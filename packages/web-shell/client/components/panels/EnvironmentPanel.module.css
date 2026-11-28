@@ -301,6 +301,148 @@ button.row:disabled {
   color: var(--error-color);
 }
 
+.scheduledTaskHeaderRow {
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sectionHeaderAction {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.sectionHeaderAction:hover,
+.sectionHeaderAction:focus-visible {
+  background: var(--accent);
+  color: var(--foreground);
+  outline: none;
+}
+
+.scheduledList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.scheduledItem {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  margin-right: -6px;
+  margin-left: -6px;
+  padding: 4px 6px;
+  border-radius: 8px;
+}
+
+.scheduledItem:hover {
+  background: var(--accent);
+}
+
+.scheduledItem[data-enabled='false'] {
+  opacity: 0.72;
+}
+
+.scheduledItemMain {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+}
+
+.scheduledItemMain:disabled {
+  cursor: default;
+}
+
+.scheduledItemMain:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+  border-radius: 6px;
+}
+
+.scheduledItemBody {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.scheduledItemTitleRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.scheduledItemMeta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.scheduledItemActions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.scheduledIconButton {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.scheduledIconButton svg {
+  width: 13px;
+  height: 13px;
+}
+
+.scheduledIconButton:hover,
+.scheduledIconButton:focus-visible {
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
+  color: var(--foreground);
+  outline: none;
+}
+
+.scheduledIconButton:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .statusRunning {
   animation: environment-panel-spin 1s linear infinite;
 }

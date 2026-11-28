@@ -8725,4 +8725,102 @@ describe('ManagedSessionsPage', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
   });
+
+  it('gates ComposerUsageStats and onOpenContextUsage on diagnostics capability, opens the matching tab, and aborts in-flight reads on session switch', async () => {
+    // 1) Without capabilities.diagnostics: neither usage bar nor context opener mounts.
+    const getContextUsage = vi.fn().mockResolvedValue(diagnosticContext);
+    const getStatistics = vi.fn().mockResolvedValue(diagnosticStats);
+    provider = {
+      ...provider,
+      diagnostics: {
+        getContextUsage,
+        getStatistics,
+        getResources: vi.fn().mockResolvedValue(diagnosticResources),
+        listAgentTrace: vi.fn().mockResolvedValue(diagnosticTrace),
+      },
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s0', {
+        capabilities: { canSend: true, canCancel: false, diagnostics: false },
+      }),
+    );
+    await render('s0');
+    expect(
+      container.querySelector('[data-web-shell-composer-usage]'),
+    ).toBeNull();
+    expect(mocks.editorProps?.onOpenContextUsage).toBeUndefined();
+    expect(getStatistics).not.toHaveBeenCalled();
+
+    // 2) With capabilities.diagnostics=true: ComposerUsageStats renders real
+    // usage and opens Statistics tab; onOpenContextUsage opens Context tab.
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: true, canCancel: false, diagnostics: true },
+      }),
+    );
+    await render('s1');
+    await act(async () => {
+      await flush();
+    });
+    const usageBar = container.querySelector('[data-web-shell-composer-usage]');
+    expect(usageBar).not.toBeNull();
+    expect(usageBar?.textContent).toContain('110 tok');
+    expect(usageBar?.textContent).toContain('20% cache hit');
+    expect(usageBar?.textContent).toContain('11 tok/s');
+    expect(usageBar?.textContent).not.toContain('turn');
+    expect(mocks.editorProps?.onOpenContextUsage).toBeTypeOf('function');
+
+    await act(async () => {
+      usageBar!.querySelector('button')!.click();
+      await flush();
+    });
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    const statsTab = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ].find((tab) => tab.textContent === 'Statistics');
+    expect(statsTab?.getAttribute('aria-selected')).toBe('true');
+    expect(getContextUsage).not.toHaveBeenCalled();
+
+    // Close dialog via Escape, then open via onOpenContextUsage -> Context tab.
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      await flush();
+    });
+    await act(async () => {
+      mocks.editorProps?.onOpenContextUsage?.();
+      await flush();
+    });
+    const contextTab = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ].find((tab) => tab.textContent === 'Context');
+    expect(contextTab?.getAttribute('aria-selected')).toBe('true');
+    expect(getContextUsage).toHaveBeenCalledTimes(1);
+
+    // 3) Switching sessions aborts an in-flight getStatistics request and hides
+    // the usage bar when the target session does not advertise diagnostics.
+    let capturedSignal: AbortSignal | undefined;
+    getStatistics.mockImplementationOnce((_id, options) => {
+      capturedSignal = options.signal;
+      return new Promise(() => {});
+    });
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          diagnostics: id === 's2',
+        },
+      }),
+    );
+    await render('s2');
+    expect(capturedSignal).toBeInstanceOf(AbortSignal);
+    expect(capturedSignal?.aborted).toBe(false);
+    await render('s3');
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(
+      container.querySelector('[data-web-shell-composer-usage]'),
+    ).toBeNull();
+    expect(mocks.editorProps?.onOpenContextUsage).toBeUndefined();
+  });
 });

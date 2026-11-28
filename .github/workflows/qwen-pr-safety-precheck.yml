@@ -49,6 +49,7 @@ jobs:
           echo "trusted_author=$trusted_author" >> "$GITHUB_OUTPUT"
 
       - name: 'Collect PR precheck input'
+        id: 'collect'
         env:
           GH_TOKEN: '${{ github.token }}'
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
@@ -60,25 +61,45 @@ jobs:
             printf '{"headRefOid":"%s","title":"","body":""}\n' "$HEAD_SHA" \
               > "$RUNNER_TEMP/pr-precheck.json"
             : > "$RUNNER_TEMP/pr-precheck.diff"
+            echo "diff_truncated=false" >> "$GITHUB_OUTPUT"
+            echo "metadata_unavailable=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          # An unreadable title/body must not read as an empty one: the body is
+          # a payload channel of its own (#18364 carried its instructions there
+          # and shipped a harmless docs diff), so a metadata API failure would
+          # otherwise turn a held PR back into an admitted one.
+          metadata_unavailable=false
           if ! gh pr view "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
             --json title,body,headRefOid \
             > "$RUNNER_TEMP/pr-precheck.json"; then
             printf '{"headRefOid":"%s","title":"","body":""}\n' "$HEAD_SHA" \
               > "$RUNNER_TEMP/pr-precheck.json"
+            metadata_unavailable=true
+            echo "PR metadata unavailable; precheck will fail closed." >&2
           fi
+          echo "metadata_unavailable=$metadata_unavailable" >> "$GITHUB_OUTPUT"
 
+          # Read one byte past the cap: a full cap-sized read is
+          # indistinguishable from a complete diff of exactly that size, and
+          # reporting a truncated read as clean lets a payload ride past the cap
+          # (#18362/#18364 follow-up). The extra byte is the truncation witness.
           max_diff_bytes=$((2 * 1024 * 1024))
           set +o pipefail
           gh pr diff "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
             --patch \
-            | head -c "$max_diff_bytes" > "$RUNNER_TEMP/pr-precheck.diff"
+            | head -c "$((max_diff_bytes + 1))" > "$RUNNER_TEMP/pr-precheck.diff"
           diff_status=${PIPESTATUS[0]}
           set -o pipefail
+          diff_truncated=false
+          if [ "$(wc -c < "$RUNNER_TEMP/pr-precheck.diff")" -gt "$max_diff_bytes" ]; then
+            diff_truncated=true
+            echo "PR diff exceeds ${max_diff_bytes} bytes; precheck will fail closed." >&2
+          fi
+          echo "diff_truncated=$diff_truncated" >> "$GITHUB_OUTPUT"
           if [ "$diff_status" -ne 0 ] && [ "$diff_status" -ne 141 ]; then
             echo "PR diff unavailable; precheck will fail closed." >&2
             : > "$RUNNER_TEMP/pr-precheck.diff"
@@ -91,6 +112,8 @@ jobs:
             --pr "$RUNNER_TEMP/pr-precheck.json" \
             --diff "$RUNNER_TEMP/pr-precheck.diff" \
             --trusted-author "${{ steps.author_permission.outputs.trusted_author }}" \
+            --diff-truncated "${{ steps.collect.outputs.diff_truncated }}" \
+            --metadata-unavailable "${{ steps.collect.outputs.metadata_unavailable }}" \
             --comment "$RUNNER_TEMP/pr-precheck-comment.md"
 
       - name: 'Upsert manual approval comment'

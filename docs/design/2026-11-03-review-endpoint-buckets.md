@@ -26,6 +26,13 @@ printed before the endpoint override and can misidentify the final destination.
 - Preserve invalid-percentage handling, invalid-PR fallback, and the optional
   endpoint contract. No canary URL keeps the existing model-only split. A URL
   without its key, or an unparseable URL, falls back to the default cohort.
+- Gate the endpoint override to the self-hosted pool (PR #18579). The canary
+  gateway (the CN MaaS endpoint) is unreachable from GitHub-hosted runners — the
+  lane fork-PR reviews route to — which time out on TCP connect. A non-self-hosted
+  runner keeps the default cohort and emits a `::warning::` naming the resolved
+  `runner.environment`. Key/URL validity is checked first, so a misconfigured pair
+  reports the specific "unusable" reason on every runner. A model-only canary (no
+  URL) is unaffected, since the default gateway is reachable everywhere.
 - Label the early host log `initial_openai_host`. After selection, log the
   requested model, bucket and bucket count, final cohort, and endpoint hostname.
   Do not include keys, URL credentials, paths, or query parameters in the notice.
@@ -37,7 +44,9 @@ deterministic only while the percentage and configuration stay unchanged. An
 80/20 split describes PR buckets, not model requests or concurrent capacity; this
 change does not guarantee either gateway can handle its share. Transport errors
 do not trigger automatic cross-endpoint failover, and other workflows can still
-consume the default endpoint's quota.
+consume the default endpoint's quota. The endpoint override applies only on the
+self-hosted pool: on a GitHub-hosted runner every bucket keeps the default cohort,
+so the canary endpoint's share is zero there regardless of the percentage.
 
 The EAS backend model is not confirmed. Keep the working default request name
 until explicit `deepseek-v4.1-flash-1017` support is confirmed; a backend model
@@ -51,9 +60,10 @@ percentage precision at 8%, paired endpoint/key selection, configuration fallbac
 and the final hostname notice. These tests have not been run locally in this
 iteration; no local build or dependency installation is required for delivery.
 
-After CI passes and the PR is merged, inspect one review from each cohort. At
-80%, require a 0–7 bucket to announce the Beijing hostname and an 8–9 bucket to
-announce the Shanghai EAS hostname. Confirm `Run review` actually ran, rather
+After CI passes and the PR is merged, inspect one review from each cohort. On a
+self-hosted run at 80%, require a 0–7 bucket to announce the Beijing hostname and
+an 8–9 bucket to announce the Shanghai EAS hostname; a GitHub-hosted run announces
+the default hostname for every bucket. Confirm `Run review` actually ran, rather
 than relying on a green workflow with a skipped review. Service-side model and
 capacity verification remain separate follow-up work; do not change live model
 variables based only on the notice's requested model name.

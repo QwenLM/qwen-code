@@ -41,6 +41,13 @@ public interface TurnExecutionStore {
 
     String HARNESS_ACTION_PARKED = "hosted_action_parked";
 
+    /**
+     * Prefixes the Harness boot ID in {@code dispatch_owner} while the Harness
+     * holds an admitted Turn and pushes its events. Dispatcher owners are
+     * UUIDs, so the prefix never collides with one.
+     */
+    String HARNESS_DISPATCH_OWNER_PREFIX = "harness:";
+
     public List<DispatchTarget> findDispatchable(long now, int limit);
 
     /**
@@ -118,6 +125,15 @@ public interface TurnExecutionStore {
 
     public void recordAdmission(String tenantId, String sessionId, String turnId,
             String owner, String eventEpoch, long lastEventId);
+
+    /**
+     * Records the admission and, unless the Turn is already cancelling, hands
+     * its dispatch lease to {@code harnessOwner} in the same transaction.
+     * Returns whether the Turn was handed off.
+     */
+    public boolean recordAdmissionHandOff(String tenantId, String sessionId,
+            String turnId, String owner, String eventEpoch, long lastEventId,
+            String harnessOwner, Duration leaseDuration);
 
     public void recordRecoveryAdmission(String tenantId, String sessionId,
             String turnId, String owner, String expectedTurnEventEpoch,

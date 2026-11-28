@@ -20,6 +20,10 @@ import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
 import type { WebShellRightPanelItem } from '../../customization';
 import type { ArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
 import type { TurnOutputScheduledTask } from './TurnOutputs';
+import {
+  scheduledTaskRuntimeKey,
+  type SessionDurableScheduledTask,
+} from '../../hooks/useSessionScheduledTasks';
 
 const mockDocxRender = vi.hoisted(() => vi.fn());
 vi.mock('docx-preview', () => ({ renderAsync: mockDocxRender }));
@@ -408,7 +412,7 @@ const secondaryScheduledTask: DaemonScheduledTask = {
   createdAt: 1_700_000_000_000,
   lastFiredAt: null,
   nextRunAt: null,
-  sessionId: null,
+  sessionId: 'active-session',
   runs: [],
 };
 
@@ -417,6 +421,24 @@ function scheduledTaskPanel(
     workspaceCwd?: string;
     workspaceId?: string;
     task?: Partial<TurnOutputScheduledTask>;
+    liveDurableScheduledTasks?: readonly SessionDurableScheduledTask[];
+    confirmedDeletedDurableTaskKeys?: ReadonlySet<string>;
+    hasLiveDurableScheduledSnapshot?: boolean;
+    liveSessionScheduledTasks?: Parameters<
+      typeof ArtifactPanel
+    >[0]['liveSessionScheduledTasks'];
+    liveSessionScheduledTasksOwnerSessionId?: string;
+    hasLiveSessionScheduledSnapshot?: boolean;
+    onCancelSessionScheduledTask?: Parameters<
+      typeof ArtifactPanel
+    >[0]['onCancelSessionScheduledTask'];
+    onSessionScheduledTaskStopped?: Parameters<
+      typeof ArtifactPanel
+    >[0]['onSessionScheduledTaskStopped'];
+    onDurableScheduledTaskDeleted?: Parameters<
+      typeof ArtifactPanel
+    >[0]['onDurableScheduledTaskDeleted'];
+    sourceSessionId?: string;
   } = {},
 ) {
   const workspaceCwd = options.workspaceCwd ?? '/secondary';
@@ -447,11 +469,29 @@ function scheduledTaskPanel(
             workspaceCwd,
             workspaceId,
             task,
+            sourceSessionId: options.sourceSessionId ?? 'active-session',
           },
         ]}
         activeTabId="scheduled-task:secondary:cron-call"
         reviewChanges={[]}
         selectedReviewPath={null}
+        liveDurableScheduledTasks={options.liveDurableScheduledTasks}
+        confirmedDeletedDurableTaskKeys={
+          options.confirmedDeletedDurableTaskKeys
+        }
+        liveSessionScheduledTasks={options.liveSessionScheduledTasks}
+        liveSessionScheduledTasksOwnerSessionId={
+          options.liveSessionScheduledTasksOwnerSessionId
+        }
+        hasLiveDurableScheduledSnapshot={
+          options.hasLiveDurableScheduledSnapshot
+        }
+        hasLiveSessionScheduledSnapshot={
+          options.hasLiveSessionScheduledSnapshot
+        }
+        onCancelSessionScheduledTask={options.onCancelSessionScheduledTask}
+        onSessionScheduledTaskStopped={options.onSessionScheduledTaskStopped}
+        onDurableScheduledTaskDeleted={options.onDurableScheduledTaskDeleted}
         onSelectTab={() => {}}
         onCloseTab={() => {}}
         onOpenFilePreview={() => {}}
@@ -2332,6 +2372,7 @@ describe('ArtifactPanel scheduled-task ownership', () => {
       'cron-secondary',
       { enabled: false },
       'secondary-id',
+      'active-session',
     );
 
     const openDelete = Array.from(container.querySelectorAll('button')).find(
@@ -2349,6 +2390,641 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledWith(
       'cron-secondary',
       'secondary-id',
+      'active-session',
+    );
+  });
+
+  it('rejects a foreign mutation response without replacing the owned task', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...secondaryScheduledTask,
+      sessionId: 'foreign-session',
+      enabled: false,
+      prompt: 'FOREIGN REBIND',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+    const disable = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Disable',
+    );
+    await act(async () => {
+      disable?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledOnce();
+    expect(container.textContent).not.toContain('FOREIGN REBIND');
+    expect(container.textContent).toContain(
+      'The selected workspace is unavailable or untrusted',
+    );
+    const edit = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Edit',
+    );
+    act(() => edit?.click());
+    expect(document.body.querySelector('textarea')?.value).toBe(
+      'secondary only',
+    );
+  });
+
+  it('completes a confirmed save after a live update during its request', async () => {
+    const pendingUpdate = Promise.withResolvers<DaemonScheduledTask>();
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    mockWorkspaceActions.updateScheduledTask.mockImplementation(
+      () => pendingUpdate.promise,
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+    const edit = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Edit',
+    );
+    act(() => edit?.click());
+    const textarea = document.body.querySelector('textarea');
+    expect(textarea?.value).toBe('secondary only');
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )!.set!.call(textarea, 'unsaved draft');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const save = Array.from(document.body.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    act(() => save?.click());
+    expect(save?.disabled).toBe(true);
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          task: { prompt: 'server C' },
+          liveDurableScheduledTasks: [
+            {
+              scope: 'durable',
+              id: secondaryScheduledTask.id,
+              title: secondaryScheduledTask.name ?? 'Session task',
+              prompt: 'server C',
+              cronExpr: secondaryScheduledTask.cron,
+              recurring: true,
+              enabled: true,
+              createdAt: secondaryScheduledTask.createdAt,
+              lastFiredAt: secondaryScheduledTask.lastFiredAt,
+              nextRunAt: secondaryScheduledTask.nextRunAt,
+              gate: null,
+              workspaceId: 'secondary-id',
+              task: { ...secondaryScheduledTask, prompt: 'server C' },
+            },
+          ],
+        }),
+      ),
+    );
+    await flush();
+    expect(textarea?.value).toBe('unsaved draft');
+
+    await act(async () => {
+      pendingUpdate.resolve({
+        ...secondaryScheduledTask,
+        cron: '0 9 * * *',
+        prompt: 'confirmed save',
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      expect.objectContaining({ prompt: 'unsaved draft' }),
+      'secondary-id',
+      'active-session',
+    );
+    expect(document.body.querySelector('textarea')).toBeNull();
+    expect(container.textContent).toContain('confirmed save');
+  });
+
+  it('does not hydrate a same-id task from a different session', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      { ...secondaryScheduledTask, sessionId: 'foreign-session' },
+    ]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          sourceSessionId: 'owner-session',
+          liveSessionScheduledTasksOwnerSessionId: 'owner-session',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain('live status is unavailable');
+    for (const label of ['Edit', 'Enable', 'Delete']) {
+      expect(
+        Array.from(container.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === label,
+        )?.disabled,
+      ).toBe(true);
+    }
+    expect(mockWorkspaceActions.updateScheduledTask).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.deleteScheduledTask).not.toHaveBeenCalled();
+  });
+
+  it('retains an acknowledged detail deletion across owner providers rebuilding', async () => {
+    const onDurableScheduledTaskDeleted = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+
+    act(() =>
+      root.render(scheduledTaskPanel({ onDurableScheduledTaskDeleted })),
+    );
+    await flush();
+    const openDelete = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Delete',
+    );
+    act(() => openDelete?.click());
+    const confirmDelete = Array.from(document.body.querySelectorAll('button'))
+      .filter((button) => button.textContent?.trim() === 'Delete')
+      .at(-1);
+    await act(async () => {
+      confirmDelete?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onDurableScheduledTaskDeleted).toHaveBeenCalledWith(
+      'cron-secondary',
+      'secondary-id',
+      'active-session',
+    );
+    expect(container.textContent).toContain('has been deleted');
+    mockWorkspace.capabilities = { ...mockWorkspace.capabilities };
+    act(() =>
+      root.render(scheduledTaskPanel({ onDurableScheduledTaskDeleted })),
+    );
+    await flush();
+    expect(container.textContent).toContain('has been deleted');
+    expect(container.textContent).toContain('secondary only');
+    expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledOnce();
+  });
+
+  it('retains a draft and a confirmed save through live refreshes', async () => {
+    const liveEntry = (prompt: string): SessionDurableScheduledTask => ({
+      scope: 'durable',
+      id: secondaryScheduledTask.id,
+      title: secondaryScheduledTask.name ?? prompt,
+      prompt,
+      cronExpr: secondaryScheduledTask.cron,
+      recurring: true,
+      enabled: true,
+      createdAt: secondaryScheduledTask.createdAt,
+      lastFiredAt: secondaryScheduledTask.lastFiredAt,
+      nextRunAt: secondaryScheduledTask.nextRunAt,
+      gate: null,
+      workspaceId: 'secondary-id',
+      task: { ...secondaryScheduledTask, prompt },
+    });
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...secondaryScheduledTask,
+      prompt: 'confirmed save',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const options = {
+      sourceSessionId: 'active-session',
+      liveSessionScheduledTasksOwnerSessionId: 'active-session',
+    };
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          ...options,
+          liveDurableScheduledTasks: [liveEntry('server A')],
+        }),
+      ),
+    );
+    await flush();
+    const edit = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Edit',
+    );
+    act(() => edit?.click());
+    const textarea = document.body.querySelector('textarea');
+    expect(textarea?.value).toBe('server A');
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )!.set!.call(textarea, 'unsaved draft');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(textarea?.value).toBe('unsaved draft');
+
+    await act(async () => {
+      root.render(
+        scheduledTaskPanel({
+          ...options,
+          task: { prompt: 'server C' },
+          liveDurableScheduledTasks: [liveEntry('server C')],
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(textarea?.value).toBe('unsaved draft');
+
+    const save = Array.from(document.body.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save!.click();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      expect.objectContaining({ prompt: 'unsaved draft' }),
+      'secondary-id',
+      'active-session',
+    );
+    expect(container.textContent).toContain('confirmed save');
+  });
+
+  it('retires stale live controls only after a supported snapshot loses that task', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const button = (label: string) =>
+      Array.from(container.querySelectorAll('button')).find(
+        (candidate) => candidate.textContent?.trim() === label,
+      );
+    const options = {
+      sourceSessionId: 'active-session',
+      liveSessionScheduledTasksOwnerSessionId: 'active-session',
+    };
+
+    act(() => root.render(scheduledTaskPanel(options)));
+    await flush();
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          ...options,
+          liveDurableScheduledTasks: [],
+          hasLiveDurableScheduledSnapshot: false,
+        }),
+      ),
+    );
+    await flush();
+    expect(button('Disable')).toBeDefined();
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          ...options,
+          liveDurableScheduledTasks: [],
+          hasLiveDurableScheduledSnapshot: true,
+        }),
+      ),
+    );
+    await flush();
+    expect(container.textContent).toContain('live status is unavailable');
+    expect(button('Edit')?.disabled).toBe(true);
+    expect(button('Enable')?.disabled).toBe(true);
+    expect(button('Delete')?.disabled).toBe(true);
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledOnce();
+  });
+
+  it('hydrates and edits a default unbound durable task created in the active session', async () => {
+    const unboundTask = {
+      ...secondaryScheduledTask,
+      id: 'cron-secondary',
+      workspaceId: 'secondary-id',
+      sessionId: null,
+      prompt: 'Default unbound durable prompt',
+    };
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([unboundTask]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...unboundTask,
+      prompt: 'Updated unbound prompt',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          sourceSessionId: 'active-session',
+          liveSessionScheduledTasksOwnerSessionId: 'active-session',
+          liveDurableScheduledTasks: [],
+          hasLiveDurableScheduledSnapshot: true,
+          task: {
+            id: unboundTask.id,
+            prompt: unboundTask.prompt,
+          },
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).not.toContain('live status is unavailable');
+    const editBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'Edit',
+    );
+    expect(editBtn).toBeDefined();
+    expect(editBtn?.disabled).toBe(false);
+
+    act(() => editBtn!.click());
+    await flush();
+    const promptInput =
+      document.body.querySelector<HTMLTextAreaElement>('textarea');
+    expect(promptInput).not.toBeNull();
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(promptInput, 'Updated unbound prompt');
+      promptInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const saveBtn = Array.from(document.body.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'Save',
+    );
+    expect(saveBtn).toBeDefined();
+    await act(async () => {
+      saveBtn!.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+      unboundTask.id,
+      expect.objectContaining({ prompt: 'Updated unbound prompt' }),
+      'secondary-id',
+      null,
+    );
+  });
+
+  it('does not let a late loadTask response resurrect a bound task absent from the authoritative session snapshot', async () => {
+    let resolveLoad!: (tasks: DaemonScheduledTask[]) => void;
+    const delayedLoad = new Promise<DaemonScheduledTask[]>((resolve) => {
+      resolveLoad = resolve;
+    });
+    mockWorkspaceActions.listScheduledTasks.mockReturnValueOnce(delayedLoad);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const options = {
+      sourceSessionId: 'active-session',
+      liveSessionScheduledTasksOwnerSessionId: 'active-session',
+    };
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          ...options,
+          liveDurableScheduledTasks: [],
+          hasLiveDurableScheduledSnapshot: false,
+        }),
+      ),
+    );
+    await flush();
+
+    // Authoritative empty session snapshot arrives before the stale list load settles.
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          ...options,
+          liveDurableScheduledTasks: [],
+          hasLiveDurableScheduledSnapshot: true,
+        }),
+      ),
+    );
+    await flush();
+
+    // Stale list response carrying the deleted bound task arrives later.
+    await act(async () => {
+      resolveLoad([secondaryScheduledTask]);
+      await delayedLoad;
+    });
+    await flush();
+
+    expect(container.textContent).toContain('live status is unavailable');
+    const editBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'Edit',
+    );
+    expect(editBtn?.disabled).toBe(true);
+  });
+
+  it.each(['adopted-before-open', 'adopted-before-save'] as const)(
+    'hydrates and saves a default unbound durable task even after keepalive adopts it into a dedicated session (%s)',
+    async (timing) => {
+      const dedicatedSessionId = 'dedicated-task-session-uuid';
+      const unboundBeforeAdopt = {
+        ...secondaryScheduledTask,
+        id: 'cron-secondary',
+        workspaceId: 'secondary-id',
+        sessionId: null,
+        prompt: 'Default unbound durable prompt',
+      };
+      const adoptedTask = {
+        ...unboundBeforeAdopt,
+        sessionId: dedicatedSessionId,
+      };
+      if (timing === 'adopted-before-open') {
+        mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+          adoptedTask,
+        ]);
+      } else {
+        mockWorkspaceActions.listScheduledTasks
+          .mockResolvedValueOnce([unboundBeforeAdopt])
+          .mockResolvedValue([adoptedTask]);
+      }
+      mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+        ...adoptedTask,
+        prompt: 'Saved after keepalive adoption',
+      });
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          scheduledTaskPanel({
+            sourceSessionId: 'creating-session',
+            liveSessionScheduledTasksOwnerSessionId: 'creating-session',
+            liveDurableScheduledTasks: [],
+            hasLiveDurableScheduledSnapshot: true,
+            task: {
+              id: adoptedTask.id,
+              prompt: adoptedTask.prompt,
+              unboundCreation: true,
+            },
+          }),
+        ),
+      );
+      await flush();
+
+      expect(container.textContent).not.toContain('live status is unavailable');
+      const editBtn = Array.from(container.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Edit',
+      );
+      expect(editBtn?.disabled).toBe(false);
+
+      act(() => editBtn!.click());
+      await flush();
+      const promptInput =
+        document.body.querySelector<HTMLTextAreaElement>('textarea');
+      expect(promptInput).not.toBeNull();
+      act(() => {
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )?.set;
+        setter?.call(promptInput, 'Saved after keepalive adoption');
+        promptInput!.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      const saveBtn = Array.from(document.body.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Save',
+      );
+      await act(async () => {
+        saveBtn!.click();
+        await Promise.resolve();
+      });
+      await flush();
+
+      expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+        adoptedTask.id,
+        expect.objectContaining({ prompt: 'Saved after keepalive adoption' }),
+        'secondary-id',
+        dedicatedSessionId,
+      );
+      expect(container.textContent).toContain('Saved after keepalive adoption');
+    },
+  );
+
+  it('does not treat another workspace empty live snapshot as deleting a secondary durable tab', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'scheduled-task:secondary:cross-ws',
+                kind: 'scheduled_task',
+                title: 'Scheduled Tasks',
+                workspaceCwd: '/secondary',
+                workspaceId: 'secondary-id',
+                sourceSessionId: 'active-session',
+                task: {
+                  id: secondaryScheduledTask.id,
+                  toolCallId: 'cron-cross-ws',
+                  title: 'Secondary task',
+                  cron: secondaryScheduledTask.cron,
+                  prompt: secondaryScheduledTask.prompt,
+                  recurring: true,
+                  durable: true,
+                  workspaceId: 'secondary-id',
+                },
+              },
+            ]}
+            activeTabId="scheduled-task:secondary:cross-ws"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            liveDurableScheduledTasks={[]}
+            liveDurableScheduledTasksWorkspaceId={null}
+            hasLiveDurableScheduledSnapshot={true}
+            liveSessionScheduledTasksOwnerSessionId="active-session"
+            open={true}
+            onClose={vi.fn()}
+            onSelectTab={vi.fn()}
+            onCloseTab={vi.fn()}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).not.toContain('live status is unavailable');
+    const editBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'Edit',
+    );
+    expect(editBtn?.disabled).toBe(false);
+  });
+
+  it('rejects an untrusted primary durable task without issuing a request', async () => {
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: mockWorkspace.capabilities.workspaces?.map((entry, index) =>
+        index === 0 ? { ...entry, trusted: false } : entry,
+      ),
+    };
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      { ...secondaryScheduledTask, workspaceId: undefined },
+    ]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          workspaceCwd: '/primary',
+          workspaceId: undefined,
+        }),
+      ),
+    );
+    await flush();
+
+    expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+    expect(container.textContent).toContain(
+      'This workspace may have been removed or the link is no longer valid.',
+    );
+    for (const label of ['Edit', 'Enable', 'Delete']) {
+      expect(
+        Array.from(container.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === label,
+        ),
+      ).toBeUndefined();
+    }
+    expect(container.textContent).not.toContain(
+      'Scheduled task workspace owner no longer matches',
     );
   });
 
@@ -2377,6 +3053,34 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     expect(mockWorkspaceActions.deleteScheduledTask).not.toHaveBeenCalled();
   });
 
+  it('does not call a fallback tool-call id a deleted durable task', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          task: {
+            id: 'cron-call',
+            toolCallId: 'cron-call',
+            prompt: 'history without structured id',
+          },
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain('history without structured id');
+    expect(container.textContent).not.toContain('has been deleted');
+    expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+    const edit = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Edit',
+    );
+    expect(edit?.disabled).toBe(true);
+  });
+
   it('shows a session-scoped task snapshot without a workspace owner', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -2403,6 +3107,75 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     expect(container.textContent).toContain('local session snapshot');
     expect(container.querySelector('[role="alert"]')).toBeNull();
     expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+  });
+
+  it('does not expose durable mutations when the workspace target has no actions', async () => {
+    const capability = {
+      workspaceCwd: '/primary',
+      workspaces: [
+        {
+          id: 'primary-id',
+          cwd: '/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'new-registration',
+          cwd: '/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    const liveTask = {
+      ...secondaryScheduledTask,
+      enabled: true,
+      sessionId: 'active-session',
+    };
+    mockWorkspace.capabilities = capability;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          sourceSessionId: 'active-session',
+          liveSessionScheduledTasksOwnerSessionId: 'active-session',
+          liveDurableScheduledTasks: [
+            {
+              scope: 'durable',
+              id: liveTask.id,
+              title: liveTask.name ?? liveTask.prompt,
+              prompt: liveTask.prompt,
+              cronExpr: liveTask.cron,
+              recurring: liveTask.recurring,
+              enabled: true,
+              createdAt: liveTask.createdAt,
+              lastFiredAt: liveTask.lastFiredAt,
+              nextRunAt: liveTask.nextRunAt,
+              gate: null,
+              workspaceId: 'secondary-id',
+              task: liveTask,
+            },
+          ],
+          hasLiveDurableScheduledSnapshot: true,
+        }),
+      ),
+    );
+    await flush();
+    const byLabel = (label: string) =>
+      Array.from(container.querySelectorAll('button')).find(
+        (candidate) => candidate.textContent === label,
+      );
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain(
+        'This workspace may have been removed or the link is no longer valid.',
+      ),
+    );
+    for (const label of ['Edit', 'Enable', 'Disable', 'Delete']) {
+      expect(byLabel(label)).toBeUndefined();
+    }
   });
 
   it('keeps legacy single-workspace scheduled-task routes unqualified', async () => {
@@ -2447,6 +3220,7 @@ describe('ArtifactPanel scheduled-task ownership', () => {
       'cron-secondary',
       { enabled: false },
       undefined,
+      'active-session',
     );
 
     const openDelete = Array.from(container.querySelectorAll('button')).find(
@@ -2463,6 +3237,7 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledWith(
       'cron-secondary',
       undefined,
+      'active-session',
     );
   });
 
@@ -2515,6 +3290,7 @@ describe('ArtifactPanel scheduled-task ownership', () => {
           'cron-secondary',
           expect.objectContaining({ prompt: expect.any(String) }),
           'secondary-id',
+          'active-session',
         );
       } else if (mutation === 'toggle') {
         const disable = Array.from(container.querySelectorAll('button')).find(
@@ -2546,7 +3322,9 @@ describe('ArtifactPanel scheduled-task ownership', () => {
         await Promise.resolve();
       });
 
-      expect(container.textContent).not.toContain('Loading…');
+      await vi.waitFor(() => {
+        expect(container.textContent).not.toContain('Loading…');
+      });
       if (mutation === 'delete') {
         expect(container.textContent).toContain('has been deleted');
       } else {
@@ -2625,7 +3403,263 @@ describe('ArtifactPanel scheduled-task ownership', () => {
       'cron-replacement',
       { enabled: false },
       'secondary-id',
+      'active-session',
     );
+  });
+
+  it('reflects an owned durable update without another server request', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    const liveTask = {
+      ...secondaryScheduledTask,
+      enabled: false,
+      prompt: 'Edited through the environment',
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+    expect(
+      Array.from(container.querySelectorAll('button')).some(
+        (button) => button.textContent?.trim() === 'Disable',
+      ),
+    ).toBe(true);
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          liveDurableScheduledTasks: [
+            {
+              scope: 'durable',
+              id: liveTask.id,
+              title: liveTask.name ?? liveTask.prompt,
+              prompt: liveTask.prompt,
+              cronExpr: liveTask.cron,
+              recurring: liveTask.recurring,
+              enabled: liveTask.enabled,
+              createdAt: liveTask.createdAt,
+              lastFiredAt: liveTask.lastFiredAt,
+              nextRunAt: liveTask.nextRunAt,
+              gate: null,
+              workspaceId: 'secondary-id',
+              task: liveTask,
+            },
+          ],
+          sourceSessionId: 'active-session',
+          liveSessionScheduledTasksOwnerSessionId: 'active-session',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(
+      Array.from(container.querySelectorAll('button')).some(
+        (button) => button.textContent?.trim() === 'Enable',
+      ),
+    ).toBe(true);
+    expect(container.textContent).toContain('Edited through the environment');
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledOnce();
+  });
+
+  it('uses a confirmed owner-scoped deletion to retire detail actions', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          confirmedDeletedDurableTaskKeys: new Set([
+            JSON.stringify(['secondary-id', 'cron-secondary']),
+          ]),
+          sourceSessionId: 'active-session',
+          liveSessionScheduledTasksOwnerSessionId: 'active-session',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain('has been deleted');
+    const edit = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Edit',
+    );
+    const toggle = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Enable',
+    );
+    const remove = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Delete',
+    );
+    expect(edit?.disabled).toBe(true);
+    expect(toggle?.disabled).toBe(true);
+    expect(remove?.disabled).toBe(true);
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledOnce();
+  });
+
+  it('restores focus to the detail after confirming a session stop', async () => {
+    const onCancelSessionScheduledTask = vi.fn().mockResolvedValue(true);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          task: { durable: false },
+          liveSessionScheduledTasks: new Map([
+            [
+              scheduledTaskRuntimeKey({
+                id: 'cron-secondary',
+                scope: 'session',
+                source: 'cron',
+              }),
+              {
+                id: 'cron-secondary',
+                source: 'cron',
+                cronExpr: '0 9 * * *',
+                prompt: 'secondary only',
+                recurring: true,
+                createdAt: 1_700_000_000_000,
+                expiresAt: null,
+                lastFiredAt: null,
+                nextRunAt: null,
+                enabled: true,
+              },
+            ],
+          ]),
+          liveSessionScheduledTasksOwnerSessionId: 'session-1',
+          hasLiveSessionScheduledSnapshot: true,
+          onCancelSessionScheduledTask,
+          sourceSessionId: 'session-1',
+        }),
+      ),
+    );
+    await flush();
+    const stop = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Stop task',
+    );
+    expect(stop).toBeDefined();
+    await act(async () => {
+      stop?.focus();
+      stop?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      'cron',
+    );
+    expect(container.textContent).not.toContain('Stop task');
+    const detail = container.querySelector(
+      '[role="group"][aria-label="Scheduled tasks"]',
+    );
+    expect(detail).not.toBeNull();
+    expect(document.activeElement).toBe(detail);
+  });
+
+  it('stops the wakeup task when cron and wakeup share an id', async () => {
+    const onCancelSessionScheduledTask = vi.fn().mockResolvedValue(true);
+    const onSessionScheduledTaskStopped = vi.fn();
+    const cronTask = {
+      id: 'shared-scheduled-task',
+      source: 'cron' as const,
+      cronExpr: '0 9 * * *',
+      prompt: 'Cron live prompt',
+      recurring: true,
+      createdAt: 1_000,
+      expiresAt: null,
+      lastFiredAt: null,
+      nextRunAt: null,
+      enabled: true,
+    };
+    const wakeupTask = {
+      ...cronTask,
+      source: 'wakeup' as const,
+      cronExpr: '@wakeup',
+      prompt: 'Wakeup live prompt',
+      recurring: false,
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          task: {
+            id: 'shared-scheduled-task',
+            toolCallId: 'shared-wakeup-call',
+            cron: '@wakeup',
+            prompt: 'Wakeup historical prompt',
+            recurring: false,
+            durable: false,
+          },
+          liveSessionScheduledTasks: new Map([
+            [
+              scheduledTaskRuntimeKey({ ...cronTask, scope: 'session' }),
+              cronTask,
+            ],
+            [
+              scheduledTaskRuntimeKey({ ...wakeupTask, scope: 'session' }),
+              wakeupTask,
+            ],
+          ]),
+          liveSessionScheduledTasksOwnerSessionId: 'owner-session',
+          hasLiveSessionScheduledSnapshot: true,
+          onCancelSessionScheduledTask,
+          onSessionScheduledTaskStopped,
+          sourceSessionId: 'owner-session',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain(
+      'Active in this session. Stopping cancels future runs immediately.',
+    );
+    expect(container.textContent).toContain('Wakeup live prompt');
+    expect(container.textContent).not.toContain('Cron live prompt');
+    const stop = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Stop task',
+    );
+    expect(stop).toBeDefined();
+    expect(stop?.disabled).toBe(false);
+
+    await act(async () => {
+      stop?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(
+      'shared-scheduled-task',
+      'wakeup',
+    );
+    expect(onSessionScheduledTaskStopped).toHaveBeenCalledWith(
+      'shared-scheduled-task',
+      'owner-session',
+      'wakeup',
+    );
+    expect(container.textContent).toContain(
+      'This session-scoped scheduled task is no longer active.',
+    );
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === 'Stop task',
+      ),
+    ).toBeUndefined();
   });
 });
 
@@ -6345,6 +7379,321 @@ describe('ArtifactPanel binary document previews', () => {
     const download = container.querySelector<HTMLAnchorElement>('a[download]');
     expect(download?.getAttribute('href')).toBe('blob:pdf-preview');
     expect(download?.download).toBe('Report.PDF');
+  });
+
+  it('allows stopping a paused but live session-scoped scheduled task', async () => {
+    const onCancelSessionScheduledTask = vi.fn().mockResolvedValue(true);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const task = {
+      id: 'cron-paused-live',
+      toolCallId: 'create-paused-live',
+      title: 'Paused release monitor',
+      cron: '*/5 * * * *',
+      prompt: 'Paused release monitor',
+      recurring: true,
+      durable: false,
+    };
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'scheduled-task:paused:cron-paused-live',
+                kind: 'scheduled_task',
+                title: 'Paused release monitor',
+                task,
+                sourceSessionId: 'session-live',
+              },
+            ]}
+            activeTabId="scheduled-task:paused:cron-paused-live"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            liveSessionScheduledTasks={
+              new Map([
+                [
+                  scheduledTaskRuntimeKey({
+                    id: 'cron-paused-live',
+                    scope: 'session',
+                    source: 'cron',
+                  }),
+                  {
+                    id: 'cron-paused-live',
+                    source: 'cron' as const,
+                    cronExpr: '*/5 * * * *',
+                    prompt: 'Paused release monitor',
+                    recurring: true,
+                    enabled: false,
+                    createdAt: 1,
+                    expiresAt: null,
+                    lastFiredAt: null,
+                    nextRunAt: Date.now() + 60_000,
+                  },
+                ],
+              ])
+            }
+            liveSessionScheduledTasksOwnerSessionId="session-live"
+            hasLiveSessionScheduledSnapshot
+            onCancelSessionScheduledTask={onCancelSessionScheduledTask}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain(
+      'Paused in this session. Stopping removes the remaining schedule.',
+    );
+    const stopButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Stop task');
+    expect(stopButton).toBeDefined();
+    expect(stopButton?.disabled).toBe(false);
+
+    await act(async () => {
+      stopButton?.click();
+      await Promise.resolve();
+    });
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(
+      'cron-paused-live',
+      'cron',
+    );
+    expect(container.textContent).toContain(
+      'This session-scoped scheduled task is no longer active.',
+    );
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Stop task',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('allows stopping an active session-scoped scheduled task from ArtifactPanel', async () => {
+    const onCancelSessionScheduledTask = vi.fn().mockResolvedValue(true);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const liveTask = {
+      id: 'cron-live-1',
+      source: 'cron' as const,
+      cronExpr: '*/5 * * * *',
+      prompt: 'Poll build status',
+      recurring: true,
+      createdAt: 1_000,
+      expiresAt: 100_000,
+      lastFiredAt: null,
+      nextRunAt: 60_000,
+    };
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'scheduled-task:session:cron-live-1',
+                kind: 'scheduled_task',
+                title: 'Poll build status',
+                task: {
+                  id: 'cron-live-1',
+                  toolCallId: 'tool-cron-1',
+                  title: 'Poll build status',
+                  cron: '*/5 * * * *',
+                  prompt: 'Poll build status',
+                  recurring: true,
+                  durable: false,
+                },
+              },
+            ]}
+            activeTabId="scheduled-task:session:cron-live-1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            liveSessionScheduledTasks={
+              new Map([
+                [
+                  scheduledTaskRuntimeKey({ ...liveTask, scope: 'session' }),
+                  liveTask,
+                ],
+              ])
+            }
+            hasLiveSessionScheduledSnapshot
+            onCancelSessionScheduledTask={onCancelSessionScheduledTask}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain(
+      'Active in this session. Stopping cancels future runs immediately.',
+    );
+    const stopButton = Array.from(container.querySelectorAll('button')).find(
+      (btn) => btn.textContent === 'Stop task',
+    );
+    expect(stopButton).toBeDefined();
+    await act(async () => {
+      stopButton?.click();
+      await Promise.resolve();
+    });
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(
+      'cron-live-1',
+      'cron',
+    );
+    expect(container.textContent).toContain(
+      'This session-scoped scheduled task is no longer active.',
+    );
+  });
+
+  it('does not borrow another session live snapshot for a historical task', () => {
+    const onCancelSessionScheduledTask = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const task = {
+      id: 'cron-from-session-b',
+      toolCallId: 'tool-session-b',
+      title: 'Poll build status',
+      cron: '*/5 * * * *',
+      prompt: 'Poll build status',
+      recurring: true,
+      durable: false,
+    };
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'scheduled-task:session-b:cron-from-session-b',
+                kind: 'scheduled_task',
+                title: 'Poll build status',
+                task,
+                sourceSessionId: 'session-b',
+              },
+            ]}
+            activeTabId="scheduled-task:session-b:cron-from-session-b"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            liveSessionScheduledTasks={new Map()}
+            liveSessionScheduledTasksOwnerSessionId="session-a"
+            hasLiveSessionScheduledSnapshot
+            onCancelSessionScheduledTask={onCancelSessionScheduledTask}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain(
+      'Showing the snapshot from when it was created.',
+    );
+    expect(container.textContent).not.toContain('no longer active');
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Stop task',
+      ),
+    ).toBeUndefined();
+    expect(onCancelSessionScheduledTask).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a failed session-scoped cancellation instead of a silent snapshot', async () => {
+    const onCancelSessionScheduledTask = vi.fn().mockResolvedValue(false);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const liveTask = {
+      id: 'cron-refused-1',
+      source: 'cron' as const,
+      cronExpr: '*/5 * * * *',
+      prompt: 'Poll build status',
+      recurring: true,
+      createdAt: 1_000,
+      expiresAt: 100_000,
+      lastFiredAt: null,
+      nextRunAt: 60_000,
+      enabled: true,
+    };
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'scheduled-task:session:cron-refused-1',
+                kind: 'scheduled_task',
+                title: 'Poll build status',
+                task: {
+                  id: 'cron-refused-1',
+                  toolCallId: 'tool-cron-refused',
+                  title: 'Poll the build',
+                  cron: '*/5 * * * *',
+                  prompt: 'Poll build status',
+                  recurring: true,
+                  durable: false,
+                },
+              },
+            ]}
+            activeTabId="scheduled-task:session:cron-refused-1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            liveSessionScheduledTasks={
+              new Map([
+                [
+                  scheduledTaskRuntimeKey({ ...liveTask, scope: 'session' }),
+                  liveTask,
+                ],
+              ])
+            }
+            hasLiveSessionScheduledSnapshot
+            onCancelSessionScheduledTask={onCancelSessionScheduledTask}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const stopButton = Array.from(container.querySelectorAll('button')).find(
+      (btn) => btn.textContent === 'Stop task',
+    );
+    expect(stopButton).toBeDefined();
+    await act(async () => {
+      stopButton?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(
+      'cron-refused-1',
+      'cron',
+    );
+    expect(container.textContent).toContain(
+      'Failed to stop the scheduled task',
+    );
+    expect(container.textContent).not.toContain(
+      'Showing the snapshot from when it was created.',
+    );
+    expect(stopButton?.disabled).toBe(false);
   });
 });
 

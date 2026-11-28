@@ -19,7 +19,7 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
+import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpControllerTestFixture;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.provisioning.staticruntime.StaticRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.security.ProtectedSecret;
@@ -27,7 +27,6 @@ import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
-import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -53,7 +52,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-public class RuntimeBrokerHttpServerTest {
+public class RuntimeBrokerHttpControllerTest {
     @Test
     void capabilityReadsResolveAdmissionWithoutAllocatingOrAcquiringARuntime() throws Exception {
         var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
@@ -495,6 +494,31 @@ public class RuntimeBrokerHttpServerTest {
             assertEquals(401, fixture.client.send(request,
                     HttpResponse.BodyHandlers.ofString()).statusCode());
             assertEquals(0, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
+    void multipartCannotBypassAuthenticationOrTheBoundedBodyReader() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            String body = "--broker\r\n"
+                    + "Content-Disposition: form-data; name=\"payload\"\r\n\r\n"
+                    + "{}\r\n--broker--\r\n";
+            for (String token : new String[] {"wrong", "secret"}) {
+                HttpRequest request = HttpRequest.newBuilder(
+                        fixture.uri("/tool-sessions:acquire"))
+                        .header("Authorization", "Bearer " + token)
+                        .header("Content-Type",
+                                "multipart/form-data; boundary=broker")
+                        .POST(HttpRequest.BodyPublishers.ofString(body))
+                        .build();
+                HttpResponse<String> response = fixture.client.send(request,
+                        HttpResponse.BodyHandlers.ofString());
+                assertEquals("wrong".equals(token) ? 401 : 400,
+                        response.statusCode(), response.body());
+                assertTrue(response.body().contains("wrong".equals(token)
+                        ? "runtime_broker_unauthorized"
+                        : "runtime_broker_invalid_json"), response.body());
+            }
         }
     }
 
@@ -1161,7 +1185,7 @@ public class RuntimeBrokerHttpServerTest {
         List<String> intercepted = java.util.Collections.synchronizedList(
                 new java.util.ArrayList<>());
         ToolExecutionRepository gate = (ToolExecutionRepository) Proxy.newProxyInstance(
-                RuntimeBrokerHttpServerTest.class.getClassLoader(),
+                RuntimeBrokerHttpControllerTest.class.getClassLoader(),
                 new Class<?>[] { ToolExecutionRepository.class },
                 (proxy, method, args) -> {
                     if (failing.get() && failingMethod.get().equals(method.getName())) {
@@ -1179,7 +1203,7 @@ public class RuntimeBrokerHttpServerTest {
         // the gate keeps reading the healthy store. Both share one database.
         AtomicBoolean writeOutage = new AtomicBoolean();
         javax.sql.DataSource guardedSource = (javax.sql.DataSource) Proxy.newProxyInstance(
-                RuntimeBrokerHttpServerTest.class.getClassLoader(),
+                RuntimeBrokerHttpControllerTest.class.getClassLoader(),
                 new Class<?>[] { javax.sql.DataSource.class },
                 (proxy, method, args) -> {
                     if (writeOutage.get() && method.getName().equals("getConnection")) {
@@ -1521,6 +1545,30 @@ public class RuntimeBrokerHttpServerTest {
         }
     }
 
+    @Test
+    void enforcesTheRequestLimitForChunkedBodies() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            for (int extra : new int[] {0, 1}) {
+                byte[] body = new byte[8 * 1024 * 1024 + extra];
+                java.util.Arrays.fill(body, (byte) ' ');
+                HttpRequest request = HttpRequest.newBuilder(
+                        fixture.uri("/tool-sessions:acquire"))
+                        .header("Authorization", "Bearer secret")
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofInputStream(
+                                () -> new java.io.ByteArrayInputStream(body)))
+                        .build();
+                HttpResponse<String> response = fixture.client.send(request,
+                        HttpResponse.BodyHandlers.ofString());
+                assertEquals(extra == 0 ? 400 : 413, response.statusCode(),
+                        response.body());
+                assertTrue(response.body().contains(extra == 0
+                        ? "runtime_broker_invalid_json"
+                        : "runtime_broker_request_too_large"), response.body());
+            }
+        }
+    }
+
     private static Map<String, Object> reference() {
         return Map.of("sessionId", "runtime", "promptId", "turn",
                 "callId", "call", "argsDigest", "digest");
@@ -1552,7 +1600,7 @@ public class RuntimeBrokerHttpServerTest {
         private final ToolExecutionRepository executions;
         private final JdbcRuntimeBindingRepository bindings;
         private final RuntimeBrokerService service;
-        private final RuntimeBrokerHttpServer server;
+        private final RuntimeBrokerHttpControllerTestFixture server;
 
         private Fixture() throws Exception {
             this(false);
@@ -1607,8 +1655,7 @@ public class RuntimeBrokerHttpServerTest {
                     new JdbcRuntimeSessionRepository(source),
                     this.executions,
                     "broker", Duration.ofMinutes(1), Duration.ofMinutes(1), verifier);
-            server = new RuntimeBrokerHttpServer(new InetSocketAddress("127.0.0.1", 0),
-                    "secret", service);
+            server = new RuntimeBrokerHttpControllerTestFixture("secret", service);
             server.start();
         }
 
@@ -1616,8 +1663,7 @@ public class RuntimeBrokerHttpServerTest {
             this.executions = null;
             this.bindings = null;
             this.service = service;
-            server = new RuntimeBrokerHttpServer(new InetSocketAddress("127.0.0.1", 0),
-                    "secret", service);
+            server = new RuntimeBrokerHttpControllerTestFixture("secret", service);
             server.start();
         }
 
@@ -1627,7 +1673,7 @@ public class RuntimeBrokerHttpServerTest {
         }
 
         private URI uri(String path) {
-            return server.getBaseUri().resolve(RuntimeBrokerHttpServer.ROUTE_PREFIX + path);
+            return server.getBaseUri().resolve(RuntimeBrokerHttpControllerTestFixture.ROUTE_PREFIX + path);
         }
 
         private HttpResponse<String> post(String path, Map<String, Object> body) throws Exception {
@@ -1643,7 +1689,7 @@ public class RuntimeBrokerHttpServerTest {
         }
 
         @Override
-        public void close() {
+        public void close() throws Exception {
             server.close();
             client.close();
         }

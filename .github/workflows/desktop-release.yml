@@ -761,7 +761,11 @@ jobs:
           if [ -n '${{ matrix.tauri_config }}' ]; then
             args+=(--config '${{ matrix.tauri_config }}')
           fi
-          npm run tauri -- build "${args[@]}"
+          if [ "$RUNNER_OS" = 'Linux' ] && [ '${{ matrix.rpm }}' = 'false' ]; then
+            bash scripts/run-appimage-build.sh npm run tauri -- build "${args[@]}"
+          else
+            npm run tauri -- build "${args[@]}"
+          fi
 
       - name: 'Verify Linux installer runtimes'
         if: "runner.os == 'Linux'"

@@ -30,8 +30,10 @@ class ManagedStoreDecompositionTest {
             AgentSessionCommands.class,
             AgentLifecycleOperations.class,
             AgentSessionAdmissions.class,
+            ChildSessionAdmissions.class,
             AgentActionParking.class,
             AgentTurnExecution.class,
+            AgentTurnHandOff.class,
             AgentExecutionOperations.class,
             JournalStoreRows.class,
             JournalFencing.class,
@@ -40,12 +42,16 @@ class ManagedStoreDecompositionTest {
             JournalResourceReads.class,
             JournalResourceWrites.class,
             JournalWriterLifecycle.class,
-            JournalCommit.class);
+            JournalCommit.class,
+            ManagedAgentReadEntries.class,
+            ManagedStoreAssembly.class);
 
     @Test
     void collaboratorsAreImmutableOrdinaryObjectsWithAcyclicDependencies() {
         for (Class<?> component : COMPONENTS) {
-            assertThat(Modifier.isFinal(component.getModifiers())).as(component.getSimpleName()).isTrue();
+            if (component != ManagedAgentReadEntries.class) {
+                assertThat(Modifier.isFinal(component.getModifiers())).as(component.getSimpleName()).isTrue();
+            }
             assertThat(Modifier.isPublic(component.getModifiers())).isFalse();
             assertThat(component.getInterfaces()).isEmpty();
             assertNoSpringComponent(component);
@@ -56,6 +62,10 @@ class ManagedStoreDecompositionTest {
             assertThat(Arrays.stream(component.getDeclaredMethods()))
                     .noneMatch(method -> method.isAnnotationPresent(Transactional.class));
             requireAcyclic(component, new HashSet<>());
+        }
+        for (Class<?> ancestor = ManagedAgentStore.class.getSuperclass();
+                ancestor != Object.class; ancestor = ancestor.getSuperclass()) {
+            assertThat(COMPONENTS).as(ancestor.getSimpleName()).contains(ancestor);
         }
     }
 
@@ -138,7 +148,7 @@ class ManagedStoreDecompositionTest {
                 markTurnRecoveryBlocked/6::REQUIRED:DEFAULT:false markTurnFailureRecovery/5::REQUIRED:DEFAULT:false requestRecoveryRecheck/3::REQUIRED:DEFAULT:false
                 parkTurnForRuntimeRecovery/6::REQUIRED:DEFAULT:false parkTurnForAction/4::REQUIRED:DEFAULT:false deferTurnRetry/5::REQUIRED:DEFAULT:false scheduleTurnRetry/6::REQUIRED:DEFAULT:false
                 bindHarness/5::REQUIRED:DEFAULT:false bindSessionHarness/3::REQUIRED:DEFAULT:false bindRecoveredHarness/6::REQUIRED:DEFAULT:false markSubmissionAttempted/4::REQUIRED:DEFAULT:false
-                withdrawSubmissionAttempted/4::REQUIRED:DEFAULT:false recordAdmission/6::REQUIRED:DEFAULT:false recordRecoveryAdmission/8::REQUIRED:DEFAULT:false
+                withdrawSubmissionAttempted/4::REQUIRED:DEFAULT:false recordAdmission/6::REQUIRED:DEFAULT:false recordAdmissionHandOff/8::REQUIRED:DEFAULT:false recordRecoveryAdmission/8::REQUIRED:DEFAULT:false
                 retractContinuationOutput/6::REQUIRED:DEFAULT:false retractHarnessTurnOutput/7::REQUIRED:DEFAULT:false retractHarnessTurnOutput/10::REQUIRED:DEFAULT:false
                 recordHarnessEvents/6::REQUIRED:DEFAULT:false cancelUnadmittedTurn/4::REQUIRED:DEFAULT:false cancelBeforeAdmission/4::REQUIRED:DEFAULT:false
                 failTurn/6::REQUIRED:DEFAULT:false failWorktreeInitialTurns/3::REQUIRED:DEFAULT:false failRecoveryBlockedTurn/5::REQUIRED:DEFAULT:false
@@ -159,21 +169,27 @@ class ManagedStoreDecompositionTest {
                 readSnapshotResource/5:- readOwnerResource/5:- publishAgentInstructions/4::REQUIRED:DEFAULT:false
                 publishAgentSkills/4::REQUIRED:DEFAULT:false publishInheritedExtensionResource/4::REQUIRED:DEFAULT:false publishToolResult/4::REQUIRED:DEFAULT:false
                 publishToolResult/5::REQUIRED:DEFAULT:false toolResultLimit/1:-
-                hasLiveWriter/2::REQUIRED:DEFAULT:false
+                hasLiveWriter/2::REQUIRED:DEFAULT:false authenticateEventIngest/7::REQUIRED:DEFAULT:false
                 commandKeyHash/2:- journalCorrupt/0:- journalPacks/0:-
                 """);
     }
 
     private static void assertEntries(Class<?> facade, String expected) {
         assertThat(facade.getAnnotation(Qualifier.class).value()).isEqualTo("managedAgentTransactionManager");
-        List<String> actual = Arrays.stream(facade.getDeclaredMethods())
-                .filter(method -> !Modifier.isPrivate(method.getModifiers()) && !method.isSynthetic())
-                .map(method -> {
-                    var tx = method.getAnnotation(Transactional.class);
-                    String attributes = tx == null ? "-" : tx.transactionManager() + ":" + tx.propagation()
-                            + ":" + tx.isolation() + ":" + tx.readOnly();
-                    return method.getName() + "/" + method.getParameterCount() + ":" + attributes;
-                }).toList();
+        // The facade may inherit an entry arm from a package-private
+        // superclass; the population pin covers the whole hierarchy, so a
+        // move between facade and superclass keeps the same contract.
+        List<String> actual = new java.util.ArrayList<>();
+        for (Class<?> type = facade; type != null && type != Object.class; type = type.getSuperclass()) {
+            Arrays.stream(type.getDeclaredMethods())
+                    .filter(method -> !Modifier.isPrivate(method.getModifiers()) && !method.isSynthetic())
+                    .map(method -> {
+                        var tx = method.getAnnotation(Transactional.class);
+                        String attributes = tx == null ? "-" : tx.transactionManager() + ":" + tx.propagation()
+                                + ":" + tx.isolation() + ":" + tx.readOnly();
+                        return method.getName() + "/" + method.getParameterCount() + ":" + attributes;
+                    }).forEach(actual::add);
+        }
         assertThat(actual).containsExactlyInAnyOrderElementsOf(List.of(expected.trim().split("\\s+")));
     }
 

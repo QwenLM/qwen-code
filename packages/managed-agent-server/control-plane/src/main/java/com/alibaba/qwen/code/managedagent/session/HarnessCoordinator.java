@@ -19,8 +19,6 @@ import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRuntimeRecove
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessSessionRefusedFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessTransportFailure;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.DispatchTarget;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.HarnessEvent;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
@@ -30,14 +28,12 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -118,6 +114,8 @@ public class HarnessCoordinator {
     private final int batchMaxEvents;
     private final int batchMaxBytes;
     private final boolean sessionCreateWarm;
+    @Value("${qwen.managed-agent.event-ingest.enabled:false}")
+    private boolean eventIngestEnabled;
     private final LeaseRenewalRunner runner =
             new LeaseRenewalRunner("managed-agent-dispatch-lease");
     private final String owner = runner.owner();
@@ -830,11 +828,16 @@ public class HarnessCoordinator {
                 store.markSubmissionAttempted(current.tenantId(),
                         current.sessionId(), current.turnId(), owner);
                 submissionAttempted.set(true);
+                boolean ingest = eventIngestEnabled && harness.supportsEventIngest();
                 Admission admission = null;
                 try {
-                    admission = harness.submit(session.tenantId(),
-                            session.sessionId(), current.promptId(),
-                            current.input(), current.payloadDigest());
+                    admission = ingest
+                            ? harness.submit(session.tenantId(), session.sessionId(),
+                                    current.promptId(), current.input(),
+                                    current.payloadDigest(), current.turnId())
+                            : harness.submit(session.tenantId(),
+                                    session.sessionId(), current.promptId(),
+                                    current.input(), current.payloadDigest());
                     requireLease(leaseLost);
                 } catch (HarnessHttpFailure error) {
                     // A coded 409 on this prompt proves the mark's lineage:
@@ -916,9 +919,19 @@ public class HarnessCoordinator {
                     }
                 }
                 if (admission != null) {
-                    store.recordAdmission(current.tenantId(),
+                    if (!ingest) {
+                        store.recordAdmission(current.tenantId(),
+                                current.sessionId(), current.turnId(), owner,
+                                admission.eventEpoch(), admission.lastEventId());
+                    } else if (store.recordAdmissionHandOff(current.tenantId(),
                             current.sessionId(), current.turnId(), owner,
-                            admission.eventEpoch(), admission.lastEventId());
+                            admission.eventEpoch(), admission.lastEventId(),
+                            AgentStateStore.HARNESS_DISPATCH_OWNER_PREFIX + attachment.bootId(),
+                            leaseDuration)) {
+                        // The Harness now holds the lease and pushes the
+                        // Turn's events; no stream opens here.
+                        return true;
+                    }
                     current = store.findTurn(current.tenantId(),
                             current.sessionId(), current.turnId())
                             .orElseThrow();
@@ -972,17 +985,16 @@ public class HarnessCoordinator {
                 new ArrayBlockingQueue<>(capacity);
         Future<?> reader = executor.submit(() -> readStream(stream,
                 incoming));
-        List<HarnessEvent> batch = new ArrayList<>();
-        int batchBytes = 0;
+        HarnessEventRecorder recorder = new HarnessEventRecorder(store,
+                projector, turn, owner, bootId, stream.eventEpoch(),
+                batchMaxEvents, batchMaxBytes, () -> requireLease(leaseLost));
         long flushAt = 0;
         long statusAt = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
         long lastEventId = turn.harnessLastEventId() == null ? 0 : turn.harnessLastEventId();
-        boolean flushFirstVisibleText = true;
         try {
             while (true) {
                 if (System.nanoTime() >= statusAt) {
-                    flush(turn, stream.eventEpoch(), batch, leaseLost);
-                    batchBytes = 0;
+                    recorder.flush();
                     flushAt = 0;
                     // An unavailable advisory read must not replace the stream's
                     // authoritative terminal event or its bounded idle failure.
@@ -1011,10 +1023,9 @@ public class HarnessCoordinator {
                     }
                     statusAt = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
                 }
-                StreamItem item = take(incoming, batch, flushAt, statusAt);
+                StreamItem item = take(incoming, recorder.isEmpty(), flushAt, statusAt);
                 if (item == null) {
-                    flush(turn, stream.eventEpoch(), batch, leaseLost);
-                    batchBytes = 0;
+                    recorder.flush();
                     flushAt = 0;
                     continue;
                 }
@@ -1022,7 +1033,7 @@ public class HarnessCoordinator {
                     throw item.error();
                 }
                 if (item.end()) {
-                    flush(turn, stream.eventEpoch(), batch, leaseLost);
+                    recorder.flush();
                     if (store.parkTurnForAction(turn.tenantId(), turn.sessionId(),
                             turn.turnId(), owner)) {
                         return true;
@@ -1036,73 +1047,14 @@ public class HarnessCoordinator {
                 if (source.id() != null) {
                     lastEventId = Math.max(lastEventId, source.id());
                 }
-                if (source.id() == null
-                        || source.promptId() != null
-                        && !turn.promptId().equals(source.promptId())) {
-                    continue;
+                boolean wasEmpty = recorder.isEmpty();
+                if (recorder.accept(source)) {
+                    return true;
                 }
-                if ("message_retracted".equals(source.type())) {
-                    // A restarted model attempt retracts the prefix the failed
-                    // one published (#13319). Flush the pending batch first:
-                    // the retraction range covers deltas this stream already
-                    // read but has not recorded yet.
-                    flush(turn, stream.eventEpoch(), batch, leaseLost);
-                    batchBytes = 0;
+                if (recorder.isEmpty()) {
                     flushAt = 0;
-                    Map<?, ?> retraction = source.data() instanceof Map<?, ?> data ? data : Map.of();
-                    if (retraction.containsKey("throughSequence")) {
-                        Object through = retraction.get("throughSequence");
-                        Object sourceBoot = retraction.get("sourceBootId");
-                        Object sourceEpoch = retraction.get("sourceEventEpoch");
-                        if (!(through instanceof Number) || !(sourceBoot instanceof String) || !(sourceEpoch instanceof String)) {
-                            throw new IllegalStateException("Invalid bounded Hosted retraction source");
-                        }
-                        store.retractHarnessTurnOutput(turn.tenantId(), turn.sessionId(), turn.turnId(), owner,
-                                stream.eventEpoch(), retractionFromSequence(source), source.id(),
-                                (String) sourceBoot, (String) sourceEpoch, ((Number) through).longValue());
-                    } else {
-                        store.retractHarnessTurnOutput(turn.tenantId(), turn.sessionId(), turn.turnId(), owner,
-                                stream.eventEpoch(), retractionFromSequence(source), source.id());
-                    }
-
-                    // The replay's first chunk is the new first visible text:
-                    // the transcript it replaces was just blanked.
-                    flushFirstVisibleText = true;
-                    continue;
-                }
-                ProjectedEvent projection = projector.project(source,
-                        turn.turnId());
-                HarnessEvent event = new HarnessEvent(source.id(),
-                        bootId + ":" + stream.eventEpoch() + ":"
-                                + source.id(),
-                        projection);
-                if (projection != null && !isTextDelta(projection)) {
-                    flush(turn, stream.eventEpoch(), batch, leaseLost);
-                    record(turn, stream.eventEpoch(), List.of(event),
-                            leaseLost);
-                    if (projection.terminal()) {
-                        return true;
-                    }
-                    batchBytes = 0;
-                    flushAt = 0;
-                    continue;
-                }
-                if (batch.isEmpty()) {
-                    flushAt = System.nanoTime()
-                            + batchInterval.toNanos();
-                }
-                batch.add(event);
-                batchBytes += estimatedBytes(projection);
-                if (projection != null && flushFirstVisibleText) {
-                    flush(turn, stream.eventEpoch(), batch, leaseLost);
-                    flushFirstVisibleText = false;
-                    batchBytes = 0;
-                    flushAt = 0;
-                } else if (batch.size() >= batchMaxEvents
-                        || batchBytes >= batchMaxBytes) {
-                    flush(turn, stream.eventEpoch(), batch, leaseLost);
-                    batchBytes = 0;
-                    flushAt = 0;
+                } else if (wasEmpty) {
+                    flushAt = System.nanoTime() + batchInterval.toNanos();
                 }
             }
         } finally {
@@ -1130,9 +1082,9 @@ public class HarnessCoordinator {
     }
 
     private StreamItem take(BlockingQueue<StreamItem> incoming,
-            List<HarnessEvent> batch, long flushAt, long statusAt) {
+            boolean batchEmpty, long flushAt, long statusAt) {
         try {
-            long deadline = batch.isEmpty() ? statusAt : Math.min(flushAt, statusAt);
+            long deadline = batchEmpty ? statusAt : Math.min(flushAt, statusAt);
             long remaining = Math.max(1, deadline - System.nanoTime());
             return incoming.poll(remaining, TimeUnit.NANOSECONDS);
         } catch (InterruptedException error) {
@@ -1140,53 +1092,6 @@ public class HarnessCoordinator {
             throw new IllegalStateException(
                     "Managed event batching was interrupted", error);
         }
-    }
-
-    private void flush(TurnRecord turn, String eventEpoch,
-            List<HarnessEvent> events, AtomicBoolean leaseLost) {
-        if (events.isEmpty()) {
-            return;
-        }
-        record(turn, eventEpoch, List.copyOf(events), leaseLost);
-        events.clear();
-    }
-
-    private void record(TurnRecord turn, String eventEpoch,
-            List<HarnessEvent> events, AtomicBoolean leaseLost) {
-        requireLease(leaseLost);
-        store.recordHarnessEvents(turn.tenantId(), turn.sessionId(),
-                turn.turnId(), owner, eventEpoch, events);
-    }
-
-    private static boolean isTextDelta(ProjectedEvent event) {
-        return "item.output_text.delta".equals(event.type())
-                || "item.reasoning.delta".equals(event.type());
-    }
-
-    // The journal sequence of the retracted message's first delta (#13319).
-    // Fail closed on a malformed event: skipping it would keep the orphaned
-    // prefix in the public transcript.
-    private static long retractionFromSequence(SourceEvent event) {
-        Object data = event.data();
-        if (data instanceof Map<?, ?> map) {
-            Object fromSequence = map.get("fromSequence");
-            if (fromSequence instanceof Number number) {
-                return number.longValue();
-            }
-        }
-        throw new IllegalStateException(
-                "Hosted Harness retraction is missing fromSequence");
-    }
-
-    private static int estimatedBytes(ProjectedEvent event) {
-        if (event == null) {
-            return 64;
-        }
-        Object text = event.data().get("text");
-        return 128 + (text instanceof String
-                ? ((String) text).getBytes(StandardCharsets.UTF_8).length
-                : event.data().toString().getBytes(StandardCharsets.UTF_8)
-                        .length);
     }
 
     private record StreamItem(SourceEvent event, RuntimeException error,

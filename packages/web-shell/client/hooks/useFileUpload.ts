@@ -5,8 +5,10 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useDaemonAvailabilityController } from '../daemon/availability-context.js';
-import { isDaemonUnavailableError } from '../daemon/availability.js';
+import {
+  isServiceUnavailableError,
+  useServiceAvailabilityController,
+} from '../utils/service-availability.js';
 import type {
   DaemonWorkspaceFileUploadRequest,
   DaemonWorkspaceFileUploadResult,
@@ -107,7 +109,7 @@ export function useFileUpload(
   options: UseFileUploadOptions,
 ): UseFileUploadReturn {
   const { client, maxBytes, targetKey } = options;
-  const availability = useDaemonAvailabilityController();
+  const availability = useServiceAvailabilityController();
   const [uploads, setUploads] = useState<FileUploadItem[]>([]);
   const uploadsRef = useRef<FileUploadItem[]>([]);
   const queueRef = useRef<QueuedUpload[]>([]);
@@ -225,7 +227,7 @@ export function useFileUpload(
           }
           patchItem(
             id,
-            isDaemonUnavailableError(err)
+            isServiceUnavailableError(err)
               ? { status: 'error', errorCode: 'noDaemon', error: undefined }
               : {
                   status: 'error',

@@ -71,6 +71,23 @@ const APPIMAGE_HOST_LIBRARIES = new Set([
   'libz.so.1',
 ]);
 
+// The rest of the wayland family. Upstream does not exclude these, but they
+// share libwayland-client's versioning: a library built against the host's
+// newer client rejects these older copies. #18486 verified that dropping all
+// four renders, so the host supplies the siblings too.
+const HOST_PROVIDED_SONAMES = new Set([
+  'libwayland-cursor.so.0',
+  'libwayland-egl.so.1',
+  'libwayland-server.so.0',
+]);
+
+// Both closure rules below read this union: a copy in the image shadows the
+// host library, and a dependency nothing supplies may come from the host.
+const HOST_BASELINE_SONAMES = new Set([
+  ...APPIMAGE_HOST_LIBRARIES,
+  ...HOST_PROVIDED_SONAMES,
+]);
+
 export function findLinuxInstallers(
   bundleRoot,
   required = ['appImage', 'deb'],
@@ -177,6 +194,23 @@ export function verifyAppImageClosure(extractedRoot) {
   if (elfFiles.length === 0) {
     throw new Error('AppImage contains no ELF files');
   }
+  // A bundled copy of a host-baseline library is as fatal as a missing one:
+  // the bundle dir leads LD_LIBRARY_PATH, so it shadows the host's newer copy.
+  // An old libwayland-client lacks wl_fixes_interface, which breaks dlopening
+  // the host's libEGL_mesa.so.0 and leaves the window gray (mesa#11316).
+  const shadowed = files
+    .filter((file) => HOST_BASELINE_SONAMES.has(path.basename(file)))
+    .map((file) => path.relative(extractedRoot, file))
+    .sort();
+  if (shadowed.length > 0) {
+    // Include the packaging remedy here because the extraction tree is deleted.
+    throw new Error(
+      `AppImage must not bundle host-baseline libraries: ${shadowed.join(', ')}. ` +
+        'Stop linuxdeploy from copying them at packaging time, e.g. ' +
+        '`linuxdeploy --exclude-library=<soname>` or an equivalent in the ' +
+        'AppImage build step.',
+    );
+  }
   const missing = new Set();
   for (const elf of elfFiles) {
     const result = spawnSync('readelf', ['-d', elf], {
@@ -191,7 +225,7 @@ export function verifyAppImageClosure(extractedRoot) {
     for (const [, soname] of result.stdout.matchAll(
       /\(NEEDED\).*\[([^\]]+)\]/g,
     )) {
-      if (!bundled.has(soname) && !APPIMAGE_HOST_LIBRARIES.has(soname)) {
+      if (!bundled.has(soname) && !HOST_BASELINE_SONAMES.has(soname)) {
         missing.add(soname);
       }
     }

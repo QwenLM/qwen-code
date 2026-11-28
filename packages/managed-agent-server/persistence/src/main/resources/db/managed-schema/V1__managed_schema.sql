@@ -75,12 +75,16 @@ CREATE TABLE ma_session (
     harness_placement_epoch BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Monotonic Harness assignment generation.',
     harness_placement_state VARCHAR(16) NOT NULL DEFAULT 'UNASSIGNED' COMMENT 'Harness assignment state: UNASSIGNED, ACTIVE, QUIESCING, or RELEASED.',
     CONSTRAINT ck_ma_harness_placement CHECK ((harness_placement_state = 'UNASSIGNED' AND harness_instance_id IS NULL AND harness_owner_boot_id IS NULL AND harness_placement_epoch = 0) OR (harness_instance_id IS NOT NULL AND harness_owner_boot_id IS NOT NULL AND harness_placement_epoch > 0 AND (CASE harness_placement_state WHEN 'ACTIVE' THEN 6 WHEN 'QUIESCING' THEN 9 WHEN 'RELEASED' THEN 8 ELSE -1 END = CHAR_LENGTH(harness_placement_state)))),
+    harness_claim_requested_at BIGINT UNSIGNED COMMENT 'Database time in Unix epoch milliseconds when a push path first asked a Harness poller to claim the Session; cleared by writer acquisition or a push takeover.',
+    harness_claim_reserved_until BIGINT UNSIGNED COMMENT 'Database time in Unix epoch milliseconds until which only the claiming poller may take over the current placement; cleared by writer acquisition.',
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT uk_ma_session_id UNIQUE (id),
     CONSTRAINT ck_ma_session_boolean_values CHECK ((is_recovery_protected >= 0 AND is_recovery_protected <= 1) AND (is_resource_gc_completed >= 0 AND is_resource_gc_completed <= 1) AND (is_plan_enabled >= 0 AND is_plan_enabled <= 1))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Managed Session identity, lifecycle, Workspace binding, and execution preferences.';
 
 CREATE INDEX idx_ma_harness_owner ON ma_session (harness_instance_id, harness_owner_boot_id, harness_placement_state, tenant_id, session_id);
+
+CREATE INDEX idx_ma_harness_claim_demand ON ma_session (harness_claim_requested_at, harness_claim_reserved_until);
 
 CREATE INDEX idx_ma_session_retirement ON ma_session (retired_at, is_recovery_protected);
 
@@ -805,7 +809,7 @@ CREATE INDEX idx_ma_work_evidence ON ma_operation_work (evidence_resource_ref);
 
 CREATE TABLE ma_workspace (
     tenant_id VARCHAR(36) NOT NULL COMMENT 'Tenant identity used for isolation.',
-    workspace_id VARCHAR(128) NOT NULL COMMENT 'Workspace identity within the tenant.',
+    workspace_id VARCHAR(128) COLLATE utf8mb4_0900_as_cs NOT NULL COMMENT 'Workspace identity within the tenant.',
     workspace_generation BIGINT UNSIGNED NOT NULL COMMENT 'Current generation of the registered Workspace.',
     storage_id VARCHAR(256) NOT NULL COMMENT 'Logical storage identity.',
     display_name VARCHAR(512) NOT NULL COMMENT 'User-visible Workspace name.',

@@ -31,9 +31,7 @@ import static org.mockito.Mockito.verify;
  * pins neither flag: reverting either YAML placeholder default turns it red
  * through the binding assertions (and the coupling guard for durable); a
  * silent scan-configuration regression (coordinator never reaching the
- * candidate query) turns it red through the batch-read verification; and the
- * `ManagedAgentProperties` field defaults are pinned by
- * `EmbeddedRuntimeBrokerTest#usesFetchCompatibleDefaultBrokerPort`.
+ * candidate query) turns it red through the batch-read verification.
  */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:runtime-broker-default-on;MODE=MySQL;"
@@ -46,8 +44,6 @@ import static org.mockito.Mockito.verify;
                 + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "qwen.managed-agent.runtime-broker.enabled=true",
-        "qwen.managed-agent.runtime-broker.host=127.0.0.1",
-        "qwen.managed-agent.runtime-broker.port=0",
         "qwen.managed-agent.runtime-broker.token=broker-token",
         "qwen.managed-agent.runtime-broker.credential-key-id=test-key",
         "qwen.managed-agent.runtime-broker.credential-key="

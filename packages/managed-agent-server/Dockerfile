@@ -52,6 +52,6 @@ COPY --from=build /tmp/qwen-managed-agent-server.jar \
 # or the deliberately unauthenticated
 # QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND=true override.
 
-EXPOSE 8080 4182
+EXPOSE 8080
 USER 10001
 ENTRYPOINT ["java", "-jar", "/app/qwen-managed-agent-server.jar"]

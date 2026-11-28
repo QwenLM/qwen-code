@@ -6,9 +6,11 @@
 
 import {
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ComponentProps,
+  type CSSProperties,
   type ReactNode,
   type Ref,
 } from 'react';
@@ -42,6 +44,7 @@ type SurfaceOwnedTranscriptKeys =
   | 'approvalOverlayActive'
   | 'sessionViewportEnabled'
   | 'loadingTranscript'
+  | 'isResponding'
   | 'sessionKey'
   | 'hasOlderHistory'
   | 'onLoadOlderHistory'
@@ -79,7 +82,15 @@ export interface ChatSurfaceProps {
   // surface owns only the chat column. Slots keep the kernel backend-neutral.
   readonly header?: ReactNode;
   readonly panels?: ReactNode;
+  readonly footerRef?: Ref<HTMLDivElement>;
+  readonly footerStyle?: CSSProperties;
   readonly footerClassName?: string;
+  readonly footerHeader?: ReactNode;
+  readonly footerTrailing?: ReactNode;
+  // Optional host-rendered transcript subtree (e.g. App's memoized
+  // streaming-tail LiveMessageList + ConversationSearch). When omitted,
+  // ChatSurface renders TranscriptViewport directly.
+  readonly transcriptContent?: ReactNode;
   readonly transcriptClassName?: string;
   readonly transcriptRef?: Ref<MessageListHandle>;
   readonly transcriptProps?: ChatSurfaceTranscriptProps;
@@ -105,6 +116,7 @@ export interface ChatSurfaceProps {
   // page (plan state, pane focus, background-tab policy), not derivable here.
   readonly decisionClassName?: string;
   readonly decisionTestId?: string;
+  readonly decisionRef?: Ref<HTMLDivElement>;
   readonly decisionHeader?: ReactNode;
   readonly decisionFooter?: ReactNode;
   readonly approvalKey?: string;
@@ -113,6 +125,7 @@ export interface ChatSurfaceProps {
   readonly planExecutionMode?: string;
   readonly approvalDisabled?: boolean;
   readonly approvalKeyboardActive?: boolean;
+  readonly questionKeyboardActive?: boolean;
   readonly showBrowserNotifications?: boolean;
   // Page-supplied generator for the exec-command explain action; the contract
   // has no generator field, so each column's page supplies it (as App/ChatPane
@@ -148,10 +161,12 @@ export interface ChatSurfaceProps {
   readonly onComposerSubmit?: ChatEditorComponentProps['onSubmit'];
   readonly composerProps?: ChatSurfaceComposerProps;
   // Opt-in flags for host-context integrations (historical turn-navigation /
-  // message-deletion viewport, workspace-backed composer features, and explicit
-  // composer toolbar actions). All default closed/empty so a non-daemon surface
-  // never crashes outside daemon providers or leaks an ancestor daemon
-  // provider's session, workspace, or voice state when co-mounted.
+  // message-deletion viewport — requires pairing with
+  // `transcriptProps.sessionViewportComponent`, workspace-backed composer
+  // features, and explicit composer toolbar actions). All default closed/empty
+  // so a non-daemon surface never crashes outside daemon providers or leaks an
+  // ancestor daemon provider's session, workspace, or voice state when
+  // co-mounted.
   readonly sessionViewportEnabled?: boolean;
   readonly workspaceFeaturesEnabled?: boolean;
   readonly visibleToolbarActions?: readonly ComposerToolbarAction[];
@@ -170,7 +185,12 @@ export function ChatSurface({
   className,
   header,
   panels,
+  footerRef,
+  footerStyle,
   footerClassName,
+  footerHeader,
+  footerTrailing,
+  transcriptContent,
   transcriptClassName,
   transcriptRef,
   transcriptProps,
@@ -186,6 +206,7 @@ export function ChatSurface({
   historyCapacityReached,
   decisionClassName,
   decisionTestId,
+  decisionRef,
   decisionHeader,
   decisionFooter,
   approvalKey,
@@ -194,6 +215,7 @@ export function ChatSurface({
   planExecutionMode,
   approvalDisabled,
   approvalKeyboardActive,
+  questionKeyboardActive,
   showBrowserNotifications,
   generateContent,
   questionKey,
@@ -318,6 +340,7 @@ export function ChatSurface({
   const hasDecisionWrapper =
     decisionClassName !== undefined ||
     decisionTestId !== undefined ||
+    decisionRef !== undefined ||
     decisionHeader !== undefined ||
     decisionFooter !== undefined;
   const decisionCards = (
@@ -325,7 +348,11 @@ export function ChatSurface({
       {activeApproval && (
         <div
           className={hasDecisionWrapper ? undefined : styles.decisionCard}
-          data-testid="approval-overlay"
+          data-testid={
+            decisionTestId === 'approval-overlay'
+              ? undefined
+              : 'approval-overlay'
+          }
         >
           <ToolApproval
             key={approvalKey}
@@ -373,7 +400,7 @@ export function ChatSurface({
             variant="floating"
             disabled={approvalDisabled}
             submitDisabled={askUserSubmitDisabled}
-            keyboardActive={approvalKeyboardActive}
+            keyboardActive={questionKeyboardActive ?? approvalKeyboardActive}
             customInputLabel={askUserFreeTextLabel}
             initialDraft={askUserInitialDraft}
             onDraftChange={askUserOnDraftChange}
@@ -521,17 +548,23 @@ export function ChatSurface({
     return commitAccepted ? false : undefined;
   };
 
+  const editorCommands = useMemo(() => [...commands], [commands]);
   const hideComposer = hideComposerWhenCardActive && cardActive;
 
   const bottomContent = (
     <>
+      {footerHeader}
       {/* In-flow bottom sheets: a decision card replaces the hidden composer so
           the transcript shrinks above it instead of being covered by a floating
           overlay, and each card keeps its own container so an approval and a
           question pending together both stay operable. */}
       {cardActive &&
         (hasDecisionWrapper ? (
-          <div className={decisionClassName} data-testid={decisionTestId}>
+          <div
+            ref={decisionRef}
+            className={decisionClassName}
+            data-testid={decisionTestId}
+          >
             {decisionHeader}
             {decisionCards}
             {decisionFooter}
@@ -575,7 +608,7 @@ export function ChatSurface({
                 {...composerProps}
                 key={composerKey}
                 ref={composerRef}
-                commands={[...commands]}
+                commands={editorCommands}
                 sessionId={
                   composerProps && 'sessionId' in composerProps
                     ? composerProps.sessionId
@@ -594,7 +627,7 @@ export function ChatSurface({
                 }
                 dialogOpen={
                   hideComposerWhenCardActive
-                    ? cardActive
+                    ? cardActive || Boolean(composerProps?.dialogOpen)
                     : Boolean(composerProps?.dialogOpen)
                 }
                 // The deferred commit keeps the draft, so the send button would
@@ -620,8 +653,14 @@ export function ChatSurface({
           )}
         </div>
       )}
+      {footerTrailing}
     </>
   );
+
+  const hasFooterWrapper =
+    footerClassName !== undefined ||
+    footerRef !== undefined ||
+    footerStyle !== undefined;
 
   return (
     <div
@@ -629,46 +668,48 @@ export function ChatSurface({
       data-testid="chat-surface"
     >
       {header}
-      <div
-        className={
-          transcriptClassName
-            ? `${styles.transcript} ${transcriptClassName}`
-            : styles.transcript
-        }
-      >
-        {controller.transcriptState === 'error' ? (
-          transcriptError
-        ) : (
-          <TranscriptViewport
-            {...transcriptProps}
-            ref={transcriptRef}
-            messages={[...controller.messages]}
-            pendingApproval={activeApproval?.request ?? null}
-            approvalOverlayActive={cardActive}
-            sessionViewportEnabled={sessionViewportEnabled}
-            loadingTranscript={controller.transcriptState === 'loading'}
-            isResponding={
-              transcriptProps && 'isResponding' in transcriptProps
-                ? Boolean(transcriptProps.isResponding)
-                : isRunning
-            }
-            sessionKey={controller.sessionId}
-            hasOlderHistory={hasOlderHistory ?? controller.hasOlderHistory}
-            onLoadOlderHistory={loadOlder}
-            historyPaginationError={
-              historyPaginationError ?? controller.historyPaginationError
-            }
-            loadingOlderHistory={
-              loadingOlderHistory ?? controller.loadingOlderHistory
-            }
-            historyCapacityReached={
-              historyCapacityReached ?? controller.historyCapacityReached
-            }
-          />
-        )}
-      </div>
-      {footerClassName ? (
-        <div className={footerClassName}>{bottomContent}</div>
+      {transcriptContent !== undefined ? (
+        transcriptContent
+      ) : (
+        <div
+          className={
+            transcriptClassName
+              ? `${styles.transcript} ${transcriptClassName}`
+              : styles.transcript
+          }
+        >
+          {controller.transcriptState === 'error' ? (
+            transcriptError
+          ) : (
+            <TranscriptViewport
+              {...transcriptProps}
+              ref={transcriptRef}
+              messages={[...controller.messages]}
+              pendingApproval={activeApproval?.request ?? null}
+              approvalOverlayActive={cardActive}
+              sessionViewportEnabled={sessionViewportEnabled}
+              loadingTranscript={controller.transcriptState === 'loading'}
+              isResponding={isRunning}
+              sessionKey={controller.sessionId}
+              hasOlderHistory={hasOlderHistory ?? controller.hasOlderHistory}
+              onLoadOlderHistory={loadOlder}
+              historyPaginationError={
+                historyPaginationError ?? controller.historyPaginationError
+              }
+              loadingOlderHistory={
+                loadingOlderHistory ?? controller.loadingOlderHistory
+              }
+              historyCapacityReached={
+                historyCapacityReached ?? controller.historyCapacityReached
+              }
+            />
+          )}
+        </div>
+      )}
+      {hasFooterWrapper ? (
+        <div ref={footerRef} style={footerStyle} className={footerClassName}>
+          {bottomContent}
+        </div>
       ) : (
         bottomContent
       )}

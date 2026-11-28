@@ -610,6 +610,17 @@ equality" proposal above, and the interim decision to keep actor columns at
   earlier trailing-space-distinction tests became trailing-space-rejection
   tests; case-distinction tests are preserved.
 
+### 2026-11-27 narrow collation correction
+
+The direct-seeding registry contract retains distinct trailing-space identifiers
+at insertion by using `utf8mb4_0900_as_cs` (NO PAD) for `ma_workspace.workspace_id`.
+Case and accent sensitivity do not imply byte identity: this UCA collation folds
+some ignored-codepoint and Unicode-normalization differences, mixed joins retain
+the admission-side trailing-space policy, and recursive traversal uses explicit
+binary predicates. The matching MySQL fixture rejects an impermissible altered
+column size before construction rather than treating that refusal as a collation
+success.
+
 ### Actor columns
 
 - Raw-actor (≤36 UTF-16 units) authorization/idempotency key columns are uniformly

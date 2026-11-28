@@ -128,11 +128,10 @@ function jobsFixture({
 }
 
 // Two failed pools, one timed out (a pool wedged on a slow npm fetch is the
-// shape that produced the v0.22.3 incident), the rest healthy. The stale
-// set spans BOTH regions so the reporter's pool naming replays on an hz
-// leg too, not only on the hk legs.
-const firstHz = pools.findIndex((pool) => pool.includes('hz'));
-const STALE_POOLS = [...pools.slice(0, 2), pools[firstHz === -1 ? 2 : firstHz]];
+// shape that produced the v0.22.3 incident), the rest healthy. Three
+// DISTINCT pools: with a single-region fleet the old "first hz leg" pick
+// duplicated pools[0] and the fixture listed one leg twice.
+const STALE_POOLS = pools.slice(0, 3);
 const HEALTHY_POOLS = pools.filter((pool) => !STALE_POOLS.includes(pool));
 const DEFAULT_JOBS = jobsFixture({
   failed: STALE_POOLS.slice(0, 2),
@@ -226,35 +225,32 @@ describe('ECS runner qwen update workflow', () => {
     for (const pool of pools) {
       assert.match(pool, /^ecs-update-(hk|hz)-\d+$/);
     }
-    // hz4 and hz5 have no persistent runner — every machine there is an
-    // ephemeral container runner whose image already carries the CLI, so
-    // there is nothing to update and no runner to hang the label on. The
-    // other four hz hosts each get a leg.
-    for (const host of [1, 2, 3, 6]) {
-      assert.ok(pools.includes(`ecs-update-hz-${host}`));
-    }
-    for (const host of [4, 5]) {
+    // The fleet is hz7-hz13: every host gets exactly one leg. The former
+    // hk and hz1-hz6 hosts have no registered runners left, and a leg whose
+    // label matches no registered runner never runs and is never reported.
+    // The negative pins use EXACT labels: a substring `includes('hz-1')`
+    // would also match 'hz-13'.
+    for (const host of [7, 8, 9, 10, 11, 12, 13]) {
       assert.ok(
-        !pools.some((pool) => pool.includes(`hz-${host}`)),
-        `ecs-update-hz-${host} has no runner carrying that label`,
+        pools.includes(`ecs-update-hz-${host}`),
+        `ecs-update-hz-${host} lost its leg`,
       );
     }
-    // Name every hk leg too: the shape check above accepts any digit string,
-    // so renaming one of them (and its actionlint declaration together) used
-    // to survive the whole suite while the leg queued forever.
+    for (const host of [1, 2, 3, 4, 5, 6]) {
+      assert.ok(
+        !pools.includes(`ecs-update-hz-${host}`),
+        `ecs-update-hz-${host} has no registered runner left`,
+      );
+    }
     for (const host of [1, 2, 3, 4, 5]) {
       assert.ok(
-        pools.includes(`ecs-update-hk-${host}`),
-        `ecs-update-hk-${host} lost its leg`,
+        !pools.includes(`ecs-update-hk-${host}`),
+        `ecs-update-hk-${host} has no registered runner left`,
       );
     }
     // Counted last on purpose: a re-added leg should fail on the host that has
     // no runner, not on an opaque length mismatch.
-    assert.equal(
-      pools.length,
-      9,
-      'five hk legs plus the four hz hosts that have a persistent runner',
-    );
+    assert.equal(pools.length, 7, 'one leg per host of the hz7-hz13 fleet');
     // Static runs-on: actionlint can only check labels it can see, and an
     // expression-built label array hides typos from it.
     assert.ok(
@@ -840,7 +836,10 @@ describe('ECS runner qwen update replay', { skip: !replayable }, () => {
     const updated = runUpdate({ legacyCopy: false });
     assert.equal(updated.status, 0);
     assert.ok(updated.localQwenExists);
-    assert.ok(!updated.usrQwenExists, 'hk hosts must not grow a second tree');
+    assert.ok(
+      !updated.usrQwenExists,
+      'a host without a legacy copy must not grow a second tree',
+    );
     assert.ok(updated.ghEnv.includes('LEGACY_PRESENT=0'));
     assert.ok(!/--prefix \S*\/usr /.test(updated.npmCalls));
     assert.equal(updated.verifyStatus, 0);

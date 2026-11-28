@@ -68,13 +68,15 @@ if [ -n "\${FAKE_ADMIN_REFUSE:-}" ] && [[ " $* " == *" \${FAKE_ADMIN_REFUSE} "* 
   exit 0
 fi
 topic=""
+group=""
 previous=""
 for arg in "$@"; do
   [ "\${previous}" != "-t" ] || topic="\${arg}"
+  [ "\${previous}" != "-g" ] || group="\${arg}"
   previous="\${arg}"
 done
 echo "create success."
-echo "topicName=\${topic} $*"
+echo "topicName=\${topic} groupName=\${group} $*"
 `;
 
 async function freePorts(count) {
@@ -284,6 +286,20 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
       expect(await waitForNoListener(port)).toBe(true);
     }
     expect(pidFiles()).toEqual([]);
+  }, 200_000);
+
+  it('provisions the configured GC delay topic and ordinary group', () => {
+    const result = run('start', {
+      RMQ_DELAY_TOPIC: 'qwen-gc-fixture-delay',
+      RMQ_DELAY_GROUP: 'qwen-gc-fixture-workers',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toContain(
+      'created DELAY topic qwen-gc-fixture-delay',
+    );
+    expect(result.stderr).toContain(
+      'created ordinary group qwen-gc-fixture-workers',
+    );
   }, 200_000);
 
   it('leaves a running cluster alone when a second start fails, and stop stops it', async () => {
