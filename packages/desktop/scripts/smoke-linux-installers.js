@@ -205,7 +205,7 @@ export function verifyAppImageClosure(extractedRoot) {
   if (shadowed.length > 0) {
     // The extraction tree is deleted before anyone reads this, so name the
     // remedy too: linuxdeploy copies the wayland family by default, and the
-    // packaging exclusion is the fix tracked by #18491.
+    // packaging exclusion is a separate change still to be made.
     throw new Error(
       `AppImage must not bundle host-baseline libraries: ${shadowed.join(', ')}. ` +
         'Stop linuxdeploy from copying them at packaging time, e.g. ' +
