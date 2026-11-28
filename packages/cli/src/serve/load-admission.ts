@@ -34,6 +34,13 @@ export interface LoadAdmissionSnapshot {
 export interface LoadAdmissionSignals {
   readonly loadRatio: number;
   readonly eventLoopLagP99Ms: number;
+  /**
+   * False when the CPU signal could not be read (core count unavailable).
+   * The tick then skips the CPU state machine instead of feeding it a
+   * fabricated 0, which would release a latched `cpu_load` on a reading
+   * that carries no information. Omitted means readable.
+   */
+  readonly loadReadable?: boolean;
 }
 
 /** Status shape reported when no monitor runs (opt-out or injected bridge). */
@@ -103,6 +110,22 @@ function advanceSignal(
 }
 
 /**
+ * Host load per core, or 0 when the CPU signal is unreadable. `os.cpus()`
+ * returns an empty array on Android/Termux (libuv cannot read /proc/stat)
+ * while /proc/loadavg stays readable, so `loadavg / 0` is `Infinity`:
+ * `Infinity >= LOAD_RATIO_ENTER` holds on every sample and
+ * `Infinity < LOAD_RATIO_EXIT` never does, which latches `cpu_load`
+ * permanently. An unreadable core count is not evidence of overload, so the
+ * CPU signal reports 0 and the event-loop lag / observation-gap signals keep
+ * guarding admission. Core count stays host scope on purpose (see the note
+ * in createLoadAdmissionMonitor).
+ */
+export function hostLoadRatio(loadavg1m: number, cores: number): number {
+  if (!Number.isFinite(loadavg1m) || !(cores > 0)) return 0;
+  return loadavg1m / cores;
+}
+
+/**
  * Samples host load and daemon event-loop lag on an unref'd interval and
  * caches a synchronous snapshot for fresh-session admission. The admission
  * contract forbids async probes, so the reading is always the last tick's —
@@ -137,14 +160,18 @@ export function createLoadAdmissionMonitor(
     // availableParallelism() honours cgroup quota/affinity — dividing one by
     // the other latches a CPU-limited daemon into permanent refusals.
     // Container-level starvation is the event-loop-lag signal's job.
-    const cores = os.cpus().length;
+    // Read once, as before; keep retrying only while it is unreadable (0).
+    let cores = 0;
     readSignals = () => {
-      const loadRatio = os.loadavg()[0] / cores;
+      if (!(cores > 0)) cores = os.cpus().length;
+      const load = os.loadavg()[0];
+      const loadRatio = hostLoadRatio(load, cores);
+      const loadReadable = cores > 0 && Number.isFinite(load);
       // Window-scoped p99: reset after each read so the figure describes
       // the last interval, not the since-start average.
       const eventLoopLagP99Ms = loopDelay.percentile(99) / 1_000_000;
       loopDelay.reset();
-      return { loadRatio, eventLoopLagP99Ms };
+      return { loadRatio, eventLoopLagP99Ms, loadReadable };
     };
   }
 
@@ -170,10 +197,16 @@ export function createLoadAdmissionMonitor(
     // daemon capacity: engage only when the loop already feels the
     // pressure; release once it is healthy again, even if host load stays
     // high.
-    advanceSignal(cpu, latest.loadRatio, LOAD_RATIO_ENTER, LOAD_RATIO_EXIT, {
-      enter: latest.eventLoopLagP99Ms >= LOAD_CORROBORATION_ENTER_MS,
-      exit: latest.eventLoopLagP99Ms < LOAD_CORROBORATION_EXIT_MS,
-    });
+    // An unreadable CPU signal is a non-reading, not a reading of zero: skip
+    // the state machine so it neither latches nor releases on it. Releasing
+    // on a fabricated 0 would also let the corroboration-OR clear an already
+    // latched cpu_load, and block the clear while the loop stays busy.
+    if (latest.loadReadable !== false) {
+      advanceSignal(cpu, latest.loadRatio, LOAD_RATIO_ENTER, LOAD_RATIO_EXIT, {
+        enter: latest.eventLoopLagP99Ms >= LOAD_CORROBORATION_ENTER_MS,
+        exit: latest.eventLoopLagP99Ms < LOAD_CORROBORATION_EXIT_MS,
+      });
+    }
     advanceSignal(
       lag,
       latest.eventLoopLagP99Ms,

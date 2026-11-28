@@ -4,12 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createLoadAdmissionMonitor,
   DISABLED_LOAD_ADMISSION_SNAPSHOT,
   EVENT_LOOP_LAG_ENTER_MS,
   EVENT_LOOP_LAG_EXIT_MS,
+  hostLoadRatio,
   LOAD_ADMISSION_SAMPLE_MS,
   LOAD_ADMISSION_SUSTAIN_SAMPLES,
   LOAD_CORROBORATION_ENTER_MS,
@@ -901,5 +903,96 @@ describe('load admission real event-loop stall', () => {
     } finally {
       monitor.dispose();
     }
+  });
+});
+
+describe('load admission with an unreadable core count (Android/Termux)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('hostLoadRatio never returns Infinity or NaN', () => {
+    expect(hostLoadRatio(42.85, 0)).toBe(0);
+    expect(hostLoadRatio(0, 0)).toBe(0);
+    expect(hostLoadRatio(Number.NaN, 8)).toBe(0);
+    expect(hostLoadRatio(4, 8)).toBe(0.5);
+  });
+
+  const sampleDefaultReader = async () => {
+    const monitor = createLoadAdmissionMonitor({ sampleMs: 20 });
+    try {
+      await new Promise((r) => setTimeout(r, 140));
+      return monitor.snapshot();
+    } finally {
+      monitor.dispose();
+    }
+  };
+
+  it('does not latch cpu_load when os.cpus() is empty but loadavg is high', async () => {
+    vi.spyOn(os, 'cpus').mockReturnValue([]);
+    vi.spyOn(os, 'loadavg').mockReturnValue([42.85, 40, 30]);
+    const snap = await sampleDefaultReader();
+    expect(snap.sampledAtMs).toBeGreaterThan(0);
+    expect(Number.isFinite(snap.loadRatio)).toBe(true);
+    expect(snap.overloaded).toBe(false);
+  });
+
+  it('still divides by the core count when it is readable', async () => {
+    vi.spyOn(os, 'cpus').mockReturnValue(
+      new Array(2).fill({}) as os.CpuInfo[],
+    );
+    vi.spyOn(os, 'loadavg').mockReturnValue([1, 1, 1]);
+    const snap = await sampleDefaultReader();
+    expect(snap.sampledAtMs).toBeGreaterThan(0);
+    expect(snap.loadRatio).toBe(0.5);
+  });
+});
+
+describe('load admission with an unreadable CPU signal (non-reading)', () => {
+  let signals: LoadAdmissionSignals;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    signals = { loadRatio: 0.2, eventLoopLagP99Ms: 5 };
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const tick = (times = 1) => {
+    for (let i = 0; i < times; i++) {
+      vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    }
+  };
+
+  it('does not latch cpu_load on an unreadable signal even with high lag', () => {
+    const monitor = createLoadAdmissionMonitor({ readSignals: () => signals });
+    signals = {
+      loadRatio: 0,
+      eventLoopLagP99Ms: 300,
+      loadReadable: false,
+    };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES * 3);
+    // The lag signal may engage on its own; the CPU signal must not.
+    expect(monitor.snapshot().reason).not.toBe('cpu_load');
+    monitor.dispose();
+  });
+
+  it('does not release an already latched cpu_load on an unreadable reading', () => {
+    const monitor = createLoadAdmissionMonitor({ readSignals: () => signals });
+    signals = { loadRatio: LOAD_RATIO_ENTER, eventLoopLagP99Ms: 300 };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
+    expect(monitor.snapshot().reason).toBe('cpu_load');
+    // Core count drops out while the loop is quiet: a fabricated 0 would
+    // satisfy both exit clauses and clear the latch; a non-reading must not.
+    signals = { loadRatio: 0, eventLoopLagP99Ms: 5, loadReadable: false };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES * 3);
+    expect(monitor.snapshot().reason).toBe('cpu_load');
+    // A real low reading still releases it.
+    signals = { loadRatio: 0.1, eventLoopLagP99Ms: 5 };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
+    expect(monitor.snapshot().overloaded).toBe(false);
+    monitor.dispose();
   });
 });
