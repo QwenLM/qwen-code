@@ -167,6 +167,14 @@ export function normalize(model: string): string {
     '',
   );
 
+  // `ollama run hf.co/<user>/<repo>-GGUF:Q4_K_M` ids put a bare
+  // quantization tag after the colon, with no size in front of it for the
+  // tag pattern above to anchor on.
+  s = s.replace(
+    /:(?:ud-)?(?:[it]?q\d+(?:_[a-z0-9]+)*|i2_s|b?f(?:16|32)|fp(?:8|16|32)|mxfp4(?:_moe)?|nf4|int[48])$/,
+    '',
+  );
+
   s = s.split(':').pop() ?? s;
 
   // collapse whitespace to single hyphen
@@ -355,6 +363,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 
   // OpenAI
   [/^gpt-5/, LIMITS['128k']], // GPT-5.x: 128K
+  [/^gpt-oss/, LIMITS['32k']], // gpt-oss: 32K
   [/^gpt-/, LIMITS['16k']], // GPT fallback: 16K
   [/^o\d/, LIMITS['128k']], // o-series: 128K
 
