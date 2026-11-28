@@ -6,6 +6,18 @@
 
 import { beforeEach, vi } from 'vitest';
 
+// A self-hosted runner operated from a qwen session inherits its stamps, and
+// test:scripts runs this suite right after the standalone regression in the
+// same job. They hijack the production wrapper's --version fast path and
+// inject preloads; scripts/test-standalone-runtimes.mjs clears the same keys.
+for (const key of [
+  'NODE_OPTIONS',
+  'BUN_OPTIONS',
+  'CLI_VERSION',
+  'QWEN_CODE_RELAUNCH_ARGS',
+])
+  delete process.env[key];
+
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
   const appendFileSync = vi.fn();

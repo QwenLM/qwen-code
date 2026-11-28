@@ -4463,6 +4463,155 @@ esac`,
     );
   });
 
+  // Pinned here, not parsed out of the files under test: a witness that reads
+  // its expectation from the scrub it checks stays green when that scrub is
+  // emptied, narrowed, or moved somewhere the probe never enters.
+  const SESSION_STAMPS = [
+    'NODE_OPTIONS',
+    'BUN_OPTIONS',
+    'CLI_VERSION',
+    'QWEN_CODE_RELAUNCH_ARGS',
+  ];
+  // The child is a real node, so NODE_OPTIONS must parse: a quoted preload
+  // path loses its backslashes on Windows. The witness is the key's absence.
+  const stampEnv = () => {
+    const env = { ...process.env };
+    for (const key of SESSION_STAMPS)
+      env[key] = key === 'NODE_OPTIONS' ? '--max-old-space-size=4096' : '9.9.9';
+    return env;
+  };
+
+  it.skipIf(process.platform === 'win32')(
+    'isolates the standalone runtime suite from inherited session stamps',
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), 'standalone-stamps-'));
+      try {
+        const probe = join(dir, 'child-env');
+        const stub = join(dir, 'pinned-runtime');
+        // Names only: the release lane's job env carries secrets the runner
+        // does not mask, and a worker killed at the step cap never reaches
+        // the cleanup below, so no value may touch disk at all.
+        writeFileSync(
+          stub,
+          '#!/bin/sh\nenv | cut -d= -f1 > "$STAMP_PROBE_OUT"\n',
+        );
+        chmodSync(stub, 0o755);
+        // Both entrances: --ci hands the driver to the pinned runtime, a bare
+        // invocation runs the identity probes in its own process. A scrub
+        // placed inside ci() covers only the first.
+        for (const [mode, args] of [
+          ['--ci', ['--ci']],
+          ['direct', []],
+        ]) {
+          rmSync(probe, { force: true });
+          const env = stampEnv();
+          env.PINNED_NODE = stub;
+          env.PINNED_BUN = stub;
+          env.STAMP_PROBE_OUT = probe;
+          // The lane exports a host-wide archive cache; this probe downloads
+          // nothing and must not sweep it.
+          delete env.QWEN_STANDALONE_RUNTIME_CACHE;
+          // The stub is not a real runtime, so the bare invocation aborts just
+          // after its identity probes; the dump they wrote is the witness.
+          const result = spawnSync(
+            process.execPath,
+            ['scripts/test-standalone-runtimes.mjs', ...args],
+            { env, encoding: 'utf8', timeout: 60_000 },
+          );
+          expect(
+            existsSync(probe),
+            `the stub never ran: ${mode} (status=${result.status} signal=${result.signal} error=${result.error?.code})\n${result.stderr ?? ''}`,
+          ).toBe(true);
+          const dump = readFileSync(probe, 'utf8').split('\n').filter(Boolean);
+          // A full-env dump matches no bare stamp name, so pin the shape too.
+          expect(
+            dump.every((name) => !name.includes('=')),
+            `probe dump is not names-only: ${mode}`,
+          ).toBe(true);
+          // The stub's own redirect target: an empty dump cannot contain it.
+          expect(dump, `probe dump is empty: ${mode}`).toContain(
+            'STAMP_PROBE_OUT',
+          );
+          const leaked = dump.filter((key) => SESSION_STAMPS.includes(key));
+          expect(leaked, `child env carries session stamps: ${mode}`).toEqual(
+            [],
+          );
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  const SUITE_STAMP_PROBE = 'QWEN_SUITE_STAMP_PROBE';
+  it('isolates the scripts unit suite from inherited session stamps', () => {
+    if (process.env[SUITE_STAMP_PROBE]) {
+      // Inside the spawned suite: scripts/tests/test-setup.ts has already run
+      // in this worker, so its scrub is observable without reading its source.
+      writeFileSync(
+        process.env[SUITE_STAMP_PROBE],
+        SESSION_STAMPS.filter((key) => key in process.env).join('\n'),
+      );
+    } else {
+      const dir = mkdtempSync(join(tmpdir(), 'suite-stamps-'));
+      try {
+        const out = join(dir, 'leaked');
+        const env = stampEnv();
+        env[SUITE_STAMP_PROBE] = out;
+        const result = spawnSync(
+          process.execPath,
+          [
+            'node_modules/vitest/vitest.mjs',
+            'run',
+            '--config',
+            'scripts/tests/vitest.config.ts',
+            'scripts/tests/release-workflow.test.js',
+            '-t',
+            'isolates the scripts unit suite',
+          ],
+          { env, encoding: 'utf8', timeout: 60_000 },
+        );
+        // vitest exits 0 when -t matches nothing, so the file the probe writes
+        // witnesses that it ran; the child's exit code cannot.
+        expect(
+          existsSync(out),
+          `the spawned suite never ran the probe (status=${result.status} signal=${result.signal} error=${result.error?.code})\n${result.stderr ?? ''}`,
+        ).toBe(true);
+        expect(readFileSync(out, 'utf8').split('\n').filter(Boolean)).toEqual(
+          [],
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('declares the pinned session stamps at both test:scripts entry points', () => {
+    // Neither delete loop assigns meaning to order, so compare sets. The
+    // probes above pin what each entrance actually drops; this pins that both
+    // declare exactly the keys those probes inject, so a new stamp cannot
+    // reach one half — or both — without extending the witnesses too.
+    const pinned = [...SESSION_STAMPS].sort();
+    // Every candidate loop, not the first one in the file: an unrelated scrub
+    // added above this one must not be mistaken for it.
+    const declares = (file, pattern) => {
+      const lists = [...readFileSync(file, 'utf8').matchAll(pattern)].map((m) =>
+        [...m[1].matchAll(/'([A-Z0-9_]+)'/g)].map((k) => k[1]).sort(),
+      );
+      expect(lists, `stamp list not declared in ${file}`).toContainEqual(
+        pinned,
+      );
+    };
+    declares(
+      'scripts/tests/test-setup.ts',
+      /for \(const key of \[([^\]]*)\]\)\s*\{?\s*delete process\.env\[key\];/g,
+    );
+    declares(
+      'scripts/test-standalone-runtimes.mjs',
+      /const SESSION_STAMP_ENV = \[([^\]]*)\];/g,
+    );
+  });
+
   it('stages every integration package manifest after versioning', () => {
     expect(releaseStepScript).toContain(
       'git add package.json pnpm-lock.yaml packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json',
