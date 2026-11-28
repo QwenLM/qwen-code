@@ -1435,6 +1435,41 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       removeMCPServerStatus(serverName);
     });
 
+    it('a stop during transport allocation discards the late transport', async () => {
+      // `createTransport()` can await auth-module loading, so a stop can land
+      // before the transport exists for `disconnect()` to close. The factory's
+      // late result is unowned: it must not reach the SDK connect, and it must
+      // be closed rather than left running.
+      let finishTransport!: (transport: Obj) => void;
+      const factoryGate = new Promise<Obj>((resolve) => {
+        finishTransport = resolve;
+      });
+      const transport = { close: vi.fn(() => Promise.resolve()) };
+      const sdkClient = mockClient({ close: vi.fn() });
+      const serverName = `stop-during-allocation-${Date.now()}`;
+      const client = newClient(serverName);
+      const createTransportSpy = vi
+        .spyOn(client as unknown as Obj, 'createTransport')
+        .mockReturnValue(factoryGate);
+
+      const connecting = client.connect();
+      await vi.waitFor(() =>
+        expect(createTransportSpy).toHaveBeenCalledTimes(1),
+      );
+      await client.disconnect();
+
+      finishTransport(transport);
+      await connecting;
+
+      expect(sdkClient.connect).not.toHaveBeenCalled();
+      expect(transport.close).toHaveBeenCalledTimes(1);
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+      expect(getMCPConnectionStatus(client['client'])).toBe(
+        MCPServerStatus.DISCONNECTED,
+      );
+      removeMCPServerStatus(serverName);
+    });
+
     it('flips status to DISCONNECTED when discover() throws', async () => {
       // `Config.getFailedMcpServerNames()` filters by `status !== CONNECTED`,
       // so a server that connects but whose `discover()` then crashes (e.g.
@@ -3451,8 +3486,10 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       await client.disconnect();
       removeMCPServerStatus('racy-server');
 
-      // Now let the rejected connect propagate.
-      await expect(connectPromise).rejects.toThrow('connect failed');
+      // The stop claimed this attempt's outcome: `connect()` settles without
+      // rejecting, because its failure is the one `disconnect()` already
+      // turned into a stop. What matters is that it stays silent.
+      await expect(connectPromise).resolves.toBeUndefined();
 
       // The entry must remain absent — no resurrection.
       expect(getAllMCPServerStatuses().has('racy-server')).toBe(false);

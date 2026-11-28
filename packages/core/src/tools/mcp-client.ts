@@ -562,6 +562,10 @@ export class McpClient {
    * owner already ended.
    */
   private connectingTransport: Transport | undefined;
+  /**
+   * Set by a stop that interrupts transport creation or the SDK connect, so
+   * that attempt's late outcome cannot revive the client.
+   */
   private stopLifetime = false;
   /**
    * captures the most recent error
@@ -611,9 +615,29 @@ export class McpClient {
     this.lastTransportError = undefined;
     this.updateStatus(MCPServerStatus.CONNECTING);
     try {
-      this.transport = await this.createTransport();
-      this.connectingTransport = this.transport;
-      const connectingTransport = this.transport;
+      const creating = this.createTransport();
+      let transport: Transport;
+      try {
+        transport = await creating;
+      } catch (error) {
+        // The factory failed before the stop below would have been reached.
+        // A stop that ran meanwhile already wrote the status this catch
+        // would rewrite, so leave the failure to it.
+        if (this.stopLifetime || this.isDisconnecting) {
+          return;
+        }
+        throw error;
+      }
+      // The factory handed back a transport after a stop that had none to
+      // close. It is unowned: close it here rather than let it reach the
+      // SDK, which would start a server nobody will stop.
+      if (this.stopLifetime || this.isDisconnecting) {
+        await closeTransportQuietly(transport, this.serverName);
+        return;
+      }
+      this.transport = transport;
+      this.connectingTransport = transport;
+      const connectingTransport = transport;
 
       this.client.onerror = (error) => {
         // Legacy Streamable HTTP can wrap a JSON-RPC -32601 response in a
@@ -1061,6 +1085,25 @@ export class McpClient {
       this.serverConfig,
       this.debugMode,
       this.sendSdkMcpMessage,
+    );
+  }
+}
+
+/**
+ * Closes a transport the caller has just produced but will not use. A
+ * transport is created before it is handed to the SDK `connect()`, so one
+ * abandoned at that point has no owner and its stdio child (if any) would
+ * outlive the client. Best-effort: a close failure must not mask the stop.
+ */
+async function closeTransportQuietly(
+  transport: Transport,
+  serverName: string,
+): Promise<void> {
+  try {
+    await transport.close();
+  } catch (error) {
+    debugLogger.debug(
+      `Could not close the transport for server '${serverName}' after a stop (continuing): ${getErrorMessage(error)}`,
     );
   }
 }
