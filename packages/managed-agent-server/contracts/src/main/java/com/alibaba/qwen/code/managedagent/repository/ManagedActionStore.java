@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.repository;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedUserQuestions;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
@@ -43,6 +44,7 @@ public interface ManagedActionStore {
     public OperationAdmission admit(
             String tenantId,
             String sessionId,
+            SessionPrincipal principal,
             String actorId,
             String actorDigest,
             String key,

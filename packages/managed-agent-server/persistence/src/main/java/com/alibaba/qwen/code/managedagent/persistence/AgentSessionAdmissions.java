@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelOption;
 import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
@@ -77,7 +78,8 @@ final class AgentSessionAdmissions {
             boolean workspaceChildAgentsEnabled,
             boolean managedExtensionExecutionEnabled,
             List<? extends ManagedAgentSettings.RuntimeBroker.WorkspaceMount> workspaceMounts,
-            WorkspaceCreationRoots createdRoots, ManagedSessionModelConfigs modelConfigs) {
+            WorkspaceCreationRoots createdRoots,
+            ManagedSessionModelConfigs modelConfigs) {
         this.eventJournal = eventJournal;
         this.sessionCommands = sessionCommands;
         this.sessionPolicies = sessionPolicies;
@@ -106,19 +108,124 @@ final class AgentSessionAdmissions {
     Admission insertSessionCommand(String tenantId, String actorId,
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
-            List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig, String memoryStoreId) {
+            List<Map<String, Object>> input, String payloadDigest) {
+        return insertSessionCommand(tenantId, actorId, operation, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest, null);
+    }
+
+    Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig) {
+        return insertSessionCommand(tenantId, actorId, operation, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest,
+                modelConfig, null);
+    }
+
+    Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            SessionModelConfig modelConfig, String memoryStoreId) {
+        return insertSessionCommand(tenantId,
+                actorId == null ? null
+                        : SessionPrincipal.ofUser(tenantId, actorId),
+                operation, idempotencyKey, requestDigest, agentId,
+                requestedRevision, title, input, payloadDigest, modelConfig,
+                memoryStoreId);
+    }
+
+    Admission insertSessionCommand(String tenantId,
+            SessionPrincipal principal, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest) {
+        return insertSessionCommand(tenantId, principal, operation,
+                idempotencyKey, requestDigest, agentId, requestedRevision,
+                title, input, payloadDigest, null);
+    }
+
+    /**
+     * Ownership-enforcing creation of an unbound Session, with or without a
+     * model configuration. The ownership row lands in the same transaction
+     * as the Session, receipt and creation event. A null principal is the
+     * legacy actorless arm: the Session is created without an ownership row
+     * and stays tenant-wide, exactly as pre-ownership rows do. The fail-closed
+     * enforcement lives one layer up, at the controllers'
+     * {@code requirePrincipal} and the tenant-only creation overload.
+     */
+    Admission insertSessionCommand(String tenantId,
+            SessionPrincipal principal, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            SessionModelConfig modelConfig) {
+        return insertSessionCommand(tenantId, principal, operation, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest,
+                modelConfig, null);
+    }
+
+    /**
+     * The creation entry point: ownership row, Session, receipt, memory
+     * binding and model configuration all land in the caller's transaction.
+     */
+    Admission insertSessionCommand(String tenantId,
+            SessionPrincipal principal, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            SessionModelConfig modelConfig, String memoryStoreId) {
+        if (principal != null) {
+            ManagedSessionPrincipal.requireTenant(tenantId, principal);
+        }
         requireModelConfiguration(modelConfig);
         AgentSessionPolicies.AgentPin pin = sessionPolicies.resolveAgentPin(tenantId, agentId, requestedRevision,
                 false);
         requireCreationScope(tenantId, idempotencyKey, false);
         Admission admission = insertSession(tenantId, operation, idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
-                null, actorId, pin);
-        ManagedMemoryStore.bind(jdbc, tenantId, actorId, admission.sessionId(), memoryStoreId);
+                null, principal == null ? null : principal.userId(), pin,
+                false, null, principal);
+        ManagedMemoryStore.bind(jdbc, tenantId,
+                principal == null ? null : principal.userId(),
+                admission.sessionId(), memoryStoreId);
         if (modelConfig != null) {
             modelConfigs.save(tenantId, admission.sessionId(), modelConfig);
         }
         return admission;
+    }
+
+    /** Requires that the principal owns the unbound Session exactly. */
+    void requireSessionOwnership(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        ManagedSessionPrincipal.requireOwnership(jdbc, tenantId, sessionId,
+                principal);
+    }
+
+    /** The read-only twin of {@link #requireSessionOwnership}. */
+    boolean ownsSession(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        return ManagedSessionPrincipal.owns(jdbc, tenantId, sessionId,
+                principal);
+    }
+
+    void requireSessionAuthority(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId,
+                principal);
+    }
+
+    void requireSessionReadAuthority(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        ManagedSessionPrincipal.requireReadAuthority(jdbc, tenantId, sessionId,
+                principal);
+    }
+
+    /** The raw-actor twin: no byte-bounded principal is constructed (R7-1). */
+    void requireSessionReadAuthority(String tenantId, String sessionId,
+            String actorId) {
+        ManagedSessionPrincipal.requireReadAuthority(jdbc, tenantId, sessionId,
+                actorId);
     }
 
     // Pre-admission capability read for default Skill discovery: resolves the
@@ -162,10 +269,12 @@ final class AgentSessionAdmissions {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         // InnoDB's first consistent read must follow the creation's first lock.
-        // Creations lock the selected Workspace before reading receipts, as
-        // resolveForCreation does below. Explicit selections lock one
-        // Workspace; default selections retain the tenant scan to preserve
-        // the lock order with default switches (see design
+        // A selection that may resolve to a Resident Workspace keeps the tenant
+        // guard first: its single-Session range lock can deadlock adjacent
+        // Workspaces' inserts. Other creations lock the selected Workspace
+        // before reading receipts, as resolveForCreation does below. Explicit
+        // selections lock one Workspace; default selections retain the tenant
+        // scan to preserve the lock order with default switches (see design
         // 2026-11-04-managed-session-admission-tenant-guard).
         workspaces.lockSelectionForCreation(tenantId, selection);
         List<ChildSessionAdmissions.WorkspaceCommand> existing = childSessionAdmissions.findWorkspaceCommand(tenantId,
@@ -244,7 +353,7 @@ final class AgentSessionAdmissions {
         ResolvedBinding target = worktree == null ? workspace : worktree.target(workspace);
         Admission admission = insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
-                target, actorId, pin, planMode, modelId);
+                target, actorId, pin, planMode, modelId, null);
         ManagedMemoryStore.bind(jdbc, tenantId, actorId, admission.sessionId(), command.memoryStoreId());
         if (modelConfig != null) {
             modelConfigs.save(tenantId, admission.sessionId(), modelConfig);
@@ -431,22 +540,16 @@ final class AgentSessionAdmissions {
             String title, List<Map<String, Object>> input,
             String payloadDigest, ResolvedBinding resolved,
             String actorId, AgentSessionPolicies.AgentPin pin) {
-        return insertSession(tenantId, operation, idempotencyKey, requestDigest, agentId, title,
-                input, payloadDigest, resolved, actorId, pin, false);
+        return insertSession(tenantId, operation, idempotencyKey, requestDigest,
+                agentId, title, input, payloadDigest, resolved, actorId, pin,
+                false, null, null);
     }
 
     Admission insertSession(String tenantId, String operation, String idempotencyKey,
             String requestDigest, String agentId, String title, List<Map<String, Object>> input,
             String payloadDigest, ResolvedBinding resolved, String actorId, AgentSessionPolicies.AgentPin pin,
-            boolean planMode) {
-        return insertSession(tenantId, operation, idempotencyKey, requestDigest, agentId, title,
-                input, payloadDigest, resolved, actorId, pin, planMode, null);
-    }
-
-    Admission insertSession(String tenantId, String operation, String idempotencyKey,
-            String requestDigest, String agentId, String title, List<Map<String, Object>> input,
-            String payloadDigest, ResolvedBinding resolved, String actorId, AgentSessionPolicies.AgentPin pin,
-            boolean planMode, String modelId) {
+            boolean planMode, String modelId,
+            SessionPrincipal principal) {
         ContextBinding workspace = resolved == null ? null
                 : resolved.binding();
         long now = clock.millis();
@@ -493,8 +596,17 @@ final class AgentSessionAdmissions {
             SideQueryConversation.mainInputAccepted(jdbc, tenantId, sessionId);
         }
         if (resolved == null) {
+            // A present principal writes the durable ownership row; the legacy
+            // actorless arm (legacy_create) creates without one and stamps the
+            // command receipt with the nullable creator key.
+            if (principal != null) {
+                ManagedSessionPrincipal.insert(jdbc, tenantId, sessionId,
+                        principal, now);
+            }
             sessionCommands.insertCommand(tenantId, operation, idempotencyKey, requestDigest,
-                    sessionId, turnId, now);
+                    sessionId, turnId, "COMPLETED", null,
+                    principal == null ? actorKey
+                            : ManagedSessionPrincipal.actorKey(principal), now);
         } else {
             ManagedReceipts.insertCreation(jdbc, tenantId, actorKey,
                     idempotencyKey, requestDigest, sessionId, turnId, now);

@@ -152,6 +152,21 @@ class ManagedSessionResourcesServiceTest {
     }
 
     @Test
+    void thePrincipalSkillReadKeepsTheLegacyRepeatableReadSnapshot() throws Exception {
+        // The catalog is assembled from several reads (config journal,
+        // installed skills, initial pins); the subject-aware route must keep
+        // the legacy overload's single snapshot instead of auto-commit reads.
+        var annotation = ManagedSkillCatalogService.class
+                .getMethod("get", com.alibaba.qwen.code.managedagent.model.SessionPrincipal.class, String.class)
+                .getAnnotation(org.springframework.transaction.annotation.Transactional.class);
+        assertThat(annotation).isNotNull();
+        assertThat(annotation.transactionManager()).isEqualTo("managedAgentTransactionManager");
+        assertThat(annotation.readOnly()).isTrue();
+        assertThat(annotation.isolation())
+                .isEqualTo(org.springframework.transaction.annotation.Isolation.REPEATABLE_READ);
+    }
+
+    @Test
     void usesTheLastActiveBundleInsteadOfANewerFailedOperationsPreviousBundle() throws Exception {
         ObjectNode active = bundle(1);
         active.withArray("independentMcpSelections").add(pin("active").put("state", "disabled"));

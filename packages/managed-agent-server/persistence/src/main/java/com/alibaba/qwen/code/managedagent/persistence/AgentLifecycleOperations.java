@@ -168,7 +168,7 @@ final class AgentLifecycleOperations {
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         AgentSessionPolicies.requireSessionStatus(session.status(), "ARCHIVED");
         sessionPolicies.requireNoOpenOperation(tenantId, sessionId);
-        if (!sessionQueries.hasCompletedWorkspaceClose(tenantId, sessionId)) {
+        if (session.workspace() != null && !sessionQueries.hasCompletedWorkspaceClose(tenantId, sessionId)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         long now = storeRows.lifecycleDatabaseTime();

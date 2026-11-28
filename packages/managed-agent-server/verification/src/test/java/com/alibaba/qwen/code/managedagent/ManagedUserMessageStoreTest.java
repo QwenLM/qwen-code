@@ -80,7 +80,7 @@ class ManagedUserMessageStoreTest {
 
     @BeforeEach
     void setUp() {
-        session = agents.createSession(TENANT, "create-" + UUID.randomUUID(),
+        session = agents.createSession(TENANT, ACTOR, "create-" + UUID.randomUUID(),
                 "qwen-code", null, "queue", Map.of(), List.of()).sessionId();
         ManagedAgentService queueAgents = mock(ManagedAgentService.class);
         when(queueAgents.supportsUserMessageQueue()).thenReturn(true);
@@ -203,9 +203,9 @@ class ManagedUserMessageStoreTest {
             holder.setAutoCommit(false);
             com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.lockPlacementDomain(holder, TENANT);
             try {
-                messages.startNext(TENANT, session, (tenant, actor, key, target, input) -> {
-                    var admission = store.insertTurnCommand(tenant, "queue-test", key, "digest", target,
-                            first.input(), "sha256:" + "0".repeat(64), actor);
+                messages.startNext(TENANT, session, (tenantId, principal, actorId, key, target, input) -> {
+                    var admission = store.insertTurnCommand(tenantId, "queue-test", key, "digest", target,
+                            first.input(), "sha256:" + "0".repeat(64), principal);
                     return new com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission(
                             target, admission.turnId(), "ACCEPTED", false);
                 });
@@ -217,6 +217,56 @@ class ManagedUserMessageStoreTest {
             assertThat(message.state()).isEqualTo("claimed");
             assertThat(message.turnId()).isNotBlank();
         });
+    }
+
+    @Test
+    void dispatchesQueuedMessagesOfALegacySessionWithoutAnOwnershipRow() {
+        String legacy = agents.createSession(TENANT, null,
+                "legacy-" + UUID.randomUUID(), "qwen-code", null, "legacy",
+                Map.of(), List.of()).sessionId();
+        Message first = messages.command(TENANT, ACTOR, legacy, "legacy-first",
+                submit("legacy")).messages().getFirst();
+        messages.startNext(TENANT, legacy, (tenantId, principal, actorId, key, target, input) -> {
+            var admission = store.insertTurnCommand(tenantId,
+                    "queue-test", key, "digest", target, first.input(),
+                    "sha256:" + "0".repeat(64), actorId);
+            return new com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission(
+                    target, admission.turnId(), "ACCEPTED", false);
+        });
+        assertThat(messages.queryMessages(TENANT, ACTOR, legacy).messages())
+                .singleElement().satisfies(message -> {
+                    assertThat(message.state()).isEqualTo("claimed");
+                    assertThat(message.turnId()).isNotBlank();
+                });
+    }
+
+    @Test
+    void dispatchesALongActorsLegacyQueueWithoutConstructingAPrincipal() {
+        // R11-4: the stored actor is verbatim; startNext must not rebuild a
+        // byte-bounded principal from it, or the tick rolls back and the
+        // queue wedges. 512 CJK code points = 1536 UTF-8 bytes, within the
+        // widened actor column but past the principal's 512-byte bound.
+        String longActor = "界".repeat(36);
+        String legacy = agents.createSession(TENANT, null,
+                "long-legacy-" + UUID.randomUUID(), "qwen-code", null, "legacy",
+                Map.of(), List.of()).sessionId();
+        Message first = messages.command(TENANT, longActor, legacy,
+                "long-first", submit("legacy")).messages().getFirst();
+        messages.startNext(TENANT, legacy,
+                (actorTenant, principal, actorId, key, target, input) -> {
+                    assertThat(principal).isNull();
+                    assertThat(actorId).isEqualTo(longActor);
+                    var admission = store.insertTurnCommand(actorTenant,
+                            "queue-test", key, "digest", target, first.input(),
+                            "sha256:" + "0".repeat(64), actorId);
+                    return new com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission(
+                            target, admission.turnId(), "ACCEPTED", false);
+                });
+        assertThat(messages.queryMessages(TENANT, longActor, legacy).messages())
+                .singleElement().satisfies(message -> {
+                    assertThat(message.state()).isEqualTo("claimed");
+                    assertThat(message.turnId()).isNotBlank();
+                });
     }
 
     @Test
@@ -461,7 +511,7 @@ class ManagedUserMessageStoreTest {
         store.beginOperation(TENANT, session, OperationKind.ARCHIVE, ACTOR, "archive", "digest");
         jdbc.update("UPDATE ma_user_message SET state = 'queued' WHERE tenant_id = ? AND session_id = ?", TENANT, session);
         long beforeUnarchive = queueRevision(session);
-        store.beginSessionMutation(TENANT, "UNARCHIVE_SESSION", "unarchive", "digest", session, SessionMutationKind.UNARCHIVE);
+        store.beginSessionMutation(TENANT, "UNARCHIVE_SESSION", "unarchive", "digest", session, SessionMutationKind.UNARCHIVE, ACTOR);
         store.completeSessionMutation(TENANT, "UNARCHIVE_SESSION", "unarchive", session, SessionMutationKind.UNARCHIVE, null, null);
         assertThat(store.requireSession(TENANT, session).status()).isEqualTo("CLOSED");
         assertThat(state(queued)).isEqualTo("withdrawn");

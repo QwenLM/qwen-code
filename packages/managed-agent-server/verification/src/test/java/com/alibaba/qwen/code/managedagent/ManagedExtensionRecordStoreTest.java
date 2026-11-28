@@ -852,6 +852,10 @@ class ManagedExtensionRecordStoreTest {
                 + " session_id, agent_id, status, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT,
                 sessionId);
+        jdbc.update("INSERT INTO ma_session_principal (tenant_id, session_id,"
+                + " version, user_id, actor_present, actor_subject_id,"
+                + " gmt_create) VALUES (?, ?, 1, ?, FALSE, NULL, 1)",
+                TENANT, sessionId, TENANT);
         ExtensionRecordJournal journal = journal(sessionId);
         String taskId = ManagedExtensionProjection.taskId(
                 ManagedExtensionProjection.recordKey(sessionId, "child_run",
@@ -954,6 +958,10 @@ class ManagedExtensionRecordStoreTest {
         String sessionId = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT,
                 sessionId);
+        jdbc.update("INSERT INTO ma_session_principal (tenant_id, session_id,"
+                + " version, user_id, actor_present, actor_subject_id,"
+                + " gmt_create) VALUES (?, ?, 1, ?, FALSE, NULL, 1)",
+                TENANT, sessionId, TENANT);
         ExtensionRecordJournal journal = journal(sessionId);
         String taskId = ManagedExtensionProjection.taskId(
                 ManagedExtensionProjection.recordKey(sessionId, "child_run",
@@ -1198,6 +1206,10 @@ class ManagedExtensionRecordStoreTest {
                 + " session_id, agent_id, status, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT,
                 sessionId);
+        jdbc.update("INSERT INTO ma_session_principal (tenant_id, session_id,"
+                + " version, user_id, actor_present, actor_subject_id,"
+                + " gmt_create) VALUES (?, ?, 1, ?, FALSE, NULL, 1)",
+                TENANT, sessionId, TENANT);
         ExtensionRecordJournal journal = journal(sessionId);
         commitDomain(journal, "route-task", "channel_route",
                 channelRoute(templates, policy), List.of(policy));
@@ -1894,7 +1906,7 @@ class ManagedExtensionRecordStoreTest {
 
     @Test
     void keepsOneTextPartAcrossATaskAnnouncement() throws Exception {
-        String sessionId = agents.createSession(TENANT, "split-"
+        String sessionId = agents.createSession(TENANT, TENANT, "split-"
                 + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
                 List.of()).sessionId();
         String turnId = "turn-" + UUID.randomUUID();
@@ -1931,7 +1943,7 @@ class ManagedExtensionRecordStoreTest {
 
     @Test
     void filtersChildInvocationsBeforeApplyingTheKeysetPage() throws Exception {
-        String sessionId = agents.createSession(TENANT, "child-pages-" + UUID.randomUUID(),
+        String sessionId = agents.createSession(TENANT, TENANT, "child-pages-" + UUID.randomUUID(),
                 "qwen-code", null, "children", Map.of(), List.of()).sessionId();
         ExtensionRecordJournal journal = journal(sessionId);
         CommitResource input = hookResource("child-page-input", "managed-input", "{}".getBytes(StandardCharsets.UTF_8));
@@ -1958,7 +1970,7 @@ class ManagedExtensionRecordStoreTest {
 
     @Test
     void pagesTasksNewestFirstThenByTaskId() throws Exception {
-        String sessionId = agents.createSession(TENANT, "pages-"
+        String sessionId = agents.createSession(TENANT, TENANT, "pages-"
                 + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
                 List.of()).sessionId();
         ExtensionRecordJournal journal = journal(sessionId);
@@ -1977,7 +1989,7 @@ class ManagedExtensionRecordStoreTest {
             String cursor = null;
             do {
                 PublicList<PublicTask> page = tasks.listPublicTasks(TENANT,
-                        null, sessionId, cursor, limit);
+                        TENANT, sessionId, cursor, limit);
                 page.data().forEach(task -> seen.add(task.createdAt() + " "
                         + task.id()));
                 assertThat(page.hasMore()).as("limit %d", limit)
@@ -1995,26 +2007,26 @@ class ManagedExtensionRecordStoreTest {
                 assertThat(seen).as("limit %d", limit).isEqualTo(first);
             }
         }
-        PublicTask monitor = tasks.getPublicTask(TENANT, null, sessionId,
+        PublicTask monitor = tasks.getPublicTask(TENANT, TENANT, sessionId,
                 first.get(0).substring(5));
         assertThat(monitor.kind()).isEqualTo("monitor");
         assertThat(monitor.childSessionId()).isNull();
-        assertThatThrownBy(() -> tasks.listPublicTasks(TENANT, null,
+        assertThatThrownBy(() -> tasks.listPublicTasks(TENANT, TENANT,
                 sessionId, "not-a-cursor", 1))
                 .hasFieldOrPropertyWithValue("code", "invalid_cursor");
         for (int limit : new int[] {0, 101}) {
-            assertThatThrownBy(() -> tasks.listPublicTasks(TENANT, null,
+            assertThatThrownBy(() -> tasks.listPublicTasks(TENANT, TENANT,
                     sessionId, null, limit))
                     .hasFieldOrPropertyWithValue("code", "invalid_limit");
         }
-        assertThatThrownBy(() -> tasks.getPublicTask(TENANT, null, sessionId,
+        assertThatThrownBy(() -> tasks.getPublicTask(TENANT, TENANT, sessionId,
                 "task_" + "0".repeat(64)))
                 .hasFieldOrPropertyWithValue("code", "task_not_found");
     }
 
     @Test
     void materializesMcpWithoutTasksAndRequiresItsResourceClosure() throws Exception {
-        String sessionId = agents.createSession(TENANT, "mcp-" + UUID.randomUUID(),
+        String sessionId = agents.createSession(TENANT, TENANT, "mcp-" + UUID.randomUUID(),
                 "qwen-code", null, "mcp", Map.of(), List.of()).sessionId();
         ExtensionRecordJournal journal = journal(sessionId);
         JsonNode fixtures = ManagedMcpRecordContractTest.fixtures();
@@ -2073,7 +2085,7 @@ class ManagedExtensionRecordStoreTest {
 
     @Test
     void materializesHookChainsAndAtomicallyConsumesOnceIntentsWithoutTasks() throws Exception {
-        String sessionId = agents.createSession(TENANT, "hook-" + UUID.randomUUID(),
+        String sessionId = agents.createSession(TENANT, TENANT, "hook-" + UUID.randomUUID(),
                 "qwen-code", null, "hook", Map.of(), List.of()).sessionId();
         ExtensionRecordJournal journal = journal(sessionId);
         JsonNode fixtures = ManagedHookRecordContractTest.fixtures();
@@ -2458,6 +2470,13 @@ class ManagedExtensionRecordStoreTest {
                         + " session_id, agent_id, status, gmt_create,"
                         + " gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
                 TENANT, sessionId);
+        // The ownership read resolves the principal row; the raw fixture must
+        // carry the same version-1 layout the service writes, matching the
+        // ofUser(TENANT, TENANT) principal the query below presents.
+        jdbc.update("INSERT INTO ma_session_principal (tenant_id, session_id,"
+                        + " version, user_id, actor_present, actor_subject_id,"
+                        + " gmt_create) VALUES (?, ?, 1, ?, FALSE, NULL, 1)",
+                TENANT, sessionId, TENANT);
         ExtensionRecordJournal journal = journal(sessionId);
         JsonNode monitor = first.required("monitorRun");
         journal.commitMonitor("race-0", monitor,
@@ -2506,6 +2525,10 @@ class ManagedExtensionRecordStoreTest {
                         + " session_id, agent_id, status, gmt_create,"
                         + " gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
                 TENANT, sessionId);
+        jdbc.update("INSERT INTO ma_session_principal (tenant_id, session_id,"
+                        + " version, user_id, actor_present, actor_subject_id,"
+                        + " gmt_create) VALUES (?, ?, 1, ?, FALSE, NULL, 1)",
+                TENANT, sessionId, TENANT);
         ExtensionRecordJournal journal = journal(sessionId);
         JsonNode monitor = first.required("monitorRun");
         journal.commitMonitor("fresh-0", monitor,

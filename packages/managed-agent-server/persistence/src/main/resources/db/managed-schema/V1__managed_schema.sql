@@ -3,6 +3,7 @@
 -- Do not add V2+ migrations or increment the database schema version before that release.
 -- Development catalogs must be recreated when the baseline changes; no upgrade path is maintained.
 -- No old-schema upgrade or compatibility objects are provided.
+-- Generated-column comments stay on a continuation line because validation reads the expression line.
 
 CREATE TABLE ma_session (
     tenant_id VARCHAR(36) NOT NULL COMMENT 'Tenant identity used for isolation.',
@@ -89,6 +90,24 @@ CREATE INDEX idx_ma_harness_claim_demand ON ma_session (harness_claim_requested_
 CREATE INDEX idx_ma_session_retirement ON ma_session (retired_at, is_recovery_protected);
 
 CREATE INDEX idx_ma_session_storage_scope ON ma_session (tenant_id, workspace_storage_id, is_resource_gc_completed, session_id);
+
+-- Ownership of a non-Workspace Session: exactly one immutable row per
+-- unbound Session, written in the Session creation transaction. The owner is
+-- the full verified principal (tenant, user and DataAgent business actor);
+-- actor_present distinguishes a present business actor from none. Legacy
+-- Sessions without this row remain invisible to ownership-enforcing paths.
+CREATE TABLE ma_session_principal (
+    tenant_id VARCHAR(36) NOT NULL,
+    session_id VARCHAR(64) NOT NULL,
+    version BIGINT NOT NULL,
+    user_id VARCHAR(255) NOT NULL,
+    actor_present BOOLEAN NOT NULL,
+    actor_subject_id VARCHAR(255),
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    CONSTRAINT uk_ma_session_principal_business_key UNIQUE (tenant_id, session_id),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_session_principal_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE TABLE ma_user_message_queue (
     tenant_id VARCHAR(36) NOT NULL COMMENT 'Tenant identity used for isolation.',
@@ -656,7 +675,7 @@ CREATE TABLE ma_request_receipt (
     idempotency_key VARCHAR(128) NOT NULL COMMENT 'Original key identifying retries of the same request.',
     idempotency_digest CHAR(64) NOT NULL COMMENT 'Digest of the idempotency key used in unique indexes.',
     request_digest VARCHAR(80) NOT NULL COMMENT 'Request digest used to reject conflicting retries.',
-    actor_id VARCHAR(36) COMMENT 'Raw actor identity associated with this record.',
+    actor_id VARCHAR(515) COMMENT 'Raw actor identity or principal receipt stamp (user + NUL + flag + NUL + subject).',
     operation VARCHAR(64) COMMENT 'Command operation associated with this receipt.',
     state VARCHAR(32) NOT NULL COMMENT 'Admission or settlement state of the request.',
     is_workspace_bound TINYINT UNSIGNED COMMENT 'Whether the Session creation request binds a Workspace.',

@@ -97,15 +97,24 @@ public class TenantContextFilter extends OncePerRequestFilter {
             }
             actorId = claimedActorId;
         }
-        request.setAttribute(ATTRIBUTE, new TenantContext(tenantId, actorId));
+        request.setAttribute(ATTRIBUTE,
+                new TenantContext(tenantId, actorId));
         chain.doFilter(request, response);
     }
 
     private static boolean validActorId(String tenantId, String actorId) {
+        if (actorId == null || actorId.isBlank()) {
+            return false;
+        }
         try {
+            // WorkspaceActor delegates to WorkspaceValues.requireActor
+            // (VARCHAR(36) / 36 UTF-16 units); SessionPrincipal's component
+            // bound (255 chars) is strictly wider, so a principal is never
+            // narrower than this admission.
             new WorkspaceActor(tenantId, actorId);
             return true;
-        } catch (IllegalArgumentException error) {
+        } catch (IllegalArgumentException
+                | com.alibaba.qwen.code.managedagent.exception.ManagedAgentException error) {
             return false;
         }
     }

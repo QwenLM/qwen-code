@@ -21,12 +21,18 @@ class TenantContextFilterTest {
     @Test
     void acceptsOnlyMatchingTrustedPrincipal() throws Exception {
         MockHttpServletRequest request = request("tenant-a");
-        request.setUserPrincipal(actor("tenant-a", "actor-a"));
+        request.setUserPrincipal(actor("tenant-a", "actor-a",
+                "subject-a"));
         MockFilterChain chain = new MockFilterChain();
         filter.doFilter(request, new MockHttpServletResponse(), chain);
         TenantContext context = (TenantContext) request.getAttribute(
                 TenantContextFilter.ATTRIBUTE);
         assertThat(context.requireActorId()).isEqualTo("actor-a");
+        // The subject axis is inert: the filter no longer forwards an
+        // adapter's claim into the TenantContext until a signed adapter
+        // supplies it (R1-16/R1-17).
+        assertThat(context.actorSubjectId()).isNull();
+        assertThat(context.principal().actorSubjectId()).isNull();
         assertThat(context.tenantId()).isEqualTo("tenant-a");
         assertThat(chain.getRequest()).isSameAs(request);
     }
@@ -69,7 +75,9 @@ class TenantContextFilterTest {
         for (AuthenticatedTenantActor actor : new AuthenticatedTenantActor[] {
                 actor("tenant-b", "actor-a"), actor("tenant-a", "bad\nactor"),
                 actor("tenant-a", "𝄞".repeat(19)),
-                actor("tenant-a", "𝄞".repeat(37))
+                actor("tenant-a", "𝄞".repeat(37)),
+                actor("tenant-a", " "),
+                actor("tenant-a", null, "subject-a")
         }) {
             MockHttpServletRequest request = request("tenant-a");
             request.setUserPrincipal(actor);
@@ -161,6 +169,11 @@ class TenantContextFilterTest {
 
     private static AuthenticatedTenantActor actor(String tenant,
             String actorId) {
+        return actor(tenant, actorId, null);
+    }
+
+    private static AuthenticatedTenantActor actor(String tenant,
+            String actorId, String actorSubjectId) {
         return new AuthenticatedTenantActor() {
             @Override
             public String getName() {
@@ -175,6 +188,11 @@ class TenantContextFilterTest {
             @Override
             public String actorId() {
                 return actorId;
+            }
+
+            @Override
+            public String actorSubjectId() {
+                return actorSubjectId;
             }
         };
     }

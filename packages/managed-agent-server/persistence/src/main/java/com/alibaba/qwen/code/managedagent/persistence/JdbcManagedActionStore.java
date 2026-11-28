@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedUserQuest
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
@@ -464,6 +465,7 @@ public class JdbcManagedActionStore
     public OperationAdmission admit(
             String tenantId,
             String sessionId,
+            SessionPrincipal principal,
             String actorId,
             String actorDigest,
             String key,
@@ -482,8 +484,10 @@ public class JdbcManagedActionStore
         OwnerRow ownerRow = ownerRow(tenantId, sessionId);
         // The immutable owner arms answer before the replay; the mutable
         // Workspace role arm follows it, so a role revoked after admission
-        // still resolves a retry to the caller's own operation.
-        boolean admitted = ownerIdentityAdmits(ownerRow, actorId);
+        // still resolves a retry to the caller's own operation. The owner
+        // arm holds the caller to the ownership record's granularity (R13-4).
+        boolean admitted = ownerIdentityAdmits(ownerRow, actorId)
+                && ManagedSessionPrincipal.permits(jdbc, tenantId, sessionId, principal);
         List<String> replay =
                 jdbc.query(
                         "SELECT operation_id FROM ma_operation WHERE scope_kind = 'SESSION' AND scope_id = ? AND target_id ="
