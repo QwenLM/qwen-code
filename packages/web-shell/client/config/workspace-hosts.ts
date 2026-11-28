@@ -1,10 +1,12 @@
 import { createContext, useEffect, useState } from 'react';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
+import { isDesktopShell } from '../utils/externalOpen';
 import {
   buildDaemonConnectionUrl,
   confirmDaemonTarget,
   getAllowedDaemonOrigin,
 } from './daemon';
+import { readShellState, writeShellState } from './shell-state';
 
 export const WorkspaceHostsEnabled = createContext(false);
 const STORAGE_KEY = 'qwen-workspace-hosts';
@@ -17,9 +19,7 @@ export interface WorkspaceHost {
 
 export function readWorkspaceHosts(): WorkspaceHost[] {
   try {
-    const value: unknown = JSON.parse(
-      localStorage.getItem(STORAGE_KEY) || '[]',
-    );
+    const value: unknown = JSON.parse(readShellState(STORAGE_KEY) || '[]');
     if (!Array.isArray(value)) return [];
     return value.filter(
       (host): host is WorkspaceHost =>
@@ -45,6 +45,12 @@ export function rememberWorkspaceHost(
   origin: string,
   workspaces: WorkspaceHost['workspaces'],
 ): void {
+  // The page origin is this shell's own daemon. In the desktop client it is an
+  // ephemeral loopback origin that changes every launch, so persisting it would
+  // add a stale host on every restart. The browser keeps it: that entry is the
+  // offline snapshot for the local group when the page daemon cannot be
+  // reached, and `useOtherOrigins` only keeps the group itself in-session.
+  if (isDesktopShell() && origin === window.location.origin) return;
   const hosts = readWorkspaceHosts();
   const index = hosts.findIndex((host) => host.origin === origin);
   const host = {
@@ -61,12 +67,8 @@ export function rememberWorkspaceHost(
   } else {
     hosts.push(host);
   }
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(hosts));
-    window.dispatchEvent(new Event(CHANGE_EVENT));
-  } catch {
-    // Connections remain usable when browser persistence is unavailable.
-  }
+  writeShellState(STORAGE_KEY, JSON.stringify(hosts));
+  window.dispatchEvent(new Event(CHANGE_EVENT));
 }
 
 /**
@@ -75,13 +77,15 @@ export function rememberWorkspaceHost(
  * not just on the next load.
  */
 export function forgetWorkspaceHost(origin: string): void {
-  const hosts = readWorkspaceHosts().filter((host) => host.origin !== origin);
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(hosts));
-    window.dispatchEvent(new Event(CHANGE_EVENT));
-  } catch {
-    // Connections remain usable when browser persistence is unavailable.
-  }
+  const hosts = readWorkspaceHosts().filter(
+    (host) =>
+      host.origin !== origin &&
+      // A read that fell back to a pre-change mirror can still name the page
+      // origin; the durable catalog must not carry it.
+      !(isDesktopShell() && host.origin === window.location.origin),
+  );
+  writeShellState(STORAGE_KEY, JSON.stringify(hosts));
+  window.dispatchEvent(new Event(CHANGE_EVENT));
 }
 
 /** Saved hosts, kept in sync with catalog updates from this and other tabs. */

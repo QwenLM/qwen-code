@@ -6,6 +6,7 @@ import {
   navigateToDaemon,
   persistDaemonToken,
 } from './daemon';
+import { readShellState, writeShellState } from './shell-state';
 import { forgetWorkspaceHost } from './workspace-hosts';
 
 const STORAGE_KEY = 'qwen-remote-connections';
@@ -24,27 +25,26 @@ export function formatOriginHost(origin: string): string {
 }
 
 function storeRemoteConnections(origins: string[]): void {
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(origins));
-    window.dispatchEvent(new Event(REMOTE_CONNECTIONS_CHANGE_EVENT));
-  } catch {
-    // A connection remains usable in the current tab when persistence fails.
-  }
+  writeShellState(STORAGE_KEY, JSON.stringify(origins));
+  window.dispatchEvent(new Event(REMOTE_CONNECTIONS_CHANGE_EVENT));
 }
 
-export function readRemoteConnections(): string[] {
+/**
+ * The catalog as it is stored: validated and de-duplicated, but with the page
+ * origin still in it. Writers persist this one — hiding the current origin is a
+ * display rule, and rewriting the durable catalog without it would delete a
+ * saved connection that happens to land on this launch's ephemeral port.
+ */
+function readStoredRemoteConnections(): string[] {
   try {
-    const value: unknown = JSON.parse(
-      window.localStorage.getItem(STORAGE_KEY) || '[]',
-    );
+    const value: unknown = JSON.parse(readShellState(STORAGE_KEY) || '[]');
     if (!Array.isArray(value)) return [];
     return Array.from(
       new Set(
         value.filter(
           (origin): origin is string =>
             typeof origin === 'string' &&
-            getAllowedDaemonOrigin(origin) === origin &&
-            origin !== window.location.origin,
+            getAllowedDaemonOrigin(origin) === origin,
         ),
       ),
     );
@@ -53,16 +53,23 @@ export function readRemoteConnections(): string[] {
   }
 }
 
+export function readRemoteConnections(): string[] {
+  const origin = window.location.origin;
+  return readStoredRemoteConnections().filter(
+    (connection) => connection !== origin,
+  );
+}
+
 export function rememberRemoteConnection(origin: string): void {
   const normalized = getAllowedDaemonOrigin(origin);
   if (!normalized || normalized === window.location.origin) return;
-  const connections = readRemoteConnections();
+  const connections = readStoredRemoteConnections();
   if (connections.includes(normalized)) return;
   storeRemoteConnections([...connections, normalized]);
 }
 
 export function forgetRemoteConnection(origin: string): string[] {
-  const connections = readRemoteConnections().filter(
+  const connections = readStoredRemoteConnections().filter(
     (connection) => connection !== origin,
   );
   storeRemoteConnections(connections);
@@ -70,7 +77,9 @@ export function forgetRemoteConnection(origin: string): string[] {
   // Its saved workspace identities must go too: fan-out groups union both
   // catalogs, so clearing only this one keeps the host listed.
   forgetWorkspaceHost(origin);
-  return connections;
+  // Callers render this list. The stored one still names this launch's origin,
+  // and a row for it would delete the live token and this host's workspaces.
+  return readRemoteConnections();
 }
 
 /** Saved connection origins, kept in sync with catalog updates. */
