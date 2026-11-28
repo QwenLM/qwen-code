@@ -2,7 +2,7 @@
 
 [English](2026-11-27-verify-pr-adversarial-and-guard-gates.md) | [简体中文](2026-11-27-verify-pr-adversarial-and-guard-gates.zh-CN.md)
 
-- **状态**：已实现并完成本地验证
+- **状态**：已实现（PR #18549，2026-11-28 合入，`940e9b7925`）
 - **日期**：2026-11-27
 
 ## 问题陈述
@@ -86,7 +86,7 @@ I/O 回归（`7210889200`、`7214891441`、`7215477398`、`7215982054`、`721809
   `verify-pr-check.mjs` 时不增加对 `verify-pr-guard.mjs` 的运行时依赖。
 - **`verify-pr-guard.mjs`**：
   - `fetchSnapshot()` 在首次读取元数据前记录 UTC ISO-8601 `capturedAt`（`isSnapshot()` 对缺少 `capturedAt` 的旧快照保持向后兼容），收紧 `owner/repo` slug 校验，并拒绝空值参数与多余位置参数。
-  - 在首轮分页完成后先复核 `reviews` 与 `reviewComments`，并对行内评审评论与顶层评论执行基于最大 `updated_at` 的轻量 `?since=` 增量补读（拦截多页 REST 分页期间对已读前页的编辑，以及同秒 `updatedAt` 并列下的同秒原地编辑），随后在**所有 REST 抓取完全结束之后**执行 GraphQL 终检（`GUARD_CONFIRM_QUERY`，超过 100 条正式评审时自动通过 `before` 游标向前翻页覆盖全部 N 条评审，并以显式 `{ ok, value }` 区分调用失败与 JSON `null` 响应），在同一流程中核对 `headRefOid`、`state`、全部正式评审（`databaseId`/`state`/`submittedAt`/归一化 `body`）、顶层评论总数与最新创建条目（`databaseId`/`updatedAt`）以及按更新时间倒序取出的最近编辑顶层评论，凡在途新增或原地编辑即拒绝写出快照并要求重抓。
+  - 在首轮分页完成后先复核 `reviews` 与 `reviewComments`，并对行内评审评论与顶层评论执行基于最大 `updated_at` 的轻量 `?since=` 增量补读（拦截多页 REST 分页期间对已读前页的编辑，以及同秒 `updatedAt` 并列下的同秒原地编辑），随后在**所有 REST 抓取完全结束之后**执行 GraphQL 终检（`GUARD_CONFIRM_QUERY`，超过 100 条正式评审时自动通过 `before` 游标向前翻页覆盖全部 N 条评审，并以显式 `{ ok, value }` 区分调用失败与 JSON `null` 响应），在同一流程中核对 `headRefOid`、`state`、全部正式评审（`databaseId`/`state`/`submittedAt`/归一化 `body`）、顶层评论总数与最新创建条目（`databaseId`/`updatedAt`）以及按更新时间倒序取出的最近编辑顶层评论，检测到变化时拒绝写出快照并要求重抓。
   - 为本轮独占目录中的起始快照新增 `--no-clobber`（内核级 `O_EXCL` 排他创建），防止并发两轮互相覆盖或删除彼此的 `guard-start.json`。
   - 在非 `--no-clobber` 的 `--snapshot <file>` 刷新及 `--compare --out <verdict-file>` 中，预先校验目标安全性；无论抓取失败还是写入失败（例如可写目录中只读旧文件触发 `EACCES`），均自动移除单链接普通旧文件使之失效（绝不触动 symlink、hardlink 或非普通文件）。
   - `--compare` 通过 `realpathSync`、父目录规范化与 `(dev, ino)` 强化同文件判定，防止经由 symlink 或 hardlink 自我对比，并将倒序时间戳（`now.capturedAt < start.capturedAt`）直接判为 dirty。
