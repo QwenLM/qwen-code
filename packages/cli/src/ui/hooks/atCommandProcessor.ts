@@ -46,6 +46,7 @@ import {
   matchMcpServerByRef,
   parseMcpServerRef,
 } from '../../utils/mcp-server-mention.js';
+import { CJK_AT_TERMINATOR_RE } from '../utils/commandUtils.js';
 
 export interface ResolveAtCommandParams {
   query: string;
@@ -146,8 +147,11 @@ function parseAllAtCommands(query: string): AtCommandPart[] {
         inEscape = true;
       } else if (isUrlRef) {
         if (NON_URL_CHAR.test(char)) break;
-      } else if (/[,\s;!?()[\]{}]/.test(char)) {
-        // Path ends at first whitespace or punctuation not escaped
+      } else if (
+        /[,\s;!?()[\]{}]/.test(char) ||
+        CJK_AT_TERMINATOR_RE.test(char)
+      ) {
+        // Path ends at first whitespace or ASCII/CJK punctuation not escaped
         break;
       } else if (char === '.') {
         // For . we need to be more careful - only terminate if followed by whitespace or end of string

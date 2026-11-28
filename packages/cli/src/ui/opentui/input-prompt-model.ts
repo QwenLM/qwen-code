@@ -37,7 +37,9 @@ import {
   type SlashCommand,
 } from '../commands/types.js';
 import {
+  CJK_AT_TERMINATOR_RE,
   findMidInputSlashCommand,
+  isAtTriggerPrefixChar,
   isMidInputCompletableCommand,
   isSlashCommand,
 } from '../utils/commandUtils.js';
@@ -155,9 +157,10 @@ export interface CompletionTarget {
   slashContext?: 'mid-input' | 'stacked-skill';
 }
 
-/** Escape-aware space scan shared by the forward/backward AT scans. */
-function isUnescapedSpace(codePoints: string[], index: number): boolean {
-  if (codePoints[index] !== ' ') return false;
+/** Escape-aware delimiter scan shared by the forward/backward AT scans. */
+function isUnescapedAtDelimiter(codePoints: string[], index: number): boolean {
+  const ch = codePoints[index];
+  if (!ch || (!/\s/.test(ch) && !CJK_AT_TERMINATOR_RE.test(ch))) return false;
   let backslashCount = 0;
   for (let j = index - 1; j >= 0 && codePoints[j] === '\\'; j--) {
     backslashCount++;
@@ -201,15 +204,15 @@ export function detectCompletionTarget(
 
   for (let i = cursorCol - 1; i >= 0; i--) {
     const char = codePoints[i];
-    if (char === ' ') {
-      if (isUnescapedSpace(codePoints, i)) break;
+    if (isUnescapedAtDelimiter(codePoints, i)) {
+      break;
     } else if (
       char === '@' &&
-      (i === 0 || /\s/.test(codePoints[i - 1] ?? ''))
+      (i === 0 || isAtTriggerPrefixChar(codePoints[i - 1] ?? ''))
     ) {
       let end = codePoints.length;
       for (let k = cursorCol; k < codePoints.length; k++) {
-        if (isUnescapedSpace(codePoints, k)) {
+        if (isUnescapedAtDelimiter(codePoints, k)) {
           end = k;
           break;
         }
@@ -908,9 +911,16 @@ export function applyCompletion(
 
   const charAfterCompletion = lineCodePoints[end];
   const isDirectory = suggestion.isDirectory;
+  const isFollowedByCjkTerminator =
+    target.mode === CompletionMode.AT &&
+    charAfterCompletion !== undefined &&
+    CJK_AT_TERMINATOR_RE.test(charAfterCompletion);
   if (
     charAfterCompletion !== ' ' &&
-    !(isDirectory && charAfterCompletion === undefined)
+    !(
+      isDirectory &&
+      (charAfterCompletion === undefined || isFollowedByCjkTerminator)
+    )
   ) {
     suggestionText += ' ';
   }

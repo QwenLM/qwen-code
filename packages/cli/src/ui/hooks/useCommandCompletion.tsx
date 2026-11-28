@@ -13,6 +13,8 @@ import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import { logicalPosToOffset } from '../components/shared/text-buffer.js';
 import {
+  CJK_AT_TERMINATOR_RE,
+  isAtTriggerPrefixChar,
   isSlashCommand,
   findMidInputSlashCommand,
   getBestSlashCommandMatch,
@@ -119,7 +121,7 @@ export function useCommandCompletion(
     for (let i = cursorCol - 1; i >= 0; i--) {
       const char = codePoints[i];
 
-      if (char === ' ') {
+      if (/\s/.test(char) || CJK_AT_TERMINATOR_RE.test(char)) {
         let backslashCount = 0;
         for (let j = i - 1; j >= 0 && codePoints[j] === '\\'; j--) {
           backslashCount++;
@@ -127,17 +129,23 @@ export function useCommandCompletion(
         if (backslashCount % 2 === 0) {
           break;
         }
-      } else if (char === '@' && (i === 0 || /\s/.test(codePoints[i - 1]))) {
+      } else if (
+        char === '@' &&
+        (i === 0 || isAtTriggerPrefixChar(codePoints[i - 1]))
+      ) {
         let end = codePoints.length;
-        for (let i = cursorCol; i < codePoints.length; i++) {
-          if (codePoints[i] === ' ') {
+        for (let k = cursorCol; k < codePoints.length; k++) {
+          if (
+            /\s/.test(codePoints[k]) ||
+            CJK_AT_TERMINATOR_RE.test(codePoints[k])
+          ) {
             let backslashCount = 0;
-            for (let j = i - 1; j >= 0 && codePoints[j] === '\\'; j--) {
+            for (let j = k - 1; j >= 0 && codePoints[j] === '\\'; j--) {
               backslashCount++;
             }
 
             if (backslashCount % 2 === 0) {
-              end = i;
+              end = k;
               break;
             }
           }
@@ -345,9 +353,13 @@ export function useCommandCompletion(
       const lineCodePoints = toCodePoints(buffer.lines[cursorRow] || '');
       const charAfterCompletion = lineCodePoints[end];
       const isDirectory = suggestions[indexToUse].isDirectory;
+      const isFollowedByCjkTerminator =
+        completionMode === CompletionMode.AT &&
+        charAfterCompletion !== undefined &&
+        CJK_AT_TERMINATOR_RE.test(charAfterCompletion);
       if (
         charAfterCompletion !== ' ' &&
-        !(isDirectory && !charAfterCompletion)
+        !(isDirectory && (!charAfterCompletion || isFollowedByCjkTerminator))
       ) {
         suggestionText += ' ';
       }
