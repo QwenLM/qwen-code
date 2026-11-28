@@ -494,7 +494,6 @@ class HostedShellLifecycleRecoveryIT {
 
         private void startSpring() throws Exception {
             springPort = reservePort();
-            int brokerPort = reservePort();
             var properties = new LinkedHashMap<String, Object>();
             properties.put("server.address", "127.0.0.1");
             properties.put("server.port", springPort);
@@ -523,7 +522,6 @@ class HostedShellLifecycleRecoveryIT {
             properties.put(prefix + "harness.capability-digest", DIGEST);
             properties.put(prefix + "harness.approval-mode", "default");
             properties.put(prefix + "runtime-broker.enabled", true);
-            properties.put(prefix + "runtime-broker.port", brokerPort);
             properties.put(prefix + "runtime-broker.token", TOKEN);
             properties.put(prefix + "runtime-broker.durable-local-process", true);
             properties.put(prefix + "runtime-broker.verified-workspace-recovery-enabled", true);
@@ -569,7 +567,7 @@ class HostedShellLifecycleRecoveryIT {
             assertThat(process.isAlive()).as("Spring boot: %s", Files.readString(root.resolve("spring-" + boot + ".log"))).isTrue();
             assertThat(JSON.readTree(Files.readString(ready)).path("pid").asLong()).isEqualTo(process.pid());
             store.backend(URI.create("http://127.0.0.1:" + springPort));
-            broker.backend(URI.create("http://127.0.0.1:" + brokerPort));
+            broker.backend(URI.create("http://127.0.0.1:" + springPort));
         }
 
         private void startHarness() throws Exception {

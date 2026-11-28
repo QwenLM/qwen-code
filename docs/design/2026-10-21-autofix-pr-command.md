@@ -428,8 +428,8 @@ Event rules:
   it back. A pass someone saw only on a head the watch counted (a re-run
   started by hand there) is not asked about. The entry stays with the
   watch through a take-over, a resume and a recreated worktree; a new start
-  begins without it, as the push budget does, and so does every
-  `--in-place` start (one round each).
+  begins without it, as the push budget does, and so does a fresh
+  `--in-place` start (a resume or take-over of an in-place watch keeps it).
 - A comment of a review not submitted yet (`PENDING`) is a draft only its
   author sees, and is skipped. A bot asks in the comment that opens a
   thread (and in a review); its replies answer someone and are not

@@ -232,6 +232,7 @@ import type {
 import { ChatSurface } from './chat-core/ChatSurface';
 import { useDaemonChatControllerFromState } from './daemon/useDaemonChatController';
 import type { ComposerToolbarAction } from './components/ChatEditor';
+import { DAEMON_COMPOSER_INTEGRATIONS } from './components/composer/daemon-composer-integrations';
 import { getWorkflowModeMessages } from './components/workflow-mode-messages';
 import {
   mapRestoredInputAnnotationsAfterTextChange,
@@ -500,6 +501,10 @@ import {
 } from './utils/workspace';
 import { loadReadyWorkspaceSkills } from './daemon/workspace/load-ready-skills';
 import {
+  OVERLOAD_REFUSAL_TTL_MS,
+  useDaemonOverloadPause,
+} from './daemon/workspace/hooks/useDaemonOverloadPause.js';
+import {
   getLocalCommands,
   localizeBuiltinDescriptions,
   skillDescriptionKey,
@@ -552,7 +557,10 @@ import {
 } from './i18n';
 import { CapacityRecoveryDialog } from './components/workspaces/CapacityRecoveryDialog';
 import { useCapacityRecovery } from './hooks/useCapacityRecovery';
-import { isAcpChildCapacityError } from './daemon/session/httpErrors.js';
+import {
+  isAcpChildCapacityError,
+  isSystemOverloadedError,
+} from './daemon/session/httpErrors.js';
 import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
@@ -2006,6 +2014,7 @@ const emptyComposerApi: WebShellComposerApi = {
   focus: () => {},
   insertText: () => {},
   setText: () => {},
+  saveCurrentDraftToHistory: () => {},
   addTags: () => {},
   removeTag: () => {},
   clear: () => {},
@@ -4088,6 +4097,8 @@ export function App({
   const managedMode = managedAgentProvider !== undefined && managedHome;
   const managedModeRef = useRef(managedMode);
   managedModeRef.current = managedMode;
+  const overloadPausedRef = useRef(false);
+  const overloadDetailRef = useRef<string | undefined>(undefined);
   const [managedNavigationTarget, setManagedNavigationTarget] =
     useState<HTMLDivElement | null>(null);
   const [archivedSessionsTarget, setArchivedSessionsTarget] =
@@ -6386,6 +6397,13 @@ export function App({
           setArtifactPanelOpen(true);
           return true;
         }
+      } else if (overloadPausedRef.current && !managedModeRef.current) {
+        // Opening a brand-new side-task tab spawns a fresh daemon child.
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return false;
       }
       // A details side task is one-per-pending-question: repeat clicks focus
       // the existing tab instead of provisioning a duplicate child session.
@@ -6437,10 +6455,19 @@ export function App({
       setArtifactPanelOpen(true);
       return true;
     },
-    [connection.sessionId, connection.workspaceCwd, sideTasksAvailable, t],
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      pushToast,
+      sideTasksAvailable,
+      t,
+    ],
   );
   const createEmptySideTask = useCallback(() => {
-    if (createSideTask()) return;
+    const created = createSideTask();
+    if (created || (overloadPausedRef.current && !managedModeRef.current)) {
+      return;
+    }
     pushToast('error', t('sideTask.createFailed'));
   }, [createSideTask, pushToast, t]);
   const openWebPreviewTab = useCallback(() => {
@@ -6500,6 +6527,18 @@ export function App({
     (tabId: string, parentSessionId: string, title: string) => {
       const pending = sideTaskCreationPromisesRef.current.get(tabId);
       if (pending) return pending;
+      if (overloadPausedRef.current && !managedModeRef.current) {
+        // A failed tab's Retry bypasses the tab-opening guard.
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return Promise.reject(
+          Object.assign(new Error(t('sidebar.overloadPaused')), {
+            _alreadyDispatched: true,
+          }),
+        );
+      }
       if (tabId.startsWith(DETAILS_TAB_ID_PREFIX)) {
         // Capture the parent identity now: the draft tab may close before
         // creation resolves, and the association must still be recorded.
@@ -6551,6 +6590,7 @@ export function App({
       sessionOwnerGuard,
       pushToast,
       sessionCatalogController,
+      t,
       workspace.client,
     ],
   );
@@ -9870,6 +9910,13 @@ export function App({
         taskIsStale,
         beforeTaskDispatch,
       ),
+    shouldRefuseManualRun: (fresh) => shouldRefuseScheduledManualRun(fresh),
+    onOverloadRefused: () => {
+      pushToast(
+        'warning',
+        overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+      );
+    },
     onError: (error, fallback) =>
       reportScheduledTaskError(error, t(fallback), true),
     translate: t,
@@ -11276,6 +11323,35 @@ export function App({
   const sessionLimitScopeRef = useRef<
     { sessionId?: string; workspaceCwd?: string } | undefined
   >(undefined);
+  // Load-admission pause: the proactive poll verdict OR an unexpired
+  // `system_overloaded` refusal. The refusal hint matches the daemon's
+  // Retry-After so the UI never stays paused longer than advised without
+  // poll confirmation.
+  const [overloadRefusal, setOverloadRefusal] = useState<{
+    message: string;
+    expiresAt: number;
+  } | null>(null);
+  const clearOverloadRefusal = useCallback(() => setOverloadRefusal(null), []);
+  const {
+    paused: overloadPaused,
+    pollOverloaded,
+    loadAdmission: pollLoadAdmission,
+    refusalMessage: overloadRefusalMessage,
+  } = useDaemonOverloadPause({
+    enabled: daemonAvailable,
+    refusal: overloadRefusal,
+    onRefusalExpired: clearOverloadRefusal,
+  });
+  const overloadDetail =
+    pollOverloaded && pollLoadAdmission
+      ? t('sidebar.overloadDetail', {
+          ratio: pollLoadAdmission.loadRatio.toFixed(2),
+          lag: Math.round(pollLoadAdmission.eventLoopLagP99Ms),
+          reason: pollLoadAdmission.reason ?? 'unknown',
+        })
+      : overloadRefusalMessage;
+  overloadPausedRef.current = overloadPaused;
+  overloadDetailRef.current = overloadDetail;
   const [showRewindDialog, setShowRewindDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
@@ -12804,6 +12880,17 @@ export function App({
           )
             return;
         }
+        if (
+          command.sessionId === undefined &&
+          overloadPausedRef.current &&
+          !managedModeRef.current
+        ) {
+          pushToast(
+            'warning',
+            overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+          );
+          return;
+        }
         const result = await workspace.client.sendToSubSession(
           callerSessionId,
           {
@@ -12824,6 +12911,15 @@ export function App({
           setSubSessionTasksRefresh((value) => value + 1);
         }
       } catch (error) {
+        if (appMountedRef.current && isSystemOverloadedError(error)) {
+          const message = extractErrorDetail(error);
+          setOverloadRefusal({
+            message,
+            expiresAt: Date.now() + OVERLOAD_REFUSAL_TTL_MS,
+          });
+          pushToast('warning', message);
+          return;
+        }
         if (appMountedRef.current)
           pushToast('error', extractErrorDetail(error));
       } finally {
@@ -13673,6 +13769,16 @@ export function App({
         // its own submitter.
       }
       if (currentSessionId) return Promise.resolve(undefined);
+      // Chokepoint for !ls / control commands / @-mention runs: refuse the
+      // allocation up front while paused instead of paying a doomed create
+      // round-trip on a saturated host.
+      if (overloadPausedRef.current && !managedModeRef.current) {
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return Promise.resolve(undefined);
+      }
       const pendingManualTitle = pendingManualTitleRef.current;
       const promise = (async () => {
         let allocatedSessionId: string | undefined;
@@ -13936,10 +14042,12 @@ export function App({
     [
       getComposerWorkspaceCwd,
       lockedWorkspaceCwd,
+      pushToast,
       sessionActions,
       sessionCatalogController,
       setPendingSessionContext,
       setPendingReasoningIntent,
+      t,
     ],
   );
   const onSubmitBeforeRef = useRef(onSubmitBefore);
@@ -13983,6 +14091,15 @@ export function App({
       if (isAlreadyDispatched(error)) {
         return;
       }
+      if (isSystemOverloadedError(error)) {
+        const message = formatError(error, fallback);
+        setOverloadRefusal({
+          message,
+          expiresAt: Date.now() + OVERLOAD_REFUSAL_TTL_MS,
+        });
+        pushToast('warning', message);
+        return;
+      }
       const includeLocalizedContext =
         includeErrorContext &&
         error instanceof Error &&
@@ -13997,6 +14114,30 @@ export function App({
       pushToast('error', message);
     },
     [pushToast, t],
+  );
+  const shouldRefuseScheduledManualRun = useCallback(
+    (fresh: {
+      sessionId: string | null;
+      sessionMode?: 'persistent' | 'per_run';
+    }) => {
+      if (!overloadPausedRef.current || managedModeRef.current) {
+        return false;
+      }
+      if (fresh.sessionMode === 'per_run') return true;
+      const current = connectionRef.current;
+      if (
+        !current.sessionId ||
+        current.loadingTranscript ||
+        current.status !== 'connected'
+      ) {
+        return true;
+      }
+      return (
+        typeof fresh.sessionId === 'string' &&
+        fresh.sessionId !== current.sessionId
+      );
+    },
+    [],
   );
   // Scheduled-task manual runs already suppress internal target-replacement
   // cancellations before reaching onError; non-cancellation AbortErrors
@@ -14268,6 +14409,22 @@ export function App({
         ownerRef?: { current: DaemonSessionOwnerSnapshot };
       },
     ) => {
+      // A first prompt in a fresh draft would allocate a daemon session;
+      // refuse it up front while paused instead of failing after submit.
+      // `false` is the refusal contract: awaited callers (composer submit,
+      // settings language sync) must not treat it as an accepted submission.
+      if (
+        overloadPausedRef.current &&
+        !managedModeRef.current &&
+        !connectionRef.current.sessionId &&
+        !createSessionPromiseRef.current
+      ) {
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return false;
+      }
       if (sessionWriteBlockedRef.current) {
         throw new DOMException(
           'Session switch is still preparing',
@@ -14566,6 +14723,10 @@ export function App({
       }
       const sessionIdAfterEnsure =
         connectionRef.current.sessionId ?? allocatedSessionId;
+      if (!sessionIdAfterEnsure) {
+        restoreCancelledSubmitState();
+        return false;
+      }
       const allocatedOwner = allocatedSessionCatalogOwnerRef.current;
       const promptWorkspaceCwd = allocatedSessionId
         ? allocatedOwner?.sessionId === allocatedSessionId
@@ -14794,6 +14955,8 @@ export function App({
     [
       beginPromptPreparation,
       clearFollowup,
+      pushToast,
+      t,
       disarmSubmittedPromptRetry,
       ensureSessionForPrompt,
       finishPromptPreparation,
@@ -14831,6 +14994,15 @@ export function App({
           );
           if (page.sessions.length > 0) return page.sessions[0].sessionId;
         }
+        // Only allocation is paused: reuse above must keep working while
+        // overloaded (GitDialog commit/PR generation allocates nothing).
+        if (overloadPausedRef.current && !managedModeRef.current) {
+          pushToast(
+            'warning',
+            overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+          );
+          return undefined;
+        }
         // No session exists or forced: create one. Creating binds the chat
         // connection — session navigation that must discard an armed
         // `/clear` carry, mirroring loadSidebarSession.
@@ -14858,6 +15030,8 @@ export function App({
     },
     [
       getComposerWorkspaceCwd,
+      pushToast,
+      t,
       connection.sessionId,
       activeWorkspaceCwd,
       sessionCatalogController,
@@ -15669,6 +15843,19 @@ export function App({
         notice.operation === 'create_session'
       ) {
         setSessionLimitReached(true);
+      }
+      if (
+        notice.code === 'system_overloaded' &&
+        (notice.operation === 'create_session' ||
+          notice.operation === 'branch_session' ||
+          notice.operation === 'fork_session' ||
+          notice.operation === 'load_session' ||
+          notice.operation === 'resume_session')
+      ) {
+        setOverloadRefusal({
+          message: notice.message,
+          expiresAt: Date.now() + OVERLOAD_REFUSAL_TTL_MS,
+        });
       }
       if (shouldToastNotice(notice)) {
         pushToast(
@@ -17044,11 +17231,12 @@ export function App({
       // running sessions; a plain settings write would leave both stale.
       const command = `/language output ${language.trim() || 'auto'}`;
       try {
-        await sendPrompt(command, undefined, undefined, {
+        const admitted = await sendPrompt(command, undefined, undefined, {
           ownerRef: owner,
           suppressSessionTitle: true,
           suppressInputHistory: true,
         });
+        if (admitted === false) return false;
       } catch (error) {
         if (owner.current.isCurrent()) {
           reportError(error, 'Failed to sync /language output command');
@@ -17900,6 +18088,15 @@ export function App({
       }
       if (sessionWriteBlocked) return;
       if (!requireActiveSessionForLocalCommand()) return;
+      // A record-point branch also reaches startSessionSwitch and can allocate
+      // a restored child, so every branch path must honor load admission.
+      if (overloadPausedRef.current && !managedModeRef.current) {
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return false;
+      }
       const sourceSessionId = connectionRef.current.sessionId;
       const sourceWorkspaceCwd = connectionRef.current.workspaceCwd;
       const requestKey = JSON.stringify([
@@ -17927,10 +18124,22 @@ export function App({
               })
             : sessionActions.branchSession({ name: options.name });
       const request = branchRequest
-        .then((result) => {
-          if (!result.switchStarted) return;
+        .then(async (result) => {
+          // The branch itself was created, so source-copy warnings apply
+          // whether or not the follow-up switch completes.
           if (result.sourceWarnings?.length)
             pushToast('warning', result.sourceWarnings.join(' '));
+          if (
+            !result.switchStarted ||
+            (await result.switchCompleted) === false
+          ) {
+            // The branch metadata was already published even when its
+            // switch was refused or aborted.
+            if (sourceWorkspaceCwd) {
+              sessionCatalogController.invalidateWorkspace(sourceWorkspaceCwd);
+            }
+            return;
+          }
           store.dispatch([
             {
               type: 'status',
@@ -17984,6 +18193,7 @@ export function App({
                 : undefined;
             const code = body?.['code'];
             if (
+              isSystemOverloadedError(error) ||
               code === 'branch_worktree_activation_failed' ||
               code === 'branch_worktree_outcome_unknown'
             ) {
@@ -18026,7 +18236,12 @@ export function App({
       const sourceSessionId = connectionRef.current.sessionId;
       const sourceWorkspaceCwd = connectionRef.current.workspaceCwd;
       if (!branchWorktreeEligible || !sourceSessionId || !sourceWorkspaceCwd) {
-        return branchCurrentSession({ atRecordId });
+        const request = branchCurrentSession({ atRecordId });
+        return request === false ? undefined : request;
+      }
+      if (overloadPausedRef.current && !managedModeRef.current) {
+        branchCurrentSession({ atRecordId });
+        return;
       }
       return (async () => {
         try {
@@ -18039,11 +18254,13 @@ export function App({
           if (connectionRef.current.sessionId !== sourceSessionId) return;
           setSelectedWorkspaceGitStatus(status);
           if (status.worktreeSupported !== true) {
-            return branchCurrentSession({ atRecordId });
+            await branchCurrentSession({ atRecordId });
+            return;
           }
         } catch {
           if (connectionRef.current.sessionId !== sourceSessionId) return;
-          return branchCurrentSession({ atRecordId });
+          await branchCurrentSession({ atRecordId });
+          return;
         }
         setBranchSessionDialog({ sourceSessionId, atRecordId });
         setBranchSessionDialogBusy(false);
@@ -18121,6 +18338,8 @@ export function App({
       opts?: {
         keepView?: boolean;
         keepPanel?: boolean;
+        // A directory recovery reset clears local state; a later prompt
+        // still observes fresh-child admission independently.
         allowRecoveryReset?: boolean;
         /**
          * Git mode the new workspace draft starts with. Set here, in the same
@@ -18131,6 +18350,17 @@ export function App({
         carryManualTitle?: string;
       },
     ) => {
+      if (
+        overloadPausedRef.current &&
+        !managedModeRef.current &&
+        !(opts?.allowRecoveryReset && intent.kind !== 'inherit')
+      ) {
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return false;
+      }
       if (
         connectionRef.current.standaloneSession?.creationRecovery &&
         !opts?.allowRecoveryReset
@@ -18427,6 +18657,7 @@ export function App({
         {
           keepView: true,
           keepPanel: true,
+          allowRecoveryReset: true,
         },
       );
       const latest = connectionRef.current;
@@ -20264,7 +20495,20 @@ export function App({
           },
           suppressInputHistory: true,
         }).then(
-          () => {
+          (result) => {
+            if (result === false) {
+              if (!admitted) {
+                // sendPrompt's guard already pushed the warning toast with
+                // load readings; mark as dispatched so reportError does not
+                // surface a duplicate error-toned toast for the same click.
+                reject(
+                  Object.assign(new Error(t('sidebar.overloadPaused')), {
+                    _alreadyDispatched: true,
+                  }),
+                );
+              }
+              return;
+            }
             if (!admitted) {
               if (
                 !scheduledScopeIsCurrent() ||
@@ -21191,7 +21435,7 @@ export function App({
       let admitted = false;
       let admissionUnknown = false;
       try {
-        await sendPrompt(trimmed, images, files, {
+        const submission = await sendPrompt(trimmed, images, files, {
           submittedPrompt: trimmed,
           inputAnnotations,
           idempotencyKey: editIdempotencyKey,
@@ -21260,6 +21504,7 @@ export function App({
             admitted = true;
           },
         });
+        if (submission === false) return false;
       } catch (error) {
         if (!isCurrent()) return false;
         if (
@@ -21406,6 +21651,17 @@ export function App({
       }
 
       const needsSession = !connectionRef.current.sessionId;
+      if (
+        needsSession &&
+        overloadPausedRef.current &&
+        !managedModeRef.current
+      ) {
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return false;
+      }
       goalSessionCreationInFlightRef.current = needsSession;
       void (async () => {
         const sourceOwner = sessionOwnerGuard.capture();
@@ -21998,8 +22254,11 @@ export function App({
           if (cmd === 'branch') {
             if (commandBlocked) return blockCommand();
             const branchName = text.slice(match[0].length).trim();
-            branchCurrentSession({ name: branchName || undefined });
-            return true;
+            return (
+              branchCurrentSession({
+                name: branchName || undefined,
+              }) !== false
+            );
           }
           if (cmd === 'fork') {
             if (commandBlocked) return blockCommand();
@@ -22897,12 +23156,23 @@ export function App({
       } else if (text.startsWith('!')) {
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
+        const needsSession = !connectionRef.current.sessionId;
+        if (
+          needsSession &&
+          overloadPausedRef.current &&
+          !managedModeRef.current
+        ) {
+          pushToast(
+            'warning',
+            overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+          );
+          return false;
+        }
         if (streamingStateRef.current !== 'idle') {
           queuedShellCommandsRef.current.push(cmd);
           pushToast('info', t('queue.shellQueued'));
           return true;
         }
-        const needsSession = !connectionRef.current.sessionId;
         let shellPromptPreparationOwner: symbol | undefined;
         if (needsSession) {
           if (shellSubmitInFlightRef.current) return false;
@@ -23523,9 +23793,9 @@ export function App({
           }
           if (isDaemonTurnError(error)) {
             // A loop-detected rejection ends the retry lineage: the
-            // retried turn itself was stopped for loop protection, so
-            // the stashed prompt must not be re-offered — resubmitting
-            // it tends to re-loop.
+            // retried turn itself was stopped by the tool-call cap or the
+            // duplicate tool-call breaker, so the stashed prompt must not
+            // be re-offered — resubmitting it tends to hit the same stop.
             if (error.body !== 'LOOP_DETECTED') {
               failedTurnErrorRetryRef.current = {
                 errorId: retryErrorId,
@@ -24767,6 +25037,13 @@ export function App({
   // ordinary first prompt (`promptWorkspaceCwd` in the submit path).
   const ensureAgentMentionSession = useCallback(async () => {
     const existing = connectionRef.current.sessionId;
+    if (!existing && overloadPausedRef.current && !managedModeRef.current) {
+      pushToast(
+        'warning',
+        overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+      );
+      return { paused: true as const };
+    }
     const allocated = existing ? undefined : await ensureSessionForPrompt();
     const sessionId =
       existing ?? allocated?.sessionId ?? connectionRef.current.sessionId;
@@ -24790,7 +25067,7 @@ export function App({
           }
         : {}),
     };
-  }, [ensureSessionForPrompt, getComposerWorkspaceCwd]);
+  }, [ensureSessionForPrompt, getComposerWorkspaceCwd, pushToast, t]);
   const settledAgentRunsKey = useMemo(
     () => settledAgentRunKey(blocks),
     [blocks],
@@ -25650,6 +25927,7 @@ export function App({
     sideTasks: visibleSideTasks,
     archivedSideTasks: visibleArchivedSideTasks,
     sideTasksLoading,
+    overloadPaused: overloadPaused && !managedMode,
     onCreateSideTask: createEmptySideTask,
     onOpenSideTask: openSideTask,
     onArchiveSideTasks: sideTaskArchiveAvailable ? archiveSideTasks : undefined,
@@ -26493,6 +26771,15 @@ export function App({
                   // in the composer's workspace picker instead. From a Live
                   // chat it opens an ordinary task; a fresh voice conversation
                   // comes from the Live controls.
+                  overloadPaused={overloadPaused && !managedMode}
+                  overloadDetail={overloadDetail}
+                  onOverloadRefused={() => {
+                    pushToast(
+                      'warning',
+                      overloadDetailRef.current ??
+                        t('sidebar.overloadPaused'),
+                    );
+                  }}
                   onNewSession={(workspaceCwd) => {
                     if (managedMode && typeof workspaceCwd !== 'string') {
                       if (
@@ -26931,9 +27218,14 @@ export function App({
                           : undefined
                       }
                       {...artifactsHeaderEntry}
-                      onOpenLocalControlSettings={
+                      renderLeadingAction={
                         showMobileAccess && workspaceContextActive
-                          ? handleOpenLocalControlSettings
+                          ? (actionClassName) => (
+                              <LocalControlQrButton
+                                onOpenSettings={handleOpenLocalControlSettings}
+                                className={actionClassName}
+                              />
+                            )
                           : undefined
                       }
                     />
@@ -27076,6 +27368,13 @@ export function App({
                         splitFoldedByShrinkRef.current = false;
                         const current = connectionRef.current;
                         const currentSessionId = current.sessionId;
+                        if (
+                          overloadPausedRef.current &&
+                          !managedModeRef.current
+                        ) {
+                          closePanel();
+                          return;
+                        }
                         const currentWorkspaceCwd =
                           current.workspaceCwd ||
                           lockedWorkspaceCwd ||
@@ -27575,6 +27874,15 @@ export function App({
                         'workspace_channel_observed_contacts',
                       )}
                       autofixPrWatchesAvailable={prWatchesAvailable}
+                      shouldRefuseManualRun={shouldRefuseScheduledManualRun}
+                      overloadDetail={overloadDetail}
+                      onOverloadRefused={() => {
+                        pushToast(
+                          'warning',
+                          overloadDetailRef.current ??
+                            t('sidebar.overloadPaused'),
+                        );
+                      }}
                       isTaskDeleted={(task) =>
                         isDurableTaskDeletedRef.current(task)
                       }
@@ -29026,6 +29334,7 @@ export function App({
                               ? undefined
                               : mainVoiceTarget,
                           voiceStatusRevision: mainVoiceStatusRevision,
+                          composerIntegrations: DAEMON_COMPOSER_INTEGRATIONS,
                           queuedMessages: queuedTexts,
                           onFocusFooter: handleFocusTaskChips,
                           onPopQueuedMessages: editLastQueuedPrompt,

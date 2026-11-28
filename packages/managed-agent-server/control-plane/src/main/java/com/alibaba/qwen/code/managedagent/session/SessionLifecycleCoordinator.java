@@ -118,6 +118,12 @@ public class SessionLifecycleCoordinator {
                     "hosted_session_closing", "hosted_session_open_busy");
     private final AgentStateStore store;
     private WorkspaceLifecycleStore lifecycle;
+    private SessionResourceGcWakeup resourceGcWakeup;
+
+    @Autowired(required = false)
+    public void setSessionResourceGcWakeup(SessionResourceGcWakeup wakeup) {
+        this.resourceGcWakeup = wakeup;
+    }
 
     @Autowired(required = false)
     public void setWorkspaceLifecycleStore(WorkspaceLifecycleStore lifecycle) {
@@ -307,6 +313,13 @@ public class SessionLifecycleCoordinator {
                 LOG.warn("Managed Session operation was claimed by another"
                                 + " worker tenant={} session={} operation={}",
                         tenantId, sessionId, operationId);
+            } else if (claimed.kind() == OperationKind.DELETE && resourceGcWakeup != null) {
+                try {
+                    resourceGcWakeup.retired(tenantId, sessionId);
+                } catch (RuntimeException failure) {
+                    LOG.warn("Session resource collection wakeup failed tenant={} session={}",
+                            tenantId, sessionId, failure);
+                }
             }
         } catch (RuntimeException error) {
             // A capability digest mismatch lands here too: nothing may be

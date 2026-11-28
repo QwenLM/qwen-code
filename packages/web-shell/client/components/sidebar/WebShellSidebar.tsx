@@ -91,6 +91,7 @@ import {
   SettingsIcon,
   SquarePenIcon,
   SunIcon,
+  TriangleAlertIcon,
 } from 'lucide-react';
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useBrand, useBrandName } from '../../brandContext';
@@ -636,6 +637,11 @@ interface WebShellSidebarProps {
   /** Whether to offer the in-window split view (large screens only). */
   canOpenSplitView?: boolean;
   onNewSession: (workspaceCwd?: string) => Promise<boolean> | boolean;
+  /** Load-admission pause: while true the create entry points are disabled
+   * and a warning strip explains the daemon overload. */
+  overloadPaused?: boolean;
+  overloadDetail?: string;
+  onOverloadRefused?: () => void;
   onNewStandaloneSession?: () => Promise<boolean> | boolean;
   standaloneSessionsReloadToken?: number;
   onLoadSession: (
@@ -1311,6 +1317,9 @@ export function WebShellSidebar({
   splitSessionIds,
   canOpenSplitView,
   onNewSession,
+  overloadPaused = false,
+  overloadDetail,
+  onOverloadRefused,
   onNewStandaloneSession,
   standaloneSessionsReloadToken = 0,
   onLoadSession,
@@ -3443,7 +3452,25 @@ export function WebShellSidebar({
     '--web-shell-sidebar-min-width': `${sidebarMinWidth}px`,
     '--web-shell-sidebar-max-width': `${getSidebarMaxWidth()}px`,
   } as CSSProperties;
-  const newSessionDisabled = creatingSession;
+  const newSessionDisabled = creatingSession || overloadPaused;
+  const renderOverloadStrip = (compactRail = false) => (
+    <div
+      className={styles.overloadStrip}
+      data-web-shell-overload-strip
+      role="status"
+      title={overloadDetail}
+      aria-label={
+        overloadDetail
+          ? `${t('sidebar.overloadPaused')}: ${overloadDetail}`
+          : t('sidebar.overloadPaused')
+      }
+    >
+      <TriangleAlertIcon size={14} strokeWidth={1.5} />
+      {!compactRail && (!collapsed || homePreviewOpen) && (
+        <span>{t('sidebar.overloadPaused')}</span>
+      )}
+    </div>
+  );
 
   useEffect(() => {
     if (!currentSessionId) return;
@@ -4097,6 +4124,17 @@ export function WebShellSidebar({
   const handleNewSession = useCallback(
     (workspaceCwd?: string, fromRecent = false) => {
       if (creatingSessionRef.current) return;
+      if (overloadPaused) {
+        if (onOverloadRefused) {
+          onOverloadRefused();
+        } else {
+          onError(
+            new Error(t('sidebar.overloadPaused')),
+            t('sidebar.overloadPaused'),
+          );
+        }
+        return;
+      }
 
       creatingSessionRef.current = true;
       setCreatingSession(true);
@@ -4129,7 +4167,9 @@ export function WebShellSidebar({
       bumpWorkspaceReload,
       currentRowIdentity,
       onError,
+      onOverloadRefused,
       onNewSession,
+      overloadPaused,
       primaryWorkspaceCwd,
       sessionCatalogController,
       sessionContent,
@@ -4142,6 +4182,17 @@ export function WebShellSidebar({
   const handleNewWorktreeSession = useCallback(
     (workspaceCwd?: string) => {
       if (!onNewWorktreeSession || creatingSessionRef.current) return;
+      if (overloadPaused) {
+        if (onOverloadRefused) {
+          onOverloadRefused();
+        } else {
+          onError(
+            new Error(t('sidebar.overloadPaused')),
+            t('sidebar.overloadPaused'),
+          );
+        }
+        return;
+      }
 
       creatingSessionRef.current = true;
       setCreatingSession(true);
@@ -4168,7 +4219,9 @@ export function WebShellSidebar({
     [
       bumpWorkspaceReload,
       onError,
+      onOverloadRefused,
       onNewWorktreeSession,
+      overloadPaused,
       primaryWorkspaceCwd,
       sessionCatalogController,
       t,
@@ -8613,6 +8666,10 @@ export function WebShellSidebar({
               data-web-shell-navigation-rail
             >
               <div className={styles.railPrimary}>
+                {overloadPaused &&
+                  (homeHidden || sectionView) &&
+                  !homePreviewOpen &&
+                  renderOverloadStrip(true)}
                 {activityEnabled && (collapsed || homeHidden) && (
                   <button
                     type="button"
@@ -8850,6 +8907,11 @@ export function WebShellSidebar({
               </div>
             </>
           )}
+          {!sectionView &&
+            !selectionMode &&
+            overloadPaused &&
+            (!homeHidden || homePreviewOpen) &&
+            renderOverloadStrip()}
           {!sectionView &&
             (selectionMode ||
               primaryNavItems.has('newTask') ||
@@ -9605,7 +9667,8 @@ export function WebShellSidebar({
                             gitBranchWanted={
                               !sectionView &&
                               Boolean(onNewWorktreeSession) &&
-                              !lockedWorkspaceCwd
+                              !lockedWorkspaceCwd &&
+                              !overloadPaused
                             }
                             sessionStats={
                               ws.primary
@@ -9729,7 +9792,7 @@ export function WebShellSidebar({
                                             },
                                           }
                                         : {}),
-                                      ...(ws.trusted
+                                      ...(ws.trusted && !overloadPaused
                                         ? {
                                             newSession: () =>
                                               handleNewSession(wsCwd),
@@ -9740,6 +9803,7 @@ export function WebShellSidebar({
                                       // intent and the daemon rejects the session.
                                       ...(ws.trusted &&
                                       !ws.ssh &&
+                                      !overloadPaused &&
                                       onNewWorktreeSession &&
                                       gitBranch
                                         ? {
@@ -9821,6 +9885,7 @@ export function WebShellSidebar({
                                             type="button"
                                             title={t('sidebar.newTask')}
                                             aria-label={t('sidebar.newTask')}
+                                            disabled={newSessionDisabled}
                                             onClick={(event) => {
                                               event.preventDefault();
                                               event.stopPropagation();
@@ -9937,6 +10002,7 @@ export function WebShellSidebar({
                       })
                     }
                     onNewSession={onNewStandaloneSession}
+                    newSessionDisabled={newSessionDisabled}
                     onLoadSession={onLoadStandaloneSession}
                     onRenameSession={(sessionId, displayName) =>
                       onSessionRenameConfirmed?.(

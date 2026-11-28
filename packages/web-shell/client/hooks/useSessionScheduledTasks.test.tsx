@@ -66,6 +66,8 @@ interface HarnessProps {
   activityKey?: string;
   durableSeeded?: boolean;
   refreshTrigger?: number;
+  shouldRefuseManualRun?: (task: DaemonScheduledTask) => boolean;
+  onOverloadRefused?: () => void;
 }
 
 function Harness(props: HarnessProps) {
@@ -78,6 +80,8 @@ function Harness(props: HarnessProps) {
     activityKey: props.activityKey ?? '',
     durableSeeded: props.durableSeeded,
     onRunPrompt,
+    shouldRefuseManualRun: props.shouldRefuseManualRun,
+    onOverloadRefused: props.onOverloadRefused,
     onError,
     refreshTrigger: props.refreshTrigger ?? 0,
   });
@@ -1706,6 +1710,35 @@ describe('useSessionScheduledTasks', () => {
         sdkMock.workspaceActions.listScheduledTasks.mock.calls.length,
       ).toBeGreaterThanOrEqual(readsBeforeRecurring + 3);
     });
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('forwards shouldRefuseManualRun and onOverloadRefused before mutating a durable task', async () => {
+    const perRun = durableTask({
+      id: 'per-run-overloaded',
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    sdkMock.workspaceActions.listScheduledTasks.mockResolvedValue([perRun]);
+    const onOverloadRefused = vi.fn();
+
+    renderHarness({
+      sessionId: 'session-1',
+      workspaceId: 'ws-1',
+      activityKey: ACTIVE_KEY,
+      shouldRefuseManualRun: (fresh) => fresh.sessionMode === 'per_run',
+      onOverloadRefused,
+    });
+    await act(async () => Promise.resolve());
+
+    const entry = latest!.tasks[0] as SessionDurableScheduledTask;
+    await act(async () => {
+      await latest!.runDurableTask(entry);
+    });
+
+    expect(onOverloadRefused).toHaveBeenCalledOnce();
+    expect(sdkMock.workspaceActions.runScheduledTask).not.toHaveBeenCalled();
+    expect(onRunPrompt).not.toHaveBeenCalled();
     expect(onError).not.toHaveBeenCalled();
   });
 });

@@ -579,7 +579,7 @@ test('bootstrap renders matching credentials and a 32-byte key', () => {
   );
   assert.match(
     harness,
-    /^QWEN_MANAGED_RUNTIME_BROKER_URL=http:\/\/127\.0\.0\.1:4182$/m,
+    /^QWEN_MANAGED_RUNTIME_BROKER_URL=http:\/\/127\.0\.0\.1:8080$/m,
   );
   const paths = {
     databasePassword: secrets.databasePassword,
@@ -1061,7 +1061,7 @@ test('ships the Harness credential keys the control plane reads', async () => {
   // The tool path's pair ships commented, for the operator to enable together.
   assert.match(
     template,
-    /^# QWEN_MANAGED_RUNTIME_BROKER_URL=http:\/\/127\.0\.0\.1:4182$/m,
+    /^# QWEN_MANAGED_RUNTIME_BROKER_URL=http:\/\/127\.0\.0\.1:8080$/m,
   );
   assert.match(
     template,

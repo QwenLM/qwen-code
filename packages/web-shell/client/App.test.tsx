@@ -104,6 +104,7 @@ import type {
   WebShellAssistantFeedbackOptions,
   WebShellComposerToolbarRenderInfo,
 } from './customization';
+import { getTranslator } from './i18n';
 import { createContextUsageMessageData } from './components/messages/ContextUsageMessage';
 import { createStatsMessageData } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
@@ -117,6 +118,8 @@ import { HotkeySetter } from './live/HotkeySetter';
 import { TOUCH_COMPOSER_QUERY } from './hooks/useIsTouchComposer';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
+import type { ComposerIntegrations } from './components/composer/composer-integrations';
+import { DAEMON_COMPOSER_INTEGRATIONS } from './components/composer/daemon-composer-integrations';
 
 vi.mock('./components/managed/ManagedSessionsPage', async () => {
   const React = await import('react');
@@ -372,6 +375,7 @@ type ChatEditorTestProps = {
   btwEnabled?: boolean;
   contextChipPlacement?: 'toolbar' | 'below' | 'header';
   liveVoicePortalContainer?: HTMLElement | null;
+  composerIntegrations?: ComposerIntegrations;
   onSkillsOpenChange?: (open: boolean) => void;
   skillsLoading?: boolean;
   skillsLoadError?: boolean;
@@ -1241,6 +1245,11 @@ const {
         };
         currentSessionSchedulingAvailable?: boolean;
         autofixPrWatchesAvailable?: boolean;
+        shouldRefuseManualRun?: (task: {
+          recurring: boolean;
+          sessionId: string | null;
+          sessionMode?: 'persistent' | 'per_run';
+        }) => boolean;
         isTaskDeleted?: (task: {
           id: string;
           workspaceId?: string;
@@ -1609,6 +1618,41 @@ vi.mock('./daemon/session/DaemonSessionProvider', async (importOriginal) => {
     },
   };
 });
+
+// This harness renders App without a DaemonWorkspaceProvider; the overload
+// pause hook reads the workspace status resource, so stub it here with a
+// per-test controllable state (default unpaused, reset in beforeEach).
+const overloadPauseStub = vi.hoisted(() => ({
+  paused: false,
+  pollOverloaded: false,
+  loadAdmission: undefined as
+    | {
+        enabled: boolean;
+        overloaded: boolean;
+        reason: string | null;
+        loadRatio: number;
+        eventLoopLagP99Ms: number;
+        sampledAtMs: number;
+      }
+    | undefined,
+  refusalMessage: undefined as string | undefined,
+}));
+
+vi.mock('./daemon/workspace/hooks/useDaemonOverloadPause.js', () => ({
+  OVERLOAD_REFUSAL_TTL_MS: 15_000,
+  useDaemonOverloadPause: (options?: {
+    refusal?: { message: string; expiresAt: number } | null;
+  }) => {
+    const refusal = options?.refusal ?? null;
+    const reactiveActive = refusal !== null && Date.now() < refusal.expiresAt;
+    return {
+      paused: overloadPauseStub.paused || reactiveActive,
+      pollOverloaded: overloadPauseStub.pollOverloaded,
+      loadAdmission: overloadPauseStub.loadAdmission,
+      refusalMessage: refusal?.message ?? overloadPauseStub.refusalMessage,
+    };
+  },
+}));
 
 vi.mock('./components/ChatEditor', async () => {
   const React = await import('react');
@@ -4777,6 +4821,130 @@ describe('task activity key', () => {
     ).toContain('report.html');
   });
 
+  it('keeps a pressed close affordance for a restored zero-artifact artifacts tab', async () => {
+    // App-layer witness for the artifactsTabActive join: with an empty live
+    // list the count term is 0, so only (rightPanelOpen && artifactsTabActive)
+    // keeps the entry visible. The restore arm reopens the persisted tab while
+    // artifacts is still [] (cold load, or artifacts since deleted); the entry
+    // is then the header's only close affordance. Mutating artifactsTabActive
+    // to false or a wrong id prefix reddens this case.
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'artifacts:session-1',
+          tabs: [
+            {
+              id: 'artifacts:session-1',
+              kind: 'artifacts',
+              title: 'Artifacts',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp();
+    await vi.waitFor(async () => {
+      await flush();
+      const entry = container.querySelector('[data-web-shell-artifacts-entry]');
+      expect(entry).not.toBeNull();
+      expect(entry!.getAttribute('aria-pressed')).toBe('true');
+    });
+    expect(
+      container.querySelector('[data-testid="artifacts-list-empty"]'),
+    ).not.toBeNull();
+    // One click closes the panel. With the count still 0 and the panel closed,
+    // the entry's render condition no longer holds, so it hides entirely rather
+    // than lingering as a pressed-false zero entry.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-artifacts-entry]')
+        ?.click();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="artifacts-list-empty"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-artifacts-entry]'),
+    ).toBeNull();
+  });
+
+  it('does not show the artifacts entry for an unrelated restored tab at zero artifacts', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'review:stored',
+          tabs: [
+            { id: 'review:stored', kind: 'review', title: 'Stored review' },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    expect(
+      container.querySelector('[role="tab"][title="Stored review"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-artifacts-entry]'),
+    ).toBeNull();
+  });
+
+  it('does not show the artifacts entry for an inactive artifacts tab at zero artifacts', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'review:stored',
+          tabs: [
+            {
+              id: 'artifacts:session-1',
+              kind: 'artifacts',
+              title: 'Artifacts',
+              sessionId: 'session-1',
+            },
+            { id: 'review:stored', kind: 'review', title: 'Stored review' },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp();
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector('[role="tab"][title="Stored review"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[role="tab"][title="Artifacts"]'),
+      ).not.toBeNull();
+    });
+    expect(
+      container.querySelector('[data-web-shell-artifacts-entry]'),
+    ).toBeNull();
+  });
+
   it('does not restore a persisted artifacts tab when the host hides the artifacts entry', async () => {
     mockConnection.capabilities = {
       ...mockConnection.capabilities,
@@ -4946,6 +5114,7 @@ describe('task activity key', () => {
   });
 
   it('exposes the artifact count and opener to a custom chat header', async () => {
+    const t = getTranslator('en');
     mockConnection.capabilities = {
       ...mockConnection.capabilities,
       features: ['session_artifacts'],
@@ -5003,18 +5172,37 @@ describe('task activity key', () => {
       ),
     ).toBeNull();
 
-    // The artifacts tab serializes into the persisted right-panel state.
+    // The artifacts tab serializes into the persisted right-panel state with
+    // the exact shape parsePersistedArtifactPanelTab accepts: a string id and
+    // title (the common gate) plus kind and sessionId. A kind-only assertion
+    // would stay green for a serialize arm that dropped id/title, yet the tab
+    // would vanish on every reload; pin the fields the restore arm reads.
     await vi.waitFor(async () => {
       await flush();
       const rawState = JSON.parse(
         window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
           '{}',
-      ) as Record<string, { tabs?: Array<{ kind?: string }> }>;
-      expect(
-        Object.values(rawState).some((entry) =>
-          entry.tabs?.some((tab) => tab.kind === 'artifacts'),
-        ),
-      ).toBe(true);
+      ) as Record<
+        string,
+        {
+          activeTabId?: string;
+          tabs?: Array<{
+            id?: string;
+            kind?: string;
+            title?: string;
+            sessionId?: string;
+          }>;
+        }
+      >;
+      const entry = Object.values(rawState).find((candidate) =>
+        candidate.tabs?.some((tab) => tab.kind === 'artifacts'),
+      );
+      const tab = entry?.tabs?.find((item) => item.kind === 'artifacts');
+      expect(tab).toBeDefined();
+      expect(tab!.id).toBe('artifacts:session-1');
+      expect(tab!.title).toBe(t('environment.artifacts'));
+      expect(tab!.sessionId).toBe('session-1');
+      expect(entry!.activeTabId).toBe('artifacts:session-1');
     });
 
     // A second click toggles the right panel closed.
@@ -13026,6 +13214,78 @@ describe('artifact panel fullscreen', () => {
     expect(drawerAside!.contains(document.activeElement)).toBe(true);
   });
 
+  it('returns focus to the artifacts entry when the floating drawer closes', async () => {
+    // openArtifactsListPanel records the focused trigger so the drawer's
+    // onCloseAutoFocus can return focus to it. Deleting that call leaves every
+    // suite green but drops focus to BODY on close; this pins the restore.
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [
+        {
+          id: 'report',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'report',
+          workspacePath: 'report.html',
+          clientRetained: false,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+    });
+    const { container } = renderApp();
+    await flush();
+    const entry = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-artifacts-entry]',
+    );
+    expect(entry).not.toBeNull();
+    entry!.focus();
+    expect(document.activeElement).toBe(entry);
+
+    await act(async () => {
+      entry!.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector(
+        '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+      ),
+    ).not.toBeNull();
+    expect(entry).not.toBe(document.activeElement);
+
+    // Close with the drawer's own toggle (the header entry is overlaid).
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>(
+          '[data-web-shell-portal-root] aside button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector(
+        '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+      ),
+    ).toBeNull();
+    expect(document.activeElement).toBe(entry);
+  });
+
   it('keeps the dock animation suppressed across a fullscreen floating interlude', async () => {
     // Docked fullscreen -> narrow (the drawer takes over) -> widen -> shrink
     // via a non-toggle exit: the suppression flag must survive the interlude,
@@ -15263,6 +15523,86 @@ describe('App /send', () => {
     expect(editorCommit).not.toHaveBeenCalled();
   });
 
+  it('refuses a new /send child while paused without clearing the draft', async () => {
+    overloadPauseStub.paused = true;
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = '/send independent work';
+
+    await clickSubmit(container);
+
+    expect(mockWorkspace.client.sendToSubSession).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('/send independent work');
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+  });
+
+  it('still allows /send to an explicitly selected target while paused', async () => {
+    overloadPauseStub.paused = true;
+    mockWorkspace.client.sendToSubSession.mockResolvedValue({
+      sessionId: 'target-session',
+    });
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/send --session-id target-session hello';
+
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(
+        mockWorkspace.client.sendToSubSession,
+      ).toHaveBeenCalledExactlyOnceWith(
+        'session-1',
+        { prompt: 'hello', targetSessionId: 'target-session' },
+        'client-1',
+      );
+    });
+    expect(editorCommit).toHaveBeenCalledOnce();
+  });
+
+  it('turns a real /send overload into a reactive warning and pause', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    mockWorkspace.client.sendToSubSession.mockRejectedValue(
+      new DaemonHttpError(
+        503,
+        {
+          error: 'System overloaded (cpu_load)',
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.8,
+          eventLoopLagP99Ms: 24,
+        },
+        'System overloaded (cpu_load)',
+      ),
+    );
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = '/send independent work';
+
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(toasts).toEqual([['warning', 'System overloaded (cpu_load)']]);
+    });
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('/send independent work');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(testState.latestArtifactPanelProps?.overloadPaused).toBe(true);
+  });
+
   it('offers a stable selector for a colliding workspace name and honors the lock', async () => {
     const { container } = renderApp({ lockedWorkspaceCwd: callerCwd });
     await flush();
@@ -15776,6 +16116,10 @@ beforeEach(() => {
   testState.latestSettingsPresentation = undefined;
   testState.latestModelManagement = null;
   testState.latestScheduledTasksProps = null;
+  overloadPauseStub.paused = false;
+  overloadPauseStub.pollOverloaded = false;
+  overloadPauseStub.loadAdmission = undefined;
+  overloadPauseStub.refusalMessage = undefined;
   testState.latestPrWatchesProps = null;
   testState.latestGoalsProps = null;
   testState.latestArtifactLibraryProps = null;
@@ -20299,6 +20643,168 @@ describe('App session callbacks', () => {
     ]);
   });
 
+  it.each([{ completion: false }, { completion: true }])(
+    'publishes branch success only after switch completion: $completion',
+    async ({ completion: result }) => {
+      const switchCompletion = deferred<boolean>();
+      mockSessionActions.branchSession.mockResolvedValue({
+        sessionId: 'branch-1',
+        displayName: 'Historical branch',
+        switchStarted: true,
+        switchCompleted: switchCompletion.promise,
+      });
+      renderApp();
+      await flush();
+
+      const request =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+      expect(request).toBeInstanceOf(Promise);
+      const expectedStatus = [
+        expect.objectContaining({
+          type: 'status',
+          text: expect.stringContaining('Historical branch') as string,
+        }),
+      ];
+      expect(mockStore.dispatch).not.toHaveBeenCalledWith(expectedStatus);
+
+      switchCompletion.resolve(result);
+      await act(async () => {
+        await request;
+      });
+      if (result) {
+        expect(mockStore.dispatch).toHaveBeenCalledExactlyOnceWith(
+          expectedStatus,
+        );
+      } else {
+        expect(mockStore.dispatch).not.toHaveBeenCalledWith(expectedStatus);
+        expect(
+          sessionCatalogController.invalidateWorkspace,
+        ).toHaveBeenCalledWith('/tmp/project');
+      }
+    },
+  );
+
+  it.each([
+    { scenario: 'switch is refused', switchStarted: true, completion: false },
+    {
+      scenario: 'switch is aborted and never starts',
+      switchStarted: false,
+      completion: false,
+    },
+    { scenario: 'switch completes', switchStarted: true, completion: true },
+  ])(
+    'surfaces branch source warnings when the $scenario',
+    async ({ switchStarted, completion }) => {
+      const switchCompletion = deferred<boolean>();
+      mockSessionActions.branchSession.mockResolvedValue({
+        sessionId: 'branch-1',
+        displayName: 'Historical branch',
+        switchStarted,
+        ...(switchStarted ? { switchCompleted: switchCompletion.promise } : {}),
+        sourceWarnings: ['Session sources could not be copied.'],
+      });
+      const onToast = vi.fn();
+      renderApp({ onToast });
+      await flush();
+
+      const request =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+      switchCompletion.resolve(completion);
+      await act(async () => {
+        await request;
+      });
+
+      expect(onToast).toHaveBeenCalledWith(
+        'warning',
+        'Session sources could not be copied.',
+      );
+      const switched = [
+        expect.objectContaining({
+          type: 'status',
+          text: expect.stringContaining('Historical branch') as string,
+        }),
+      ];
+      if (completion) {
+        expect(mockStore.dispatch).toHaveBeenCalledWith(switched);
+      } else {
+        expect(mockStore.dispatch).not.toHaveBeenCalledWith(switched);
+      }
+    },
+  );
+
+  it.each([
+    [
+      'worktree is unsupported',
+      () =>
+        Promise.resolve({
+          v: 2,
+          workspaceCwd: '/tmp/project',
+          branch: 'main',
+          worktreeSupported: false,
+        }),
+    ],
+    ['worktree preflight fails', () => Promise.reject(new Error('offline'))],
+  ])(
+    'returns and awaits the fallback branch request when %s',
+    async (_scenario, preflight) => {
+      Object.assign(mockWorkspace.capabilities, {
+        features: ['session_branch_worktree'],
+        workspaces: [
+          {
+            id: 'primary',
+            cwd: '/tmp/project',
+            primary: true,
+            trusted: true,
+          },
+        ],
+      });
+      const workspaceGit = vi.fn(preflight);
+      mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+        workspaceGit,
+        workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      }));
+      const branch = deferred<{
+        sessionId: string;
+        displayName: string;
+        switchStarted: boolean;
+      }>();
+      mockSessionActions.branchSession.mockReturnValue(branch.promise);
+      renderApp();
+      await flush();
+
+      const request = testState.latestMessageListProps?.onBranchSession?.(
+        'checkpoint-fallback',
+      );
+      expect(request).toBeInstanceOf(Promise);
+      if (!(request instanceof Promise)) {
+        throw new Error('Expected the pending branch request');
+      }
+      let settled = false;
+      void request.then(() => {
+        settled = true;
+      });
+      await act(async () => {
+        await vi.waitFor(() => {
+          expect(mockSessionActions.branchSession).toHaveBeenCalledWith({
+            atRecordId: 'checkpoint-fallback',
+          });
+        });
+        await Promise.resolve();
+      });
+      expect(settled).toBe(false);
+
+      branch.resolve({
+        sessionId: 'branch-fallback',
+        displayName: 'Fallback branch',
+        switchStarted: false,
+      });
+      await act(async () => {
+        await request;
+      });
+      expect(settled).toBe(true);
+    },
+  );
+
   it('does not report a concurrent branch request as a failure', async () => {
     const branch = deferred<{
       sessionId: string;
@@ -20357,6 +20863,9 @@ describe('App session callbacks', () => {
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
       expect.objectContaining({ type: 'status' }),
     ]);
+    expect(sessionCatalogController.invalidateWorkspace).toHaveBeenCalledWith(
+      '/tmp/project',
+    );
   });
 
   it('refreshes the source catalog after a late worktree activation failure', async () => {
@@ -20402,6 +20911,52 @@ describe('App session callbacks', () => {
       'error',
       'The branched session was created, but its worktree could not be opened automatically. Reopen it from the session list.',
     );
+  });
+
+  it('refreshes the source catalog after a published worktree overload', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    let rejectBranch!: (error: unknown) => void;
+    mockSessionActions.branchSession.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectBranch = reject;
+      }),
+    );
+    const { rerender } = renderApp();
+    await flush();
+
+    let request: void | Promise<void>;
+    act(() => {
+      request =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/tmp/other-project';
+      rerender();
+    });
+    await act(async () => {
+      rejectBranch(
+        new DaemonHttpError(
+          503,
+          {
+            error: 'System overloaded (cpu_load)',
+            code: 'system_overloaded',
+            sessionId: 'branch-1',
+            loadRatio: 2.8,
+            eventLoopLagP99Ms: 27,
+          },
+          'System overloaded (cpu_load)',
+        ),
+      );
+      await request;
+    });
+
+    expect(sessionCatalogController.invalidateWorkspace).toHaveBeenCalledWith(
+      '/tmp/project',
+    );
+    expect(
+      sessionCatalogController.invalidateWorkspace,
+    ).not.toHaveBeenCalledWith('/tmp/other-project');
   });
 
   it('reloads the transcript when a historical checkpoint becomes stale', async () => {
@@ -20567,6 +21122,9 @@ describe('App session callbacks', () => {
       user: 0,
       workspace: 0,
     });
+    expect(testState.latestChatEditorProps?.composerIntegrations).toBe(
+      DAEMON_COMPOSER_INTEGRATIONS,
+    );
   });
 
   it('keeps primary Voice model reads and writes on legacy routes', async () => {
@@ -46398,6 +46956,76 @@ describe('App session callbacks', () => {
     expect(testState.latestSessionOverviewProps?.manageLiveState).toBe(false);
   });
 
+  it('clears a removed current session without allocating during overload', async () => {
+    overloadPauseStub.paused = true;
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.({
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+      });
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+    expect(
+      container.querySelector('[data-testid="session-overview-panel"]'),
+    ).not.toBeNull();
+  });
+
+  it('clears a removed standalone session during pause without a workspace cwd', async () => {
+    overloadPauseStub.paused = true;
+    mockConnection.sessionId = 'standalone-old';
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(testState.latestSessionOverviewProps).not.toBeNull();
+    await act(async () => {
+      await testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.({
+        sessionId: 'standalone-old',
+        workspaceCwd: '',
+      });
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+  });
+
   it('clears a legacy current session without a connection workspace cwd', async () => {
     mockConnection.workspaceCwd = '';
     mockWorkspace.capabilities = {
@@ -46662,6 +47290,34 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="session-overview-panel"]'),
     ).not.toBeNull();
+  });
+
+  it('leaves the Session Overview during overload without creating a new task', async () => {
+    overloadPauseStub.paused = true;
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    onSessionIdChange.mockClear();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="panel-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(onSessionIdChange).not.toHaveBeenCalledWith(undefined);
   });
 
   it('starts a new session when leaving the Session Overview with Back', async () => {
@@ -65282,6 +65938,757 @@ describe('upstream embedded transport reproduction', () => {
     await flush();
     expect(testState.latestMessageListProps?.activeTurnStartedAt).toBe(1000);
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+});
+
+describe('overload pause guards in App', () => {
+  const armOverload = () => {
+    overloadPauseStub.paused = true;
+    overloadPauseStub.pollOverloaded = true;
+    overloadPauseStub.loadAdmission = {
+      enabled: true,
+      overloaded: true,
+      reason: 'cpu_load',
+      loadRatio: 2.5,
+      eventLoopLagP99Ms: 20,
+      sampledAtMs: 1_000,
+    };
+  };
+
+  it('refuses !ls from an empty draft with one warning toast and no sendShellCommand', async () => {
+    armOverload();
+    mockConnection.sessionId = null;
+    const toasts: Array<[string, string]> = [];
+    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    await flush();
+    toasts.length = 0;
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('!ls');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('refuses a paused shell command before a session-less busy draft can queue it', async () => {
+    armOverload();
+    mockConnection.sessionId = null;
+    testState.streamingState = 'waiting';
+    const toasts: Array<[string, string]> = [];
+    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    await flush();
+    toasts.length = 0;
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('!ls');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('refuses /branch before allocating a restored branch while paused', async () => {
+    armOverload();
+    mockConnection.sessionId = 'source-session';
+    const toasts: Array<[string, string]> = [];
+    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    await flush();
+    toasts.length = 0;
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/branch feature-x');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(mockSessionActions.branchSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('refuses checkpoint activation while paused instead of guessing runtime reuse', async () => {
+    armOverload();
+    mockConnection.sessionId = 'source-session';
+    Object.assign(mockWorkspace.capabilities, {
+      features: ['session_branch_worktree'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    });
+    const workspaceGit = vi.fn().mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      worktreeSupported: true,
+    });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    toasts.length = 0;
+    workspaceGit.mockClear();
+
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(workspaceGit).not.toHaveBeenCalled();
+    expect(mockSessionActions.branchSession).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="radio"]')).toBeNull();
+    expect(toasts).toEqual([
+      ['warning', expect.stringContaining('Host load ratio 2.50')],
+    ]);
+  });
+
+  it('keeps the draft when overload begins during async preflight', async () => {
+    mockConnection.sessionId = undefined;
+    const beforeSubmit = deferred<void>();
+    const onSubmitBefore = vi.fn(() => beforeSubmit.promise);
+    const toasts: Array<[string, string]> = [];
+    const { rerender } = renderApp({
+      onSubmitBefore,
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = 'preserve this preflight draft';
+    let submitted: void | boolean | Promise<boolean | void>;
+    act(() => {
+      submitted = testState.latestChatEditorProps?.onSubmit(
+        'preserve this preflight draft',
+      );
+    });
+    await vi.waitFor(() => {
+      expect(onSubmitBefore).toHaveBeenCalledOnce();
+    });
+
+    await act(async () => {
+      armOverload();
+      rerender();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      beforeSubmit.resolve();
+      await submitted;
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('preserve this preflight draft');
+    expect(toasts).toEqual([
+      ['warning', expect.stringContaining('Host load ratio 2.50')],
+    ]);
+  });
+
+  it('refuses an ordinary first prompt while paused and preserves the draft', async () => {
+    armOverload();
+    mockConnection.sessionId = undefined;
+    const toasts: Array<[string, string]> = [];
+    const onSubmitBefore = vi.fn();
+    const { container } = renderApp({
+      onSubmitBefore,
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = 'first prompt under overload';
+    toasts.length = 0;
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSubmitBefore).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('first prompt under overload');
+    expect(toasts).toEqual([
+      ['warning', expect.stringContaining('Host load ratio 2.50')],
+    ]);
+  });
+
+  it('returns false for an ordinary first prompt while paused', async () => {
+    armOverload();
+    mockConnection.sessionId = undefined;
+    const onSubmitBefore = vi.fn();
+    const toasts: Array<[string, string]> = [];
+    renderApp({
+      onSubmitBefore,
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = 'ordinary first prompt';
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = await testState.latestChatEditorProps?.onSubmit(
+        'ordinary first prompt',
+      );
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(onSubmitBefore).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('ordinary first prompt');
+    expect(toasts).toEqual([
+      ['warning', expect.stringContaining('Host load ratio 2.50')],
+    ]);
+  });
+
+  it('keeps /fork on the existing ACP runtime while paused', async () => {
+    armOverload();
+    mockConnection.sessionId = 'source-session';
+    mockSessionActions.forkSession.mockResolvedValue({
+      launched: true,
+      description: 'write tests',
+    });
+    const toasts: Array<[string, string]> = [];
+    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    await flush();
+    toasts.length = 0;
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/fork write tests');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(true);
+    expect(mockSessionActions.forkSession).toHaveBeenCalledWith('write tests');
+    expect(toasts.every(([tone]) => tone !== 'warning')).toBe(true);
+  });
+
+  it('refuses /goal set from an empty draft with one warning toast and no noSession error', async () => {
+    armOverload();
+    mockConnection.sessionId = null;
+    const toasts: Array<[string, string]> = [];
+    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    await flush();
+    toasts.length = 0;
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit(
+        '/goal set keep tests green',
+      );
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('rejects a paused unbound manual run with an already-dispatched overload error and one warning toast', async () => {
+    armOverload();
+    mockConnection.sessionId = null;
+    mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    const props = testState.latestScheduledTasksProps;
+    const handler = props?.onRunPrompt;
+    if (!handler || !props) throw new Error('ScheduledTasksProps not captured');
+    expect(
+      props.shouldRefuseManualRun?.({
+        recurring: false,
+        sessionId: null,
+        sessionMode: 'persistent',
+      }),
+    ).toBe(true);
+    toasts.length = 0;
+
+    let caught: unknown;
+    try {
+      await handler('check status', null);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe(
+      'System overloaded — new tasks paused',
+    );
+    expect(
+      (caught as Error & { _alreadyDispatched?: boolean })._alreadyDispatched,
+    ).toBe(true);
+    // Forward the caught error to ScheduledTasksDialog's onError (reportError)
+    // as handleRunNow's catch does: _alreadyDispatched must suppress a second
+    // error-toned toast.
+    props.onError(caught, 'Failed to run task');
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+  });
+
+  it('pauses on a structured cold scheduled-task overload without an error toast', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    const onError = testState.latestScheduledTasksProps?.onError;
+    expect(onError).toBeTypeOf('function');
+
+    await act(async () => {
+      onError!(
+        new DaemonHttpError(
+          503,
+          {
+            error: 'System overloaded (cpu_load)',
+            code: 'system_overloaded',
+          },
+          'POST /scheduled-tasks/task-1/run: System overloaded (cpu_load)',
+        ),
+        'Failed to run task',
+      );
+      await Promise.resolve();
+    });
+
+    expect(toasts).toEqual([
+      [
+        'warning',
+        'POST /scheduled-tasks/task-1/run: System overloaded (cpu_load)',
+      ],
+    ]);
+    const newSession = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    );
+    expect(newSession).not.toBeNull();
+    toasts.length = 0;
+    await act(async () => {
+      newSession!.click();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(toasts).toEqual([
+      [
+        'warning',
+        'POST /scheduled-tasks/task-1/run: System overloaded (cpu_load)',
+      ],
+    ]);
+  });
+
+  it('refuses createNewSession at the App root with a warning toast while paused', async () => {
+    armOverload();
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    toasts.length = 0;
+
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    );
+    expect(btn).not.toBeNull();
+    await act(async () => {
+      btn!.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('refuses an explicit ordinary workspace creation while paused', async () => {
+    armOverload();
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    toasts.length = 0;
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-session-primary-workspace"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toEqual([
+      ['warning', expect.stringContaining('Host load ratio 2.50')],
+    ]);
+  });
+
+  it('does not let an inherited recovery retry bypass overload pause', async () => {
+    armOverload();
+    mockConnection.sessionId = 'session-1';
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.standaloneSession = {
+      creationRecovery: { state: 'absent', sessionId: 'session-1' },
+    };
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    mockWorkspace.client.getStandaloneSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        {
+          error: 'Standalone session not found',
+          code: 'standalone_session_not_found',
+        },
+        'Standalone session not found',
+      ),
+    );
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+        .find((button) => button.textContent?.trim() === 'Check status')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(
+        Array.from(
+          container.querySelectorAll<HTMLButtonElement>('button'),
+        ).some(
+          (button) =>
+            button.textContent?.trim() === 'Start a fresh conversation',
+        ),
+      ).toBe(true);
+    });
+
+    const retry = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find(
+      (button) => button.textContent?.trim() === 'Start a fresh conversation',
+    );
+    expect(retry).toBeDefined();
+    await act(async () => {
+      retry?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+  });
+
+  it('pauses creation reactively when a system_overloaded create_session notice arrives', async () => {
+    testState.notices = [
+      {
+        id: 'overload-1',
+        severity: 'error',
+        category: 'user_action',
+        operation: 'create_session',
+        code: 'system_overloaded',
+        message: 'System overloaded (cpu_load: load ratio 3.00)',
+        createdAt: Date.now(),
+      },
+    ];
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    toasts.length = 0;
+
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    );
+    expect(btn).not.toBeNull();
+    await act(async () => {
+      btn!.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toBe(
+      'System overloaded (cpu_load: load ratio 3.00)',
+    );
+  });
+
+  it.each([
+    'branch_session',
+    'fork_session',
+    'load_session',
+    'resume_session',
+  ] as const)(
+    'reactively pauses creation on a %s overload notice',
+    async (operation) => {
+      const message = `System overloaded (cpu_load: ${operation})`;
+      testState.notices = [
+        {
+          id: `overload-${operation}`,
+          severity: 'error',
+          category: 'user_action',
+          operation,
+          code: 'system_overloaded',
+          message,
+          createdAt: Date.now(),
+        },
+      ];
+      const toasts: Array<[string, string]> = [];
+      const { container } = renderApp({
+        onToast: (tone, msg) => toasts.push([tone, msg]),
+      });
+      await flush();
+      toasts.length = 0;
+
+      const btn = container.querySelector<HTMLButtonElement>(
+        '[data-testid="new-session"]',
+      );
+      // Native disabled styling is owned by WebShellSidebar and its
+      // dedicated UI tests; this lightweight sidebar mock drives App handlers.
+      expect(btn).not.toBeNull();
+      await act(async () => {
+        btn!.click();
+        await Promise.resolve();
+      });
+      await flush();
+
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+      expect(toasts).toEqual([['warning', message]]);
+    },
+  );
+
+  it('refuses @-mention from a session-less draft with one warning toast and no noSession error', async () => {
+    armOverload();
+    mentionApiSpy.mockClear();
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['agent_collaboration_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = url.includes('/agent/agents')
+        ? {
+            agents: [
+              {
+                id: 'a1',
+                name: 'helper',
+                enabled: true,
+                status: 'idle',
+                waiting: 0,
+              },
+            ],
+          }
+        : url.includes('/agent/squads')
+          ? { squads: [] }
+          : {};
+      return { ok: true, json: async () => body } as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const toasts: Array<[string, string]> = [];
+    try {
+      renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+      await flush();
+      toasts.length = 0;
+
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('@helper please review');
+        await Promise.resolve();
+      });
+      await flush();
+
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(mentionApiSpy).not.toHaveBeenCalled();
+      expect(toasts).toHaveLength(1);
+      expect(toasts[0]?.[0]).toBe('warning');
+      expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('refuses New side task while paused with one warning toast and no createSideTaskSession call', async () => {
+    armOverload();
+    mockConnection.sessionId = 'parent-session-1';
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_side_task', 'scheduled_task_session_reuse'],
+    } as typeof mockConnection.capabilities;
+    mockWorkspace.client.createSideTaskSession.mockClear();
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    toasts.length = 0;
+
+    const panelProps = testState.latestArtifactPanelProps;
+    expect(panelProps).not.toBeNull();
+    expect(panelProps?.overloadPaused).toBe(true);
+
+    await act(async () => {
+      panelProps?.onCreateSideTask?.();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockWorkspace.client.createSideTaskSession).not.toHaveBeenCalled();
+    expect(
+      testState.latestArtifactPanelProps?.tabs.some(
+        (tab) => tab.kind === 'side_task',
+      ),
+    ).toBe(false);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('guards the low-level side-task creation retry and preserves the boolean API', async () => {
+    armOverload();
+    mockConnection.sessionId = 'parent-session-1';
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_side_task'],
+    } as typeof mockConnection.capabilities;
+    mockWorkspace.client.createSideTaskSession.mockClear();
+    const toasts: Array<[string, string]> = [];
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({
+      shellRef,
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    toasts.length = 0;
+
+    let created: boolean | undefined;
+    act(() => {
+      created = shellRef.current?.createSideTask();
+    });
+    expect(created).toBe(false);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    toasts.length = 0;
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    const createSession =
+      testState.latestArtifactPanelProps?.onCreateSideTaskSession;
+    expect(createSession).toBeTypeOf('function');
+    await act(async () => {
+      let caught: unknown;
+      try {
+        await createSession?.('retry-tab', 'parent-session-1', 'Retry task');
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({ _alreadyDispatched: true });
+      testState.latestArtifactPanelProps?.onError?.(
+        caught,
+        'sideTask.createFailed',
+      );
+    });
+
+    expect(mockWorkspace.client.createSideTaskSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+  });
+
+  it('pins live-session reuse and per-run refusal in the one-shot predicate', async () => {
+    armOverload();
+    mockConnection.sessionId = 'live-session';
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+
+    const predicate =
+      testState.latestScheduledTasksProps?.shouldRefuseManualRun;
+    expect(predicate).toBeTypeOf('function');
+    const unbound = {
+      recurring: false,
+      sessionId: null,
+      sessionMode: 'persistent' as const,
+    };
+    expect(predicate?.(unbound)).toBe(false);
+    expect(predicate?.({ ...unbound, sessionId: 'live-session' })).toBe(false);
+    expect(predicate?.({ ...unbound, sessionId: 'another-live-session' })).toBe(
+      true,
+    );
+    mockConnection.status = 'disconnected';
+    expect(predicate?.({ ...unbound, sessionId: 'live-session' })).toBe(true);
+    mockConnection.status = 'connected';
+    mockConnection.loadingTranscript = true;
+    expect(predicate?.({ ...unbound, sessionId: 'live-session' })).toBe(true);
+    mockConnection.loadingTranscript = false;
+    expect(predicate?.({ ...unbound, sessionMode: 'per_run' })).toBe(true);
+
+    mockConnection.sessionId = null;
+    expect(predicate?.(unbound)).toBe(true);
   });
 });
 

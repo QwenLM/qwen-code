@@ -49,6 +49,11 @@ describe('parseAutofixPrTick', () => {
         'Run /autofix-pr tick my-org/repo.js#7 --task feedc0ffee12 --no-reply -- keep the API',
       ),
     ).toEqual({ repo: 'my-org/repo.js', pr: 7, task: 'feedc0ffee12' });
+    expect(
+      parseAutofixPrTick(
+        'Run /autofix-pr tick o/r#12 --task feedc0ffee12 --in-place --no-reply -- keep API',
+      ),
+    ).toEqual({ repo: 'o/r', pr: 12, task: 'feedc0ffee12' });
   });
 
   it('takes no other prompt for a watch', () => {

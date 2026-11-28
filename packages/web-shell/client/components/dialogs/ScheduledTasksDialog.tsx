@@ -187,6 +187,11 @@ interface ScheduledTasksDialogProps {
   /** The daemon advertises `autofix_pr_watches`: the card of an
    * `/autofix-pr` watch's task shows the watch's state, and can stop it. */
   autofixPrWatchesAvailable?: boolean;
+  /** Re-read live App state after refresh, before a manual run consumes a
+   * one-shot or dispatches a fresh-session attempt that must be refused. */
+  shouldRefuseManualRun?: (task: DaemonScheduledTask) => boolean;
+  overloadDetail?: string;
+  onOverloadRefused?: () => void;
   isTaskDeleted?: (task: {
     id: string;
     workspaceId?: string;
@@ -668,6 +673,9 @@ export function ScheduledTasksDialog({
   deliveryAvailable = false,
   observedContactsAvailable = false,
   autofixPrWatchesAvailable = false,
+  shouldRefuseManualRun,
+  overloadDetail,
+  onOverloadRefused,
   isTaskDeleted,
   onTaskDeleted,
   onTaskMutated,
@@ -1580,6 +1588,9 @@ export function ScheduledTasksDialog({
             confirmedDeletionsRef.current.has(taskDeletionKey(task)) ||
             isTaskDeleted?.(task) === true,
           onOneShotError: onError,
+          shouldRefuseManualRun,
+          overloadDetail,
+          onOverloadRefused,
         });
       } finally {
         if (mountedRef.current) setRunningTaskId(null);
@@ -1590,10 +1601,13 @@ export function ScheduledTasksDialog({
       currentSession?.sessionId,
       isTaskDeleted,
       onError,
+      onOverloadRefused,
       onRunPrompt,
       onTaskMutated,
+      overloadDetail,
       reload,
       runningTaskId,
+      shouldRefuseManualRun,
       t,
     ],
   );

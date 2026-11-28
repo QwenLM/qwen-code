@@ -2479,6 +2479,9 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.toggleMenu': 'Toggle menu',
   'sidebar.newChat': 'New chat',
   'sidebar.newTask': 'New session',
+  'sidebar.overloadPaused': 'System overloaded — new tasks paused',
+  'sidebar.overloadDetail': (v) =>
+    `Host load ratio ${v?.['ratio'] ?? '?'}, event-loop p99 ${v?.['lag'] ?? '?'} ms (${v?.['reason'] ?? 'unknown'}). New tasks resume when load subsides.`,
   'sidebar.newWorktreeTask': 'New worktree session',
   'sidebar.moveWorkspaceUp': 'Move up',
   'sidebar.moveWorkspaceDown': 'Move down',
@@ -3010,18 +3013,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'The model got stuck while using tools or reached a safety limit, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
   'error.loopDetected.explicitCap': (vars) =>
     `This turn reached the limit of ${vars?.limit} tool calls set by model.maxToolCallsPerTurn, so it was stopped. Your session is still open—raise the limit in your settings, or send a new instruction to continue.`,
-  'error.loopDetected.backstop': (vars) =>
-    `This turn reached the safety limit of ${vars?.limit} tool calls, so it was stopped. Your session is still open—send a new instruction to continue, or set model.maxToolCallsPerTurn to choose a different limit.`,
-  'error.loopDetected.stuckRepetition': (vars) =>
-    `After more than ${vars?.limit} tool calls, the model kept repeating the same call, so this turn was stopped. Your session is still open—try a different or more specific instruction.`,
-  'error.loopDetected.repeatedCall':
-    'The model kept repeating the same tool call during this turn, so it was stopped. Your session is still open—try a different or more specific instruction.',
   'error.loopDetected.providerDuplicateId':
     'The model service sent a tool call that had already run, so this turn was stopped instead of running it again. Your session is still open—send a new message to continue.',
-  'error.loopDetected.invalidToolParams':
-    'The model kept sending invalid arguments to the same tool, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
-  'error.loopDetected.repeatedToolFailure':
-    'The same tool kept failing for the same reason after a reminder, so this turn was stopped. Your session is still open—check the errors above, or try a different approach.',
   'shell.command': 'Shell Command',
   'shell.result.timedOut': 'Timed out',
   'shell.result.notices': 'Notices',
