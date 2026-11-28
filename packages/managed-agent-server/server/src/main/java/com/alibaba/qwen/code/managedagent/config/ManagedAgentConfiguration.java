@@ -63,6 +63,7 @@ import java.util.ArrayList;
     ParkedMcpReclamationConfiguration.class,
     ManagedArtifactConfiguration.class,
     ToolPublicationConfiguration.class,
+    SessionResourceGcConfiguration.class,
     EventTransportConfiguration.class,
     ManagedMemoryConfiguration.class,
     AliyunToolPublicationStorageAutoConfiguration.class

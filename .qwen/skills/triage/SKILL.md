@@ -112,10 +112,14 @@ labels are escaped safely). Actions execute in file order:
 
 Rules the publisher enforces (fail-closed; do not rely on leniency):
 
-- Comment bodies must start with the exact marker line
-  `<!-- qwen-triage <marker> -->`; markers are limited to `stage=1`,
-  `stage=2`, `stage=3`, `stage=1-pre`, `stage=1b`.
-- Bodies are capped at 65,536 characters — rejected, not truncated.
+- Markers are limited to `stage=1`, `stage=2`, `stage=3`, `stage=1-pre`,
+  `stage=1b`. Write `<!-- qwen-triage <marker> -->` as the first line of
+  each comment body; the publisher enforces that exact first line (prepending
+  it when omitted, normalizing leading blank lines or whitespace on a
+  matching marker, and rejecting empty bodies or any mismatched/malformed
+  leading `<!-- qwen-triage ... -->` comment).
+- Bodies are capped at 65,536 characters (checked after any marker prefix is
+  added) — rejected, not truncated.
 - `APPROVE` requires the full reviewed `commit_id`; the publisher skips it
   as stale if the head moved, and suppresses duplicate approvals and
   duplicate `CHANGES_REQUESTED` reviews.

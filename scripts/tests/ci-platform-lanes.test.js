@@ -1923,6 +1923,16 @@ describe('platform lanes — the retired sensitivity classifier', () => {
 });
 
 describe('GitHub helper tests', () => {
+  it('includes the precheck production and real-workflow suites on both lanes', () => {
+    for (const suite of [
+      '.github/scripts/pr-safety-precheck.test.mjs',
+      '.github/scripts/pr-safety-precheck.workflow.test.mjs',
+    ]) {
+      expect(ci.env.HELPER_TESTS).toContain(suite);
+      expect(ci.env.HELPER_TESTS_DEP_FREE).toContain(suite);
+    }
+  });
+
   it('includes the disk-pressure contract suite', () => {
     expect(ci.env.HELPER_TESTS).toContain(
       '.github/scripts/ci-disk-pressure.test.mjs',

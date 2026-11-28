@@ -105,6 +105,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsEventIngest() {
+        return call(delegate::supportsEventIngest);
+    }
+
+    @Override
     public ContextCompressionSubmission prepareContextCompression(String tenantId, String sessionId,
             Map<String, Object> body) {
         return call(() -> {
@@ -349,6 +354,12 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     public Admission submit(String tenantId, String sessionId, String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
         return call(() -> delegate.submit(tenantId, sessionId, promptId, input, payloadDigest));
+    }
+
+    @Override
+    public Admission submit(String tenantId, String sessionId, String promptId,
+            List<Map<String, Object>> input, String payloadDigest, String ingestTurnId) {
+        return call(() -> delegate.submit(tenantId, sessionId, promptId, input, payloadDigest, ingestTurnId));
     }
 
     @Override

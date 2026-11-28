@@ -5,7 +5,6 @@
  */
 
 import { createRequire } from 'node:module';
-import * as path from 'node:path';
 import { expect } from 'vitest';
 
 /** The node:fs calls the probe makes. */
@@ -17,14 +16,15 @@ export interface ProbeFs {
   rmSync(path: string, options: { recursive: boolean; force: boolean }): void;
 }
 
-// The real node:fs and node:os, even when the test file that asks has
-// vi.mock()ed them: vitest mocks its own module graph, not a builtin loaded
-// through Node's require. A mocked fs would answer for the mock, not the
-// kernel. A vi.spyOn on node:fs's default export at collection time would
+// The real node:fs, node:os and node:path, even when the test file that asks
+// has vi.mock()ed them: vitest mocks its own module graph, not a builtin loaded
+// through Node's require. A mocked fs or path would answer for the mock, not
+// the kernel. A vi.spyOn on node:fs's default export at collection time would
 // still reach the probe, since that export is this same module object.
 const nodeRequire = createRequire(import.meta.url);
 const realFs = nodeRequire('node:fs') as typeof import('node:fs');
 const realOs = nodeRequire('node:os') as typeof import('node:os');
+const realPath = nodeRequire('node:path') as typeof import('node:path');
 
 /**
  * Whether file permission bits bind this process, for tests that force a
@@ -41,12 +41,14 @@ export function arePermissionBitsEnforced(fs: ProbeFs = realFs): boolean {
   if (process.platform === 'win32') return false;
   let dir: string | undefined;
   try {
-    dir = fs.mkdtempSync(path.join(realOs.tmpdir(), 'qwen-permission-probe-'));
+    dir = fs.mkdtempSync(
+      realPath.join(realOs.tmpdir(), 'qwen-permission-probe-'),
+    );
     fs.chmodSync(dir, 0o000);
     const probe = dir;
     return (
       refused(() => fs.readdirSync(probe)) &&
-      refused(() => fs.writeFileSync(path.join(probe, 'probe'), ''))
+      refused(() => fs.writeFileSync(realPath.join(probe, 'probe'), ''))
     );
   } catch (error) {
     // A temp directory that cannot hold the probe, or refuses chmod,
@@ -123,7 +125,7 @@ function causeOf(error: unknown): string {
 function askedBy(): string {
   const testPath = attempt(() => expect.getState().testPath);
   if (!testPath) return '';
-  return ` for ${attempt(() => path.relative(process.cwd(), testPath)) ?? testPath}`;
+  return ` for ${attempt(() => realPath.relative(process.cwd(), testPath)) ?? testPath}`;
 }
 
 function attempt<T>(read: () => T): T | undefined {

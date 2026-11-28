@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import fs from 'node:fs';
 import {
   SessionIdCaseConflictError,
   SessionService,
@@ -33,6 +32,7 @@ import {
 } from '../scheduled-task-session-lifecycle.js';
 import {
   acquireWorktreeCleanupLock,
+  areWorktreeSidecarsAbsent,
   executeWorktreeCleanup,
   logWorktreeCleanupPreserve,
   preclassifyWorktreeCleanup,
@@ -577,26 +577,6 @@ export function sessionLiveOnBridge(
   return false;
 }
 
-async function prepareWorktreeCleanup(
-  service: SessionService,
-  sessionId: string,
-  runtimeWorkspaceCwd?: string,
-) {
-  const activeSidecarPath = service.getWorktreeSessionPath(sessionId);
-  const archivedSidecarPath = service.getWorktreeSessionPathForArchiveState(
-    sessionId,
-    'archived',
-  );
-  if (
-    !fs.existsSync(activeSidecarPath) &&
-    (archivedSidecarPath === activeSidecarPath ||
-      !fs.existsSync(archivedSidecarPath))
-  ) {
-    return undefined;
-  }
-  return preclassifyWorktreeCleanup(service, sessionId, runtimeWorkspaceCwd);
-}
-
 export async function deleteDaemonSessions(params: {
   sessionIds: string[];
   service: SessionService;
@@ -655,19 +635,10 @@ export async function deleteDaemonSessions(params: {
     // an awaited pre-read here reshuffles which sibling reaches
     // `runExclusiveMany` first and made the gate-race test
     // non-deterministic (#11024).
-    const activeSidecarPath = service.getWorktreeSessionPath(sessionId);
-    const archivedSidecarPath = service.getWorktreeSessionPathForArchiveState(
-      sessionId,
-      'archived',
-    );
-    if (
-      !fs.existsSync(activeSidecarPath) &&
-      (archivedSidecarPath === activeSidecarPath ||
-        !fs.existsSync(archivedSidecarPath))
-    ) {
+    if (areWorktreeSidecarsAbsent(service, sessionId)) {
       return coordinator.runExclusiveMany([sessionId], mutateSession);
     }
-    const cleanupPlan = await prepareWorktreeCleanup(
+    const cleanupPlan = await preclassifyWorktreeCleanup(
       service,
       sessionId,
       runtimeWorkspaceCwd,

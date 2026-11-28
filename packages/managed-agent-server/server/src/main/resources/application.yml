@@ -46,6 +46,8 @@ qwen:
     side-queries-enabled: '${QWEN_MANAGED_AGENT_SIDE_QUERIES_ENABLED:false}'
     wake-dispatch:
       enabled: '${QWEN_MANAGED_AGENT_WAKE_DISPATCH_ENABLED:false}'
+    event-ingest:
+      enabled: '${QWEN_MANAGED_AGENT_EVENT_INGEST_ENABLED:false}'
     definition-models: '${QWEN_MANAGED_AGENT_DEFINITION_MODELS:}'
     definition-tool-profiles: '${QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES:hosted-workspace-files/1}'
     trusted-actor-header: '${QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER:}'
@@ -75,6 +77,12 @@ qwen:
       gc-enabled: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_GC_ENABLED:false}'
       deletion-grace: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_DELETION_GRACE:24h}'
       verification-concurrency: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_VERIFICATION_CONCURRENCY:2}'
+    session-resource-gc:
+      enabled: '${QWEN_MANAGED_AGENT_SESSION_RESOURCE_GC_ENABLED:false}'
+      worker-enabled: '${QWEN_MANAGED_AGENT_SESSION_RESOURCE_GC_WORKER_ENABLED:true}'
+      endpoints: '${QWEN_MANAGED_AGENT_SESSION_RESOURCE_GC_ENDPOINTS:}'
+      topic: '${QWEN_MANAGED_AGENT_SESSION_RESOURCE_GC_TOPIC:}'
+      consumer-group: '${QWEN_MANAGED_AGENT_SESSION_RESOURCE_GC_CONSUMER_GROUP:}'
     harness:
       enabled: '${QWEN_MANAGED_AGENT_HARNESS_ENABLED:false}'
       workspace-files-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED:false}'

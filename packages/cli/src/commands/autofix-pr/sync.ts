@@ -27,6 +27,8 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { git, gitOpt, gitRaw } from '../review/lib/git.js';
 import { liveDestination, withLiveBase } from './push.js';
 import {
+  assertTreeHasNoWatchFiles,
+  assertWatchFilesNotTracked,
   assertWatching,
   TASK_OPTION,
   taskArg,
@@ -313,6 +315,8 @@ function syncLocked(
       );
     }
     if (inPlace) {
+      assertWatchFilesNotTracked(worktree, prNumber);
+      assertTreeHasNoWatchFiles(worktree, prNumber, prHead);
       // The dirty gate ignores ignored files on purpose; the merge must not
       // overwrite them when the PR head starts tracking the same path.
       // --no-overwrite-ignore refuses instead, and the collision is the
