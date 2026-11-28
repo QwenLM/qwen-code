@@ -613,7 +613,7 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     },
   );
 
-  it('selects only the exact archive key and rejects missing or foreign pairs', async () => {
+  it('selects only the exact archive key and rejects malformed or foreign pairs', async () => {
     for (let index = 0; index < 2; index++) {
       await fs.writeFile(path.join(worktree, 'committed.txt'), `edit-${index}`);
       await captureWorktreeSnapshot({

@@ -153,7 +153,7 @@ live 判断中，只有明确 not-found 且不在 closing 的会话才算消失�
 - 要求普通文件及已有 no-symlink/link ownership 输入约束；以及
 - 依次比较头部 `createdAt`、归档 `mtimeNs`、完整归档路径的确定性顺序，绝不依赖目录枚举顺序。文件系统的 `mtimeNs` 必须作为 `bigint` 比较，不得转成 `Number`；如需写进 JSON 证据，应序列化为十进制字符串。
 
-竞争头部不可读或畸形、版本未知或目录不可读时，拒绝选择；不能静默回退到一个看似有效的旧归档。无关文件不得被臆造为会话快照。显式绑定的 `archiveKey` 只对对应的精确 pair 做查找和验证；其它文件或归档对既不能阻断这个有效目标，也不能被提升成备选。未显式指定 key 的最新选择会忽略已被完整可读头部证明属于其它 slug 的配对，但不会仅凭前缀转移归属。其它 session、不可读或畸形头部、未知版本、不完整配对及文件系统错误仍按失败关闭处理，不能据此接受一个任意归档。
+竞争头部不可读或畸形、版本未知或目录不可读时，拒绝选择；不能静默回退到一个看似有效的旧归档。无关文件不得被臆造为会话快照。显式绑定的 `archiveKey` 只查找并验证对应的精确配对。任一成员缺失时返回无匹配，无关配对不能阻断或替代指定配对。未指定 key 时，检查配对成员遇到 `ENOENT` 则跳过该候选并继续查找。完整可读头部证明属于其它 slug 的配对也会被跳过，文件名前缀本身不能转移归属。其它 session、不可读或畸形的头部、未知版本、不安全的成员及其它文件系统错误都会拒绝选择。
 
 既有 `checkoutMatchesCapture` 是捕获时结果，而不是写入归档的持久认证。选择不代表归档有签名，也不证明过去的删除一定已提交。它只为后续受保护恢复建立结构、归属绑定和确定性选择。
 
@@ -261,7 +261,7 @@ worktree ownership lease 在 archive exclusive 结束后延续到 ordinary load�
 2. 保留清扫恰好保留最近 N 个合规 worktree；`0` 禁用；active/pinned 独立保护。非法设置、pin store 状态未知、根冲突及 ownership 未知均保留。
 3. 保留清扫后 chat/transcript/sidecar 仍存活；文件系统确认 checkout 已移除；每个接受的移除都有可定位的归档对。普通 archive/unarchive 仍保留已有 checkout 内容与绑定。
 4. 恢复按捕获 HEAD 重建托管目标，保留真实 dirty/deleted/mode/link 内容。不得覆盖已有非空目标，也不得强制回退已前进的命名分支。
-5. 对象缺失、头部畸形、归档对不完整、恶意归档成员或陈旧、错误的 workspace 均失败关闭，不转移 ownership、不丢弃归档。
+5. 恢复所需对象缺失、头部畸形、恶意归档成员或陈旧、错误的 workspace 均失败关闭，不转移归属、不丢弃归档。未指定 key 时跳过缺少配对成员的候选。指定 key 的恢复必须使用精确绑定的配对。
 6. 移除后 sidecar 写入失败要通过严格 ownership 与有效归档对修复；恢复后、绑定前失败只能通过严格匹配的验证完成，不能盲目重新解档。
 7. scheduled activity 防止 shutdown 遗留未完成工作；retention、archive、reset 和 restore 的 ownership 关键区段均串行。
 8. 既有响应保持兼容；SDK 方法实际调用正确的 scoped 路由；Session Overview 的真实恢复点击触发实际 HTTP 恢复，并能成功 load。
