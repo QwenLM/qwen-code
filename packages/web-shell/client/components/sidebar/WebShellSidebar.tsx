@@ -643,6 +643,8 @@ interface WebShellSidebarProps {
   overloadDetail?: string;
   onOverloadRefused?: () => void;
   onNewStandaloneSession?: () => Promise<boolean> | boolean;
+  onLeaveCurrentStandaloneForDelete: (sessionId: string) => Promise<boolean>;
+  currentSessionRunning?: boolean;
   standaloneSessionsReloadToken?: number;
   onLoadSession: (
     sessionId: string,
@@ -1321,6 +1323,8 @@ export function WebShellSidebar({
   overloadDetail,
   onOverloadRefused,
   onNewStandaloneSession,
+  onLeaveCurrentStandaloneForDelete,
+  currentSessionRunning,
   standaloneSessionsReloadToken = 0,
   onLoadSession,
   onOpenHostSession,
@@ -6223,7 +6227,10 @@ export function WebShellSidebar({
         !session.hasActivePrompt && session.activeWorkState === 'active';
       // Archiving closes the live session daemon-side, which would end the
       // running work; keep the action visible but inert while it runs.
-      const running = hasLiveWork(session);
+      const currentStandaloneRunning = Boolean(
+        standalone?.active && currentSessionRunning,
+      );
+      const running = hasLiveWork(session) || currentStandaloneRunning;
       const backgroundRunning =
         !session.hasActivePrompt && session.hasRunningBackgroundTasks;
       // The status dot is prompt-gated, so a turn in flight hides the background
@@ -6283,22 +6290,19 @@ export function WebShellSidebar({
       const showDelete = standalone
         ? sessionActionItems.has('delete')
         : canShowDeleteSession(session);
-      // `showDelete` already applied the workspace-scope gate — standalone rows
-      // bypass it on purpose — so the disabled state only carries #12619's rule:
-      // the session this client is attached to is deletable once it goes idle.
-      // The no-workspace row is the exception: its delete route answers
-      // `session_busy` while this tab is still attached, so offering it would be
-      // a button that can never succeed. Keep it disabled until the user opens
-      // another chat (leaving first, then deleting, is tracked separately).
-      const currentStandalone = Boolean(standalone?.active);
-      // The attached session is only deletable once nothing runs (#12619).
-      // Background work additionally blocks any row: the delete route has no
-      // idle guard, so confirming would kill work the row says is running,
-      // and the Session Overview card already refuses the same session.
-      const deleteBlocked = sessionBlocksDelete(session, isCurrent);
-      const deleteDisabled = busy || currentStandalone || deleteBlocked;
-      const deleteDisabledTitle = currentStandalone
-        ? t('sidebar.currentStandaloneDeleteDisabled')
+      const currentStandaloneNotReady = Boolean(
+        standalone?.active &&
+          (connection.status !== 'connected' ||
+            !connection.clientId ||
+            connection.error ||
+            connection.loadingTranscript ||
+            connection.catchingUp),
+      );
+      const deleteBlocked =
+        sessionBlocksDelete(session, isCurrent) || currentStandaloneRunning;
+      const deleteDisabled = busy || currentStandaloneNotReady || deleteBlocked;
+      const deleteDisabledTitle = currentStandaloneNotReady
+        ? t('sidebar.currentStandaloneNotReady')
         : isCurrent && running
           ? t('sidebar.currentDeleteDisabled')
           : deleteBlocked
@@ -6841,7 +6845,12 @@ export function WebShellSidebar({
       bulkWorking,
       canArchiveSession,
       busySessionIds,
+      connection.catchingUp,
+      connection.clientId,
+      connection.loadingTranscript,
+      connection.status,
       canDeleteSession,
+      currentSessionRunning,
       canShowDeleteSession,
       canOrganizeSession,
       canRenameSession,
@@ -7609,6 +7618,7 @@ export function WebShellSidebar({
             })
           }
           onLoadSession={onLoadStandaloneSession}
+          onLeaveCurrentSession={onLeaveCurrentStandaloneForDelete}
           onRenameSession={(sessionId, displayName) =>
             onSessionRenameConfirmed?.(undefined, sessionId, displayName)
           }
@@ -7688,6 +7698,7 @@ export function WebShellSidebar({
     handleStandaloneMutation,
     managedArchivedSessions,
     onError,
+    onLeaveCurrentStandaloneForDelete,
     onLoadStandaloneSession,
     onSessionRenameConfirmed,
     onStandaloneNotice,
@@ -10004,6 +10015,7 @@ export function WebShellSidebar({
                     onNewSession={onNewStandaloneSession}
                     newSessionDisabled={newSessionDisabled}
                     onLoadSession={onLoadStandaloneSession}
+                    onLeaveCurrentSession={onLeaveCurrentStandaloneForDelete}
                     onRenameSession={(sessionId, displayName) =>
                       onSessionRenameConfirmed?.(
                         undefined,

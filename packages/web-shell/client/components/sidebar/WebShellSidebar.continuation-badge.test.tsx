@@ -84,6 +84,7 @@ function renderSidebar(language: 'en' | 'zh-CN' = 'en') {
       onOpenSessions={() => {}}
       onOpenSplitView={() => {}}
       onNewSession={() => false}
+      onLeaveCurrentStandaloneForDelete={async () => false}
       onLoadSession={loadSession}
       onError={() => {}}
     />

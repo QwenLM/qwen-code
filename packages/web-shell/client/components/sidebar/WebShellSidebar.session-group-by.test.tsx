@@ -212,6 +212,7 @@ function renderSidebar(
           onOpenSessions={() => {}}
           onOpenSplitView={() => {}}
           onNewSession={() => false}
+          onLeaveCurrentStandaloneForDelete={async () => false}
           onLoadSession={onLoadSession}
           onError={() => {}}
           sessionActions={{ inlineItems: ['pin'] }}

@@ -2629,8 +2629,9 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.newSessionFailed': '建立新會話失敗',
   'sidebar.switchFailed': '切換會話失敗',
   'sidebar.currentDeleteDisabled': '當前會話正在執行，不能刪除',
-  'sidebar.currentStandaloneDeleteDisabled':
-    '請先開啟另一個對話，再刪除當前無工作區會話',
+  'sidebar.currentStandaloneNotReady': '此對話尚未就緒，請稍後再試。',
+  'sidebar.standaloneLeaveFailed': '無法確認此對話已中斷連線，因此未刪除。',
+  'sidebar.standaloneDeleteCancelled': '目前的對話已變更，刪除已取消。',
   'sidebar.deleteConfirmDescription': (v) =>
     `確定刪除“${v?.name ?? ''}”嗎？刪除後不可恢復。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 個客戶端`,

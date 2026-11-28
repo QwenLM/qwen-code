@@ -2790,8 +2790,12 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.switchFailed': 'Failed to switch session',
   'sidebar.currentDeleteDisabled':
     'The current session is running and cannot be deleted',
-  'sidebar.currentStandaloneDeleteDisabled':
-    'Open another chat first to delete the current no-workspace session',
+  'sidebar.currentStandaloneNotReady':
+    'This conversation is not ready yet. Try again in a moment.',
+  'sidebar.standaloneLeaveFailed':
+    'Could not confirm this conversation was disconnected. Nothing was deleted.',
+  'sidebar.standaloneDeleteCancelled':
+    'The current conversation changed. Deletion was cancelled.',
   'sidebar.deleteConfirmDescription': (v) =>
     `Delete "${v?.name ?? ''}"? This cannot be undone.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,

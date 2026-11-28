@@ -2697,8 +2697,9 @@ export const ZH: Messages = {
   'sidebar.newSessionFailed': '创建新会话失败',
   'sidebar.switchFailed': '切换会话失败',
   'sidebar.currentDeleteDisabled': '当前会话正在运行，不能删除',
-  'sidebar.currentStandaloneDeleteDisabled':
-    '请先打开另一个对话，再删除当前无工作区会话',
+  'sidebar.currentStandaloneNotReady': '此会话尚未就绪，请稍后重试。',
+  'sidebar.standaloneLeaveFailed': '无法确认此会话已断开连接，因此未删除。',
+  'sidebar.standaloneDeleteCancelled': '当前会话已变化，删除已取消。',
   'sidebar.deleteConfirmDescription': (v) =>
     `确定删除“${v?.name ?? ''}”吗？删除后不可恢复。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,

@@ -28,8 +28,12 @@ export const RU_PART4: Record<
     'Текущая сессия выполняется и не может быть удалена',
   'sidebar.deleteRunningDisabled':
     'Сессию с фоновыми задачами нельзя удалить: удаление остановит их',
-  'sidebar.currentStandaloneDeleteDisabled':
-    'Сначала откройте другой чат, чтобы удалить текущую сессию без рабочей области',
+  'sidebar.currentStandaloneNotReady':
+    'Этот разговор ещё не готов. Повторите попытку позже.',
+  'sidebar.standaloneLeaveFailed':
+    'Не удалось подтвердить отключение от разговора. Ничего не удалено.',
+  'sidebar.standaloneDeleteCancelled':
+    'Текущий разговор изменился. Удаление отменено.',
   'sidebar.deleteConfirmDescription': (v) =>
     `Удалить «${v?.name ?? ''}»? Это действие нельзя отменить.`,
   'sidebar.clients': (v) =>

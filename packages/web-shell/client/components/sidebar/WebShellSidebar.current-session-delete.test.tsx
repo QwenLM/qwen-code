@@ -84,12 +84,15 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
 }));
 
 const standaloneArchiveFailure = vi.hoisted(() => ({ current: false }));
+const archivedLeaveProp = vi.hoisted(() => vi.fn());
 vi.mock('./StandaloneRecents', () => ({
   StandaloneRecents: ({
     archiveState,
+    onLeaveCurrentSession,
     onStatusChange,
   }: {
     archiveState?: string;
+    onLeaveCurrentSession?: (sessionId: string) => Promise<boolean>;
     onStatusChange?: (status: {
       count: number;
       loading: boolean;
@@ -103,9 +106,9 @@ vi.mock('./StandaloneRecents', () => ({
         error: archiveState === 'archived' && standaloneArchiveFailure.current,
       });
     }, [archiveState, onStatusChange]);
-    return archiveState === 'archived' ? (
-      <span data-testid="standalone-archive">Standalone archive</span>
-    ) : null;
+    if (archiveState !== 'archived') return null;
+    archivedLeaveProp(onLeaveCurrentSession);
+    return <span data-testid="standalone-archive">Standalone archive</span>;
   },
 }));
 
@@ -134,6 +137,7 @@ function renderSidebar(
     archivedSessionsTarget?: HTMLElement | null;
     onSearchQueryChange?: (query: string) => void;
     onLoadStandaloneSession?: (sessionId: string) => void;
+    onLeaveCurrentStandaloneForDelete?: (sessionId: string) => Promise<boolean>;
     onStandaloneNotice?: (message: string) => void;
     onCommit?: () => void;
     lockedWorkspaceCwd?: string;
@@ -157,6 +161,9 @@ function renderSidebar(
               onOpenSessions={() => {}}
               onOpenSplitView={() => {}}
               onNewSession={() => false}
+              onLeaveCurrentStandaloneForDelete={
+                props.onLeaveCurrentStandaloneForDelete ?? (async () => false)
+              }
               onLoadSession={loadSession}
               onError={onError}
               onSessionsDeleted={props.onSessionsDeleted}
@@ -713,6 +720,23 @@ describe('sidebar session selection', () => {
       'false',
     );
   });
+});
+
+it('requires the same leave callback for deletion from standalone archives', async () => {
+  workspace.capabilities = {
+    qwenCodeVersion: '1.2.3',
+    features: ['standalone_sessions_v1'],
+  };
+  const leave = vi.fn(async () => true);
+  archivedLeaveProp.mockClear();
+  renderSidebar({
+    archivedSessionsTarget,
+    onLoadStandaloneSession: vi.fn(),
+    onLeaveCurrentStandaloneForDelete: leave,
+    onStandaloneNotice: vi.fn(),
+  });
+  await flushSidebar();
+  expect(archivedLeaveProp).toHaveBeenLastCalledWith(leave);
 });
 
 it('excludes standalone archives and their errors from the Channels archive filter', async () => {
