@@ -160,7 +160,7 @@ export function renderVfkitSeatbeltProfile({ vfkitBin = null } = {}) {
   ].join('\n');
 }
 
-function canonicalizePreservingLeaf(absPath) {
+export function canonicalizePreservingLeaf(absPath) {
   const leaf = basename(absPath);
   let cursor = dirname(absPath);
   const tail = [];
@@ -179,7 +179,7 @@ function canonicalizePreservingLeaf(absPath) {
   }
 }
 
-function canonicalizeVaultDir(vaultDir) {
+export function canonicalizeVaultDir(vaultDir) {
   if (!vaultDir) return null;
   const abs = resolve(vaultDir);
   try {
@@ -189,7 +189,7 @@ function canonicalizeVaultDir(vaultDir) {
   }
 }
 
-function normalizeApprovedRoots(approvedRoots) {
+export function normalizeApprovedRoots(approvedRoots) {
   if (!Array.isArray(approvedRoots)) return [];
   return approvedRoots
     .filter((root) => typeof root === 'string' && root.trim() !== '')
@@ -834,6 +834,14 @@ function assertApprovedDestination(
   return abs;
 }
 
+function isDirWithinOrEqualApprovedRoots(dirPath, normalizedRoots) {
+  const canonical = canonicalizePreservingLeaf(resolve(dirPath));
+  return (
+    normalizedRoots.includes(canonical) ||
+    isPathWithinApprovedRoots(dirPath, normalizedRoots)
+  );
+}
+
 function ensureApprovedDirHierarchy(
   label,
   dirPath,
@@ -841,12 +849,20 @@ function ensureApprovedDirHierarchy(
   { approvedRoots, realVault, createdDirs = null, requirePrivateLeaf = false },
 ) {
   const normalizedRoots = normalizeApprovedRoots(approvedRoots);
-  const abs = assertApprovedDestination(
-    label,
-    dirPath,
-    normalizedRoots,
-    realVault,
-  );
+  if (typeof dirPath !== 'string' || dirPath.trim() === '') {
+    throw new Error(`${label} path is required`);
+  }
+  const abs = resolve(dirPath);
+  const canonicalAbs = canonicalizePreservingLeaf(abs);
+  if (!isDirWithinOrEqualApprovedRoots(abs, normalizedRoots)) {
+    throw new Error(`${label} ${abs} is outside approvedRoots`);
+  }
+  if (
+    realVault &&
+    (withinDir(realVault, abs) || withinDir(realVault, canonicalAbs))
+  ) {
+    throw new Error(`${label} ${canonicalAbs} must not reside inside vaultDir`);
+  }
   const missing = [];
   let cursor = abs;
   while (true) {
@@ -888,11 +904,18 @@ function ensureApprovedDirHierarchy(
   for (let i = missing.length - 1; i >= 0; i -= 1) {
     const nextDir = missing[i];
     mkdirSync(nextDir, { mode });
+    // Record immediately after mkdirSync so a failing chmodSync still rolls back,
+    // and never record a path equal to an approvedRoot itself.
+    if (
+      createdDirs &&
+      !normalizedRoots.includes(canonicalizePreservingLeaf(nextDir))
+    ) {
+      createdDirs.push(nextDir);
+    }
     chmodSync(nextDir, mode);
-    if (createdDirs) createdDirs.push(nextDir);
   }
   const realDir = realpathSync(abs);
-  if (!isPathWithinApprovedRoots(realDir, normalizedRoots)) {
+  if (!isDirWithinOrEqualApprovedRoots(realDir, normalizedRoots)) {
     throw new Error(`${label} escaped approvedRoots: ${realDir}`);
   }
   if (realVault && withinDir(realVault, realDir)) {
@@ -1116,6 +1139,26 @@ function writeAtomicStagedFile(
       }
     }
   }
+}
+
+function parseFirecrackerFsizeLimit(plan) {
+  const argv = Array.isArray(plan?.argv) ? plan.argv : [];
+  for (let i = 0; i < argv.length; i += 1) {
+    let spec = null;
+    if (argv[i] === '--resource-limit' && typeof argv[i + 1] === 'string') {
+      spec = argv[i + 1];
+      i += 1;
+    } else if (
+      typeof argv[i] === 'string' &&
+      argv[i].startsWith('--resource-limit=')
+    ) {
+      spec = argv[i].slice('--resource-limit='.length);
+    }
+    if (spec && /^fsize=[1-9]\d*$/.test(spec)) {
+      return Number(spec.slice('fsize='.length));
+    }
+  }
+  return null;
 }
 
 function parseVfkitPlanPaths(plan) {
@@ -1410,6 +1453,15 @@ export function stageLocalVmRound({
         },
       );
       createdFiles.push(disk.path);
+
+      // Fail closed before boot if the rootfs image exceeds jailer's RLIMIT_FSIZE;
+      // otherwise any guest write past maxFsizeBytes kills Firecracker with SIGXFSZ.
+      const maxFsizeBytes = parseFirecrackerFsizeLimit(plan);
+      if (Number.isInteger(maxFsizeBytes) && disk.bytes > maxFsizeBytes) {
+        throw new Error(
+          `staged rootfs (${disk.bytes} bytes) exceeds Firecracker jailer maxFsizeBytes (${maxFsizeBytes}); pass a larger maxFsizeBytes or smaller --size-mib`,
+        );
+      }
 
       const configPath = writeAtomicStagedFile(
         join(jailRoot, 'config.json'),

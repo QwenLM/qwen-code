@@ -24,7 +24,7 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ACK, GREETING } from '../verify-pr-vm-collector.mjs';
 import {
   copyIsolatedAsset,
@@ -581,6 +581,20 @@ describe('verify-pr-vm-host asset staging, rollback, and runner integration', ()
       expect(dstStat.nlink).toBe(1);
       expect(dstStat.ino).not.toBe(srcStat.ino);
 
+      // Direct child of approvedRoot (parent === approvedRoot) is accepted,
+      // while targeting approvedRoot itself for a file is still refused.
+      const directChild = copyIsolatedAsset(src, join(approved, 'kernel'), {
+        approvedRoots: [approved],
+        vaultDir: vault,
+        mode: 0o640,
+      });
+      expect(existsSync(directChild.path)).toBe(true);
+      expect(() =>
+        copyIsolatedAsset(src, approved, {
+          approvedRoots: [approved],
+        }),
+      ).toThrow(/outside approvedRoots/);
+
       // Refuses overwrite of existing destination
       expect(() =>
         copyIsolatedAsset(src, dst, { approvedRoots: [approved] }),
@@ -637,18 +651,21 @@ describe('verify-pr-vm-host asset staging, rollback, and runner integration', ()
         }),
       ).toThrow(/must not reside inside vaultDir/);
 
-      // Not-yet-created approvedRoots entry reached through a symlinked ancestor (macOS /tmp/qc-vm shape)
+      // Not-yet-created approvedRoots entry reached through a symlinked ancestor (macOS /tmp/qc-vm shape):
+      // createdDirs must NOT include the approvedRoot itself so rollback never fails on root deletion.
       const symParent = join(root, 'sym-parent');
       const realParentTarget = join(root, 'real-parent-target');
       mkdirSync(realParentTarget, { mode: 0o700 });
       symlinkSync(realParentTarget, symParent);
       const uncreatedRoot = join(symParent, 'not-yet-created-root');
+      const trackedDirs = [];
       const stagedUnderFreshRoot = copyIsolatedAsset(
         src,
         join(uncreatedRoot, 'poc', 'work.img'),
-        { approvedRoots: [uncreatedRoot] },
+        { approvedRoots: [uncreatedRoot], createdDirs: trackedDirs },
       );
       expect(existsSync(stagedUnderFreshRoot.path)).toBe(true);
+      expect(trackedDirs).toEqual([join(uncreatedRoot, 'poc')]);
       expect(() =>
         copyIsolatedAsset(src, join(symParent, 'outside-fresh', 'esc.img'), {
           approvedRoots: [uncreatedRoot],
@@ -1596,6 +1613,89 @@ describe('verify-pr-vm-host asset staging, rollback, and runner integration', ()
       );
       expect(existsSync(vfProfile)).toBe(false);
       expect(existsSync(join(vfPocDir, 'initramfs.gz'))).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rolls back newly created child directory when chmodSync fails and never records approvedRoot itself in createdDirs',
+    async () => {
+      const root = makeTempDir('vh-chmod-');
+      const kernel = join(root, 'vmlinuz');
+      const rootfs = join(root, 'rootfs.ext4');
+      writeFileSync(kernel, 'k', { mode: 0o444 });
+      writeFileSync(rootfs, 'r', { mode: 0o444 });
+
+      const freshRoot = join(root, 'fresh-approved-root');
+      const jailBase = join(freshRoot, 'j');
+      const plan = buildFirecrackerLaunchPlan({
+        runId: 'fc-chmod-rb',
+        jailBaseDir: jailBase,
+        firecrackerBin: '/opt/firecracker',
+        jailerBin: '/opt/jailer',
+        vmmUid: 65534,
+        vmmGid: 65534,
+      });
+
+      const failTarget = join(jailBase, 'firecracker', 'fc-chmod-rb', 'root');
+      vi.resetModules();
+      vi.doMock('node:fs', async () => {
+        const actual = await vi.importActual('node:fs');
+        return {
+          ...actual,
+          chmodSync(target, mode) {
+            if (target === failTarget) {
+              const err = new Error(`EPERM: chmod failed on ${target}`);
+              err.code = 'EPERM';
+              throw err;
+            }
+            return actual.chmodSync(target, mode);
+          },
+        };
+      });
+      try {
+        const hostMod = await import('../verify-pr-vm-host.mjs');
+        expect(() =>
+          hostMod.stageLocalVmRound({
+            plan,
+            sourceKernelPath: kernel,
+            sourceRootfsPath: rootfs,
+            approvedRoots: [freshRoot],
+            applyChown: false,
+          }),
+        ).toThrow(/EPERM: chmod failed/);
+      } finally {
+        vi.doUnmock('node:fs');
+        vi.resetModules();
+      }
+
+      // The directory created right before chmodSync failed must be rolled back,
+      // and rollback must NOT have thrown `outside approvedRoots` on freshRoot itself.
+      expect(existsSync(failTarget)).toBe(false);
+      expect(existsSync(jailBase)).toBe(false);
+      expect(existsSync(freshRoot)).toBe(true);
+
+      // Firecracker staging must fail closed and roll back if rootfs exceeds jailer maxFsizeBytes
+      const tinyLimitPlan = buildFirecrackerLaunchPlan({
+        runId: 'fc-fsize-cap',
+        jailBaseDir: join(root, 'j-cap'),
+        firecrackerBin: '/opt/firecracker',
+        jailerBin: '/opt/jailer',
+        vmmUid: 65534,
+        vmmGid: 65534,
+        maxFsizeBytes: 4,
+      });
+      const bigRootfs = join(root, 'big-rootfs.ext4');
+      writeFileSync(bigRootfs, '1234567890', { mode: 0o444 });
+      expect(() =>
+        stageLocalVmRound({
+          plan: tinyLimitPlan,
+          sourceKernelPath: kernel,
+          sourceRootfsPath: bigRootfs,
+          approvedRoots: [root],
+          applyChown: false,
+        }),
+      ).toThrow(/exceeds Firecracker jailer maxFsizeBytes/);
+      expect(existsSync(tinyLimitPlan.jailRoot)).toBe(false);
     },
   );
 });
