@@ -13,6 +13,7 @@ import {
   feedbackUserMessageOf,
   notifyAssistantFeedback,
   readAssistantFeedbackStore,
+  readPrunedAssistantFeedbackSession,
   setAssistantFeedbackRating,
   shouldOfferAssistantFeedback,
   writeAssistantFeedbackStore,
@@ -33,6 +34,7 @@ function sessionIds(n: number): string[] {
 
 beforeEach(() => {
   window.localStorage.clear();
+  readAssistantFeedbackStore();
 });
 
 afterEach(() => {
@@ -43,7 +45,7 @@ afterEach(() => {
 describe('readAssistantFeedbackStore', () => {
   it('round-trips what writeAssistantFeedbackStore persisted', () => {
     const store = setAssistantFeedbackRating({}, 'session-1', 'turn-1', 'down');
-    writeAssistantFeedbackStore(store);
+    expect(writeAssistantFeedbackStore(store)).toBe(true);
     expect(readAssistantFeedbackStore()).toEqual({
       'session-1': { 'turn-1': 'down' },
     });
@@ -71,6 +73,23 @@ describe('readAssistantFeedbackStore', () => {
     expect(readAssistantFeedbackStore()).toEqual({});
   });
 
+  it.each([
+    ['invalid JSON', 'not json'],
+    ['a future version', JSON.stringify({ v: 2 })],
+    ['an empty valid payload', JSON.stringify({ v: 1 })],
+  ])('forgets pruned sessions after reading %s', (_label, payload) => {
+    writeAssistantFeedbackStore(
+      storeOf(sessionIds(MAX_ASSISTANT_FEEDBACK_SESSIONS + 1)),
+    );
+    expect(readPrunedAssistantFeedbackSession('session-0')).toEqual({
+      'turn-1': 'up',
+    });
+    window.localStorage.setItem(ASSISTANT_FEEDBACK_STORAGE_KEY, payload);
+
+    expect(readAssistantFeedbackStore()).toEqual({});
+    expect(readPrunedAssistantFeedbackSession('session-0')).toBeUndefined();
+  });
+
   it('survives a localStorage that refuses to be read', () => {
     const getItem = vi
       .spyOn(Storage.prototype, 'getItem')
@@ -92,9 +111,7 @@ describe('writeAssistantFeedbackStore', () => {
         throw new Error('quota exceeded');
       });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    expect(() =>
-      writeAssistantFeedbackStore(storeOf(['session-1'])),
-    ).not.toThrow();
+    expect(writeAssistantFeedbackStore(storeOf(['session-1']))).toBe(false);
     expect(setItem).toHaveBeenCalled();
     expect(warn).toHaveBeenCalled();
   });

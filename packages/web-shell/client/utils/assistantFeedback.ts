@@ -69,6 +69,35 @@ export const ASSISTANT_FEEDBACK_STORAGE_KEY =
 /** Sessions kept in storage; the rest age out oldest-first. */
 export const MAX_ASSISTANT_FEEDBACK_SESSIONS = 10;
 
+const editRevisions = new Map<string, number>();
+
+function editRevisionKey(sessionId: string, turnId: string): string {
+  return JSON.stringify([sessionId, turnId]);
+}
+
+export function readAssistantFeedbackEditRevision(
+  sessionId: string,
+  turnId: string,
+): number {
+  return editRevisions.get(editRevisionKey(sessionId, turnId)) ?? 0;
+}
+
+const prunedSessions = new Map<
+  string,
+  Record<string, AssistantFeedbackRating>
+>();
+
+/** Intended ratings of sessions not on disk (cap eviction or a failed write). */
+export function readPrunedAssistantFeedbackSession(
+  sessionId: string,
+): Readonly<Record<string, AssistantFeedbackRating>> | undefined {
+  return prunedSessions.get(sessionId);
+}
+
+export function forgetAssistantFeedbackSessionPruned(sessionId: string): void {
+  prunedSessions.delete(sessionId);
+}
+
 /** Characters of the turn's prompt forwarded to the host. */
 export const FEEDBACK_USER_MESSAGE_MAX_CHARS = 100;
 
@@ -149,6 +178,23 @@ function keepMostRecentSessions(
   return kept;
 }
 
+function recordEditRevisions(
+  edited: ReadonlyArray<{ sessionId: string; turnId: string }>,
+  kept: AssistantFeedbackStore,
+): void {
+  for (const { sessionId, turnId } of edited) {
+    // Capacity eviction retains the revision for the snapshot restored later.
+    if (!kept[sessionId]) continue;
+    const key = editRevisionKey(sessionId, turnId);
+    editRevisions.set(key, (editRevisions.get(key) ?? 0) + 1);
+  }
+}
+
+function emptyAssistantFeedbackStore(): AssistantFeedbackStore {
+  prunedSessions.clear();
+  return {};
+}
+
 /**
  * Reads the persisted marks, dropping anything unrecognizable rather than
  * guessing: a hand-edited or future payload must degrade to "nothing marked".
@@ -158,16 +204,20 @@ export function readAssistantFeedbackStore(): AssistantFeedbackStore {
   let parsed: unknown;
   try {
     const raw = window.localStorage.getItem(ASSISTANT_FEEDBACK_STORAGE_KEY);
-    if (!raw) return {};
+    if (!raw) return emptyAssistantFeedbackStore();
     parsed = JSON.parse(raw);
   } catch {
     // localStorage can be unavailable in private or embedded contexts, and the
     // stored value may not be JSON at all.
-    return {};
+    return emptyAssistantFeedbackStore();
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return emptyAssistantFeedbackStore();
+  }
   const { v, ...sessions } = parsed as Record<string, unknown>;
-  if (v !== undefined && v !== STORAGE_VERSION) return {};
+  if (v !== undefined && v !== STORAGE_VERSION) {
+    return emptyAssistantFeedbackStore();
+  }
 
   const store: AssistantFeedbackStore = {};
   for (const [sessionId, value] of Object.entries(sessions)) {
@@ -187,23 +237,59 @@ export function readAssistantFeedbackStore(): AssistantFeedbackStore {
     }
     if (Object.keys(ratings).length > 0) store[sessionId] = ratings;
   }
-  return keepMostRecentSessions(store);
+  return Object.keys(store).length > 0
+    ? keepMostRecentSessions(store)
+    : emptyAssistantFeedbackStore();
 }
 
+/**
+ * Persists `store`. `edited` names the turns this write actually edits, so a
+ * restore of an evicted session does not advance the revisions of the turns
+ * it merely re-inserts and retire other panes' still-valid queued edits.
+ */
 export function writeAssistantFeedbackStore(
   store: AssistantFeedbackStore,
-): void {
-  if (typeof window === 'undefined') return;
+  edited: ReadonlyArray<{ sessionId: string; turnId: string }> = [],
+): boolean {
+  if (typeof window === 'undefined') return false;
+  const previous = readAssistantFeedbackStore();
+  const kept = keepMostRecentSessions(store);
+  let persisted = false;
   try {
     window.localStorage.setItem(
       ASSISTANT_FEEDBACK_STORAGE_KEY,
-      JSON.stringify({ v: STORAGE_VERSION, ...keepMostRecentSessions(store) }),
+      JSON.stringify({ v: STORAGE_VERSION, ...kept }),
     );
+    persisted = true;
   } catch (error) {
     // A full or disabled localStorage must not break the click that just
     // happened; the mark still shows for this page.
     console.warn('[web-shell] failed to persist assistant feedback:', error);
   }
+  // Revisions only advance for persisted edits; a failed write leaves disk
+  // unchanged, so bumping them would retire other panes' queued edits.
+  if (persisted) recordEditRevisions(edited, kept);
+  // Snapshots must track the intended state of every session whose content is
+  // not on disk after this attempt — a session evicted at the cap, or one a
+  // failed write left on disk with stale content (a cleared rating a sibling
+  // pane would otherwise re-insert).
+  const onDisk = persisted ? kept : previous;
+  const touched = new Set(edited.map((edit) => edit.sessionId));
+  for (const sessionId of new Set([
+    ...Object.keys(previous),
+    ...Object.keys(store),
+  ])) {
+    const intended = store[sessionId] ?? {};
+    const landed = onDisk[sessionId];
+    if (JSON.stringify(landed ?? {}) !== JSON.stringify(intended)) {
+      prunedSessions.set(sessionId, { ...intended });
+    } else if (touched.has(sessionId)) {
+      // Only this write's own sessions may forget a snapshot on landing; an
+      // unrelated pane's write must not drop another session's unlanded edit.
+      prunedSessions.delete(sessionId);
+    }
+  }
+  return persisted;
 }
 
 /**

@@ -1,6 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import {
+  forgetAssistantFeedbackSessionPruned,
+  readAssistantFeedbackEditRevision,
   readAssistantFeedbackStore,
+  readPrunedAssistantFeedbackSession,
   setAssistantFeedbackRating,
   writeAssistantFeedbackStore,
   type AssistantFeedbackRating,
@@ -32,8 +35,15 @@ export function useAssistantFeedback(
   const [store, setStore] = useState<AssistantFeedbackStore>(
     readAssistantFeedbackStore,
   );
-  // Hydrating is not an edit, so the first render must not write back.
-  const hydratedStore = useRef(store);
+  const pendingChanges = useRef<
+    Array<{
+      sessionId: string;
+      turnId: string;
+      rating: AssistantFeedbackRating | null;
+      base: AssistantFeedbackRating | undefined;
+      revision: number;
+    }>
+  >([]);
   const storeRef = useRef(store);
   storeRef.current = store;
 
@@ -43,6 +53,54 @@ export function useAssistantFeedback(
       setStore((current) =>
         setAssistantFeedbackRating(current, sessionId, turnId, rating),
       );
+      let next = readAssistantFeedbackStore();
+      // Replay this pane's uncommitted edits on the latest storage. A session
+      // whose intended ratings are not on disk restores them — evicted at the
+      // cap, or left stale by a failed write (including a failed clear).
+      const pruned = readPrunedAssistantFeedbackSession(sessionId);
+      if (pruned) {
+        next = { ...next, [sessionId]: { ...pruned } };
+      }
+      const merged = next;
+      pendingChanges.current = pendingChanges.current.filter(
+        (change) => change.sessionId !== sessionId || change.turnId !== turnId,
+      );
+      pendingChanges.current.push({
+        sessionId,
+        turnId,
+        rating,
+        base: merged[sessionId]?.[turnId],
+        revision: readAssistantFeedbackEditRevision(sessionId, turnId),
+      });
+      pendingChanges.current = pendingChanges.current.filter(
+        (change) =>
+          merged[change.sessionId]?.[change.turnId] === change.base &&
+          readAssistantFeedbackEditRevision(change.sessionId, change.turnId) ===
+            change.revision,
+      );
+      for (const change of pendingChanges.current) {
+        next = setAssistantFeedbackRating(
+          next,
+          change.sessionId,
+          change.turnId,
+          change.rating,
+        );
+      }
+      // A clear that empties the session retires any eviction snapshot before
+      // the write; a failed write then records the empty intent itself.
+      if (!next[sessionId]) forgetAssistantFeedbackSessionPruned(sessionId);
+      if (
+        writeAssistantFeedbackStore(
+          next,
+          pendingChanges.current.map((change) => ({
+            sessionId: change.sessionId,
+            turnId: change.turnId,
+          })),
+        )
+      ) {
+        pendingChanges.current = [];
+        setStore(next);
+      }
     },
     [sessionId],
   );
@@ -52,11 +110,6 @@ export function useAssistantFeedback(
       sessionId && turnId ? storeRef.current[sessionId]?.[turnId] : undefined,
     [sessionId],
   );
-
-  useEffect(() => {
-    if (store === hydratedStore.current) return;
-    writeAssistantFeedbackStore(store);
-  }, [store]);
 
   return {
     ratings: (sessionId && store[sessionId]) || NO_RATINGS,
