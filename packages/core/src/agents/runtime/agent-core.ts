@@ -52,6 +52,7 @@ import {
   findRepeatedDuplicateProviderToolCall,
   LlmEventType,
   markDuplicateProviderToolCallResponseSent,
+  outputBudgetAtTruncation,
   type ServerLlmStreamEvent,
   type ToolCallRequestInfo,
   type Turn,
@@ -329,7 +330,11 @@ interface SharedToolStep {
   /** Drops the requests of an attempt a retry or fallback replaced. */
   reset(): void;
   /** Gives the requests the round's final response id and truncation. */
-  settle(round: { responseId?: string; wasOutputTruncated: boolean }): void;
+  settle(round: {
+    responseId?: string;
+    wasOutputTruncated: boolean;
+    outputBudgetAtTruncation?: ToolCallRequestInfo['outputBudgetAtTruncation'];
+  }): void;
   requestCount(): number;
   options: Pick<
     AgentLoopOptions,
@@ -350,7 +355,11 @@ interface SharedToolStep {
 async function* withAgentRequests(
   stream: AsyncIterator<ServerLlmStreamEvent, Turn | undefined>,
   step: SharedToolStep,
-  round: () => { responseId?: string; wasOutputTruncated: boolean },
+  round: () => {
+    responseId?: string;
+    wasOutputTruncated: boolean;
+    outputBudgetAtTruncation?: ToolCallRequestInfo['outputBudgetAtTruncation'];
+  },
 ): AsyncGenerator<ServerLlmStreamEvent, Turn | undefined> {
   let done = false;
   try {
@@ -1313,6 +1322,7 @@ export class AgentCore {
           undefined;
         let currentResponseId: string | undefined = undefined;
         let wasOutputTruncated = false;
+        let truncatedUsage: GenerateContentResponseUsageMetadata | undefined;
         let loopDetectedInStream = false;
 
         for await (const streamEvent of responseStream) {
@@ -1352,6 +1362,7 @@ export class AgentCore {
             lastUsage = undefined;
             currentResponseId = undefined;
             wasOutputTruncated = false;
+            truncatedUsage = undefined;
             continue;
           }
 
@@ -1380,6 +1391,7 @@ export class AgentCore {
               resp.candidates?.[0]?.finishReason === FinishReason.MAX_TOKENS
             ) {
               wasOutputTruncated = true;
+              truncatedUsage = resp.usageMetadata;
             }
             const content = resp.candidates?.[0]?.content;
             const parts = content?.parts || [];
@@ -1528,6 +1540,15 @@ export class AgentCore {
                 wasOutputTruncated,
                 handledToolCallFingerprints,
                 duplicateProviderToolCallResponseIds,
+                // The same numbers the Turn records on its own requests
+                // (#16417), so a subagent's rejection names them too
+                // (#17306).
+                wasOutputTruncated
+                  ? outputBudgetAtTruncation(
+                      truncatedUsage,
+                      chat.getLastRequestMaxOutputTokens?.(),
+                    )
+                  : undefined,
               )
             : undefined;
         if (toolCallResult) {
@@ -1811,6 +1832,9 @@ export class AgentCore {
         | undefined,
       responseId: undefined as string | undefined,
       wasOutputTruncated: false,
+      outputBudgetAtTruncation: undefined as
+        | ToolCallRequestInfo['outputBudgetAtTruncation']
+        | undefined,
       stopped: false,
       timedOut: false,
     };
@@ -1882,6 +1906,7 @@ export class AgentCore {
       model.usageMetadata = undefined;
       model.responseId = undefined;
       model.wasOutputTruncated = false;
+      model.outputBudgetAtTruncation = undefined;
     };
     const stopRound = (): AgentLoopStopReason => {
       model.stopped = true;
@@ -1972,6 +1997,13 @@ export class AgentCore {
               const { reason, usageMetadata } = event.value;
               if (reason === FinishReason.MAX_TOKENS) {
                 model.wasOutputTruncated = true;
+                // The same numbers the Turn records on its own requests
+                // (#16417), so a subagent's rejection names them too
+                // (#17306).
+                model.outputBudgetAtTruncation = outputBudgetAtTruncation(
+                  usageMetadata,
+                  params.chat.getLastRequestMaxOutputTokens?.(),
+                );
               }
               if (
                 checkSubagentLoop({
@@ -2066,10 +2098,17 @@ export class AgentCore {
         declaredNames.clear();
         callIds.clear();
       },
-      settle: ({ responseId, wasOutputTruncated }) => {
+      settle: ({
+        responseId,
+        wasOutputTruncated,
+        outputBudgetAtTruncation,
+      }) => {
         for (const request of declaredNames.keys()) {
           request.response_id = responseId;
           request.wasOutputTruncated = wasOutputTruncated;
+          if (outputBudgetAtTruncation) {
+            request.outputBudgetAtTruncation = outputBudgetAtTruncation;
+          }
         }
       },
       requestCount: () => declaredNames.size,
@@ -2628,6 +2667,7 @@ export class AgentCore {
     wasOutputTruncated = false,
     handledToolCallFingerprints = new Map<string, string>(),
     duplicateProviderToolCallResponseIds = new Set<string>(),
+    outputBudgetAtTruncation?: ToolCallRequestInfo['outputBudgetAtTruncation'],
   ): Promise<ToolStepResult> {
     if (this.codeModeToolsUnprepared()) await this.prepareTools();
     const responseByCallId = new Map<
@@ -2786,6 +2826,7 @@ export class AgentCore {
         promptId,
         responseId,
         wasOutputTruncated,
+        outputBudgetAtTruncation,
       ),
     );
     await this.scheduleToolCalls({
@@ -3478,6 +3519,7 @@ export class AgentCore {
     promptId: string,
     responseId: string | undefined,
     wasOutputTruncated: boolean,
+    outputBudgetAtTruncation?: ToolCallRequestInfo['outputBudgetAtTruncation'],
   ): ToolCallRequestInfo {
     const toolName = String(fc.name);
     const providerCallId = getProviderToolCallId(fc) ?? fc.id;
@@ -3491,6 +3533,7 @@ export class AgentCore {
       prompt_id: promptId,
       response_id: responseId,
       wasOutputTruncated,
+      ...(outputBudgetAtTruncation ? { outputBudgetAtTruncation } : {}),
       // Mirror `turn.ts`: the data-loss guard keys on the fact that the
       // arguments arrived unterminated, which is independent of whether the
       // output token limit was what cut them (QwenLM/qwen-code#12970).

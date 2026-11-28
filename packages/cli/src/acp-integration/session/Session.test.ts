@@ -5110,6 +5110,59 @@ describe('Session', () => {
       expect(sent).toContain('truncated due to max_tokens limit');
     });
 
+    /** A cut the response's usage corroborates: 12288 − 8192 = 4096 spent. */
+    function cutOffWithUsage(
+      usageMetadata: Record<string, number> = {
+        totalTokenCount: 12288,
+        promptTokenCount: 8192,
+        candidatesTokenCount: 4096,
+      },
+    ) {
+      return {
+        type: core.StreamEventType.CHUNK,
+        value: {
+          functionCalls: [call('call-cut')],
+          candidates: [{ finishReason: FinishReason.MAX_TOKENS }],
+          usageMetadata,
+        },
+      };
+    }
+
+    it('names the output budget the cut spent (#17306)', async () => {
+      const execute = useTool(core.Kind.Edit, 'write_file');
+      Object.assign(mockChat, {
+        getLastRequestMaxOutputTokens: vi.fn().mockReturnValue(8192),
+      });
+
+      const sent = await prompt(cutOffWithUsage());
+
+      expect(execute).not.toHaveBeenCalled();
+      // The sentence the scheduler's own guard appends, so the refusal reads
+      // the same whichever harness surface issued the write.
+      expect(sent).toContain('used 4096 of the 8192-token output limit');
+      expect(sent).toContain('size each part well under that limit');
+    });
+
+    it('leaves the budget out when the cut reports only zeroed counts', async () => {
+      const execute = useTool(core.Kind.Edit, 'write_file');
+      Object.assign(mockChat, {
+        getLastRequestMaxOutputTokens: vi.fn().mockReturnValue(8192),
+      });
+
+      // OpenAI converters stamp every count with `|| 0`.
+      const sent = await prompt(
+        cutOffWithUsage({
+          totalTokenCount: 0,
+          promptTokenCount: 0,
+          candidatesTokenCount: 0,
+        }),
+      );
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(sent).toContain('truncated due to max_tokens limit');
+      expect(sent).not.toContain('output limit');
+    });
+
     it('refuses an edit whose arguments arrived incomplete', async () => {
       const execute = useTool(core.Kind.Edit, 'write_file');
       const incomplete = call('call-incomplete');
@@ -6011,6 +6064,46 @@ describe('Session', () => {
       expect(execute).not.toHaveBeenCalled();
       expect(JSON.stringify(send.mock.calls[1][0])).toContain(
         'truncated due to max_tokens limit',
+      );
+    });
+
+    it('names the output budget of a cut-off call on the shared tool batch (#17306)', async () => {
+      const execute = useTool(core.Kind.Edit, 'write_file');
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      runAcpToolBatchSpy.mockImplementationOnce(
+        (
+          await vi.importActual<typeof import('./acp-tool-batch.js')>(
+            './acp-tool-batch.js',
+          )
+        ).runAcpToolBatch as never,
+      );
+      (
+        session as unknown as { liveScreenContextTool: object }
+      ).liveScreenContextTool = {};
+      const cutCall = toolCall({
+        id: 'call-cut',
+        name: 'write_file',
+        args: { file_path: '/tmp/notes.txt', content: 'p' },
+      });
+      // The client records the truncation and its budget on the cut
+      // response's pending calls; the mocked model stream omits that step,
+      // so mark the request here as the client would.
+      Object.assign((cutCall as { value: core.ToolCallRequestInfo }).value, {
+        wasOutputTruncated: true,
+        outputBudgetAtTruncation: { usedTokens: 4096, limitTokens: 8192 },
+      });
+      const send = useSharedRounds([
+        cutCall,
+        finished(FinishReason.MAX_TOKENS),
+      ]);
+
+      await prompt();
+
+      // The shared batch schedules the client's own requests, so the
+      // scheduler's guard has the budget without further wiring.
+      expect(execute).not.toHaveBeenCalled();
+      expect(JSON.stringify(send.mock.calls[1][0])).toContain(
+        'used 4096 of the 8192-token output limit',
       );
     });
 

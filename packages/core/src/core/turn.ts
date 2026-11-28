@@ -1024,37 +1024,11 @@ export class Turn {
               // split write should be (#16417). The limit is whatever the
               // send layer actually used — clamp, escalation, or user
               // override.
-              // Prefer total − prompt: Gemini-family providers report
-              // reasoning tokens separately in thoughtsTokenCount, and the
-              // output-limit consumption includes them. A bare
-              // candidatesTokenCount under-reports there and the model would
-              // size its retry too large. Fall back to candidatesTokenCount
-              // when total or prompt is missing, zero-coerced (OpenAI
-              // converters stamp totalTokenCount unconditionally with
-              // `|| 0`), or non-finite. A MAX_TOKENS cut always consumed
-              // output tokens, so both arms refuse to certify a budget
-              // nothing was taken from — a zero or non-finite count is a
-              // coerced/missing value, not a measurement (#16417 R1-1/R4-1).
-              const usage = resp.usageMetadata;
-              const total = usage?.totalTokenCount;
-              const prompt = usage?.promptTokenCount;
-              const candidates = usage?.candidatesTokenCount;
-              const usedTokens =
-                total !== undefined &&
-                prompt !== undefined &&
-                Number.isFinite(total) &&
-                Number.isFinite(prompt) &&
-                total > prompt
-                  ? total - prompt
-                  : candidates !== undefined &&
-                      Number.isFinite(candidates) &&
-                      candidates > 0
-                    ? candidates
-                    : undefined;
-              const limitTokens = this.chat.getLastRequestMaxOutputTokens?.();
-              if (usedTokens !== undefined && limitTokens !== undefined) {
-                tc.outputBudgetAtTruncation = { usedTokens, limitTokens };
-              }
+              const budget = outputBudgetAtTruncation(
+                resp.usageMetadata,
+                this.chat.getLastRequestMaxOutputTokens?.(),
+              );
+              if (budget) tc.outputBudgetAtTruncation = budget;
             }
           }
 
@@ -1176,4 +1150,47 @@ function getCitations(resp: GenerateContentResponse): string[] {
       }
       return citation.uri!;
     });
+}
+
+/**
+ * What a `MAX_TOKENS` cut spent of the output budget, from the response's
+ * usage and the limit the send layer used. Undefined when either number was
+ * not measured, so no caller can certify a budget from a missing value.
+ *
+ * Prefer total − prompt: Gemini-family providers report reasoning tokens
+ * separately in thoughtsTokenCount, and the output-limit consumption
+ * includes them. A bare candidatesTokenCount under-reports there and the
+ * model would size its retry too large. Fall back to candidatesTokenCount
+ * when total or prompt is missing, zero-coerced (OpenAI converters stamp
+ * totalTokenCount unconditionally with `|| 0`), or non-finite. A MAX_TOKENS
+ * cut always consumed output tokens, so both arms refuse to certify a budget
+ * nothing was taken from — a zero or non-finite count is a coerced/missing
+ * value, not a measurement (#16417 R1-1/R4-1).
+ *
+ * Shared by every harness that reports a truncation without the `Turn`'s
+ * own request objects — the subagent runtime and the ACP session's own
+ * executor (#17306) — so all of them derive the same numbers.
+ */
+export function outputBudgetAtTruncation(
+  usage: GenerateContentResponseUsageMetadata | undefined,
+  limitTokens: number | undefined,
+): { usedTokens: number; limitTokens: number } | undefined {
+  const total = usage?.totalTokenCount;
+  const prompt = usage?.promptTokenCount;
+  const candidates = usage?.candidatesTokenCount;
+  const usedTokens =
+    total !== undefined &&
+    prompt !== undefined &&
+    Number.isFinite(total) &&
+    Number.isFinite(prompt) &&
+    total > prompt
+      ? total - prompt
+      : candidates !== undefined &&
+          Number.isFinite(candidates) &&
+          candidates > 0
+        ? candidates
+        : undefined;
+  return usedTokens !== undefined && limitTokens !== undefined
+    ? { usedTokens, limitTokens }
+    : undefined;
 }

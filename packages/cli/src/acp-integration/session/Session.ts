@@ -30,6 +30,7 @@ import {
   TOOL_INTERRUPTED_FOR_USER_MESSAGE,
   TRUNCATION_EDIT_REJECTION,
   TRUNCATION_RETRY_LOOP_DIRECTIVE,
+  truncationBudgetNote,
   USER_MESSAGE_INTERRUPT_ABORT_REASON,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { ShellAbortReason } from '@qwen-code/qwen-code-core/services/shellExecutionService.js';
@@ -52,6 +53,7 @@ import {
 import {
   getStructuredErrorCause,
   LlmEventType,
+  outputBudgetAtTruncation,
   type StructuredError,
 } from '@qwen-code/qwen-code-core/core/turn.js';
 import { toolCallArgumentsWereIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
@@ -975,6 +977,12 @@ export type DaemonToolLoopState = {
 /** What the send wrapper knows about one model response, for its calls. */
 type ModelResponseFacts = {
   outputTruncated: boolean;
+  /**
+   * What the output limit's cut spent, when both numbers were measured —
+   * the fact `turn.ts` puts on `outputBudgetAtTruncation`. Read only for a
+   * truncated response.
+   */
+  outputBudgetAtTruncation?: ToolCallRequestInfo['outputBudgetAtTruncation'];
   /** Tools whose refused partial edit this response already counted. */
   refusedPartialEdits: Set<string>;
 };
@@ -11646,6 +11654,10 @@ export class Session implements SessionContext {
               FinishReason.MAX_TOKENS
             ) {
               attempt.outputTruncated = true;
+              attempt.outputBudgetAtTruncation = outputBudgetAtTruncation(
+                event.value.usageMetadata,
+                chat.getLastRequestMaxOutputTokens?.(),
+              );
             }
           } else if (event.type === StreamEventType.COMPRESSED) {
             config.resetWorkflowModeContext?.();
@@ -17898,6 +17910,8 @@ export class Session implements SessionContext {
                   response,
                 )
               : 0;
+          // As in the scheduler: the refusal names the budget the cut spent
+          // until the count calls for the retry directive instead (#17306).
           return earlyErrorResponse(
             new Error(
               count >= PARTIAL_EDIT_DIRECTIVE_AT
@@ -17906,7 +17920,11 @@ export class Session implements SessionContext {
                       ? TRUNCATION_RETRY_LOOP_DIRECTIVE
                       : INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE
                   }`
-                : rejection,
+                : `${rejection}${
+                    outputTruncated
+                      ? truncationBudgetNote(response?.outputBudgetAtTruncation)
+                      : ''
+                  }`,
             ),
             toolName,
             {
