@@ -509,11 +509,14 @@ async function checkoutMatchesCapture(
   };
   await collect();
 
+  // `regularFiles` can have 10^5+ entries on a real checkout; a Set keeps the
+  // membership check O(N) instead of O(N^2) synchronously on the event loop.
+  const regularFileSet = new Set(regularFiles);
   for (const entry of await computeCarriedIdentities(
     worktreePath,
     regularFiles,
   )) {
-    if (entry.hash === null || !regularFiles.includes(entry.path)) {
+    if (entry.hash === null || !regularFileSet.has(entry.path)) {
       throw new Error('Worktree snapshot: contents changed during capture');
     }
     current.set(
