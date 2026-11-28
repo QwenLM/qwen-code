@@ -33,6 +33,7 @@ public class JdbcHarnessPlacementStore
             + "harness_owner_boot_id, harness_placement_epoch, harness_placement_state";
     private static final String JOIN_COLUMNS = "m.tenant_id, m.session_id, m.workspace_id, m.harness_instance_id, "
             + "m.harness_owner_boot_id, m.harness_placement_epoch, m.harness_placement_state";
+    private static final long CLAIM_RESERVATION_MILLIS = 30_000;
     private final JdbcTemplate jdbc;
 
     public JdbcHarnessPlacementStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
@@ -170,15 +171,73 @@ public class JdbcHarnessPlacementStore
 
     @Transactional
     public Placement takeover(String tenant, String session, Placement expected, String instance, String boot) {
-        return takeover(tenant, session, expected, instance, boot, null);
+        return takeover(tenant, session, expected, instance, boot, null, false).placement();
     }
 
     @Transactional
     public Placement takeoverForLifecycle(OperationRecord operation, Placement expected, String instance, String boot) {
-        return takeover(operation.tenantId(), operation.sessionId(), expected, instance, boot, operation);
+        return takeover(operation.tenantId(), operation.sessionId(), expected, instance, boot, operation, false).placement();
     }
 
-    private Placement takeover(String tenant, String session, Placement expected, String instance, String boot, OperationRecord operation) {
+    @Transactional
+    public long recordDemand(String tenant, String session) {
+        lock(tenant, session);
+        Long requestedAt = jdbc.queryForObject("SELECT harness_claim_requested_at FROM ma_session"
+                + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", Long.class, tenant, session);
+        long now = now(jdbc);
+        if (requestedAt == null) {
+            jdbc.update("UPDATE ma_session SET harness_claim_requested_at = ? WHERE tenant_id = ? AND session_id = ?",
+                    now, tenant, session);
+            return 0;
+        }
+        return Math.max(0, now - requestedAt);
+    }
+
+    @Transactional
+    public Claim claim(String tenant, String session, Placement expected, String instance, String boot) {
+        return takeover(tenant, session, expected, instance, boot, null, true);
+    }
+
+    public List<Placement> findClaimCandidates(int limit) {
+        requireLimit(limit);
+        // A live owner refuses every claim, so its demand must not hold a place in the batch.
+        return jdbc.query("SELECT " + JOIN_COLUMNS + " FROM ma_session m LEFT JOIN ma_session_head h"
+                + " ON h.tenant_id = m.tenant_id AND h.session_id = m.session_id AND h.head_kind = 'MANAGED_SESSION'"
+                + " WHERE m.harness_claim_requested_at IS NOT NULL"
+                + " AND (m.harness_claim_reserved_until IS NULL OR m.harness_claim_reserved_until <= " + ManagedSchemaTime.SQL_NOW + ")"
+                + " AND m.harness_placement_state <> 'UNASSIGNED'"
+                + " AND (m.harness_placement_state = 'RELEASED' OR h.writer_lease_until IS NULL"
+                + " OR h.writer_lease_until <= " + ManagedSchemaTime.SQL_NOW + ")"
+                + " AND m.status = 'ACTIVE' AND m.deleted_at IS NULL AND m.retired_at IS NULL"
+                + " AND (m.session_kind = 'PUBLIC' OR m.workspace_id IS NOT NULL)"
+                + " ORDER BY m.harness_claim_requested_at, m.tenant_id, m.session_id LIMIT ?",
+                (row, index) -> new Placement(row.getString(1), row.getString(2), row.getString(3),
+                        row.getString(4), row.getString(5), row.getLong(6), row.getString(7)), limit);
+    }
+
+    public List<Claim> findReservedClaims(String instance, String boot, int limit) {
+        identity(instance);
+        BrokerValues.requireShortId(boot, "harnessOwnerBootId");
+        requireLimit(limit);
+        return jdbc.query("SELECT " + COLUMNS + ", harness_claim_reserved_until FROM ma_session"
+                + " WHERE harness_instance_id = ? AND harness_owner_boot_id = ? AND harness_placement_state = 'ACTIVE'"
+                + " AND harness_claim_reserved_until > " + ManagedSchemaTime.SQL_NOW
+                + " ORDER BY tenant_id, session_id LIMIT ?",
+                (row, index) -> new Claim(new Placement(row.getString(1), row.getString(2), row.getString(3),
+                        row.getString(4), row.getString(5), row.getLong(6), row.getString(7)), row.getLong(8)),
+                instance, boot, limit);
+    }
+
+    /** Writer acquisition consumes the claim; the caller already holds the placement row lock. */
+    static void consumeClaim(JdbcTemplate jdbc, String tenant, String session) {
+        jdbc.update("UPDATE ma_session SET harness_claim_requested_at = NULL, harness_claim_reserved_until = NULL"
+                + " WHERE tenant_id = ? AND session_id = ?"
+                + " AND (harness_claim_requested_at IS NOT NULL OR harness_claim_reserved_until IS NOT NULL)",
+                tenant, session);
+    }
+
+    private Claim takeover(String tenant, String session, Placement expected, String instance, String boot,
+            OperationRecord operation, boolean reserve) {
         identity(instance);
         BrokerValues.requireShortId(boot, "harnessOwnerBootId");
         Placement current = lockEligible(tenant, session, operation);
@@ -193,9 +252,14 @@ public class JdbcHarnessPlacementStore
                         row.getString(3), row.getObject(4, Long.class), row.getObject(5, Long.class),
                         row.getLong(6), row.getLong(7)},
                 tenant, session);
+        long now = now(jdbc);
+        Long reservedUntil = jdbc.queryForObject("SELECT harness_claim_reserved_until FROM ma_session"
+                + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", Long.class, tenant, session);
+        if ("ACTIVE".equals(current.state()) && reservedUntil != null && reservedUntil > now) {
+            throw blocked("harness_owner_still_live");
+        }
         if (!heads.isEmpty()) {
             Object[] head = heads.getFirst();
-            long now = now(jdbc);
             boolean released = "RELEASED".equals(current.state()) && "SEALED".equals(head[0])
                     && released(jdbc, tenant, session, current.epoch());
             boolean activationKnown = Objects.equals(head[4], head[5]) || Objects.equals(head[6], 0L);
@@ -216,10 +280,13 @@ public class JdbcHarnessPlacementStore
             throw blocked("harness_placement_epoch_exhausted");
         }
         long epoch = current.epoch() + 1;
+        long until = reserve ? now + CLAIM_RESERVATION_MILLIS : 0;
+        // A claim keeps the demand until its writer acquires; a push takeover answers it.
         jdbc.update("UPDATE ma_session SET harness_instance_id = ?, harness_owner_boot_id = ?,"
-                + " harness_placement_epoch = ?, harness_placement_state = 'ACTIVE'"
-                + " WHERE tenant_id = ? AND session_id = ?", instance, boot, epoch, tenant, session);
-        return new Placement(tenant, session, current.workspaceId(), instance, boot, epoch, "ACTIVE");
+                + " harness_placement_epoch = ?, harness_placement_state = 'ACTIVE', harness_claim_reserved_until = ?"
+                + (reserve ? "" : ", harness_claim_requested_at = NULL")
+                + " WHERE tenant_id = ? AND session_id = ?", instance, boot, epoch, reserve ? until : null, tenant, session);
+        return new Claim(new Placement(tenant, session, current.workspaceId(), instance, boot, epoch, "ACTIVE"), until);
     }
 
     static Placement requireCurrent(JdbcTemplate jdbc, WriterCredentialPolicy credentials,
@@ -333,6 +400,12 @@ public class JdbcHarnessPlacementStore
 
     static long now(JdbcTemplate jdbc) {
         return jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW, Long.class);
+    }
+
+    private static void requireLimit(int limit) {
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Claim limit must be between 1 and 100");
+        }
     }
 
     private static void identity(String id) {
