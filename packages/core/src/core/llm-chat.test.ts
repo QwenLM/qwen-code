@@ -10019,12 +10019,22 @@ describe('LlmChat', async () => {
         available: false,
         reason: 'quota',
       });
+      // The mark is logged so the session-permanent skip is distinguishable
+      // from the transient rate-limit failure in the debug log.
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        '[FALLBACK] Marking fallback model "fallback-a" terminal for the session (reason: quota); it is skipped on later requests until a new session.',
+      );
 
       // Request 2, same turn: terminal fallback-a is skipped.
       const events2 = await sendSessionCollect('test', 'terminal-quota-turn');
       expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
       expect(fallbackA).toHaveBeenCalledTimes(1);
       expect(fallbackB).toHaveBeenCalledTimes(2);
+      // The entry skip logs the ledger reason: quota (session) vs
+      // retry_once_per_turn (turn).
+      expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+        '[FALLBACK] Skipping fallback model "fallback-a": marked unavailable (reason: quota).',
+      );
 
       // Request 3, a fresh turn (resetTurn): terminal survives the turn
       // boundary, so fallback-a is STILL skipped, unlike a sticky mark.
