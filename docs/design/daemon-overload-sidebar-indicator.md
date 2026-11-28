@@ -2,7 +2,7 @@
 
 [English](daemon-overload-sidebar-indicator.md) | [简体中文](daemon-overload-sidebar-indicator.zh-CN.md)
 
-Status: proposed
+Status: implemented (PR #18054, merged as `f13dc794b430`)
 
 ## Problem
 
