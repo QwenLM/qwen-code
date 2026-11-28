@@ -11,8 +11,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -228,6 +230,73 @@ class HarnessWorkPollTest {
         first.get(1, TimeUnit.SECONDS);
 
         assertThat(secondReply.claims()).isEmpty();
+    }
+
+    @Test
+    void aSaturatedAttemptPoolDoesNotDelayAnUnrelatedWaiterDeadline() throws Exception {
+        when(harness.acceptsWorkPullClaims(anyString(), anyString())).thenReturn(true);
+        when(harness.acceptsWorkPullReoffers(anyString(), anyString())).thenReturn(true);
+        when(placements.findReservedClaims(anyString(), anyString(), anyInt())).thenReturn(List.of());
+        var queries = new AtomicInteger();
+        var claimsEntered = new CountDownLatch(4);
+        var releaseClaims = new CountDownLatch(1);
+        when(placements.findClaimCandidates(100))
+                .thenAnswer(call -> List.of(candidate("blocked-" + queries.incrementAndGet(), 2)));
+        when(harness.claimLoad(any(), any(), any())).thenReturn(Map.of());
+        when(placements.claim(eq("t"), anyString(), any(), anyString(), anyString())).thenAnswer(call -> {
+            claimsEntered.countDown();
+            if (!releaseClaims.await(2, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("claim release timed out");
+            }
+            return new Claim(new Placement("t", call.getArgument(1), "ws", call.getArgument(3), call.getArgument(4),
+                    3, "ACTIVE"), 99);
+        });
+        List<CompletableFuture<HarnessWorkPoll.Reply>> blockedPolls = new ArrayList<>();
+        for (int process = 0; process < 5; process++) {
+            blockedPolls.add(work.poll("test-token", new HarnessWorkPoll.Poll(
+                    "pod-" + process, "boot-" + process, DIGEST, FEATURES, 1, 20_000)));
+        }
+        assertThat(claimsEntered.await(1, TimeUnit.SECONDS)).isTrue();
+
+        var sixth = work.poll("test-token", new HarnessWorkPoll.Poll(
+                "pod-c", "boot-c", DIGEST, FEATURES, 1, 100));
+        try {
+            assertThat(sixth.get(500, TimeUnit.MILLISECONDS).claims()).isEmpty();
+        } finally {
+            releaseClaims.countDown();
+        }
+        for (var pending : blockedPolls) {
+            assertThat(pending.get(2, TimeUnit.SECONDS).claims()).hasSize(1);
+        }
+    }
+
+    @Test
+    void anExpiredReplacementDoesNotWaitForTheInFlightAttempt() throws Exception {
+        when(placements.findReservedClaims(anyString(), anyString(), anyInt())).thenReturn(List.of());
+        var blocked = candidate("blocked", 2);
+        var queries = new AtomicInteger();
+        var claimEntered = new CountDownLatch(1);
+        var releaseClaim = new CountDownLatch(1);
+        when(placements.findClaimCandidates(100))
+                .thenAnswer(call -> queries.getAndIncrement() == 0 ? List.of(blocked) : List.of());
+        when(harness.claimLoad(any(), any(), any())).thenReturn(Map.of());
+        when(placements.claim("t", "blocked", blocked, "pod-b", "boot-b")).thenAnswer(call -> {
+            claimEntered.countDown();
+            if (!releaseClaim.await(2, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("claim release timed out");
+            }
+            return claim("blocked", 3);
+        });
+        var older = work.poll("test-token", poll(1, 20_000));
+        assertThat(claimEntered.await(1, TimeUnit.SECONDS)).isTrue();
+
+        var newer = work.poll("test-token", poll(1, 100));
+        try {
+            assertThat(older.get(100, TimeUnit.MILLISECONDS).claims()).isEmpty();
+            assertThat(newer.get(200, TimeUnit.MILLISECONDS).claims()).isEmpty();
+        } finally {
+            releaseClaim.countDown();
+        }
     }
 
     @Test

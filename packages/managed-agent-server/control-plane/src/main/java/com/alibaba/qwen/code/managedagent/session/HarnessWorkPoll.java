@@ -87,7 +87,13 @@ public class HarnessWorkPoll {
         authenticate(token, poll);
         long wait = Math.min(Math.max(poll.waitMillis(), 0), MAX_WAIT_MILLIS);
         var key = new ProcessKey(poll.instanceId(), poll.bootId());
-        var waiter = new Waiter(key, poll, System.currentTimeMillis() + wait, new CompletableFuture<>());
+        var reply = new CompletableFuture<Reply>();
+        // Positive deadlines do not depend on saturated workers; zero-wait polls still get one offer attempt.
+        // A reservation committed after the timeout remains re-offerable on the next poll.
+        if (wait > 0) {
+            reply.completeOnTimeout(new Reply(List.of()), wait, TimeUnit.MILLISECONDS);
+        }
+        var waiter = new Waiter(key, poll, System.currentTimeMillis() + wait, reply);
         // One open poll per process: a newer poll supersedes an older one, whose caller has given up,
         // so the same reserved claim is never offered twice and free slots are never counted twice.
         Waiter older = waiters.put(key, waiter);
@@ -139,7 +145,7 @@ public class HarnessWorkPoll {
             waiters.remove(waiter.key(), waiter);
             return true;
         }
-        // Worker threads keep unrelated deadlines observable during a blocked store call. This separate
+        // Worker threads keep unrelated offer attempts moving during a blocked store call. This separate
         // ownership map still serializes attempts for a process when supersession replaces its waiter.
         if (inFlight.putIfAbsent(waiter.key(), waiter) != null) {
             return false;
