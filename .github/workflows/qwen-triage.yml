@@ -17,6 +17,10 @@ on:
         description: 'PR number to run tmux real-user testing on (instead of triage)'
         required: false
         type: 'number'
+      verify_pr:
+        description: 'PR number to run deep verification on (instead of triage)'
+        required: false
+        type: 'number'
       skip_comment:
         description: 'Run the tmux test but do not post the result comment on the PR'
         required: false
@@ -51,14 +55,16 @@ jobs:
     #   - `/tmux` comment / `tmux_pr` dispatch -> gates real-user testing, which
     #     EXECUTES the PR author's code, so it is keyed on the PR author (whose
     #     code runs), not the commenter/dispatcher (see principal resolution).
-    #   - `/verify` comments launch sandboxed deep verification, which also
+    #   - `/verify` comments / `verify_pr` dispatch launch sandboxed deep
+    #     verification, which also
     #     EXECUTES the PR author's code AND burns a scarce self-hosted runner
-    #     slot plus a full model budget, so it is gated on BOTH the PR author
-    #     (whose code runs) and the commenter (who spends the budget).
+    #     slot plus a full model budget, so the requester needs write and the
+    #     author's permission selects the trusted/external controls.
     # The `issues` and `workflow_dispatch`-with-`number` (triage) triggers need
     # no gate: triage is read-only and dispatch already requires write to
-    # invoke. But `tmux_pr` dispatch runs the *PR author's* code, not the
-    # dispatcher's, so it IS gated here on the PR author's permission.
+    # invoke. `tmux_pr` dispatch is gated on the PR author's permission;
+    # `verify_pr` dispatch is gated on the dispatcher's permission and then
+    # classifies the PR author as trusted or external.
     if: |-
       always() &&
       (github.event_name != 'pull_request_target' ||
@@ -73,7 +79,8 @@ jobs:
          github.event.comment.body == '@qwen-code /verify' ||
          startsWith(github.event.comment.body, '@qwen-code /verify '))) ||
        (github.event_name == 'workflow_dispatch' &&
-        github.event.inputs.tmux_pr != ''))
+       (github.event.inputs.tmux_pr != '' ||
+        github.event.inputs.verify_pr != '')))
     # Runner routing for the write-permission gate. This job loads CI_BOT_PAT
     # but runs no agent, checks out nothing, and processes no untrusted PR
     # content — its steps only read event metadata and call read/receipt APIs,
@@ -192,7 +199,10 @@ jobs:
           COMMENT_BODY: '${{ github.event.comment.body }}'
           PR_NUMBER: '${{ github.event.pull_request.number }}'
           ISSUE_NUMBER: '${{ github.event.issue.number }}'
+          TRIAGE_NUMBER: '${{ github.event.inputs.number }}'
           TMUX_PR: '${{ github.event.inputs.tmux_pr }}'
+          VERIFY_PR: '${{ github.event.inputs.verify_pr }}'
+          DISPATCH_USER: '${{ github.triggering_actor }}'
           # `github.event.issue.pull_request` is an object on PRs and null on
           # issues; compare against null rather than truthiness so the shell
           # receives a plain true/false.
@@ -220,6 +230,12 @@ jobs:
           # typed /verify". They differ only for the piggybacked lane, where
           # a classification failure must skip verify without denying triage.
           VERIFY_LANE=false
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] &&
+             { [ -n "${VERIFY_PR:-}" ] && [ -n "${TMUX_PR:-}${TRIAGE_NUMBER:-}" ]; }; then
+            echo "::error::Select exactly one workflow dispatch target: number, tmux_pr or verify_pr."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "$EVENT_NAME" = "pull_request_target" ]; then
             # Automatic per-PR triage deliberately does NOT pull the verify
             # lane with it. Runner capacity is not the reason — the ECS pool
@@ -278,10 +294,23 @@ jobs:
               esac
               ;;
             workflow_dispatch)
-              # Only the tmux_pr dispatch reaches authorize. It runs the PR
-              # author's code, so resolve and gate on that author (not the
-              # dispatcher). Empty/unresolvable author fails closed below.
-              principals="$(gh pr view "$TMUX_PR" --repo "$GITHUB_REPOSITORY" --json author --jq '.author.login' 2>/dev/null || true)"
+              if [ -z "$TMUX_PR" ] && [ -z "$VERIFY_PR" ]; then
+                echo "should_run=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              # Dispatch users already need write, but retain the comment
+              # lane's principal check rather than weakening the trust gate
+              # for one entry point.
+              if [ -n "$VERIFY_PR" ]; then
+                IS_VERIFY=true
+                VERIFY_LANE=true
+                ISSUE_NUMBER="$VERIFY_PR"
+                COMMENT_USER="$DISPATCH_USER"
+                ISSUE_AUTHOR="$(gh pr view "$VERIFY_PR" --repo "$GITHUB_REPOSITORY" --json author --jq '.author.login' 2>/dev/null || true)"
+                principals="$DISPATCH_USER"
+              else
+                principals="$(gh pr view "$TMUX_PR" --repo "$GITHUB_REPOSITORY" --json author --jq '.author.login' 2>/dev/null || true)"
+              fi
               ;;
             *) principals="" ;;
           esac
@@ -431,13 +460,17 @@ jobs:
         if: >-
           steps.perm.outputs.should_run == 'true' &&
           vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true' &&
-          github.event_name == 'issue_comment' &&
-          github.event.issue.pull_request &&
+          (github.event_name == 'issue_comment' ||
+           (github.event_name == 'workflow_dispatch' &&
+            github.event.inputs.verify_pr != '')) &&
+          (github.event.issue.pull_request ||
+           github.event_name == 'workflow_dispatch') &&
           (github.event.comment.body == '@qwen-code /verify' ||
-           startsWith(github.event.comment.body, '@qwen-code /verify '))
+           startsWith(github.event.comment.body, '@qwen-code /verify ') ||
+           github.event_name == 'workflow_dispatch')
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          NUMBER: '${{ github.event.issue.number }}'
+          NUMBER: '${{ github.event.issue.number || github.event.inputs.verify_pr }}'
         run: |-
           # gh config reroute hardening — same pins as the perm step above.
           export GH_HOST=github.com
@@ -563,7 +596,8 @@ jobs:
            (vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot')) ||
         (github.event_name == 'workflow_dispatch' &&
          github.event.inputs.number != '' &&
-         github.event.inputs.tmux_pr == '') ||
+         github.event.inputs.tmux_pr == '' &&
+         github.event.inputs.verify_pr == '') ||
         (
           ((github.event_name == 'pull_request_target' &&
             github.event.pull_request.draft == false) ||
@@ -2806,9 +2840,10 @@ jobs:
   # A/B load-bearing proof against the base side, mock-free harnesses with
   # wire oracles, targeted workspace gates — and posts the report back.
   # EXECUTES untrusted PR code, so it reuses the /tmux isolation contract:
-  # gated on the PR AUTHOR (whose code runs) having write via the authorize
-  # job, runs in a container, NO GitHub token in the agent env, model key
-  # behind a loopback proxy, and the report is published by the separate
+  # job: its permission selects the trusted/external controls independently
+  # of the requester's write gate, with the same head OID pin, risk screen
+  # and workspace wipes for external authors. Runs in a container, NO GitHub
+  # token in the agent env, model key behind a loopback proxy; the separate
   # PR-code-free publish-verify job below. The report is agent-produced
   # evidence for a human reviewer — never a review, approval, or CI check
   # (and its check-runs ride the issue_comment event, which the finalize
@@ -2818,9 +2853,11 @@ jobs:
     if: >-
       always() &&
       github.repository == 'QwenLM/qwen-code' &&
-      github.event_name == 'issue_comment' &&
-      github.event.issue.pull_request &&
-      github.event.issue.state == 'open' &&
+      ((github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        github.event.issue.state == 'open') ||
+       (github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.verify_pr != '')) &&
       needs.authorize.outputs.verify_lane == 'true' &&
       needs.authorize.outputs.should_run == 'true' &&
       vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'
@@ -2836,13 +2873,15 @@ jobs:
     concurrency:
       group: >-
         ${{
-          (github.event_name == 'issue_comment' &&
-           github.event.issue.pull_request &&
-           github.event.issue.state == 'open' &&
+          ((github.event_name == 'issue_comment' &&
+            github.event.issue.pull_request &&
+            github.event.issue.state == 'open') ||
+           (github.event_name == 'workflow_dispatch' &&
+            github.event.inputs.verify_pr != '')) &&
            needs.authorize.outputs.verify_lane == 'true' &&
            needs.authorize.outputs.should_run == 'true' &&
            vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') &&
-          format('{0}-verify-{1}', github.workflow, github.event.issue.number) ||
+          format('{0}-verify-{1}', github.workflow, github.event.issue.number || github.event.inputs.verify_pr) ||
           format('{0}-verify-run-{1}', github.workflow, github.run_id)
         }}
       cancel-in-progress: false
@@ -2893,7 +2932,7 @@ jobs:
     permissions:
       contents: 'read'
     outputs:
-      pr_number: '${{ steps.pr.outputs.pr_number || github.event.issue.number }}'
+      pr_number: '${{ steps.pr.outputs.pr_number || github.event.issue.number || github.event.inputs.verify_pr }}'
       # The head the pr step pinned and the pin step checked against the
       # checkout: publish-verify stamps it into the report header so the
       # next round's deepen step reads it as data, not report prose.
@@ -2939,7 +2978,7 @@ jobs:
         id: 'pr'
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          PR_NUMBER: '${{ github.event.issue.number }}'
+          PR_NUMBER: '${{ github.event.issue.number || github.event.inputs.verify_pr }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           VERIFY_TRUST: '${{ needs.authorize.outputs.verify_trust }}'
           SPONSORED_OID: '${{ needs.authorize.outputs.verify_head_oid }}'
@@ -6013,9 +6052,9 @@ jobs:
       - name: 'Checkout the OSS publisher scripts'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          # Pin the trusted ref explicitly: publish-verify only runs under
-          # issue_comment events (needs: verify), where github.sha is the
-          # default-branch head — never a PR merge ref. The pin makes
+          # Pin the trusted ref explicitly: for issue_comment, github.sha is
+          # the default-branch head; for dispatch it is the selected workflow
+          # ref. Neither can be the target PR's merge ref. The pin makes
           # "never PR code" a property of this step instead of an inference
           # from the event's default resolution.
           ref: '${{ github.sha }}'
@@ -6097,7 +6136,7 @@ jobs:
           # comes through empty — which used to hit the no-PR-number guard
           # below and exit 0 silently, in exactly the scenario that produces
           # cancellations. Verified by executing this step with both values.
-          PR_NUMBER: '${{ needs.verify.outputs.pr_number || github.event.issue.number }}'
+          PR_NUMBER: '${{ needs.verify.outputs.pr_number || github.event.issue.number || github.event.inputs.verify_pr }}'
           VERDICT: '${{ needs.verify.outputs.verdict }}'
           VERIFY_MODEL: '${{ needs.verify.outputs.model }}'
           VERIFY_CLI_VERSION: '${{ needs.verify.outputs.cli_version }}'

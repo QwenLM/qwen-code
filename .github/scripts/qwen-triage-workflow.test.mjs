@@ -48,6 +48,18 @@ const prWorkflowPath = join(
   'pr-workflow.md',
 );
 const prSkill = readFileSync(prWorkflowPath, 'utf8');
+assert.ok(doc.on.workflow_dispatch.inputs.verify_pr, 'manual verify input');
+assert.match(doc.jobs.verify.if, /workflow_dispatch/);
+assert.match(doc.jobs.verify.if, /github\.event\.inputs\.verify_pr != ''/);
+assert.match(
+  doc.jobs.verify.concurrency.group,
+  /github\.event\.issue\.number \|\| github\.event\.inputs\.verify_pr/,
+);
+assert.match(
+  doc.jobs.verify.steps.find((s) => s.id === 'pr').env.PR_NUMBER,
+  /github\.event\.issue\.number \|\| github\.event\.inputs\.verify_pr/,
+);
+assert.match(doc.jobs.triage.if, /github\.event\.inputs\.verify_pr == ''/);
 const triageJob = doc.jobs.triage;
 const steps = triageJob.steps;
 const triageStep = steps.find((s) => s.id === 'triage');

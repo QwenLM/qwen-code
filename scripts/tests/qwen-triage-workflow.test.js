@@ -1596,13 +1596,11 @@ describe('qwen-triage verify workflow', () => {
     );
 
     let n = 0;
-    const gate = (
-      commentBody,
-      author,
-      commenter,
-      issueNumber = '1',
-      isPr = 'true',
-    ) => {
+    const gate = (scenario, ...commentArgs) => {
+      const isDispatch = typeof scenario === 'object';
+      const [author, commenter, issueNumber = '1', isPr = 'true'] = commentArgs;
+      const verifyPr = isDispatch ? (scenario.verifyPr ?? '') : '';
+      const dispatcher = isDispatch ? scenario.dispatcher : '';
       const out = join(dir, `out-${n++}`);
       writeFileSync(out, '');
       spawnSync('bash', ['-c', script], {
@@ -1614,14 +1612,16 @@ describe('qwen-triage verify workflow', () => {
           GITHUB_STEP_SUMMARY: '/dev/null',
           GITHUB_OUTPUT: out,
           RUNNER_TEMP: dir,
-          EVENT_NAME: 'issue_comment',
-          COMMENT_BODY: commentBody,
-          ISSUE_AUTHOR: author,
-          COMMENT_USER: commenter,
+          EVENT_NAME: isDispatch ? 'workflow_dispatch' : 'issue_comment',
+          COMMENT_BODY: isDispatch ? '' : scenario,
+          ISSUE_AUTHOR: isDispatch ? '' : author,
+          COMMENT_USER: isDispatch ? '' : commenter,
           PR_NUMBER: '1',
-          ISSUE_NUMBER: issueNumber,
+          ISSUE_NUMBER: isDispatch ? verifyPr : issueNumber,
           IS_PR: isPr,
           TMUX_PR: '',
+          VERIFY_PR: verifyPr,
+          DISPATCH_USER: dispatcher,
         },
         encoding: 'utf8',
       });
@@ -1714,9 +1714,53 @@ describe('qwen-triage verify workflow', () => {
       expect(tmux.trust).toBeUndefined();
       expect(tmux.oid).toBeUndefined();
       expect(tmux.lane).toBeUndefined();
+
+      const dispatch = (verifyPr, author, dispatcher) =>
+        gate({ verifyPr, author, dispatcher });
+      expect(dispatch('7', 'alice', 'bob')).toMatchObject({
+        run: 'true',
+        lane: 'true',
+        trust: 'trusted',
+      });
+      expect(dispatch('7', 'mallory', 'bob')).toMatchObject({
+        run: 'true',
+        lane: 'true',
+        trust: 'external',
+        oid: 'deadbeefcafe',
+      });
+      expect(dispatch('7', 'alice', 'mallory').run).toBe('false');
+      expect(dispatch('99', 'mallory', 'bob').run).toBe('false');
+      expect(dispatch('', 'alice', 'bob').run).toBe('true');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('routes manual verification through the existing verify lane', () => {
+    const parsed = parse(workflow);
+    expect(parsed.on.workflow_dispatch.inputs.verify_pr).toMatchObject({
+      required: false,
+      type: 'number',
+    });
+    const verifyJob = parse(workflow).jobs.verify;
+    expect(verifyJob.if).toContain("github.event_name == 'workflow_dispatch'");
+    expect(verifyJob.if).toContain("github.event.inputs.verify_pr != ''");
+    expect(verifyJob.if).toContain("github.event.issue.state == 'open'");
+    expect(verifyJob.if).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+    expect(verifyJob.concurrency.group).toContain(
+      'github.event.issue.number || github.event.inputs.verify_pr',
+    );
+    const prStep = stepIn('verify', 'Resolve PR and snapshot metadata');
+    expect(prStep).toContain(
+      "PR_NUMBER: '${{ github.event.issue.number || github.event.inputs.verify_pr }}'",
+    );
+    expect(job('publish-verify')).toContain(
+      'needs.verify.outputs.pr_number || github.event.issue.number || github.event.inputs.verify_pr',
+    );
+    expect(job('triage')).toContain("github.event.inputs.verify_pr == ''");
+    expect(job('tmux-testing')).not.toContain(
+      "github.event.inputs.verify_pr != ''",
+    );
   });
   it('sweeps planted verify artifacts after the last PR-controlled process', () => {
     const runStep = step('Run verification agent');
