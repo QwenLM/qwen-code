@@ -557,6 +557,21 @@ describe('model catalog', () => {
     });
   });
 
+  it('serves the base entry to quantized builds of a catalog model', () => {
+    // A quantized build is named after its base model plus the method. With
+    // the suffix kept it missed this entry and took the 262,144 `/^qwen/`
+    // family row, twice the real window.
+    for (const id of [
+      'Qwen/Qwen2.5-72B-Instruct-AWQ',
+      'Qwen/Qwen2.5-72B-Instruct-GPTQ-Int4',
+      'Qwen/Qwen2.5-72B-Instruct-FP8',
+    ]) {
+      expect(tokenLimit(id)).toBe(131_072);
+    }
+    expect(tokenLimit('zai-org/GLM-4.5-Air-FP8')).toBe(131_072);
+    expect(tokenLimit('zai-org/GLM-4.5-Air-FP8', 'output')).toBe(98_304);
+  });
+
   it.each([
     ['deepseek-v3.1'],
     ['deepseek-ai/DeepSeek-V3.1'],
