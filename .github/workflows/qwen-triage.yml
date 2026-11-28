@@ -456,6 +456,15 @@ jobs:
             echo "Failed to post disabled-lane notice; continuing." >&2
 
   triage:
+    env:
+      HTTP_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
+      http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     needs: ['authorize']
     # TUNABLE WITHOUT A CODE CHANGE: set the repository variable in
     # Settings → Variables. Why the fallback is 60: the fixed 30 was
@@ -541,15 +550,6 @@ jobs:
     container:
       image: 'node:22-bookworm'
       options: '--init'
-      env:
-        HTTP_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
-        http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     defaults:
       run:
         shell: 'bash'
@@ -1806,6 +1806,15 @@ jobs:
   # AUTHOR (whose code runs) having write via the authorize job, runs read-only
   # with NO GitHub token in the agent env, and keeps credentials out of .git.
   tmux-testing:
+    env:
+      HTTP_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
+      http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     needs: ['authorize']
     if: >-
       always() &&
@@ -1851,15 +1860,6 @@ jobs:
     container:
       image: 'node:22-bookworm'
       options: '--init'
-      env:
-        HTTP_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
-        http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     defaults:
       run:
         shell: 'bash'
@@ -2832,6 +2832,15 @@ jobs:
   # (and its check-runs ride the issue_comment event, which the finalize
   # workflow's `event == "pull_request"` universe structurally excludes).
   verify:
+    env:
+      HTTP_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
+      http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     needs: ['authorize']
     if: >-
       always() &&
@@ -2905,15 +2914,6 @@ jobs:
     container:
       image: 'node:22-bookworm'
       options: '--init'
-      env:
-        HTTP_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
-        http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     defaults:
       run:
         shell: 'bash'

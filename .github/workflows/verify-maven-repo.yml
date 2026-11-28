@@ -26,6 +26,15 @@ defaults:
 
 jobs:
   save:
+    env:
+      HTTP_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
+      http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+      no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     name: 'Save verify Maven repo'
     # Same runs-on and image as the verify consumer. actions/cache versions
     # an entry by the literal path plus the compression method; a different
@@ -35,15 +44,6 @@ jobs:
       image: 'node:22-bookworm'
       # Match the host runner UID/GID so bind-mounted files stay writable.
       options: '--init --user node'
-      env:
-        HTTP_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
-        http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-        no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     # Cold JDK + Maven + a Spring Boot resolve. The verify lane caps each
     # sibling install at 5 minutes against a warm repo; this job is the
     # cold one, so give it the same 45 minutes as sdk-java.yml's daemon-e2e

@@ -12002,11 +12002,12 @@ describe('qwen-triage pnpm store producer', () => {
     // An unset variable stays empty so existing directly connected runners
     // retain their behavior; protected hosts opt in with these repo vars.
     for (const jobName of ['triage', 'tmux-testing', 'verify']) {
-      const container = workflows.jobs[jobName].container;
-      expect(container.env).toEqual(ecsProxyEnv());
+      expect(workflows.jobs[jobName].env).toEqual(ecsProxyEnv());
+      expect(workflows.jobs[jobName].container.env).toBeUndefined();
     }
     for (const producer of producers) {
-      expect(producer.jobs.save.container.env).toEqual(ecsProxyEnv());
+      expect(producer.jobs.save.env).toEqual(ecsProxyEnv());
+      expect(producer.jobs.save.container.env).toBeUndefined();
     }
   });
 
