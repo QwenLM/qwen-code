@@ -316,7 +316,17 @@ function fitText(
 
   const preserved = recovery?.text ?? '';
   const preservedSize = preserved ? preserved.length + 2 : 0;
-  const pointer = recoveryHeader(persistedOutputFiles);
+  const primaryPointer = recoveryHeader(persistedOutputFiles);
+  const fallbackFiles = recovery?.fallbackPersistedOutputFiles;
+  const fallbackPointer = fallbackFiles?.length
+    ? recoveryHeader(fallbackFiles)
+    : undefined;
+  const pointer =
+    fallbackPointer &&
+    primaryPointer.length + preservedSize + 3 > maxChars &&
+    fallbackPointer.length + preservedSize + 3 <= maxChars
+      ? fallbackPointer
+      : primaryPointer;
   // A pointer too long to deliver in full is dropped rather than sent as a
   // partial path, so the preview is budgeted against the notice that is sent.
   const header =
