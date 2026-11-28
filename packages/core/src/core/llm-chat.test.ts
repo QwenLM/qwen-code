@@ -8665,6 +8665,10 @@ describe('LlmChat', async () => {
     const nestedReportFormat = {
       chat_template_kwargs: { response_format: reportResponseFormat },
     };
+    const jsonObjectResponseFormat = { type: 'json_object' };
+    const nestedJsonObjectFormat = {
+      chat_template_kwargs: { response_format: jsonObjectResponseFormat },
+    };
     const textResponseFormat = { type: 'text' };
     const responseAwareTemplate =
       '{{ response_format | default("none") }}{{ messages }}';
@@ -8902,6 +8906,42 @@ describe('LlmChat', async () => {
           response_format: structuredClone(reportResponseFormat),
         },
         output: 32_000,
+      },
+      {
+        name: 'a repeated MiniMax JSON object format',
+        primaryBody: nestedJsonObjectFormat,
+        body: {
+          ...nestedJsonObjectFormat,
+          response_format: { ...jsonObjectResponseFormat },
+        },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a repeated Kimi JSON object format after the body override',
+        primaryBody: nestedJsonObjectFormat,
+        sampling: { response_format: reportResponseFormat },
+        body: {
+          ...nestedJsonObjectFormat,
+          response_format: { ...jsonObjectResponseFormat },
+        },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a response schema overriding the nested Kimi JSON object format',
+        primaryBody: nestedJsonObjectFormat,
+        body: {
+          ...nestedJsonObjectFormat,
+          response_format: reportResponseFormat,
+        },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a Kimi JSON object format without an explicit nested format',
+        body: { response_format: jsonObjectResponseFormat },
+        output: kimiRoute.primaryOutput,
       },
       {
         primary: kimiRoute,

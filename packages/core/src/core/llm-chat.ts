@@ -1081,14 +1081,15 @@ function openAIChatPromptSource(
     | { type?: unknown; json_schema?: { schema?: unknown } }
     | undefined;
   const responseSchema = structuredFormat?.json_schema?.schema;
-  // These renderers use one prompt schema when the two declarations agree.
-  const omitRedundantSchema =
+  // Repeating the same structured format does not change these native prompts.
+  const omitRedundantStructuredFormat =
     chatTemplate === undefined &&
     (pinnedMiniMax || wireModel === 'moonshotai/kimi-k3:fireworks') &&
-    structuredFormat?.type === 'json_schema' &&
-    responseSchema !== null &&
-    typeof responseSchema === 'object' &&
-    !Array.isArray(responseSchema) &&
+    (isDeepStrictEqual(responseFormat, { type: 'json_object' }) ||
+      (structuredFormat?.type === 'json_schema' &&
+        responseSchema !== null &&
+        typeof responseSchema === 'object' &&
+        !Array.isArray(responseSchema))) &&
     isDeepStrictEqual(responseFormat, templateResponseFormat);
   // The Chat pipeline installs generated tools after sampling params and before
   // the provider applies extra_body. Only compare the tools that survive.
@@ -1106,7 +1107,9 @@ function openAIChatPromptSource(
       chat_template_kwargs: templateOptions,
       documents: body['documents'] ?? undefined,
       response_format:
-        omitPlainText || omitRedundantSchema ? undefined : responseFormat,
+        omitPlainText || omitRedundantStructuredFormat
+          ? undefined
+          : responseFormat,
       add_generation_prompt: addGenerationPrompt,
       continue_final_message: continueFinalMessage,
       add_special_tokens: addSpecialTokens,
