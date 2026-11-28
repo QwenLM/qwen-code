@@ -15,9 +15,9 @@
 
 ## 当前落地状态（2026-11-28）
 
-门禁覆盖 `persistence/src/main/java` 与 `runtime-broker/src/main/java` 两个源码根。当前全局上限为 **2,309 行**，与当前最大类 `ToolPublicationDataStore` 的实际行数及其按类 pin 一致。当前次大类是 `JdbcRuntimeBindingRepository`，实际 2,131 行（仍保留较早的 2,319 行 pin）；`JdbcManagedExtensionRecordStore` 实际为 2,129 行，保留较早的 2,170 行 pin。由于 pin 仅由显式评审编辑下调、不会自动收紧，目前 25 条已入 pin 条目中有 19 条高于对应类的实测行数。
+门禁覆盖 `persistence/src/main/java` 与 `runtime-broker/src/main/java` 两个源码根。当前全局上限为 **2,309 行**，与当前最大类 `ToolPublicationDataStore` 的实际行数及其按类 pin 一致。当前次大类是 `JdbcRuntimeBindingRepository`，实际 2,131 行；此处把较早的 2,319 行 pin 收紧到当前行数。`JdbcManagedExtensionRecordStore` 实际为 2,129 行，保留较早的 2,170 行 pin。除此之外，pin 仅由显式评审编辑下调、不会自动收紧，因此目前 25 条已入 pin 条目中有 18 条高于对应类的实测行数。
 
-新增私有 `ossScope` helper 曾把 `ToolPublicationDataStore` 从 2,481 行增长到 2,485 行，超过 #17478 当时建立的 2,483 行上限。main 上 #18085 将该 scope helper 移入 `ToolPublicationContract`，使该类减到 2,482 行，并把全局上限与该类 pin 从 2,483 下调至 2,482。随后 `ToolPublicationObjectKeys` 删除了不再使用的 import，使该类、全局上限和按类 pin 均降至 2,481。在 #17846 中，将 guard 与回执谓词提取到 `ToolPublicationRequirements`，使 store 减至 2,306 行；合并 #18325 又增加三条 import，因此当前该类行数、全局上限与按类 pin 均为 2,309。持久化 key 布局不变。上文历史叙述中的 4,216 行及其他类体量描述原始设计基线，而非当前上限。
+新增私有 `ossScope` helper 曾把 `ToolPublicationDataStore` 从 2,481 行增长到 2,485 行，超过 #17478 当时建立的 2,483 行上限。main 上 #18085 将该 scope helper 移入 `ToolPublicationContract`，使该类减到 2,482 行，并把全局上限与该类 pin 从 2,483 下调至 2,482。随后 `ToolPublicationObjectKeys` 删除了不再使用的 import，使该类、全局上限和按类 pin 均降至 2,481。以 main 的这一基线为起点，#17846 先提取 guard、再提取回执谓词到 `ToolPublicationRequirements`，使分支上的上限先后降至 2,476 和 2,470；合并 main 上的上述缩减后，该类行数、全局上限和按类 pin 均降至 2,306。随后合并 #18325，在其经评审的纯 import 宽免下增加三条 import 行；全局只降不升的棘轮也相应获得三行例外，最终该类行数、全局上限与按类 pin 均为 2,309。持久化 key 布局不变。上文历史叙述中的 4,216 行及其他类体量描述原始设计基线，而非当前上限。
 
 ## 问题
 
@@ -42,7 +42,7 @@
 
 ### 棘轮纪律
 
-上限只**降**不升。一个类变小时，下调其在 pin 中的上限；一个类被删除或重命名时，移除其条目；随大类被拆分而下调 `GLOBAL_MAX_LINES`。上调某个上限或全局最大值是一个评审会拒绝的可见 diff——与重载计数棘轮同一约定。pin 的头注在条目旁记录了这一纪律。
+除经评审且行数精确对应 import 增量的宽免外，上限只**降**不升。一个类变小时，下调其在 pin 中的上限；一个类被删除或重命名时，移除其条目；随大类被拆分而下调 `GLOBAL_MAX_LINES`。任何其他上限或全局最大值上调都是评审会拒绝的可见 diff——与重载计数棘轮同一约定。pin 的头注在条目旁记录了这一纪律。
 
 ## 验证
 
