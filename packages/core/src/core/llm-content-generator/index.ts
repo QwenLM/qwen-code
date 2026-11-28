@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { LlmContentGenerator } from './llm-content-generator.js';
+import {
+  LlmContentGenerator,
+  normalizeGeminiBaseUrl,
+} from './llm-content-generator.js';
 import { AuthType } from '../contentGenerator.js';
 import type {
   ContentGenerator,
@@ -13,7 +16,10 @@ import type {
 import type { Config } from '../../config/config.js';
 import { InstallationManager } from '../../config/installationManager.js';
 
-export { LlmContentGenerator } from './llm-content-generator.js';
+export {
+  LlmContentGenerator,
+  normalizeGeminiBaseUrl,
+} from './llm-content-generator.js';
 
 /**
  * Create the Google GenAI-backed LLM content generator.
@@ -39,22 +45,23 @@ export function createLlmContentGenerator(
       'x-gemini-api-privileged-user-id': `${installationId}`,
     };
   }
+  const useVertex = config.authType === AuthType.USE_VERTEX_AI;
+  // Ambient SDK settings and the parent's mode cannot select the protocol
+  // of an isolated route. Other callers keep their existing overrides.
+  const vertexai = config.isolatedRoute
+    ? useVertex
+    : (config.vertexai ?? (useVertex || undefined));
   const httpOptions = config.baseUrl
     ? {
         headers,
-        baseUrl: config.baseUrl,
+        baseUrl: normalizeGeminiBaseUrl(config.baseUrl, Boolean(vertexai)),
       }
     : { headers };
-  const useVertex = config.authType === AuthType.USE_VERTEX_AI;
 
   const llmContentGenerator = new LlmContentGenerator(
     {
       apiKey: config.apiKey === '' ? undefined : config.apiKey,
-      // Ambient SDK settings and the parent's mode cannot select the protocol
-      // of an isolated route. Other callers keep their existing overrides.
-      vertexai: config.isolatedRoute
-        ? useVertex
-        : (config.vertexai ?? (useVertex || undefined)),
+      vertexai,
       httpOptions,
     },
     config,

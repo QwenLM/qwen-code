@@ -4,9 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getEventListeners } from 'node:events';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Mock } from 'vitest';
-import { LlmContentGenerator } from './llm-content-generator.js';
+import {
+  LlmContentGenerator,
+  supportsGeminiFunctionResponseAudioVideo,
+} from './llm-content-generator.js';
+import {
+  StreamInactivityTimeoutError,
+  StreamLifetimeExceededError,
+} from '../stream-guards.js';
 import { observeRequestDispatch } from '../loggingContentGenerator/request-dispatch.js';
 import { GoogleGenAI } from '@google/genai';
 import type { GenerateContentConfig, Part } from '@google/genai';
@@ -790,12 +798,12 @@ describe('LlmContentGenerator', () => {
     expect(functionResponse.parts[0].inlineData.displayName).toBeUndefined();
   });
 
-  it('moves unsupported audio and video notes out of functionResponse.parts into response.output', async () => {
+  it('promotes tool-returned audio and video to a follow-up user turn on Gemini 2.5 and earlier', async () => {
     const functionResponse = await sentFunctionResponse([
       { inlineData: { mimeType: 'image/png', data: 'imagedata' } },
       {
         inlineData: {
-          mimeType: 'audio/wav',
+          mimeType: 'audio/x-wav',
           data: 'audiodata',
           displayName: 'recording.wav',
         },
@@ -803,18 +811,147 @@ describe('LlmContentGenerator', () => {
       { inlineData: { mimeType: 'video/mp4', data: 'videodata' } },
     ]);
 
-    // Gemini's FunctionResponsePart schema rejects `text`; only supported
-    // inlineData/fileData entries remain in functionResponse.parts.
+    // Gemini 2.5 and earlier reject binary audio/video inside
+    // functionResponse.parts (400 INVALID_ARGUMENT), so image stays nested
+    // while audio/video are promoted into a follow-up user turn.
     expect(functionResponse.parts).toEqual([
       { inlineData: { mimeType: 'image/png', data: 'imagedata' } },
     ]);
     expect(functionResponse.response).toEqual({
       output:
-        'content\nUnsupported media type for Gemini: audio/wav (recording.wav).\nUnsupported media type for Gemini: video/mp4.',
+        'content\nAttached audio/wav (recording.wav) in following user message.\nAttached video/mp4 in following user message.',
+    });
+    expect(sent().contents).toHaveLength(2);
+    expect(sent().contents[1]).toEqual({
+      role: 'user',
+      parts: [
+        { text: 'Attached media from tool output:' },
+        { inlineData: { mimeType: 'audio/wav', data: 'audiodata' } },
+        { inlineData: { mimeType: 'video/mp4', data: 'videodata' } },
+      ],
     });
   });
 
-  it('drops functionResponse.parts when all nested parts are unsupported video and preserves caller input', async () => {
+  const inline = (
+    mimeType: string,
+    data: string,
+    displayName?: string,
+  ): Part => ({
+    inlineData: displayName
+      ? { mimeType, data, displayName }
+      : { mimeType, data },
+  });
+  const filePart = (
+    mimeType: string,
+    fileUri: string,
+    displayName?: string,
+  ): Part => ({
+    fileData: displayName
+      ? { mimeType, fileUri, displayName }
+      : { mimeType, fileUri },
+  });
+  const fnRespPart = (
+    parts: Part[],
+    response: Record<string, unknown> = { output: 'ok' },
+    id = 'call-1',
+  ): Part => ({
+    functionResponse: {
+      id,
+      name: 'read_file',
+      response,
+      parts: parts as NonNullable<
+        NonNullable<Part['functionResponse']>['parts']
+      >,
+    },
+  });
+
+  it('retains tool-returned audio and video natively in functionResponse.parts on Gemini 3+ models', async () => {
+    for (const [m, ok] of [
+      ['gemini-3-flash', true],
+      ['publishers/google/models/gemini-4-pro', true],
+      ['gemini-2.5-flash', false],
+      ['gemini-1.5-pro', false],
+    ] as const) {
+      expect(supportsGeminiFunctionResponseAudioVideo(m)).toBe(ok);
+    }
+
+    await generator.generateContent(
+      {
+        model: 'gemini-3.0-pro',
+        contents: [
+          content(
+            'user',
+            fnRespPart([
+              inline('image/png', 'imagedata'),
+              inline('audio/x-wav', 'audiodata', 'recording.wav'),
+              filePart('VIDEO/MP4', 'gs://bucket/clip.mp4', 'clip.mp4'),
+            ]),
+          ),
+        ],
+      },
+      'prompt-id',
+    );
+
+    expect(sent().contents).toHaveLength(1);
+    expect(sent().contents[0].parts[0].functionResponse).toMatchObject({
+      response: { output: 'ok' },
+      parts: [
+        inline('image/png', 'imagedata'),
+        inline('audio/wav', 'audiodata'),
+        filePart('video/mp4', 'gs://bucket/clip.mp4'),
+      ],
+    });
+  });
+
+  it('enforces presence-as-true InputModalities on both user turns and functionResponse parts', async () => {
+    const { gen, models } = build(
+      {},
+      { model: 'gemini-3.0-pro', modalities: { image: true } },
+    );
+    models.generateContent.mockResolvedValue({});
+
+    await gen.generateContent(
+      {
+        model: 'gemini-3.0-pro',
+        contents: [
+          content(
+            'user',
+            inline('image/png', 'img'),
+            inline('audio/wav', 'aud', 'clip.wav'),
+            inline('application/pdf; charset=binary', 'pdfdata', 'doc.pdf'),
+          ),
+          content(
+            'user',
+            fnRespPart(
+              [
+                inline('image/png', 'img2'),
+                inline('video/webm', 'vid', 'v.webm'),
+              ],
+              { output: '' },
+              'call-vision-only',
+            ),
+          ),
+        ],
+      },
+      'prompt-id',
+    );
+
+    const called = models.generateContent.mock.calls[0][0];
+    expect(called.contents).toHaveLength(2);
+    expect(called.contents[0].parts).toEqual([
+      inline('image/png', 'img'),
+      { text: 'Unsupported media type for Gemini: audio/wav (clip.wav).' },
+      { text: 'Unsupported media type for Gemini: application/pdf (doc.pdf).' },
+    ]);
+    expect(called.contents[1].parts[0].functionResponse).toMatchObject({
+      parts: [inline('image/png', 'img2')],
+      response: {
+        output: 'Unsupported media type for Gemini: video/webm (v.webm).',
+      },
+    });
+  });
+
+  it('drops functionResponse.parts when all nested parts are promoted video and preserves caller input', async () => {
     const originalResponse = { output: '' };
     const originalParts: Part[] = [
       {
@@ -841,12 +978,19 @@ describe('LlmContentGenerator', () => {
     );
     await generator.generateContentStream(request, 'prompt-id');
 
-    const sentFnResponse =
-      mockGoogleGenAI.models.generateContentStream.mock.calls[0][0].contents[0]
-        .parts[0].functionResponse;
+    const sentContents =
+      mockGoogleGenAI.models.generateContentStream.mock.calls[0][0].contents;
+    const sentFnResponse = sentContents[0].parts[0].functionResponse;
     expect(sentFnResponse.parts).toBeUndefined();
     expect(sentFnResponse.response).toEqual({
-      output: 'Unsupported media type for Gemini: video/webm (video.webm).',
+      output: 'Attached video/webm (video.webm) in following user message.',
+    });
+    expect(sentContents[1]).toEqual({
+      role: 'user',
+      parts: [
+        { text: 'Attached media from tool output:' },
+        { inlineData: { mimeType: 'video/webm', data: 'webmdata' } },
+      ],
     });
     // Caller history must remain untouched for subsequent switches back to a
     // provider that supports video.
@@ -855,7 +999,7 @@ describe('LlmContentGenerator', () => {
     expect(originalParts[0].inlineData?.mimeType).toBe('video/webm');
   });
 
-  it('moves upstream text entries and unsupported fileData out of functionResponse.parts', async () => {
+  it('moves upstream text entries and promotes fileData video out of functionResponse.parts on Gemini 2.5 and earlier', async () => {
     const functionResponse = await sentFunctionResponse(
       [
         { text: '[Image omitted during compaction]' },
@@ -888,7 +1032,16 @@ describe('LlmContentGenerator', () => {
     expect(functionResponse.response).toEqual({
       error: 'partial failure',
       output:
-        '[Image omitted during compaction]\nUnsupported media type for Gemini: video/mp4 (clip.mp4).',
+        '[Image omitted during compaction]\nAttached video/mp4 (clip.mp4) in following user message.',
+    });
+    expect(sent().contents[1]).toEqual({
+      role: 'user',
+      parts: [
+        { text: 'Attached media from tool output:' },
+        {
+          fileData: { mimeType: 'video/mp4', fileUri: 'gs://bucket/clip.mp4' },
+        },
+      ],
     });
   });
 
@@ -953,8 +1106,121 @@ describe('LlmContentGenerator', () => {
       output: { ok: true },
       notes: ['existing-note'],
       _notes:
-        'Unsupported media type for Gemini: VIDEO/WEBM (clip.webm).\nUnsupported media type for Gemini: Audio/MP3.\nlegacy string note',
+        'Attached video/webm (clip.webm) in following user message.\nAttached audio/mp3 in following user message.\nlegacy string note',
     });
+    expect(sent().contents[1]).toEqual({
+      role: 'user',
+      parts: [
+        { text: 'Attached media from tool output:' },
+        { inlineData: { mimeType: 'video/webm', data: 'webmdata' } },
+        { fileData: { fileUri: 'gs://bucket/a.mp3', mimeType: 'audio/mp3' } },
+      ],
+    });
+  });
+
+  it('splits reattach-boundary bundles off functionResponse turns with hardcoded role=user and drops unsigned empty text', async () => {
+    const fr = {
+      functionResponse: {
+        id: 'call-1',
+        name: 'read_file',
+        response: { output: 'done' },
+      },
+    };
+    await generator.generateContent(
+      {
+        model: 'gemini-3.0-pro',
+        contents: [
+          {
+            role: 'function',
+            parts: [
+              { text: '' },
+              fr,
+              {
+                text: 'Reattached image summary',
+                partMetadata: { 'qwen-code:reattach-boundary': true },
+              },
+              { inlineData: { mimeType: 'image/png', data: 'imgdata' } },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              { text: '', thoughtSignature: 'sig-keep' },
+              { text: '' },
+              { text: 'reply' },
+            ],
+          },
+        ],
+      },
+      'prompt-id',
+    );
+
+    expect(sent().contents).toEqual([
+      { role: 'function', parts: [fr] },
+      {
+        role: 'user',
+        parts: [
+          { text: 'Reattached image summary' },
+          { inlineData: { mimeType: 'image/png', data: 'imgdata' } },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ text: '', thoughtSignature: 'sig-keep' }, { text: 'reply' }],
+      },
+    ]);
+  });
+
+  it('prepends Gemini 2.5 promoted tool media ahead of split reattach-boundary bundles on user turns', async () => {
+    await generator.generateContent(
+      {
+        model: 'gemini-2.5-flash',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              fnRespPart(
+                [inline('VIDEO/WEBM', 'webmdata', 'clip.webm')],
+                { output: 'done' },
+                'call-split-promote',
+              ),
+              {
+                text: 'Reattached image summary',
+                partMetadata: { 'qwen-code:reattach-boundary': true },
+              },
+              { inlineData: { mimeType: 'image/png', data: 'imgdata' } },
+            ],
+          },
+        ],
+      },
+      'prompt-id',
+    );
+
+    expect(sent().contents).toEqual([
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-split-promote',
+              name: 'read_file',
+              response: {
+                output:
+                  'done\nAttached video/webm (clip.webm) in following user message.',
+              },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'video/webm', data: 'webmdata' } },
+          { text: 'Reattached image summary' },
+          { inlineData: { mimeType: 'image/png', data: 'imgdata' } },
+        ],
+      },
+    ]);
   });
 
   // https://github.com/QwenLM/qwen-code/issues/9453
@@ -1034,6 +1300,137 @@ describe('LlmContentGenerator', () => {
       // The garbage is forwarded unchanged (base behavior): the recognizer
       // only drops the Responses replay payload shape, never crashes.
       await sendThought(nonStringSignature, nonStringSignature);
+    });
+  });
+
+  describe('stream-guards integration', () => {
+    function setupHangingStream(
+      cg: Record<string, unknown>,
+      firstChunk?: { responseId: string },
+    ) {
+      const { gen, models } = build({}, { model: 'gemini-2.5-flash', ...cg });
+      let signal: AbortSignal | undefined;
+      const close = vi.fn().mockResolvedValue({ done: true, value: undefined });
+      models.generateContentStream.mockImplementation(
+        async (req: { config?: { abortSignal?: AbortSignal } }) => {
+          signal = req.config?.abortSignal;
+          let count = 0;
+          return {
+            [Symbol.asyncIterator]: () => ({
+              next: async () =>
+                firstChunk && count++ === 0
+                  ? { done: false, value: firstChunk }
+                  : new Promise(() => {}),
+              return: close,
+            }),
+          };
+        },
+      );
+      return { gen, close, getSignal: () => signal };
+    }
+
+    it.each([
+      [
+        'streamIdleTimeoutMs',
+        { streamIdleTimeoutMs: 500 },
+        undefined,
+        500,
+        StreamInactivityTimeoutError,
+      ],
+      [
+        'QWEN_STREAM_IDLE_TIMEOUT_MS',
+        { streamMaxLifetimeMs: 0 },
+        '200',
+        200,
+        StreamInactivityTimeoutError,
+      ],
+      [
+        'streamMaxLifetimeMs',
+        { streamIdleTimeoutMs: 0, streamMaxLifetimeMs: 250 },
+        undefined,
+        250,
+        StreamLifetimeExceededError,
+      ],
+    ] as const)(
+      'aborts stalled stream via %s and trips per-request signal',
+      async (_label, cg, envIdle, advanceMs, ErrorClass) => {
+        vi.useFakeTimers();
+        if (envIdle) vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', envIdle);
+        try {
+          const { gen, getSignal } = setupHangingStream(cg);
+          const stream = await gen.generateContentStream(
+            flashReq(),
+            'prompt-id',
+          );
+          const settled = stream.next().catch((err: unknown) => err);
+          await vi.advanceTimersByTimeAsync(advanceMs);
+          const caught = await settled;
+          expect(caught).toBeInstanceOf(ErrorClass);
+          expect((caught as { code?: string }).code).toBe('ETIMEDOUT');
+          expect(getSignal()?.aborted).toBe(true);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it('aborts request signal and cleans up caller abort listener on mid-stream error even when both guards are disabled', async () => {
+      const caller = new AbortController();
+      const { gen, models } = build(
+        {},
+        {
+          model: 'gemini-2.5-flash',
+          streamIdleTimeoutMs: 0,
+          streamMaxLifetimeMs: 0,
+        },
+      );
+      let capturedSignal: AbortSignal | undefined;
+      models.generateContentStream.mockImplementation(
+        async (req: { config?: { abortSignal?: AbortSignal } }) => {
+          capturedSignal = req.config?.abortSignal;
+          let count = 0;
+          return {
+            [Symbol.asyncIterator]: () => ({
+              next: async () => {
+                if (count++ === 0) {
+                  return { done: false, value: { responseId: '1' } };
+                }
+                throw new Error('mid-stream socket reset');
+              },
+            }),
+          };
+        },
+      );
+
+      const stream = await gen.generateContentStream(
+        { ...flashReq(), config: { abortSignal: caller.signal } },
+        'prompt-guards-off-err',
+      );
+      expect(await stream.next()).toEqual({
+        done: false,
+        value: { responseId: '1' },
+      });
+      expect(capturedSignal?.aborted).toBe(false);
+      await expect(stream.next()).rejects.toThrow('mid-stream socket reset');
+      expect(capturedSignal?.aborted).toBe(true);
+      expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+    });
+
+    it('aborts the per-request signal on early consumer return', async () => {
+      const { gen, close, getSignal } = setupHangingStream(
+        {},
+        { responseId: '1' },
+      );
+      const stream = await gen.generateContentStream(flashReq(), 'prompt-id');
+      expect(await stream.next()).toEqual({
+        done: false,
+        value: { responseId: '1' },
+      });
+      expect(getSignal()?.aborted).toBe(false);
+      await stream.return(undefined);
+      expect(getSignal()?.aborted).toBe(true);
+      expect(close).toHaveBeenCalledTimes(1);
     });
   });
 });

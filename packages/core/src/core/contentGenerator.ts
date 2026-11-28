@@ -104,9 +104,8 @@ export type ContentGeneratorConfig = {
   // arrival: a drip-fed stream resets the idle watchdog forever while never
   // completing the message (issue #8597), so that shape needs a bound the
   // chunks cannot reset. `<= 0` disables it. Honored by the OpenAI-compatible
-  // pipeline and the Anthropic generator (shared `withStreamGuards`,
-  // issue #9005 finding 4); the Gemini generator does not implement it, so on
-  // that auth type the drip-fed shape stays unbounded.
+  // pipeline, the Anthropic generator, and the Gemini/Vertex generator via
+  // shared `withStreamGuards`.
   streamMaxLifetimeMs?: number;
   maxRetries?: number; // Maximum retries for rate-limit errors
   retryInitialDelayMs?: number; // Initial delay for stream rate-limit retries

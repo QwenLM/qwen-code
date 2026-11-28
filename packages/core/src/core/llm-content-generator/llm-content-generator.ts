@@ -20,8 +20,11 @@ import { GoogleGenAI } from '@google/genai';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  InputModalities,
 } from '../contentGenerator.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { REATTACH_BOUNDARY_METADATA } from '../../services/image-payload-references.js';
+import { normalizeMediaMimeType } from '../../utils/media-mime.js';
 import {
   reportLlmChunk,
   reportLlmRequest,
@@ -42,13 +45,143 @@ import {
 } from '../outbound-dynamic-headers.js';
 import { isResponsesReasoningSignature } from '../../utils/thoughtUtils.js';
 import { retryContext } from '../../utils/retryContext.js';
+import { getRetryDelayMs } from '../../utils/retryPolicy.js';
+import {
+  buildRuntimeFetchOptions,
+  preloadRuntimeFetchModule,
+  redactProxyError,
+} from '../../utils/runtimeFetchOptions.js';
+import {
+  DISABLED_REQUEST_TIMEOUT_MS,
+  resolveRequestTimeout,
+} from '../openaiContentGenerator/constants.js';
+import {
+  resolveStreamIdleTimeoutMs,
+  resolveStreamMaxLifetimeMs,
+  withStreamGuards,
+} from '../stream-guards.js';
 import { markRequestDispatched } from '../loggingContentGenerator/request-dispatch.js';
 
 const debugLogger = createDebugLogger('GEMINI');
 
+const RETRYABLE_HTTP_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
+const DEFAULT_SDK_RETRY_ATTEMPTS = 5;
+const DEFAULT_SDK_RETRY_BASE_DELAY_MS = 1_000;
+const DEFAULT_SDK_RETRY_MAX_DELAY_MS = 60_000;
+const DEFAULT_SDK_RETRY_JITTER_RATIO = 0.3;
+
+/**
+ * Strip redundant trailing API version segment(s) (`/v1beta` for Gemini
+ * Developer API, `/v1beta1` for Vertex AI, with optional trailing slashes)
+ * from a base URL before passing it to `@google/genai`, which appends its
+ * own version prefix and would otherwise send `/v1beta/v1beta/` or
+ * `/v1beta1/v1beta1/`.
+ */
+export function normalizeGeminiBaseUrl(
+  baseUrl: string,
+  vertexai = false,
+): string {
+  const versionPattern = vertexai ? /(?:\/v1beta1)+$/i : /(?:\/v1beta)+$/i;
+  return baseUrl.trim().replace(/\/+$/, '').replace(versionPattern, '');
+}
+
+/**
+ * Gemini 3+ models accept binary `audio/*` and `video/*` payloads directly
+ * inside `functionResponse.parts` (`FunctionResponsePart`), whereas Gemini 2.5
+ * and earlier return HTTP 400 `INVALID_ARGUMENT` for nested audio/video tool
+ * outputs and require them on a top-level `user` turn.
+ */
+export function supportsGeminiFunctionResponseAudioVideo(
+  model: string | undefined,
+): boolean {
+  if (!model) return false;
+  const leaf = model.trim().split('/').pop()?.toLowerCase() ?? '';
+  return /^gemini-([3-9]|\d{2,})(?:[.-]|$)/.test(leaf);
+}
+
+function getMediaModality(
+  mimeType: string | undefined,
+): keyof InputModalities | undefined {
+  const normalized = normalizeMediaMimeType(mimeType);
+  if (!normalized) {
+    return undefined;
+  }
+  if (normalized.startsWith('image/')) return 'image';
+  if (normalized.startsWith('audio/')) return 'audio';
+  if (normalized.startsWith('video/')) return 'video';
+  if (normalized === 'application/pdf') return 'pdf';
+  return undefined;
+}
+
+function isUnsignedEmptyTextPart(part: Part | string): boolean {
+  if (typeof part !== 'object' || part === null) {
+    return false;
+  }
+  const definedKeys = Object.keys(part).filter(
+    (key) => (part as Record<string, unknown>)[key] !== undefined,
+  );
+  return (
+    definedKeys.length === 1 && definedKeys[0] === 'text' && part.text === ''
+  );
+}
+
+function isReattachBoundaryPart(part: Part | string): boolean {
+  return (
+    typeof part === 'object' &&
+    part !== null &&
+    part.partMetadata?.[REATTACH_BOUNDARY_METADATA] === true
+  );
+}
+
+/**
+ * Thrown when the Gemini/Vertex connect phase (waiting for initial HTTP
+ * response headers) exceeds the configured request timeout. Stamped with
+ * `code: 'ETIMEDOUT'` so `classifyRetryError` classifies it as a retryable
+ * transport timeout, matching `StreamConnectTimeoutError` on the Responses wire.
+ */
+export class GeminiConnectTimeoutError extends Error {
+  readonly code = 'ETIMEDOUT' as const;
+
+  constructor(readonly connectTimeoutMs: number) {
+    super(
+      `Gemini API connect phase exceeded ${connectTimeoutMs}ms before any ` +
+        `response headers arrived. Increase the model request timeout ` +
+        `(or set it to 0 to disable this bound).`,
+    );
+    this.name = 'GeminiConnectTimeoutError';
+  }
+}
+
+/**
+ * Thrown when a non-streaming Gemini/Vertex request exceeds the configured
+ * request timeout while reading the response body after headers have arrived.
+ * Stamped with `code: 'ETIMEDOUT'` so `classifyRetryError` classifies it as a
+ * retryable transport timeout.
+ */
+export class GeminiRequestTimeoutError extends Error {
+  readonly code = 'ETIMEDOUT' as const;
+
+  constructor(readonly timeoutMs: number) {
+    super(
+      `Gemini API non-streaming request exceeded ${timeoutMs}ms while reading ` +
+        `the response body. Increase the model request timeout ` +
+        `(or set it to 0 to disable this bound).`,
+    );
+    this.name = 'GeminiRequestTimeoutError';
+  }
+}
+
+type NonStreamingHeaderCallback = (
+  remainingMs: number,
+  abortConnect: (reason: Error) => void,
+) => void;
+
 type GeminiStreamPart = { responseInternal: Response };
 
 type GeminiApiClient = {
+  clientOptions?: {
+    httpOptions?: HttpOptions;
+  };
   apiCall?(url: string, init: RequestInit): Promise<Response>;
   processStreamResponse?(response: Response): AsyncGenerator<GeminiStreamPart>;
   includeExtraHttpOptionsToRequestInit(
@@ -101,9 +234,39 @@ function withoutDoneSentinel(
   };
 }
 
+function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    const abortErr = new Error('Aborted');
+    abortErr.name = 'AbortError';
+    return Promise.reject(abortErr);
+  }
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      const abortErr = new Error('Aborted');
+      abortErr.name = 'AbortError';
+      reject(abortErr);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    timer.unref?.();
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 function installIsolatedTransport(
   client: GoogleGenAI,
-  options: { apiKey?: string },
+  options: {
+    apiKey?: string;
+    getProxy?: () => string | undefined;
+    connectTimeoutMs?: number;
+    nonStreamingHeaderCallbacks?: WeakMap<
+      AbortSignal,
+      NonStreamingHeaderCallback
+    >;
+  },
 ): boolean {
   // @google/genai 2.6 has no public fetch hook. Both model request paths use
   // this instance's final HTTP call after the SDK has built the URL and auth.
@@ -114,48 +277,220 @@ function installIsolatedTransport(
   const destinations = new WeakMap<Response, string>();
   // apiCall shallow-copies RequestInit but preserves the Headers instance.
   const explicitNativeHeaderRequests = new WeakSet<Headers>();
+  // Maps the SDK's per-request AbortSignal back to our non-streaming body
+  // deadline callback registered under `abortScope.signal`.
+  const sdkSignalToHeaderCallback = new WeakMap<
+    AbortSignal,
+    NonStreamingHeaderCallback
+  >();
   if (typeof apiClient.includeExtraHttpOptionsToRequestInit === 'function') {
     const includeExtraHttpOptionsToRequestInit =
       apiClient.includeExtraHttpOptionsToRequestInit.bind(apiClient);
     apiClient.includeExtraHttpOptionsToRequestInit = async (
       init,
-      options,
+      httpOptions,
       url,
       signal,
     ) => {
       // The SDK only observes abort events after it starts building the request.
       signal?.throwIfAborted();
-      const hasExplicitNativeHeader = Object.keys(options.headers ?? {}).some(
-        (name) => name.toLowerCase() === 'x-goog-api-key',
-      );
+      const hasExplicitNativeHeader = Object.keys(
+        httpOptions.headers ?? {},
+      ).some((name) => name.toLowerCase() === 'x-goog-api-key');
       const request = await includeExtraHttpOptionsToRequestInit(
         init,
-        options,
+        httpOptions,
         url,
         signal,
       );
       if (hasExplicitNativeHeader && request.headers) {
         explicitNativeHeaderRequests.add(request.headers as Headers);
       }
+      if (signal && request.signal) {
+        const cb = options.nonStreamingHeaderCallbacks?.get(signal);
+        if (cb) {
+          sdkSignalToHeaderCallback.set(request.signal, cb);
+        }
+      }
       return request;
     };
   }
-  const apiCall = apiClient.apiCall.bind(apiClient);
   apiClient.apiCall = async (url, init) => {
+    const headers = new Headers(init.headers);
+    let headersModified = false;
     if (options.apiKey && !client.vertexai && isThirdPartyGeminiBaseUrl(url)) {
-      const headers = new Headers(init.headers);
       if (
         !headers.has('authorization') &&
         !explicitNativeHeaderRequests.has(init.headers as Headers)
       ) {
         headers.set('Authorization', `Bearer ${options.apiKey}`);
-        init = { ...init, headers };
+        headersModified = true;
       }
     }
-    const response = await (retryContext.getStore()?.singleAttempt
-      ? fetch(url, { ...init, redirect: 'error' })
-      : apiCall(url, init));
+    const connectTimeoutMs = options.connectTimeoutMs;
+    const connectTimeoutActive =
+      connectTimeoutMs !== undefined &&
+      connectTimeoutMs > 0 &&
+      connectTimeoutMs < DISABLED_REQUEST_TIMEOUT_MS;
+    // Do not synthesize `X-Server-Timeout` from `connectTimeoutMs`: Gemini and
+    // Vertex treat `X-Server-Timeout` as the total server-side RPC budget
+    // (matching `@google/genai`'s `getHeadersInternal`, which only appends it
+    // when an explicit overall `httpOptions.timeout` is configured). Sending
+    // the connect-phase timeout here would prematurely truncate healthy
+    // long-running SSE streams governed by `stream-guards`.
+    const preparedInit: RequestInit = headersModified
+      ? { ...init, headers }
+      : init;
+
+    // Route every Gemini/Vertex HTTP request through the bundled undici fetch +
+    // dispatcher (headersTimeout: 0, bodyTimeout: 0) so Node.js 22+'s built-in
+    // 300s undici timeouts cannot prematurely abort requests. (@google/genai's
+    // internal Symbol.for('undici.globalDispatcher.1') scan is a no-op on
+    // Node.js 22+.) Bound connect + initial response headers here and clear the
+    // timer as soon as headers arrive so healthy long-running streams are
+    // governed by stream-guards instead of being aborted mid-stream.
+    await preloadRuntimeFetchModule();
+    const runtimeOptions = buildRuntimeFetchOptions(
+      'gemini',
+      options.getProxy?.(),
+    );
+    const singleAttempt = Boolean(retryContext.getStore()?.singleAttempt);
+    const fetchFn: typeof fetch = runtimeOptions.fetch ?? fetch;
+    const parentSignal = preparedInit.signal ?? undefined;
+    let lastAttemptStartMs = Date.now();
+    let lastConnectController: AbortController | undefined;
+
+    const executeSingleAttempt = async (): Promise<Response> => {
+      const requestInit: RequestInit & { dispatcher?: unknown } = {
+        ...preparedInit,
+        ...(singleAttempt ? { redirect: 'error' as const } : {}),
+        ...(runtimeOptions.fetchOptions?.dispatcher
+          ? { dispatcher: runtimeOptions.fetchOptions.dispatcher }
+          : {}),
+      };
+
+      if (!connectTimeoutActive) {
+        try {
+          return await fetchFn(url, requestInit);
+        } catch (error) {
+          throw redactProxyError(error);
+        }
+      }
+
+      lastAttemptStartMs = Date.now();
+      const connectController = new AbortController();
+      lastConnectController = connectController;
+      // Combine via AbortSignal.any (Node >= 20.3; repo requires Node >= 22)
+      // instead of registering a listener on `parentSignal`, avoiding listener
+      // accumulation / MaxListenersExceededWarning across repeated retries and
+      // turns while still propagating mid-stream user aborts.
+      requestInit.signal = parentSignal
+        ? AbortSignal.any([parentSignal, connectController.signal])
+        : connectController.signal;
+
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let timedOut = false;
+      let fetchPromise: Promise<Response> | undefined;
+      let timeoutPromise: Promise<never> | undefined;
+      try {
+        fetchPromise = fetchFn(url, requestInit);
+        timeoutPromise = new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            if (parentSignal?.aborted) {
+              const abortErr = new Error('Aborted');
+              abortErr.name = 'AbortError';
+              reject(abortErr);
+            } else {
+              timedOut = true;
+              const err = new GeminiConnectTimeoutError(connectTimeoutMs);
+              reject(err);
+              connectController.abort(err);
+            }
+          }, connectTimeoutMs);
+          timer.unref?.();
+        });
+        return await Promise.race([fetchPromise, timeoutPromise]);
+      } catch (error) {
+        void fetchPromise?.then(
+          (lateResponse) => {
+            void lateResponse.body?.cancel().catch(() => {});
+          },
+          () => {},
+        );
+        void timeoutPromise?.catch(() => {});
+        if (timedOut && !parentSignal?.aborted) {
+          throw new GeminiConnectTimeoutError(connectTimeoutMs);
+        }
+        throw redactProxyError(error);
+      } finally {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+      }
+    };
+
+    const retryOptions = apiClient.clientOptions?.httpOptions?.retryOptions;
+    let response: Response;
+    // Matches `@google/genai`'s `ApiClient.apiCall`: SDK-level retries are
+    // strictly opt-in via `httpOptions.retryOptions` (omitting it performs a
+    // single fetch so outer `retryWithBackoff` owns retries without multiplying
+    // attempts); passing `{}` defaults `attempts` to `DEFAULT_SDK_RETRY_ATTEMPTS`.
+    if (!singleAttempt && retryOptions) {
+      const maxAttempts = Math.max(
+        1,
+        retryOptions.attempts ?? DEFAULT_SDK_RETRY_ATTEMPTS,
+      );
+      let attempt = 1;
+      while (true) {
+        response = await executeSingleAttempt();
+        if (
+          response.ok ||
+          !RETRYABLE_HTTP_STATUS_CODES.has(response.status) ||
+          attempt >= maxAttempts
+        ) {
+          break;
+        }
+        const delayMs = getRetryDelayMs({
+          attempt,
+          initialDelayMs: DEFAULT_SDK_RETRY_BASE_DELAY_MS,
+          maxDelayMs: DEFAULT_SDK_RETRY_MAX_DELAY_MS,
+          error: response,
+          retryAfterMode:
+            response.status === 429 || response.status === 503
+              ? 'minimum'
+              : 'ignore',
+          retryAfterMaxDelayMs: DEFAULT_SDK_RETRY_MAX_DELAY_MS,
+          jitterRatio: DEFAULT_SDK_RETRY_JITTER_RATIO,
+        });
+        try {
+          await response.body?.cancel();
+        } catch {
+          // Ignore body cancel errors before retry.
+        }
+        await sleepWithSignal(delayMs, parentSignal);
+        attempt += 1;
+      }
+    } else {
+      response = await executeSingleAttempt();
+    }
     destinations.set(response, url);
+    if (connectTimeoutActive && parentSignal) {
+      const onHeaders =
+        sdkSignalToHeaderCallback.get(parentSignal) ??
+        options.nonStreamingHeaderCallbacks?.get(parentSignal);
+      if (onHeaders) {
+        const remainingMs = Math.max(
+          0,
+          connectTimeoutMs - (Date.now() - lastAttemptStartMs),
+        );
+        const controller = lastConnectController;
+        onHeaders(remainingMs, (reason) => {
+          if (controller && !controller.signal.aborted) {
+            controller.abort(reason);
+          }
+        });
+      }
+    }
     return response;
   };
   if (typeof apiClient.processStreamResponse === 'function') {
@@ -172,22 +507,67 @@ function installIsolatedTransport(
   return true;
 }
 
+interface ObserveStreamOptions {
+  idleMs: number;
+  maxLifetimeMs: number;
+  abortRequest: () => void;
+  callerSignal?: AbortSignal;
+}
+
 function observeLlmStream(
   stream: AsyncIterable<GenerateContentResponse>,
   telemetryAttempt: GenAiAttemptHandle | undefined,
+  options: ObserveStreamOptions,
 ): AsyncGenerator<GenerateContentResponse> {
-  const iterator = stream[Symbol.asyncIterator]();
+  const sourceIterator = stream[Symbol.asyncIterator]();
+  const singleUseSource: AsyncIterable<GenerateContentResponse> = {
+    [Symbol.asyncIterator]: () => sourceIterator,
+  };
+  const guardedStream =
+    options.idleMs > 0 || options.maxLifetimeMs > 0
+      ? withStreamGuards(
+          singleUseSource,
+          options.idleMs,
+          options.maxLifetimeMs,
+          options.abortRequest,
+          options.callerSignal,
+        )
+      : singleUseSource;
+  const iterator = guardedStream[Symbol.asyncIterator]();
+  let started = false;
   return {
     async next() {
-      const result = await iterator.next();
-      if (!result.done) reportLlmChunk(telemetryAttempt, result.value);
+      started = true;
+      let result: IteratorResult<GenerateContentResponse>;
+      try {
+        result = await iterator.next();
+      } catch (error) {
+        options.abortRequest();
+        throw error;
+      }
+      if (!result.done) {
+        reportLlmChunk(telemetryAttempt, result.value);
+      } else {
+        options.abortRequest();
+      }
       return result;
     },
     async return(value?: GenerateContentResponse) {
+      options.abortRequest();
+      if (!started) {
+        if (sourceIterator.return) return sourceIterator.return(value);
+        return { done: true, value };
+      }
       if (iterator.return) return iterator.return(value);
       return { done: true, value };
     },
     async throw(error?: unknown) {
+      options.abortRequest();
+      if (!started) {
+        if (sourceIterator.throw) return sourceIterator.throw(error);
+        await sourceIterator.return?.();
+        throw error;
+      }
       if (iterator.throw) return iterator.throw(error);
       await iterator.return?.();
       throw error;
@@ -198,12 +578,45 @@ function observeLlmStream(
   };
 }
 
+function createRequestAbortScope(callerSignal?: AbortSignal): {
+  signal: AbortSignal;
+  abort: () => void;
+  dispose: () => void;
+} {
+  const controller = new AbortController();
+  let onCallerAbort: (() => void) | undefined;
+  if (callerSignal?.aborted) {
+    controller.abort(callerSignal.reason);
+  } else if (callerSignal) {
+    onCallerAbort = () => controller.abort(callerSignal.reason);
+    callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+  }
+  const dispose = () => {
+    if (callerSignal && onCallerAbort) {
+      callerSignal.removeEventListener('abort', onCallerAbort);
+      onCallerAbort = undefined;
+    }
+  };
+  const abort = () => {
+    dispose();
+    if (!controller.signal.aborted) {
+      controller.abort();
+    }
+  };
+  return { signal: controller.signal, abort, dispose };
+}
+
 /**
  * A wrapper for GoogleGenAI that implements the ContentGenerator interface.
  */
 export class LlmContentGenerator implements ContentGenerator {
   private readonly googleGenAI: GoogleGenAI;
   private readonly hasIsolatedTransport: boolean;
+  private readonly requestTimeoutMs?: number;
+  private readonly nonStreamingHeaderCallbacks = new WeakMap<
+    AbortSignal,
+    NonStreamingHeaderCallback
+  >();
   private readonly clientBaseUrl?: string;
   private readonly contentGeneratorConfig?: ContentGeneratorConfig;
   private readonly cliConfig?: Config;
@@ -253,17 +666,52 @@ export class LlmContentGenerator implements ContentGenerator {
 
     const configuredBaseUrl = finalOptions.httpOptions?.baseUrl;
     this.googleGenAI = new GoogleGenAI(finalOptions);
-    this.clientBaseUrl = finalOptions.httpOptions?.baseUrl;
+    const rawResolvedBaseUrl = finalOptions.httpOptions?.baseUrl;
     // The SDK writes any ambient base URL override back into its options.
     if (
       contentGeneratorConfig?.isolatedRoute &&
       !configuredBaseUrl &&
-      this.clientBaseUrl
+      rawResolvedBaseUrl
     ) {
       throw new Error('Configure baseUrl explicitly for this Google model.');
     }
+    // Normalize any resolved baseUrl — including env-populated
+    // GOOGLE_GEMINI_BASE_URL / GOOGLE_VERTEX_BASE_URL and direct constructor
+    // callers — using the SDK's resolved vertexai mode so `@google/genai`
+    // never doubles `/v1beta` (Developer API) or `/v1beta1` (Vertex AI).
+    const isVertex = Boolean(this.googleGenAI.vertexai);
+    const normalizedClientBaseUrl = rawResolvedBaseUrl
+      ? normalizeGeminiBaseUrl(rawResolvedBaseUrl, isVertex)
+      : undefined;
+    this.clientBaseUrl = normalizedClientBaseUrl;
+    if (finalOptions.httpOptions && normalizedClientBaseUrl !== undefined) {
+      finalOptions.httpOptions.baseUrl = normalizedClientBaseUrl;
+    }
+    const { apiClient } = this.googleGenAI as unknown as {
+      apiClient?: GeminiApiClient;
+    };
+    const sdkHttpOptions = apiClient?.clientOptions?.httpOptions;
+    if (sdkHttpOptions?.baseUrl) {
+      sdkHttpOptions.baseUrl = normalizeGeminiBaseUrl(
+        sdkHttpOptions.baseUrl,
+        isVertex,
+      );
+    }
+    const rawTimeout = contentGeneratorConfig?.timeout;
+    let normalizedTimeout: number | undefined;
+    if (typeof rawTimeout === 'number' && Number.isFinite(rawTimeout)) {
+      normalizedTimeout = Math.min(rawTimeout, DISABLED_REQUEST_TIMEOUT_MS);
+    }
+    const connectTimeoutMs =
+      finalOptions.httpOptions?.timeout === undefined
+        ? resolveRequestTimeout(normalizedTimeout)
+        : undefined;
+    this.requestTimeoutMs = connectTimeoutMs;
     this.hasIsolatedTransport = installIsolatedTransport(this.googleGenAI, {
       apiKey: finalOptions.apiKey,
+      getProxy: () => cliConfig?.getProxy?.() ?? contentGeneratorConfig?.proxy,
+      connectTimeoutMs,
+      nonStreamingHeaderCallbacks: this.nonStreamingHeaderCallbacks,
     });
     this.contentGeneratorConfig = contentGeneratorConfig;
     this.cliConfig = cliConfig;
@@ -472,76 +920,352 @@ export class LlmContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
     _userPromptId: string,
   ): Promise<GenerateContentResponse> {
-    const finalRequest = {
-      ...request,
-      contents: this.stripUnsupportedFields(request.contents),
-      config: this.buildGenerateContentConfig(request),
-    };
-    const telemetryAttempt = reportLlmRequest(finalRequest);
-    const response = await this.models.generateContent(finalRequest);
-    reportLlmResponse(telemetryAttempt, response);
-    return response;
+    const effectiveModel = request.model || this.contentGeneratorConfig?.model;
+    const callerSignal = request.config?.abortSignal;
+    const totalTimeoutMs =
+      request.config?.httpOptions?.timeout === undefined
+        ? this.requestTimeoutMs
+        : undefined;
+    const totalTimeoutActive =
+      this.hasIsolatedTransport &&
+      totalTimeoutMs !== undefined &&
+      totalTimeoutMs > 0 &&
+      totalTimeoutMs < DISABLED_REQUEST_TIMEOUT_MS;
+
+    let abortScope: ReturnType<typeof createRequestAbortScope> | undefined;
+    let bodyTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      abortScope =
+        callerSignal || totalTimeoutActive
+          ? createRequestAbortScope(callerSignal)
+          : undefined;
+      const builtConfig = this.buildGenerateContentConfig(request);
+      const finalRequest = {
+        ...request,
+        contents: this.stripUnsupportedFields(request.contents, effectiveModel),
+        config: abortScope
+          ? { ...builtConfig, abortSignal: abortScope.signal }
+          : builtConfig,
+      };
+      const telemetryAttempt = reportLlmRequest(finalRequest);
+
+      let response: GenerateContentResponse;
+      if (totalTimeoutActive && abortScope) {
+        let rejectBodyTimeout!: (error: Error) => void;
+        const bodyTimeoutPromise = new Promise<never>((_resolve, reject) => {
+          rejectBodyTimeout = reject;
+        });
+        void bodyTimeoutPromise.catch(() => {});
+
+        const activeScope = abortScope;
+        this.nonStreamingHeaderCallbacks.set(
+          activeScope.signal,
+          (remainingMs, abortConnect) => {
+            if (bodyTimer !== undefined) {
+              clearTimeout(bodyTimer);
+            }
+            bodyTimer = setTimeout(() => {
+              if (callerSignal?.aborted) {
+                const abortErr = new Error('Aborted');
+                abortErr.name = 'AbortError';
+                rejectBodyTimeout(abortErr);
+              } else {
+                const timeoutErr = new GeminiRequestTimeoutError(
+                  totalTimeoutMs,
+                );
+                abortConnect(timeoutErr);
+                activeScope.abort();
+                rejectBodyTimeout(timeoutErr);
+              }
+            }, remainingMs);
+            bodyTimer.unref?.();
+          },
+        );
+
+        const requestPromise = this.models.generateContent(finalRequest);
+        void requestPromise.catch(() => {});
+        response = await Promise.race([requestPromise, bodyTimeoutPromise]);
+      } else {
+        response = await this.models.generateContent(finalRequest);
+      }
+
+      reportLlmResponse(telemetryAttempt, response);
+      return response;
+    } finally {
+      if (bodyTimer !== undefined) {
+        clearTimeout(bodyTimer);
+      }
+      abortScope?.dispose();
+    }
   }
 
   async generateContentStream(
     request: GenerateContentParameters,
     _userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
-    const finalRequest = {
-      ...request,
-      contents: this.stripUnsupportedFields(request.contents),
-      config: this.buildGenerateContentConfig(request),
+    const effectiveModel = request.model || this.contentGeneratorConfig?.model;
+    const streamConfig = this.contentGeneratorConfig ?? {
+      model: request.model,
     };
-    const telemetryAttempt = reportLlmRequest(finalRequest);
-    markRequestDispatched();
-    const stream = await this.models.generateContentStream(finalRequest);
-    return observeLlmStream(stream, telemetryAttempt);
+    const idleMs = resolveStreamIdleTimeoutMs(streamConfig);
+    const maxLifetimeMs = resolveStreamMaxLifetimeMs(streamConfig);
+    const callerSignal = request.config?.abortSignal;
+    let abortScope: ReturnType<typeof createRequestAbortScope> | undefined;
+    let telemetryAttempt: GenAiAttemptHandle | undefined;
+    let stream: AsyncIterable<GenerateContentResponse>;
+    try {
+      abortScope = createRequestAbortScope(callerSignal);
+      const config = {
+        ...this.buildGenerateContentConfig(request),
+        abortSignal: abortScope.signal,
+      };
+      const finalRequest = {
+        ...request,
+        contents: this.stripUnsupportedFields(request.contents, effectiveModel),
+        config,
+      };
+      telemetryAttempt = reportLlmRequest(finalRequest);
+      markRequestDispatched();
+      stream = await this.models.generateContentStream(finalRequest);
+    } catch (error) {
+      abortScope?.abort();
+      throw error;
+    }
+    return observeLlmStream(stream, telemetryAttempt, {
+      idleMs,
+      maxLifetimeMs,
+      abortRequest: abortScope.abort,
+      callerSignal,
+    });
   }
 
   /**
-   * Strip fields not supported by Gemini API (e.g., displayName in inlineData/fileData)
+   * Strip fields not supported by Gemini API (e.g., displayName in inlineData/fileData),
+   * normalize media MIME types, enforce configured InputModalities (presence-as-true),
+   * drop strictly unsigned empty-text parts, split trailing historical image
+   * reattachment bundles off functionResponse turns, and promote tool-returned
+   * audio/video to a follow-up user turn for Gemini 2.5 and earlier models.
    */
   private stripUnsupportedFields(
     contents: GenerateContentParameters['contents'],
+    model?: string,
   ): GenerateContentParameters['contents'] {
     if (!contents) return contents;
 
     if (typeof contents === 'string') return contents;
 
+    const allowNestedAudioVideo =
+      supportsGeminiFunctionResponseAudioVideo(model);
+
     if (Array.isArray(contents)) {
-      return contents.map((content) =>
-        this.stripContentFields(content),
+      return contents.flatMap((content) =>
+        this.stripContentFieldsList(content, allowNestedAudioVideo),
       ) as GenerateContentParameters['contents'];
     }
 
-    return this.stripContentFields(
+    const normalized = this.stripContentFieldsList(
       contents,
+      allowNestedAudioVideo,
+    );
+    return (
+      normalized.length === 1 ? normalized[0] : normalized
     ) as GenerateContentParameters['contents'];
   }
 
-  private stripContentFields(
+  private stripContentFieldsList(
     content: Content | Part | string,
-  ): Content | Part | string {
+    allowNestedAudioVideo: boolean,
+  ): Array<Content | Part | string> {
     if (typeof content === 'string') {
-      return content;
+      return [content];
     }
 
     // Handle Part directly (for arrays of parts)
     if (!('role' in content) && !('parts' in content)) {
-      return this.stripPartFields(content as Part);
+      return [this.stripPartFields(content as Part, allowNestedAudioVideo)];
     }
 
     // Handle Content object
     const contentObj = content as Content;
-    if (!contentObj.parts) return contentObj;
+    if (!contentObj.parts) return [contentObj];
 
+    const rawParts = contentObj.parts;
+    const reattachIndex = rawParts.findIndex(
+      (part, idx) => idx > 0 && isReattachBoundaryPart(part),
+    );
+    const shouldSplitReattach =
+      reattachIndex > 0 &&
+      rawParts
+        .slice(0, reattachIndex)
+        .some(
+          (part) =>
+            typeof part === 'object' &&
+            part !== null &&
+            Boolean(part.functionResponse),
+        ) &&
+      !rawParts
+        .slice(reattachIndex)
+        .some(
+          (part) =>
+            typeof part === 'object' &&
+            part !== null &&
+            Boolean(part.functionResponse),
+        );
+
+    const promotedMediaParts: Part[] = [];
+
+    if (shouldSplitReattach) {
+      const headParts = this.sanitizeTurnParts(
+        rawParts.slice(0, reattachIndex),
+        allowNestedAudioVideo,
+        promotedMediaParts,
+      );
+      const tailParts = this.sanitizeTurnParts(
+        rawParts.slice(reattachIndex),
+        allowNestedAudioVideo,
+      );
+      return [
+        {
+          ...contentObj,
+          parts: headParts,
+        },
+        {
+          role: 'user',
+          parts:
+            promotedMediaParts.length > 0
+              ? [...promotedMediaParts, ...tailParts]
+              : tailParts,
+        },
+      ];
+    }
+
+    const sanitizedParts = this.sanitizeTurnParts(
+      rawParts,
+      allowNestedAudioVideo,
+      promotedMediaParts,
+    );
+    if (promotedMediaParts.length > 0) {
+      return [
+        {
+          ...contentObj,
+          parts: sanitizedParts,
+        },
+        {
+          role: 'user',
+          parts: [
+            { text: 'Attached media from tool output:' },
+            ...promotedMediaParts,
+          ],
+        },
+      ];
+    }
+
+    return [
+      {
+        ...contentObj,
+        parts: sanitizedParts,
+      },
+    ];
+  }
+
+  private sanitizeTurnParts(
+    parts: Part[],
+    allowNestedAudioVideo: boolean,
+    promotedMediaParts?: Part[],
+  ): Part[] {
+    const stripped = parts.map((part) =>
+      this.stripPartFields(part, allowNestedAudioVideo, promotedMediaParts),
+    );
+    const filtered = stripped.filter((part) => !isUnsignedEmptyTextPart(part));
+    return filtered.length > 0 ? filtered : stripped;
+  }
+
+  private isMediaModalityDisabled(mimeType: string | undefined): boolean {
+    const modalities = this.contentGeneratorConfig?.modalities;
+    if (!modalities) {
+      return false;
+    }
+    const modality = getMediaModality(mimeType);
+    if (!modality) {
+      return false;
+    }
+    return !modalities[modality];
+  }
+
+  private formatDisabledMediaNote(
+    mimeType: string | undefined,
+    displayName?: string,
+  ): string {
+    const normalized = normalizeMediaMimeType(mimeType) ?? '';
+    const displayNameText = displayName ? ` (${displayName})` : '';
+    return `Unsupported media type for Gemini: ${normalized}${displayNameText}.`;
+  }
+
+  private formatPromotedMediaNote(
+    mimeType: string | undefined,
+    displayName?: string,
+  ): string {
+    const normalized = normalizeMediaMimeType(mimeType) ?? '';
+    const displayNameText = displayName ? ` (${displayName})` : '';
+    return `Attached ${normalized}${displayNameText} in following user message.`;
+  }
+
+  private sanitizeTopLevelMedia<
+    T extends { displayName?: string; mimeType?: string },
+  >(media: T, disabledNotes: string[]): Omit<T, 'displayName'> | undefined {
+    const { displayName, ...rest } = media;
+    if (this.isMediaModalityDisabled(rest.mimeType)) {
+      disabledNotes.push(
+        this.formatDisabledMediaNote(rest.mimeType, displayName),
+      );
+      return undefined;
+    }
+    const normalizedMime = normalizeMediaMimeType(rest.mimeType);
     return {
-      ...contentObj,
-      parts: contentObj.parts.map((part) => this.stripPartFields(part)),
+      ...rest,
+      ...(normalizedMime !== undefined ? { mimeType: normalizedMime } : {}),
     };
   }
 
-  private stripPartFields(part: Part): Part {
+  private processNestedFunctionResponseMedia(
+    rawMimeType: string | undefined,
+    displayName: string | undefined,
+    buildCleanPart: (mimeType: string | undefined) => FunctionResponsePart,
+    allowNestedAudioVideo: boolean,
+    retainedParts: FunctionResponsePart[],
+    extractedTexts: string[],
+    promotedMediaParts?: Part[],
+  ): void {
+    if (this.isMediaModalityDisabled(rawMimeType)) {
+      extractedTexts.push(
+        this.formatDisabledMediaNote(rawMimeType, displayName),
+      );
+      return;
+    }
+    const modality = getMediaModality(rawMimeType);
+    const isAudioOrVideo = modality === 'audio' || modality === 'video';
+    const cleanPart = buildCleanPart(normalizeMediaMimeType(rawMimeType));
+    if (isAudioOrVideo && !allowNestedAudioVideo) {
+      if (promotedMediaParts) {
+        promotedMediaParts.push(cleanPart);
+        extractedTexts.push(
+          this.formatPromotedMediaNote(rawMimeType, displayName),
+        );
+      } else {
+        extractedTexts.push(
+          this.formatDisabledMediaNote(rawMimeType, displayName),
+        );
+      }
+      return;
+    }
+    retainedParts.push(cleanPart);
+  }
+
+  private stripPartFields(
+    part: Part,
+    allowNestedAudioVideo: boolean,
+    promotedMediaParts?: Part[],
+  ): Part {
     if (typeof part === 'string') {
       return part;
     }
@@ -555,18 +1279,45 @@ export class LlmContentGenerator implements ContentGenerator {
     // so drop it before the SDK sees it.
     delete result.partMetadata;
 
-    // Strip displayName from inlineData
+    const disabledNotes: string[] = [];
+
     if (result.inlineData) {
-      const { displayName: _, ...inlineDataWithoutDisplayName } =
-        result.inlineData as { displayName?: string; [key: string]: unknown };
-      result.inlineData = inlineDataWithoutDisplayName as Part['inlineData'];
+      const sanitized = this.sanitizeTopLevelMedia(
+        result.inlineData as {
+          displayName?: string;
+          mimeType?: string;
+          [key: string]: unknown;
+        },
+        disabledNotes,
+      );
+      if (sanitized) {
+        result.inlineData = sanitized as Part['inlineData'];
+      } else {
+        delete result.inlineData;
+      }
     }
 
-    // Strip displayName from fileData
     if (result.fileData) {
-      const { displayName: _, ...fileDataWithoutDisplayName } =
-        result.fileData as { displayName?: string; [key: string]: unknown };
-      result.fileData = fileDataWithoutDisplayName as Part['fileData'];
+      const sanitized = this.sanitizeTopLevelMedia(
+        result.fileData as {
+          displayName?: string;
+          mimeType?: string;
+          [key: string]: unknown;
+        },
+        disabledNotes,
+      );
+      if (sanitized) {
+        result.fileData = sanitized as Part['fileData'];
+      } else {
+        delete result.fileData;
+      }
+    }
+
+    if (disabledNotes.length > 0) {
+      const joinedNotes = disabledNotes.join('\n');
+      result.text = result.text
+        ? `${result.text}\n${joinedNotes}`
+        : joinedNotes;
     }
 
     // `thoughtSignature` carries no origin marker, so a Responses-API
@@ -580,12 +1331,13 @@ export class LlmContentGenerator implements ContentGenerator {
       delete result.thoughtSignature;
     }
 
-    // Gemini's FunctionResponsePart schema only permits `inlineData` and
-    // `fileData` (oneof data, without displayName or unknown fields) — never
-    // `text`. Convert unsupported audio/video to notes and move all text
-    // entries (including compaction placeholders / disclosures) into
-    // `functionResponse.response` so no invalid field reaches the wire in
-    // `function_response.parts`.
+    // Gemini's FunctionResponsePart schema permits `inlineData` and `fileData`
+    // (oneof data, without displayName or unknown fields) — never `text`.
+    // Retain native image/pdf payloads in `functionResponse.parts` on all
+    // models; retain audio/video natively on Gemini 3+ models, and promote
+    // audio/video to a follow-up `user` turn on Gemini 2.5 and earlier models
+    // (which reject nested audio/video inside FunctionResponsePart with 400).
+    // Disabled modalities and text entries move into `functionResponse.response`.
     if (result.functionResponse?.parts) {
       const retainedParts: FunctionResponsePart[] = [];
       const extractedTexts: string[] = [];
@@ -597,27 +1349,47 @@ export class LlmContentGenerator implements ContentGenerator {
           if (nestedPart.length > 0) extractedTexts.push(nestedPart);
           continue;
         }
-        const converted = this.convertUnsupportedMediaToText(nestedPart);
-        if (typeof converted.text === 'string' && converted.text.length > 0) {
-          extractedTexts.push(converted.text);
+        if (typeof nestedPart.text === 'string' && nestedPart.text.length > 0) {
+          extractedTexts.push(nestedPart.text);
         }
-        if (converted.inlineData) {
-          const { mimeType, data } = converted.inlineData;
-          retainedParts.push({
-            inlineData: {
-              ...(mimeType !== undefined ? { mimeType } : {}),
-              ...(data !== undefined ? { data } : {}),
-            },
-          });
+        if (nestedPart.inlineData) {
+          const { mimeType: rawMimeType, data } = nestedPart.inlineData;
+          const displayName = (
+            nestedPart.inlineData as { displayName?: string }
+          ).displayName;
+          this.processNestedFunctionResponseMedia(
+            rawMimeType,
+            displayName,
+            (mimeType) => ({
+              inlineData: {
+                ...(mimeType !== undefined ? { mimeType } : {}),
+                ...(data !== undefined ? { data } : {}),
+              },
+            }),
+            allowNestedAudioVideo,
+            retainedParts,
+            extractedTexts,
+            promotedMediaParts,
+          );
         }
-        if (converted.fileData) {
-          const { fileUri, mimeType } = converted.fileData;
-          retainedParts.push({
-            fileData: {
-              ...(fileUri !== undefined ? { fileUri } : {}),
-              ...(mimeType !== undefined ? { mimeType } : {}),
-            },
-          });
+        if (nestedPart.fileData) {
+          const { fileUri, mimeType: rawMimeType } = nestedPart.fileData;
+          const displayName = (nestedPart.fileData as { displayName?: string })
+            .displayName;
+          this.processNestedFunctionResponseMedia(
+            rawMimeType,
+            displayName,
+            (mimeType) => ({
+              fileData: {
+                ...(fileUri !== undefined ? { fileUri } : {}),
+                ...(mimeType !== undefined ? { mimeType } : {}),
+              },
+            }),
+            allowNestedAudioVideo,
+            retainedParts,
+            extractedTexts,
+            promotedMediaParts,
+          );
         }
       }
 
@@ -666,44 +1438,6 @@ export class LlmContentGenerator implements ContentGenerator {
     }
 
     return result;
-  }
-
-  /**
-   * Convert unsupported media types (audio, video) to explanatory text for Gemini API
-   */
-  private convertUnsupportedMediaToText(part: Part): Part {
-    if (typeof part === 'string') return part;
-
-    const inlineMimeType = (part.inlineData?.mimeType || '').trim();
-    const fileMimeType = (part.fileData?.mimeType || '').trim();
-    const normalizedInlineMime = inlineMimeType.toLowerCase();
-    const normalizedFileMime = fileMimeType.toLowerCase();
-
-    if (
-      normalizedInlineMime.startsWith('audio/') ||
-      normalizedInlineMime.startsWith('video/')
-    ) {
-      const displayName = (part.inlineData as { displayName?: string })
-        ?.displayName;
-      const displayNameText = displayName ? ` (${displayName})` : '';
-      return {
-        text: `Unsupported media type for Gemini: ${inlineMimeType}${displayNameText}.`,
-      };
-    }
-
-    if (
-      normalizedFileMime.startsWith('audio/') ||
-      normalizedFileMime.startsWith('video/')
-    ) {
-      const displayName = (part.fileData as { displayName?: string })
-        ?.displayName;
-      const displayNameText = displayName ? ` (${displayName})` : '';
-      return {
-        text: `Unsupported media type for Gemini: ${fileMimeType}${displayNameText}.`,
-      };
-    }
-
-    return part;
   }
 
   async embedContent(
