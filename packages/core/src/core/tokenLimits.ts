@@ -152,6 +152,26 @@ export function normalize(model: string): string {
   s = s.replace(/^.*\//, '');
   s = s.split('|').pop() ?? s;
 
+  // Bedrock ids put an optional cross-region prefix and the provider before
+  // the model, and a revision after it:
+  // `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. Left alone, the colon
+  // split below keeps only the revision (`0`) and every Bedrock id falls
+  // through to the default limit. The revision is dropped for any id, so a
+  // provider missing from the list below still keeps its model name.
+  s = s.replace(/-(?:v\d+|\d+):\d+$/, '');
+  const bedrock = s.match(
+    /^(?:[a-z]+(?:-[a-z]+)?\.)?(anthropic|meta|amazon|mistral|cohere|ai21|deepseek|qwen|openai|moonshotai|google|minimax|nvidia|writer|xai)\.(.+)$/,
+  );
+  if (bedrock) {
+    const model = bedrock[2]!.replace(/-v\d+$/, '');
+    // DeepSeek's Bedrock ids drop the family name (`deepseek.r1-v1:0`,
+    // `deepseek.v3.2`), which the limit tables key on.
+    s =
+      bedrock[1] === 'deepseek' && !model.startsWith('deepseek')
+        ? `deepseek-${model}`
+        : model;
+  }
+
   // A colon can sit on either side of the model name. `authType:model` and
   // `family:model` put it on the left, and the split below keeps the right
   // half. But OpenRouter variant suffixes and Ollama / LM Studio tags put it
@@ -355,12 +375,16 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 
   // OpenAI
   [/^gpt-5/, LIMITS['128k']], // GPT-5.x: 128K
+  [/^gpt-oss/, LIMITS['32k']], // gpt-oss: 32K
   [/^gpt-/, LIMITS['16k']], // GPT fallback: 16K
   [/^o\d/, LIMITS['128k']], // o-series: 128K
 
   // Anthropic Claude
   [CLAUDE_OPUS_EXTENDED, 128_000 as TokenCount], // Opus 4.6-4.8, Opus 5.x: 128K
   [/^claude-sonnet-4-6/, LIMITS['64k']], // Sonnet 4.6: 64K
+  [/^claude-opus-4(?:-1)?$/, 32_000 as TokenCount], // Opus 4 / 4.1: 32K
+  [/^claude-3-5-(?:sonnet|haiku)$/, LIMITS['8k']], // Claude 3.5: 8K
+  [/^claude-(?:3-(?:haiku|opus)|instant)/, LIMITS['4k']], // Claude 3, Instant: 4K
   [/^claude-/, LIMITS['64k']], // Claude fallback: 64K
 
   // Alibaba / Qwen

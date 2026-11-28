@@ -549,7 +549,17 @@ describe('tokenLimit with output type', () => {
 
     it('should return fallback output limits for legacy Claude', () => {
       expect(tokenLimit('claude-sonnet-4', 'output')).toBe(65536);
-      expect(tokenLimit('claude-opus-4', 'output')).toBe(65536);
+      expect(tokenLimit('claude-opus-4-5', 'output')).toBe(65536);
+    });
+
+    it('caps older Claude generations at their declared output limits', () => {
+      expect(tokenLimit('claude-opus-4', 'output')).toBe(32_000);
+      expect(tokenLimit('claude-opus-4-1', 'output')).toBe(32_000);
+      expect(tokenLimit('claude-3-5-sonnet', 'output')).toBe(8_192);
+      expect(tokenLimit('claude-3-5-haiku', 'output')).toBe(8_192);
+      expect(tokenLimit('claude-3-haiku', 'output')).toBe(4_096);
+      expect(tokenLimit('claude-3-opus', 'output')).toBe(4_096);
+      expect(tokenLimit('claude-instant', 'output')).toBe(4_096);
     });
   });
 
@@ -857,5 +867,103 @@ describe('models.dev catalog', () => {
     expect(tokenLimit('gpt-5', 'input')).toBe(272_000);
     expect(tokenLimit('unknown-model', 'input')).toBe(DEFAULT_TOKEN_LIMIT);
     expect(hasExplicitOutputLimit('unknown-model')).toBe(false);
+  });
+});
+
+describe('Bedrock model ids', () => {
+  it('keeps the model name of a Bedrock id', () => {
+    expect(normalize('us.anthropic.claude-sonnet-4-5-20250929-v1:0')).toBe(
+      'claude-sonnet-4-5',
+    );
+    expect(normalize('anthropic.claude-3-5-sonnet-20240620-v1:0')).toBe(
+      'claude-3-5-sonnet',
+    );
+    expect(normalize('global.anthropic.claude-opus-4-6-v1')).toBe(
+      'claude-opus-4-6',
+    );
+    expect(
+      normalize('bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0'),
+    ).toBe('claude-sonnet-4-5');
+    expect(normalize('qwen.qwen3-coder-480b-a35b-v1:0')).toBe(
+      'qwen3-coder-480b-a35b',
+    );
+
+    for (const [bedrockId, bare] of [
+      ['us.anthropic.claude-sonnet-4-5-20250929-v1:0', 'claude-sonnet-4-5'],
+      ['global.anthropic.claude-opus-4-6-v1', 'claude-opus-4-6'],
+      ['qwen.qwen3-coder-480b-a35b-v1:0', 'qwen3-coder-480b-a35b'],
+    ] as Array<[string, string]>) {
+      expect(tokenLimit(bedrockId)).toBe(tokenLimit(bare));
+      expect(tokenLimit(bedrockId, 'output')).toBe(tokenLimit(bare, 'output'));
+    }
+    // Pinned absolutely too, so both sides falling back to the default
+    // would not pass.
+    expect(tokenLimit('global.anthropic.claude-opus-4-6-v1')).toBe(1_000_000);
+  });
+
+  it('handles every region, revision and provider shape', () => {
+    // A hyphenated region and a revision without the `v`.
+    expect(normalize('us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0')).toBe(
+      'claude-sonnet-4-5',
+    );
+    expect(normalize('openai.gpt-oss-120b-1:0')).toBe('gpt-oss-120b');
+    expect(normalize('moonshotai.kimi-k2-thinking')).toBe('kimi-k2-thinking');
+    // A provider missing from the list keeps its prefix, but drops the
+    // revision instead of collapsing to `0`.
+    expect(normalize('twelvelabs.pegasus-1-2-v1:0')).toBe(
+      'twelvelabs.pegasus-1-2',
+    );
+    // OCI Generative AI serves Grok under the same `<publisher>.<model>`
+    // shape.
+    expect(normalize('xai.grok-4.3')).toBe('grok-4.3');
+  });
+
+  it("keeps the DeepSeek family name, which DeepSeek's Bedrock ids drop", () => {
+    expect(normalize('deepseek.r1-v1:0')).toBe('deepseek-r1');
+    expect(tokenLimit('deepseek.r1-v1:0')).toBe(tokenLimit('deepseek-r1'));
+    expect(tokenLimit('deepseek.v3.2')).toBe(131_072);
+    // The family is only re-attached when the model segment drops it.
+    expect(normalize('deepseek.deepseek-r1-v1:0')).toBe('deepseek-r1');
+    expect(tokenLimit('deepseek.deepseek-r1-v1:0', 'output')).toBe(65_536);
+  });
+
+  it.each([
+    ['meta.llama3-3-70b-instruct-v1:0', 'llama3-3-70b-instruct'],
+    ['amazon.nova-pro-v1:0', 'nova-pro'],
+    ['mistral.mistral-large-2407-v1:0', 'mistral-large'],
+    ['cohere.command-r-plus-v1:0', 'command-r-plus'],
+    ['ai21.jamba-1-5-large-v1:0', 'jamba-1-5-large'],
+    ['google.gemma-3-27b-it', 'gemma-3-27b-it'],
+    ['minimax.minimax-m2-v1:0', 'minimax-m2'],
+    ['nvidia.nemotron-nano-12b-v2-v1:0', 'nemotron-nano-12b'],
+    ['writer.palmyra-x5-v1:0', 'palmyra-x5'],
+  ])('drops the %s publisher prefix', (id, bare) => {
+    expect(normalize(id)).toBe(bare);
+    expect(normalize(id)).toBe(normalize(bare));
+  });
+
+  it('gives Bedrock gpt-oss the gpt-oss output limit, not the GPT fallback', () => {
+    expect(tokenLimit('openai.gpt-oss-120b-1:0', 'output')).toBe(32_768);
+    expect(tokenLimit('gpt-oss-120b', 'output')).toBe(32_768);
+    expect(tokenLimit('gpt-4', 'output')).toBe(16_384);
+  });
+
+  it('caps older Bedrock Claude generations like their plain names', () => {
+    expect(
+      tokenLimit('us.anthropic.claude-opus-4-1-20250805-v1:0', 'output'),
+    ).toBe(32_000);
+    expect(
+      defaultOutputCeiling('anthropic.claude-3-5-sonnet-20241022-v2:0'),
+    ).toBe(8_192);
+    expect(tokenLimit('anthropic.claude-instant-v1', 'output')).toBe(4_096);
+  });
+
+  it('gives Bedrock Claude the output ceiling of the plain name', () => {
+    expect(defaultOutputCeiling('global.anthropic.claude-opus-4-6-v1')).toBe(
+      defaultOutputCeiling('claude-opus-4-6'),
+    );
+    expect(defaultOutputCeiling('global.anthropic.claude-opus-4-6-v1')).toBe(
+      128_000,
+    );
   });
 });

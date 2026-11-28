@@ -116,6 +116,11 @@ describe('defaultModalities', () => {
       ['gpt-4o', IMAGE],
       ['o3', IMAGE],
     ]);
+    casesFor('returns text-only for', [
+      ['gpt-oss-120b', TEXT_ONLY],
+      ['openai/gpt-oss-20b', TEXT_ONLY],
+      ['openai.gpt-oss-120b-1:0', TEXT_ONLY],
+    ]);
   });
 
   describe('Anthropic Claude', () => {
@@ -127,6 +132,14 @@ describe('defaultModalities', () => {
       ['claude-sonnet-4-6', IMAGE_PDF],
       ['claude-sonnet-4', IMAGE_PDF],
       ['claude-3.5-sonnet', IMAGE_PDF],
+      [
+        'Bedrock Claude',
+        IMAGE_PDF,
+        'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+      ],
+    ]);
+    casesFor('returns text-only for', [
+      ['Claude Instant', TEXT_ONLY, 'anthropic.claude-instant-v1'],
     ]);
   });
 
