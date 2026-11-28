@@ -102,7 +102,7 @@ These go into the user guide:
 
 - Turn events cover only the main loop and only the prompts a person submits. `agentId` never appears.
 - `reason` is never `refusal`.
-- `usage.cache_creation_input_tokens` is 0 unless the provider reports cache writes separately, as Anthropic's does.
+- `usage.cache_creation_input_tokens` is 0 unless the provider reports cache writes separately. Anthropic's `cache_creation_input_tokens` is summed into the prompt total, while OpenAI Chat's `prompt_tokens_details.cache_write_tokens` is already inside `prompt_tokens`. In either case, `input_tokens` excludes the reported cache reads and writes.
 - A prompt or answer longer than 128 KiB as JSON reaches the hooks cut, with `isTextTruncated` or `isAnswerTruncated` set. Claude Code passes it whole.
 - In headless text mode the note goes to stderr.
 - `$.prompt.submit` does not exist yet, so a Mod cannot send a prompt after `$.turn.abort`.

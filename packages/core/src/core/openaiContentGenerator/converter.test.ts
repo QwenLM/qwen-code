@@ -2421,27 +2421,61 @@ describe('OpenAIContentConverter', () => {
       [
         'non-streaming',
         (extra: Record<string, unknown>) =>
-          toLlm([], { usage: usage(373, 112, 485, extra) }).usageMetadata,
+          toLlm([], { usage: usage(373, 112, 485, extra) }),
       ],
       [
-        'streaming',
+        'streaming usage-only',
         (extra: Record<string, unknown>) =>
-          usageChunk(withStreamParser(), usage(373, 112, 485, extra))
-            .usageMetadata,
+          usageChunk(withStreamParser(), usage(373, 112, 485, extra)),
+      ],
+    ])('preserves cache-write provenance for %s usage', (_title, convert) => {
+      const response = convert({
+        prompt_tokens_details: { cache_write_tokens: 256 },
+      });
+
+      // The provider's prompt_tokens already includes cache reads and
+      // writes, so the aggregate must not be reduced again.
+      expect(response.usageMetadata?.promptTokenCount).toBe(373);
+      expect(response.usageMetadata?.candidatesTokenCount).toBe(112);
+      expect(response.usageMetadata?.cachedContentTokenCount).toBe(0);
+      expect(
+        getGenAiUsageProvenance(response.usageMetadata)
+          ?.cachedInputTokensReported,
+      ).toBe(false);
+      expect(
+        getGenAiUsageProvenance(response.usageMetadata)
+          ?.cacheCreationInputTokens,
+      ).toBe(256);
+    });
+
+    it.each([
+      [
+        'non-streaming',
+        (extra: Record<string, unknown>) =>
+          toLlm([], { usage: usage(373, 112, 485, extra) }),
+      ],
+      [
+        'streaming usage-only',
+        (extra: Record<string, unknown>) =>
+          usageChunk(withStreamParser(), usage(373, 112, 485, extra)),
       ],
     ])(
-      'reports prompt_tokens_details.cache_write_tokens as cache creation (%s)',
+      'keeps cache reads and writes distinct for %s usage',
       (_title, convert) => {
-        const usageMetadata = convert({
-          prompt_tokens_details: { cache_write_tokens: 256 },
+        const response = convert({
+          prompt_tokens_details: {
+            cached_tokens: 100,
+            cache_write_tokens: 256,
+          },
         });
 
-        // The provider's prompt_tokens already includes cache reads and
-        // writes, so the aggregate must not be reduced again.
-        expect(usageMetadata?.promptTokenCount).toBe(373);
-        expect(
-          getGenAiUsageProvenance(usageMetadata)?.cacheCreationInputTokens,
-        ).toBe(256);
+        expect(response.usageMetadata?.promptTokenCount).toBe(373);
+        expect(response.usageMetadata?.candidatesTokenCount).toBe(112);
+        expect(response.usageMetadata?.cachedContentTokenCount).toBe(100);
+        expect(getGenAiUsageProvenance(response.usageMetadata)).toMatchObject({
+          cachedInputTokensReported: true,
+          cacheCreationInputTokens: 256,
+        });
       },
     );
 
@@ -2449,16 +2483,15 @@ describe('OpenAIContentConverter', () => {
       [
         'non-streaming',
         (extra: Record<string, unknown>) =>
-          toLlm([], { usage: usage(373, 112, 485, extra) }).usageMetadata,
+          toLlm([], { usage: usage(373, 112, 485, extra) }),
       ],
       [
-        'streaming',
+        'streaming usage-only',
         (extra: Record<string, unknown>) =>
-          usageChunk(withStreamParser(), usage(373, 112, 485, extra))
-            .usageMetadata,
+          usageChunk(withStreamParser(), usage(373, 112, 485, extra)),
       ],
     ])(
-      'distinguishes an absent cache write field from an explicitly reported zero (%s)',
+      'distinguishes absent and explicit-zero cache-write fields for %s usage',
       (_title, convert) => {
         const absent = convert({});
         const zero = convert({
@@ -2466,9 +2499,12 @@ describe('OpenAIContentConverter', () => {
         });
 
         expect(
-          getGenAiUsageProvenance(absent)?.cacheCreationInputTokens,
+          getGenAiUsageProvenance(absent.usageMetadata)
+            ?.cacheCreationInputTokens,
         ).toBeUndefined();
-        expect(getGenAiUsageProvenance(zero)?.cacheCreationInputTokens).toBe(0);
+        expect(
+          getGenAiUsageProvenance(zero.usageMetadata)?.cacheCreationInputTokens,
+        ).toBe(0);
       },
     );
 

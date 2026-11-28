@@ -118,7 +118,7 @@ Gemini 和 Vertex AI 请求使用 `generate_content`。
 
 ## 响应与用量来源
 
-提供方转换器通过 `WeakMap` 向归一化 Gemini 用量对象附加内部来源信息，记录缓存读取字段是否实际存在，以及 Anthropic 缓存创建 token 数。此做法保留公开响应 JSON 的形状，并让垃圾回收跟随归一化用量对象。
+提供方转换器通过 `WeakMap` 向归一化 Gemini 用量对象附加内部来源信息，记录缓存读取字段是否实际存在，以及提供方报告的缓存创建 token 数。Anthropic 的 `cache_creation_input_tokens` 与 `input_tokens`、`cache_read_input_tokens` 相加得到输入总量。OpenAI Chat 的 `prompt_tokens_details.cache_write_tokens` 已是 `prompt_tokens` 内部的细分，因此只保留该分项，不再从输入总量中扣减或重复加回。此做法保留公开响应 JSON 的形状，并让垃圾回收跟随归一化用量对象。
 
 OpenAI 兼容提供方仅报告 `total_tokens` 时，归一化总量仍供现有内部消费者使用，但不会合成输入/输出拆分，也不会发出这两个标准用量属性。
 
