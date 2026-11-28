@@ -28,11 +28,15 @@ vi.mock('node:os', async (importOriginal) => {
 });
 
 // Mock trustedFolders
-vi.mock('./trustedFolders.js', () => ({
-  isWorkspaceTrusted: vi
-    .fn()
-    .mockReturnValue({ isTrusted: true, source: 'file' }),
-}));
+vi.mock('./trustedFolders.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./trustedFolders.js')>();
+  return {
+    ...actual,
+    isWorkspaceTrusted: vi
+      .fn()
+      .mockReturnValue({ isTrusted: true, source: 'file' }),
+  };
+});
 
 // NOW import everything else, including the (now effectively re-exported) settings.js
 import path, * as pathActual from 'node:path'; // Restored for MOCK_WORKSPACE_SETTINGS_PATH
@@ -48,7 +52,7 @@ import {
 } from 'vitest';
 import * as fs from 'node:fs'; // fs will be mocked separately
 import stripJsonComments from 'strip-json-comments'; // Will be mocked separately
-import { isWorkspaceTrusted } from './trustedFolders.js';
+import { isFolderTrustEnabled, isWorkspaceTrusted } from './trustedFolders.js';
 import * as jsoncEditor from '../utils/jsonc-editor.js';
 
 // These imports will get the versions from the vi.mock('./settings.js', ...) factory.
@@ -764,6 +768,365 @@ describe('Settings Loading and Merging', () => {
           expect.stringContaining("'privacy.usageStatisticsEnabled'"),
         ]),
       );
+    });
+
+    it.each([true, false])(
+      'repairs an already-migrated folder-trust file that keeps the dead featureEnabled key (value %s)',
+      (choice) => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        const staleContent = {
+          [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+          security: { folderTrust: { featureEnabled: choice } },
+        };
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) =>
+            p === USER_SETTINGS_PATH ? JSON.stringify(staleContent) : '{}',
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(
+          (settings.user.settings as Settings).security?.folderTrust,
+        ).toEqual({ enabled: choice });
+        // The real consumer must see the migrated choice, not its default.
+        expect(settings.merged.security?.folderTrust?.enabled).toBe(choice);
+        expect(getSettingsWarnings(settings)).toEqual(
+          expect.arrayContaining([
+            expect.stringContaining(
+              "Migrated 'security.folderTrust.featureEnabled'",
+            ),
+          ]),
+        );
+
+        // Repaired files must be persisted, otherwise every startup re-repairs.
+        const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+          (call: unknown[]) =>
+            call[0] ===
+            path.join(`${USER_SETTINGS_PATH}.write-test`, 'settings.json.tmp'),
+        );
+        expect(writeCall).toBeDefined();
+        expect(JSON.parse(writeCall![1] as string)['security']).toEqual({
+          folderTrust: { enabled: choice },
+        });
+      },
+    );
+
+    it('keeps an explicit canonical folder-trust value ahead of the dead key', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH
+            ? JSON.stringify({
+                [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                security: {
+                  folderTrust: { enabled: false, featureEnabled: true },
+                },
+              })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(isFolderTrustEnabled(settings.user.settings as Settings)).toBe(
+        false,
+      );
+      expect(settings.user.settings.security?.folderTrust).toEqual({
+        enabled: false,
+      });
+      expect(isFolderTrustEnabled(settings.merged as Settings)).toBe(false);
+      // The dead key must be dropped on disk too, not just in memory.
+      expect(getSettingsWarnings(settings)).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            "Removed the unused 'security.folderTrust.featureEnabled'",
+          ),
+        ]),
+      );
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) =>
+          call[0] ===
+          path.join(`${USER_SETTINGS_PATH}.write-test`, 'settings.json.tmp'),
+      );
+      expect(writeCall).toBeDefined();
+      expect(JSON.parse(writeCall![1] as string)['security']).toEqual({
+        folderTrust: { enabled: false },
+      });
+    });
+
+    it('keeps a truthy non-boolean canonical value ahead of the dead key', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH
+            ? JSON.stringify({
+                [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                security: {
+                  folderTrust: { enabled: 'true', featureEnabled: false },
+                },
+              })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // `isFolderTrustEnabled` resolves the key with `?? false`, so `"true"`
+      // already opens the gate; taking the dead key's `false` would shut it
+      // and persist that across restarts.
+      expect(isFolderTrustEnabled(settings.merged as Settings)).toBeTruthy();
+      expect(settings.user.settings.security?.folderTrust).toEqual({
+        enabled: 'true',
+      });
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) =>
+          call[0] ===
+          path.join(`${USER_SETTINGS_PATH}.write-test`, 'settings.json.tmp'),
+      );
+      expect(writeCall).toBeDefined();
+      expect(JSON.parse(writeCall![1] as string)['security']).toEqual({
+        folderTrust: { enabled: 'true' },
+      });
+    });
+
+    it('keeps an unpersisted repair through a reload', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const staleContent = JSON.stringify({
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        security: { folderTrust: { featureEnabled: true } },
+      });
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH ? staleContent : '{}',
+      );
+      // Read-only home: the repair cannot be written back, so it only lives in
+      // memory and the file keeps the dead key.
+      (fs.writeFileSync as Mock).mockImplementation(() => {
+        throw new Error('EACCES: read-only file system');
+      });
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(isFolderTrustEnabled(settings.merged as Settings)).toBe(true);
+
+      expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
+
+      expect(isFolderTrustEnabled(settings.merged as Settings)).toBe(true);
+      expect(settings.user.settings.security?.folderTrust).toEqual({
+        enabled: true,
+      });
+    });
+
+    it('keeps a V1-shaped repair through a reload when the write failed', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      // A pre-V2 file: the load migrates it in memory, the repair turns the
+      // migrated dead key into `enabled`, and the read-only home keeps the
+      // original bytes on disk. The reload has to migrate before repairing,
+      // or it reads a shape the repair cannot match and drops the gate.
+      const staleContent = JSON.stringify({ folderTrustFeature: true });
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH ? staleContent : '{}',
+      );
+      (fs.writeFileSync as Mock).mockImplementation(() => {
+        throw new Error('EACCES: read-only file system');
+      });
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(isFolderTrustEnabled(settings.merged as Settings)).toBe(true);
+
+      expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
+
+      expect(isFolderTrustEnabled(settings.merged as Settings)).toBe(true);
+      expect(settings.user.settings.security?.folderTrust).toEqual({
+        enabled: true,
+      });
+    });
+
+    it('replaces a non-boolean canonical value with the dead-key boolean', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH
+            ? JSON.stringify({
+                [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                security: {
+                  folderTrust: { enabled: null, featureEnabled: true },
+                },
+              })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // No consumer honors a non-boolean canonical value (`?? false` or a
+      // policy error), so it must not cost the user their only usable
+      // opt-in: the legacy boolean replaces it.
+      expect(settings.user.settings.security?.folderTrust).toEqual({
+        enabled: true,
+      });
+      expect(isFolderTrustEnabled(settings.merged as Settings)).toBe(true);
+      expect(getSettingsWarnings(settings)).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            "Migrated 'security.folderTrust.featureEnabled'",
+          ),
+        ]),
+      );
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) =>
+          call[0] ===
+          path.join(`${USER_SETTINGS_PATH}.write-test`, 'settings.json.tmp'),
+      );
+      expect(writeCall).toBeDefined();
+      expect(JSON.parse(writeCall![1] as string)['security']).toEqual({
+        folderTrust: { enabled: true },
+      });
+    });
+
+    it('repairs the dead key that the V1 migration itself still creates', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH
+            ? JSON.stringify({ folderTrustFeature: true })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // Whatever the V1 chain maps this legacy key to, the load-time repair
+      // has to close the loop on the same startup.
+      expect(settings.user.settings.security?.folderTrust).toEqual({
+        enabled: true,
+      });
+      expect(isFolderTrustEnabled(settings.user.settings as Settings)).toBe(
+        true,
+      );
+    });
+
+    it('leaves a canonical value alone and ignores a non-boolean dead key', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH
+            ? JSON.stringify({
+                [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                security: {
+                  folderTrust: { enabled: true, featureEnabled: 'yes' },
+                },
+              })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(isFolderTrustEnabled(settings.user.settings as Settings)).toBe(
+        true,
+      );
+      expect((fs.writeFileSync as Mock).mock.calls).toHaveLength(0);
+    });
+
+    it('warns on a non-boolean dead key without rewriting the file', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH
+            ? JSON.stringify({
+                [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                security: { folderTrust: { featureEnabled: 'yes' } },
+              })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // The key is left as written for the loader and the daemon validator to
+      // refuse; the warning is the only way the operator learns which key it is.
+      expect(settings.user.settings.security?.folderTrust).toEqual({
+        featureEnabled: 'yes',
+      });
+      expect(isFolderTrustEnabled(settings.merged as Settings)).toBe(false);
+      expect(settings.migrationWarnings).toEqual([
+        expect.stringContaining('security.folderTrust.featureEnabled'),
+      ]);
+      expect((fs.writeFileSync as Mock).mock.calls).toHaveLength(0);
+    });
+
+    it('repairs a workspace dead key in memory without rewriting the tracked file', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH) {
+            return JSON.stringify({
+              [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+              security: { folderTrust: { featureEnabled: true } },
+            });
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // `security.folderTrust` is stripped from workspace settings before the
+      // merge, so a persisted value could never apply from this scope;
+      // rewriting a repository-tracked .qwen/settings.json would only dirty
+      // the checkout.
+      expect(settings.merged.security?.folderTrust).toBeUndefined();
+      const workspaceWrites = (fs.writeFileSync as Mock).mock.calls.filter(
+        (call: unknown[]) =>
+          String(call[0]).startsWith(`${MOCK_WORKSPACE_SETTINGS_PATH}.write-`),
+      );
+      expect(workspaceWrites).toHaveLength(0);
+      // The in-memory repair still runs, so the warning says so without
+      // claiming the file was updated.
+      expect(getSettingsWarnings(settings)).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            "Migrated 'security.folderTrust.featureEnabled'",
+          ),
+          expect.stringContaining(
+            'repaired in memory for this run; the file could not be updated',
+          ),
+        ]),
+      );
+    });
+
+    it('does not repair the dead key twice', () => {
+      const repaired = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        security: { folderTrust: { enabled: true } },
+      };
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH ? JSON.stringify(repaired) : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(isFolderTrustEnabled(settings.user.settings as Settings)).toBe(
+        true,
+      );
+      expect((fs.writeFileSync as Mock).mock.calls).toHaveLength(0);
     });
 
     it.each([-1, 1.5, '5'])(
