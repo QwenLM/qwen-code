@@ -1058,6 +1058,24 @@ function openAIChatPromptSource(
     add_special_tokens: addSpecialTokens = false,
   } = body;
   const rawMessages = Array.isArray(messages) ? messages : undefined;
+  const chatTemplate = body['chat_template'] ?? undefined;
+  const templateOptions = normalizeRenderOptions(body['chat_template_kwargs']);
+  const templateResponseFormat =
+    templateOptions !== null &&
+    typeof templateOptions === 'object' &&
+    'response_format' in templateOptions
+      ? (templateOptions.response_format ?? undefined)
+      : undefined;
+  const responseFormat = body['response_format'] ?? undefined;
+  const plainText = { type: 'text' };
+  // Renderers can use explicit text to replace a nested or server default.
+  // The pinned MiniMax template does not consume the top-level text setting.
+  const omitPlainText =
+    chatTemplate === undefined &&
+    isDeepStrictEqual(responseFormat, plainText) &&
+    (isDeepStrictEqual(templateResponseFormat, plainText) ||
+      (templateResponseFormat === undefined &&
+        model.trim().toLowerCase() === 'minimaxai/minimax-m2.5:digitalocean'));
   // The Chat pipeline installs generated tools after sampling params and before
   // the provider applies extra_body. Only compare the tools that survive.
   const generatedTools =
@@ -1070,12 +1088,10 @@ function openAIChatPromptSource(
     tools: generatedTools ?? tools,
     // These overrides can change the tokens rendered from the same messages and tools.
     rendering: {
-      chat_template: body['chat_template'] ?? undefined,
-      chat_template_kwargs: normalizeRenderOptions(
-        body['chat_template_kwargs'],
-      ),
+      chat_template: chatTemplate,
+      chat_template_kwargs: templateOptions,
       documents: body['documents'] ?? undefined,
-      response_format: body['response_format'] ?? undefined,
+      response_format: omitPlainText ? undefined : responseFormat,
       add_generation_prompt: addGenerationPrompt,
       continue_final_message: continueFinalMessage,
       add_special_tokens: addSpecialTokens,

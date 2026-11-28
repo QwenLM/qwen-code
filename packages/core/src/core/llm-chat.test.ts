@@ -8662,6 +8662,9 @@ describe('LlmChat', async () => {
         schema: { type: 'object' },
       },
     };
+    const textResponseFormat = { type: 'text' };
+    const responseAwareTemplate =
+      '{{ response_format | default("none") }}{{ messages }}';
     it.each<{
       name: string;
       primary?: typeof miniMaxRoute;
@@ -8831,6 +8834,41 @@ describe('LlmChat', async () => {
         output: 32_000,
       },
       {
+        name: 'the default text response format',
+        body: { response_format: textResponseFormat },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'redundant top-level text after the template override',
+        primaryBody: {
+          chat_template_kwargs: { response_format: textResponseFormat },
+        },
+        sampling: {
+          chat_template_kwargs: { response_format: reportResponseFormat },
+        },
+        body: {
+          chat_template_kwargs: { response_format: textResponseFormat },
+          response_format: textResponseFormat,
+        },
+        output: 32_000,
+      },
+      {
+        name: 'an explicit text format with a custom template',
+        primaryBody: { chat_template: responseAwareTemplate },
+        body: {
+          chat_template: responseAwareTemplate,
+          response_format: textResponseFormat,
+        },
+        output: 4_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a Kimi text format without a known nested format',
+        primaryBody: { response_format: textResponseFormat },
+        output: kimiRoute.primaryOutput,
+      },
+      {
         primary: kimiRoute,
         name: 'a text format overriding the template response schema',
         primaryBody: {
@@ -8838,7 +8876,7 @@ describe('LlmChat', async () => {
         },
         body: {
           chat_template_kwargs: { response_format: reportResponseFormat },
-          response_format: { type: 'text' },
+          response_format: textResponseFormat,
         },
         output: kimiRoute.primaryOutput,
       },
