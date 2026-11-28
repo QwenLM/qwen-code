@@ -939,6 +939,16 @@ describe('SettingsSchema', () => {
       expect(settings.context?.loadFromIncludeDirectories).toBe(true);
     });
 
+    it('should default ui.startExpanded to false so the TUI keeps starting compact', () => {
+      const ui = getSettingsSchema().ui?.properties;
+      expect(ui?.startExpanded).toBeDefined();
+      expect(ui?.startExpanded.type).toBe('boolean');
+      expect(ui?.startExpanded.default).toBe(false);
+      // A restart is what applies the seed; the flag briefly shipped without
+      // it, and nothing else pins it.
+      expect(ui?.startExpanded.requiresRestart).toBe(true);
+    });
+
     it('should have includeDirectories setting in schema', () => {
       expect(
         getSettingsSchema().context?.properties.includeDirectories,

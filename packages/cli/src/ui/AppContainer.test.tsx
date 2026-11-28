@@ -367,6 +367,44 @@ import { clearCiEnv } from '../test-utils/ci-env.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 
 describe('AppContainer State Management', () => {
+  it('starts in expanded detail mode when ui.startExpanded is true', async () => {
+    const { unmount } = render(
+      <AppContainer
+        config={mockConfig}
+        settings={
+          {
+            ...mockSettings,
+            merged: {
+              ...mockSettings.merged,
+              ui: { ...mockSettings.merged.ui, startExpanded: true },
+            },
+          } as unknown as LoadedSettings
+        }
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    await act(async () => {});
+
+    expect(capturedThoughtExpanded.allExpanded).toBe(true);
+    unmount();
+  });
+
+  it('starts collapsed when ui.startExpanded is unset', async () => {
+    const { unmount } = render(
+      <AppContainer
+        config={mockConfig}
+        settings={mockSettings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    await act(async () => {});
+
+    expect(capturedThoughtExpanded.allExpanded).toBe(false);
+    unmount();
+  });
+
   it('hands the delete command the session logger, so the log purge is live', async () => {
     deleteCommandOptions.length = 0;
     const { unmount } = render(
