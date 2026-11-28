@@ -59,6 +59,8 @@ interface Section {
   label: string;
   /** Plain text, rendered as JSON when it parses and copied as shown. */
   text?: string;
+  /** Fence language for text that is code rather than a recorded value. */
+  language?: string;
   diff?: string;
   /** Collapsed until opened: identifiers and lifecycle. */
   collapsed?: boolean;
@@ -218,9 +220,11 @@ function rowContent(
       block.rawOutput === undefined ? block.content : block.rawOutput,
       t,
     );
-    const input = content.shell
-      ? content.argumentsText || formatRaw(block.rawInput, t)
-      : formatRaw(block.rawInput, t);
+    const input = content.argumentsLanguage
+      ? content.argumentsText
+      : content.shell
+        ? content.argumentsText || formatRaw(block.rawInput, t)
+        : formatRaw(block.rawInput, t);
     const output = content.shell
       ? content.resultText || recordedOutput
       : recordedOutput;
@@ -260,7 +264,16 @@ function rowContent(
       ],
       sections: [
         ...(input !== undefined
-          ? [{ key: 'input', label: t('trajectory.detail.input'), text: input }]
+          ? [
+              {
+                key: 'input',
+                label: t('trajectory.detail.input'),
+                text: input,
+                ...(content.argumentsLanguage
+                  ? { language: content.argumentsLanguage }
+                  : {}),
+              },
+            ]
           : []),
         content.diff
           ? {
@@ -665,7 +678,11 @@ export function TrajectoryDetail({
         {section.diff !== undefined ? (
           <DiffView diff={shown} />
         ) : (
-          <ToolCallDetail text={shown} limit={limit} />
+          <ToolCallDetail
+            text={shown}
+            limit={limit}
+            language={section.language}
+          />
         )}
         {full.length > limit && (
           <p className={styles.empty}>{t('trajectory.inspector.truncated')}</p>

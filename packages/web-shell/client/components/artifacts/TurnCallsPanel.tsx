@@ -594,11 +594,17 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
     2000,
   );
   const isShell = isShellToolName(tool.toolName);
-  const { diff, shell, argumentsText, resultText } = useMemo(
+  const { diff, shell, argumentsText, argumentsLanguage, resultText } = useMemo(
     () =>
       expanded
         ? toolCallContent(tool, block)
-        : { diff: '', shell: undefined, argumentsText: '', resultText: '' },
+        : {
+            diff: '',
+            shell: undefined,
+            argumentsText: '',
+            argumentsLanguage: undefined,
+            resultText: '',
+          },
     [expanded, tool, block],
   );
   const hasDetails = Boolean(
@@ -738,7 +744,10 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
               <div className={styles.detailLabel}>
                 {t('turnCalls.arguments')}
               </div>
-              <ToolCallDetail text={argumentsText} />
+              <ToolCallDetail
+                text={argumentsText}
+                language={argumentsLanguage}
+              />
             </>
           )}
           {(shell || diff || resultText) && (

@@ -274,7 +274,7 @@ jobs:
         env:
           WEB_SHELL_VISUALS_OUTPUT_DIR: '${{ runner.temp }}/web-shell-before'
           WEB_SHELL_VISUALS_ARM: 'before'
-        run: 'npm run test:e2e:visuals --workspace=packages/web-shell -- --workers=2 screenshots.spec.ts workflow-page.spec.ts git-branch-picker.spec.ts session-workflow.spec.ts collaboration.spec.ts ask-user-details.spec.ts mobile-session-list.spec.ts'
+        run: 'npm run test:e2e:visuals --workspace=packages/web-shell -- --workers=2 screenshots.spec.ts workflow-page.spec.ts git-branch-picker.spec.ts session-workflow.spec.ts collaboration.spec.ts ask-user-details.spec.ts mobile-session-list.spec.ts exec-tool-code-view.spec.ts'
 
       - name: 'Compose before/after and keep only changed views'
         env:

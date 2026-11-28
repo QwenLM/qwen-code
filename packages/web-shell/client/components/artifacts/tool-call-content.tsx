@@ -10,6 +10,7 @@ import { isShellResultDisplay } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
 import {
   extractText,
+  getExecSource,
   isShellToolName,
   MAX_TOOL_PAYLOAD_LENGTH,
   sanitizeControlChars,
@@ -28,26 +29,37 @@ export { stringifyValue };
 
 const EDIT_TOOL = /^(edit|editfile|write|write_file|writefile)$/;
 
-/** Valid JSON renders as a code block; anything else stays plain text. */
+/**
+ * Valid JSON renders as a code block, an explicit language renders as that
+ * code; anything else stays plain text.
+ */
 export function ToolCallDetail({
   text,
   limit = MAX_DETAIL_LENGTH,
+  language,
 }: {
   text: string;
   limit?: number;
+  language?: string;
 }) {
   const json = useMemo(() => {
+    if (language !== undefined) return undefined;
     try {
       JSON.parse(text);
       return text;
     } catch {
       return undefined;
     }
-  }, [text]);
-  const displayed = truncateText(json ?? text, limit);
-  return json !== undefined ? (
+  }, [text, language]);
+  // Escape before capping, in ToolPayloadBlock's order: escapes can grow the
+  // text past the cap, and raw C0/bidi bytes must not reach the DOM.
+  const escaped = sanitizeControlChars(truncateText(json ?? text, limit));
+  const displayed =
+    escaped.length > limit ? truncateText(escaped, limit) : escaped;
+  const fenceLanguage = language ?? (json !== undefined ? 'json' : undefined);
+  return fenceLanguage !== undefined ? (
     <div className={styles.json}>
-      <Markdown content={fencedCodeBlock('json', displayed)} />
+      <Markdown content={fencedCodeBlock(fenceLanguage, displayed)} />
     </div>
   ) : (
     <pre className={styles.detailBody}>{displayed}</pre>
@@ -108,7 +120,8 @@ export function shellDetails(tool: ACPToolCall) {
 
 /**
  * What a tool call's arguments and result read as: a shell call as its command
- * and output, an edit or write as its diff, anything else as recorded.
+ * and output, an edit or write as its diff, an exec call as its JavaScript
+ * source, anything else as recorded.
  */
 export function toolCallContent(
   tool: ACPToolCall,
@@ -118,10 +131,13 @@ export function toolCallContent(
     ? extractDiff(tool)
     : '';
   const shell = isShellToolName(tool.toolName) ? shellDetails(tool) : undefined;
+  const execSource = getExecSource(tool);
   return {
     diff,
     shell,
-    argumentsText: shell ? shell.command : stringifyValue(block.rawInput),
+    argumentsText:
+      execSource ?? (shell ? shell.command : stringifyValue(block.rawInput)),
+    argumentsLanguage: execSource !== undefined ? 'javascript' : undefined,
     resultText: diff
       ? ''
       : shell

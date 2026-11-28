@@ -3944,6 +3944,44 @@ describe('generic tool card details', () => {
     expect(container.querySelector('[class*="payloadJson"]')).toBeNull();
   });
 
+  it('renders exec source as JavaScript code instead of JSON arguments', () => {
+    const source = 'const x = 1;\ntext(x);';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'exec',
+        args: { source },
+        rawOutput: 'done',
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('Arguments');
+    expect(
+      [...container.querySelectorAll('[class*="codeBlockLang"]')].map(
+        (label) => label.textContent,
+      ),
+    ).toEqual(['javascript']);
+    expect(container.querySelector('pre code')?.textContent).toBe(source);
+    expect(container.textContent).not.toContain('"source"');
+    expect(container.textContent).toContain('done');
+  });
+
+  it('keeps JSON arguments when an exec call recorded no source', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'exec',
+        args: { other: true },
+        rawOutput: 'done',
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('"other": true');
+    expect(container.querySelector('pre code')?.textContent).not.toContain(
+      'const',
+    );
+  });
+
   it('shows the failure text in the Result block', () => {
     const container = renderToolLine(
       makeTool({

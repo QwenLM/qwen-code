@@ -6,6 +6,7 @@ import {
   formatJsonPayload,
   formatToolDisplayName,
   getAgentCurrentToolHint,
+  getExecSource,
   getSubagentDetailsUnavailableReason,
   getToolDescription,
   getToolResultSummary,
@@ -60,6 +61,39 @@ describe('toolFormatting', () => {
       expect(sanitizeControlChars('a\u202ab')).toBe('a\\u202ab');
       expect(sanitizeControlChars('a\u2066b')).toBe('a\\u2066b');
       expect(sanitizeControlChars('a\u2069b')).toBe('a\\u2069b');
+    });
+  });
+
+  describe('getExecSource', () => {
+    it('returns the source verbatim, newlines and indentation included', () => {
+      const source = 'const a = 1;\n\n  console.log(a);';
+      expect(getExecSource(tool({ toolName: 'exec', args: { source } }))).toBe(
+        source,
+      );
+    });
+
+    it('matches the exec tool name case-insensitively', () => {
+      expect(
+        getExecSource(tool({ toolName: 'EXEC', args: { source: 'go()' } })),
+      ).toBe('go()');
+    });
+
+    it('falls back to undefined for an empty or non-string source', () => {
+      expect(
+        getExecSource(tool({ toolName: 'exec', args: { source: '' } })),
+      ).toBeUndefined();
+      expect(
+        getExecSource(tool({ toolName: 'exec', args: { source: 42 } })),
+      ).toBeUndefined();
+      expect(getExecSource(tool({ toolName: 'exec' }))).toBeUndefined();
+    });
+
+    it('ignores tool names that merely extend exec', () => {
+      expect(
+        getExecSource(
+          tool({ toolName: 'exec_command', args: { source: 'echo hi' } }),
+        ),
+      ).toBeUndefined();
     });
   });
 
