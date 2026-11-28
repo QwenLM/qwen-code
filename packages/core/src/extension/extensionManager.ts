@@ -525,6 +525,17 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
 // ExtensionManager Class
 // ============================================================================
 
+/**
+ * The loaded-extension cache holds one row per identity, so its key cannot be
+ * the id alone: the id hashes the install source, and one repository installed
+ * two ways (git and github-release) legitimately yields a single id under two
+ * names. Name plus id is unique for both shapes — versioned siblings share a
+ * name but not an id, aliased sources share an id but not a name.
+ */
+function extensionCacheKey(extension: { id: string; name: string }): string {
+  return `${extension.name}\u0000${extension.id}`;
+}
+
 export class ExtensionManager {
   private extensionCache: Map<string, Extension> | null = null;
   private storeSnapshot: ExtensionStoreSnapshot | undefined;
@@ -935,7 +946,7 @@ export class ExtensionManager {
         (result.pruned.length > 0 || result.removedWorkspaceRefs > 0)
       ) {
         for (const item of result.pruned) {
-          this.extensionCache?.delete(item.id);
+          this.dropCachedExtension(item.id);
         }
         this.applyStoreActivation(result.snapshot);
       }
@@ -1662,7 +1673,7 @@ export class ExtensionManager {
       });
     const nextCache = new Map<string, Extension>();
     extensions.forEach((extension) => {
-      nextCache.set(extension.id, extension);
+      nextCache.set(extensionCacheKey(extension), extension);
     });
     if (!this.cacheInitialized) {
       this.runtimeGeneration =
@@ -1942,6 +1953,15 @@ export class ExtensionManager {
       return [];
     }
     return [...this.extensionCache.values()];
+  }
+
+  /** Drops every cached identity carrying this id (see `extensionCacheKey`). */
+  private dropCachedExtension(extensionId: string): void {
+    if (!this.extensionCache) return;
+    const suffix = `\u0000${extensionId}`;
+    for (const key of [...this.extensionCache.keys()]) {
+      if (key.endsWith(suffix)) this.extensionCache.delete(key);
+    }
   }
 
   /**
@@ -3138,7 +3158,7 @@ export class ExtensionManager {
           extension.versionSlot = previous.versionSlot ?? versionSlot;
           extension.installDir = destinationPath;
           if (this.extensionCache) {
-            this.extensionCache.set(extension.id, extension);
+            this.extensionCache.set(extensionCacheKey(extension), extension);
             this.applyStoreActivation(refreshedSnapshot ?? snapshot);
           }
           await this.refreshTools().catch((error) => {
@@ -3364,7 +3384,7 @@ export class ExtensionManager {
             extension.installDir = destinationPath;
           }
         } catch (reloadError) {
-          this.extensionCache?.delete(extensionId);
+          this.dropCachedExtension(extensionId);
           this.applyStoreActivation(snapshot);
           const warnings = [
             {
@@ -3393,7 +3413,7 @@ export class ExtensionManager {
         }
 
         if (this.extensionCache) {
-          this.extensionCache.set(extension.id, extension);
+          this.extensionCache.set(extensionCacheKey(extension), extension);
         }
         let latestSnapshot = snapshot;
         if (versionSlot && !isUpdate) {
@@ -3402,7 +3422,7 @@ export class ExtensionManager {
             .catch(() => undefined);
           if (prunedResult) {
             for (const pruned of prunedResult.pruned) {
-              this.extensionCache?.delete(pruned.id);
+              this.dropCachedExtension(pruned.id);
             }
             latestSnapshot = prunedResult.snapshot;
           }
@@ -3663,7 +3683,7 @@ export class ExtensionManager {
           extension.versionSlot = prepared.versionSlot;
           extension.installDir = prepared.destinationDirectory;
         }
-        this.extensionCache?.set(extension.id, extension);
+        this.extensionCache?.set(extensionCacheKey(extension), extension);
         let latestSnapshot = snapshot;
         if (prepared.versionSlot && prepared.operation === 'install') {
           const prunedResult = await this.extensionStore
@@ -3671,14 +3691,14 @@ export class ExtensionManager {
             .catch(() => undefined);
           if (prunedResult) {
             for (const pruned of prunedResult.pruned) {
-              this.extensionCache?.delete(pruned.id);
+              this.dropCachedExtension(pruned.id);
             }
             latestSnapshot = prunedResult.snapshot;
           }
         }
         this.applyStoreActivation(latestSnapshot);
       } catch (error) {
-        this.extensionCache?.delete(prepared.identity.id);
+        this.dropCachedExtension(prepared.identity.id);
         this.applyStoreActivation(snapshot);
         warnings.push({
           code: 'extension_reload_failed',
@@ -3907,7 +3927,7 @@ export class ExtensionManager {
             destinationDirectory,
           });
     onCommitted?.(uninstallSnapshot.generation);
-    this.extensionCache?.delete(identity.id);
+    this.dropCachedExtension(identity.id);
     if (isUpdate) return uninstallSnapshot;
     const warnings: NonNullable<ExtensionStoreMutationResult['warnings']> = [];
     if (deleteGitCredential) {

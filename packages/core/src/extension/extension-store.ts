@@ -903,23 +903,21 @@ export class ExtensionStore {
   private async ensureInitializedUnlocked(
     extensions: readonly ExtensionIdentity[],
   ): Promise<ExtensionStoreSnapshot> {
-    const loadedById = new Map<string, ExtensionIdentity>();
+    // Identities may share an id. The id hashes the install source, so one
+    // repository installed two ways (git and github-release) is a single id
+    // under two names, and both must keep working: the store already keys its
+    // policies by that id, and each extension reads its own manifest defaults.
+    // Identities may share a name too — the primary copy and a versioned
+    // sibling do — so only a case-variant clash is a conflict here.
     const loadedByName = new Map<string, ExtensionIdentity>();
     for (const identity of extensions) {
       assertIdentity(identity);
-      const existingById = loadedById.get(identity.id);
-      if (existingById && existingById.name !== identity.name) {
+      const existing = loadedByName.get(identity.name.toLowerCase());
+      if (existing && existing.name !== identity.name) {
         throw new ExtensionConflictError(
-          `Extension id ${identity.id} conflicts between "${identity.name}" and "${existingById.name}".`,
+          `Extension name "${identity.name}" conflicts with "${existing.name}".`,
         );
       }
-      const existingByName = loadedByName.get(identity.name.toLowerCase());
-      if (existingByName && existingByName.name !== identity.name) {
-        throw new ExtensionConflictError(
-          `Extension name "${identity.name}" conflicts with "${existingByName.name}".`,
-        );
-      }
-      loadedById.set(identity.id, identity);
       loadedByName.set(identity.name.toLowerCase(), identity);
     }
     const existing = await this.readSnapshotUnlocked();

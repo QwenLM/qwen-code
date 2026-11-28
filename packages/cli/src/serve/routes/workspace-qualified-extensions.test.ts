@@ -238,6 +238,14 @@ function mockExtensionManager(
   vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue([
     extension,
   ]);
+  // Internal lookups (findExtensionById, reached through the skill-state
+  // helpers) read the unfiltered view, which a real manager fills from the same
+  // cache. The fake manager has to answer it too, or those lookups see an
+  // empty cache.
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'getAllLoadedExtensions',
+  ).mockReturnValue([extension]);
   vi.spyOn(
     ExtensionManager.prototype,
     'getExtensionStoreSnapshot',
