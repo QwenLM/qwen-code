@@ -54,6 +54,14 @@ Four v1 tags use `modes`:
 - `workspace_voice_transcription: { since: 'v1', modes: ['batch'] }` - the transcription path the daemon offers.
 - `voice_transcribe: { since: 'v1', modes: ['streaming', 'batch'] }` - the two transcription paths available on the `/voice/stream` WebSocket.
 
+### Session-only model selection
+
+`session_set_model_transient` independently advertises session-only model
+selection through REST and ACP. SDK clients must preflight it before sending
+`persistDefault: false`; `session_set_model` alone does not promise that the
+daemon preserves user/workspace defaults. The new tag does not change legacy
+callers that omit the option.
+
 ### Conditional tags
 
 ```ts

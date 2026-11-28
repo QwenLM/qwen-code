@@ -7349,24 +7349,43 @@ export class DaemonClient {
    * Switch the active model for a session. Backed by ACP's currently-unstable
    * `unstable_setSessionModel`; the daemon also publishes a `model_switched`
    * event so cross-client UIs can update.
+   * `persistDefault: false` requires `session_set_model_transient` and keeps
+   * user/workspace defaults unchanged while retaining the session selection.
+   *
+   * Both call shapes are supported: the `{ clientId, persistDefault }` object
+   * resolves the new `persistDefault` field, while the positional
+   * `clientId, { persistDefault: false }` form keeps sending the pre-existing
+   * `_meta` marker without checking capabilities. Older ACP dispatchers may
+   * drop that marker and persist the default. Use the object form to require
+   * session-only behavior.
    */
   async setSessionModel(
     sessionId: string,
     modelId: string,
-    clientId?: string,
+    clientOrOptions?: string | { clientId?: string; persistDefault?: boolean },
     options?: { persistDefault: false },
   ): Promise<SetModelResult> {
+    const objectOptions =
+      typeof clientOrOptions === 'string' ? undefined : clientOrOptions;
+    const clientId =
+      typeof clientOrOptions === 'string'
+        ? clientOrOptions
+        : objectOptions?.clientId;
+    if (objectOptions?.persistDefault === false) {
+      await this.requireCapability('session_set_model_transient');
+    }
+    const body: Record<string, unknown> = { modelId };
+    if (objectOptions?.persistDefault !== undefined) {
+      body['persistDefault'] = objectOptions.persistDefault;
+    } else if (options?.persistDefault === false) {
+      body['_meta'] = { [SESSION_MODEL_PERSIST_DEFAULT_META_KEY]: false };
+    }
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/model`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({
-          modelId,
-          ...(options?.persistDefault === false
-            ? { _meta: { [SESSION_MODEL_PERSIST_DEFAULT_META_KEY]: false } }
-            : {}),
-        }),
+        body: JSON.stringify(body),
       },
       async (res) => {
         if (!res.ok) {
