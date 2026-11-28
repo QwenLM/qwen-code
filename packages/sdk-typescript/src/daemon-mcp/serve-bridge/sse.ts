@@ -13,11 +13,15 @@ import type {
   PromptCollector,
   SessionEventStream,
 } from './types.js';
+import { matchTurnEvent } from '../../daemon/DaemonClient.js';
+import type { DaemonEvent } from '../../daemon/types.js';
 
 /**
  * Create a new PromptCollector that resolves when called.
  */
-export function createPromptCollector(): PromptCollector {
+export function createPromptCollector(
+  awaitingAcceptance = false,
+): PromptCollector {
   let resolve!: () => void;
   const promise = new Promise<void>((r) => {
     resolve = r;
@@ -27,6 +31,7 @@ export function createPromptCollector(): PromptCollector {
     resolve,
     promise,
     resolved: false,
+    ...(awaitingAcceptance ? { pendingEvents: [] } : {}),
   };
   // Wrap resolve to guard against double-resolution
   const originalResolve = resolve;
@@ -37,6 +42,112 @@ export function createPromptCollector(): PromptCollector {
     }
   };
   return collector;
+}
+
+/** Preserve the first terminal outcome of a prompt collector. */
+export function interruptPromptCollector(
+  collector: PromptCollector | null | undefined,
+): void {
+  if (!collector || collector.completed || collector.interrupted) return;
+  if (collector.pendingEvents) {
+    collector.pendingEvents.push(null);
+    return;
+  }
+  collector.interrupted = true;
+  collector.resolve();
+}
+
+/** Bind the admitted turn before replaying events that raced its response. */
+export function bindPromptCollector(
+  collector: PromptCollector,
+  promptId?: string,
+): void {
+  const pending = collector.pendingEvents ?? [];
+  collector.pendingEvents = undefined;
+  collector.promptId = promptId;
+  for (const event of pending) {
+    if (event === null) interruptPromptCollector(collector);
+    else collectPromptEvent(collector, event);
+  }
+}
+
+function collectPromptEvent(
+  collector: PromptCollector | null,
+  event: DaemonEvent,
+): void {
+  if (!collector || collector.completed || collector.interrupted) return;
+  const data = event.data as Record<string, unknown> | undefined;
+  const terminal =
+    event.type === 'turn_complete' || event.type === 'turn_error';
+  const update = data?.['update'] as Record<string, unknown> | undefined;
+  const chunk = update?.['sessionUpdate'] === 'agent_message_chunk';
+  const error =
+    typeof update?.['sessionUpdate'] === 'string' &&
+    /error|fail/i.test(update['sessionUpdate']);
+  if (!terminal && !chunk && !error) return;
+
+  const meta = update?.['_meta'];
+  if (
+    chunk &&
+    typeof meta === 'object' &&
+    meta !== null &&
+    ((meta as Record<string, unknown>)['qwenDiscreteMessage'] === true ||
+      (meta as Record<string, unknown>)['backgroundTurn'] !== undefined)
+  )
+    return;
+
+  if (collector.pendingEvents) {
+    collector.pendingEvents.push(event);
+    return;
+  }
+  if (
+    collector.promptId &&
+    event.promptId &&
+    event.promptId !== collector.promptId
+  )
+    return;
+  if (terminal) {
+    if (!collector.promptId || data?.['promptId'] !== collector.promptId)
+      return;
+    try {
+      const result = matchTurnEvent(event, collector.promptId);
+      if (result) {
+        collector.result = result;
+        completePromptCollector(collector);
+      }
+    } catch (error) {
+      collector.error =
+        error instanceof Error ? error : new Error(String(error));
+      interruptPromptCollector(collector);
+    }
+    return;
+  }
+  if (error) {
+    interruptPromptCollector(collector);
+    return;
+  }
+  const content = update?.['content'] as Record<string, unknown> | undefined;
+  if (!update || !content) return;
+  const text = content['text'];
+  if (typeof text === 'string' && text) collector.texts.push(text);
+  const lifecycle =
+    typeof meta === 'object' &&
+    meta !== null &&
+    (Object.hasOwn(meta, 'executionLifecycle') ||
+      Object.hasOwn(meta, 'hookLifecycle'));
+  // Only legacy blocking replies use metadata to release the collection wait.
+  // Nonblocking replies need the matching terminal on this same stream.
+  if (!collector.promptId && '_meta' in update && !lifecycle)
+    collector.resolve();
+}
+
+/** Mark a real terminal success without overwriting an earlier interruption. */
+export function completePromptCollector(
+  collector: PromptCollector | null | undefined,
+): void {
+  if (!collector || collector.completed || collector.interrupted) return;
+  collector.completed = true;
+  collector.resolve();
 }
 
 /**
@@ -53,9 +164,15 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
   }
 
   const abortCtrl = new AbortController();
+  let markReady!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    markReady = resolve;
+  });
+  abortCtrl.signal.addEventListener('abort', markReady, { once: true });
   const stream: SessionEventStream = {
     sessionId,
     abortCtrl,
+    ready,
     activeCollector: null,
     lastActivityMs: Date.now(),
   };
@@ -66,63 +183,27 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
     try {
       for await (const event of state.client.subscribeEvents(sessionId, {
         signal: abortCtrl.signal,
+        onSseStreamAccepted: markReady,
       })) {
         const data = event.data as Record<string, unknown> | undefined;
-        if (!data) continue;
-        const update = data['update'] as Record<string, unknown> | undefined;
-        if (!update) continue;
-        if (update['sessionUpdate'] === 'agent_message_chunk') {
+        const update = data?.['update'] as Record<string, unknown> | undefined;
+        if (update?.['sessionUpdate'] === 'agent_message_chunk') {
           const content = update['content'] as
             | Record<string, unknown>
             | undefined;
           if (!content) continue;
           stream.lastActivityMs = Date.now();
-          const collector = stream.activeCollector;
-          if (collector) {
-            const meta = update['_meta'];
-            // Discrete notices and automatic background output carry `_meta`
-            // like a final chunk but do not belong to this prompt collector.
-            if (
-              typeof meta === 'object' &&
-              meta !== null &&
-              ((meta as Record<string, unknown>)['qwenDiscreteMessage'] ===
-                true ||
-                (meta as Record<string, unknown>)['backgroundTurn'] !==
-                  undefined)
-            ) {
-              continue;
-            }
-            const text = content['text'];
-            if (typeof text === 'string' && text) {
-              collector.texts.push(text);
-            }
-            const lifecycle =
-              typeof meta === 'object' &&
-              meta !== null &&
-              (Object.hasOwn(meta, 'executionLifecycle') ||
-                Object.hasOwn(meta, 'hookLifecycle'));
-            // Lifecycle frames do not mark the turn's final chunk.
-            if ('_meta' in update && !lifecycle) {
-              collector.resolve();
-            }
-          }
         } else if (
-          typeof update['sessionUpdate'] === 'string' &&
-          // Best-effort error detection: daemon does not yet define a formal
-          // error event enum, so we match common patterns. This may produce
-          // false positives (e.g. "default_fallback") or miss events like
-          // "quota_exceeded". Update once daemon publishes an error event spec.
+          typeof update?.['sessionUpdate'] === 'string' &&
+          // Legacy session_update errors use varied names. Retain this
+          // best-effort detection alongside the formal turn_error event.
           /error|fail/i.test(update['sessionUpdate'] as string)
         ) {
           process.stderr.write(
             `[serve-bridge] daemon error event for ${sessionId}: ${JSON.stringify(update)}\n`,
           );
-          // Resolve collector so prompt returns immediately with partial text
-          if (stream.activeCollector) {
-            stream.activeCollector.interrupted = true;
-            stream.activeCollector.resolve();
-          }
         }
+        collectPromptEvent(stream.activeCollector, event);
       }
     } catch (err) {
       // Log unexpected SSE disconnections (skip AbortError from intentional close)
@@ -133,11 +214,9 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
         );
       }
     } finally {
+      markReady();
       // Resolve any pending collector so prompt doesn't hang on disconnect
-      if (stream.activeCollector) {
-        stream.activeCollector.interrupted = true;
-        stream.activeCollector.resolve();
-      }
+      interruptPromptCollector(stream.activeCollector);
       // Only delete if this is still our stream (not replaced by startEventStream)
       if (state.eventStreams.get(sessionId) === stream) {
         state.eventStreams.delete(sessionId);
@@ -158,10 +237,7 @@ export function stopEventStream(state: BridgeState, sessionId: string): void {
   if (stream) {
     stream.abortCtrl.abort();
     // Resolve any pending collector so prompt doesn't hang
-    if (stream.activeCollector) {
-      stream.activeCollector.interrupted = true;
-      stream.activeCollector.resolve();
-    }
+    interruptPromptCollector(stream.activeCollector);
     state.eventStreams.delete(sessionId);
   }
 }
