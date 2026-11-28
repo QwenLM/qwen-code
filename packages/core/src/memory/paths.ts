@@ -8,11 +8,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import {
+  boundProjectIdentifier,
   QWEN_DIR,
   isSubpath,
   realpathNearestExisting,
   resolvePath,
-  sanitizeCwd,
 } from '../utils/paths.js';
 import {
   getImportedProjectMemoryRoot,
@@ -99,7 +99,7 @@ export function getWorkspaceProjectMemoryRoot(
   return path.join(
     memoryBaseDir,
     'projects',
-    sanitizeCwd(path.resolve(projectRoot)),
+    boundProjectIdentifier(path.resolve(projectRoot)),
     AUTO_MEMORY_DIRNAME,
   );
 }

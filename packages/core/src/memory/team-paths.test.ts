@@ -9,6 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  AUTO_MEMORY_DIRNAME,
   clearAutoMemoryRootCache,
   getAutoMemoryRoot,
   getTeamAutoMemoryIndexPath,
@@ -19,6 +20,11 @@ import {
   isTeamAutoMemPath,
   TEAM_AUTO_MEMORY_DIRNAME,
 } from './paths.js';
+import {
+  getProjectHash,
+  PROJECT_DIR_NAME_MAX,
+  sanitizeCwd,
+} from '../utils/paths.js';
 describe('team auto-memory paths', () => {
   let projectRoot: string;
 
@@ -94,6 +100,76 @@ describe('team auto-memory paths', () => {
     );
     expect(isTeamAutoMemPath(teamFile, projectRoot)).toBe(true);
     expect(isAnyAutoMemPath(teamFile, projectRoot)).toBe(false);
+  });
+
+  it('bounds the project component of the auto-memory root too', () => {
+    // R2-1: getProjectDir() was bounded for long roots while this root was
+    // not, so chats worked and auto memory kept failing with ENAMETOOLONG for
+    // exactly the projects the fix targets.
+    const previousBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+    // The limit applies to the key, which in git-root scope is findGitRoot's
+    // answer — so the long part has to sit above the git root, not below it.
+    const deepRoot = path.join(
+      projectRoot,
+      ...Array.from({ length: 4 }, () => 'd'.repeat(60)),
+    );
+    fs.mkdirSync(deepRoot, { recursive: true });
+    // findGitRoot returns the nearest ancestor holding .git, so the long path
+    // needs its own .git to be the key that gets flattened.
+    const longRoot = path.join(
+      deepRoot,
+      ...Array.from({ length: 4 }, () => 'e'.repeat(60)),
+    );
+    fs.mkdirSync(path.join(longRoot, '.git'), { recursive: true });
+    const memoryBaseDir = path.join(projectRoot, '.runtime');
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = memoryBaseDir;
+    // test-setup.ts defaults this to '1' (local mode), where the root is
+    // projectRoot/.qwen/memory and no project key is joined at all. The
+    // shared-directory branch only runs when local mode is off.
+    process.env['QWEN_CODE_MEMORY_LOCAL'] = '0';
+    clearAutoMemoryRootCache();
+    try {
+      // findGitRoot walks up from the argument, so a synthetic path would
+      // anchor at this checkout. The long root has to be a real directory
+      // whose own name is already past NAME_MAX.
+      // Each component stays within NAME_MAX so the tree can be created; it
+      // is the flattened identifier that overflows, which is exactly the
+      // shape getProjectDir() already handles.
+      fs.mkdirSync(longRoot, { recursive: true });
+
+      expect(sanitizeCwd(longRoot).length).toBeGreaterThan(
+        PROJECT_DIR_NAME_MAX,
+      );
+
+      // Identify the joined component by what it must contain rather than by
+      // its fixed index: the readable prefix is bounded, so it can itself
+      // contain no separator and must be exactly one path component.
+      const segments = getAutoMemoryRoot(longRoot)
+        .slice(memoryBaseDir.length + 1)
+        .split(path.sep);
+      expect(segments).toHaveLength(3);
+      const [projects, projectKey, leaf] = segments;
+      expect(projects).toBe('projects');
+      expect(leaf).toBe(AUTO_MEMORY_DIRNAME);
+      expect(Buffer.byteLength(projectKey, 'utf8')).toBeLessThanOrEqual(
+        PROJECT_DIR_NAME_MAX,
+      );
+      expect(projectKey).toContain(getProjectHash(longRoot).slice(0, 16));
+    } finally {
+      fs.rmSync(memoryBaseDir, { recursive: true, force: true });
+      clearAutoMemoryRootCache();
+      if (previousLocal === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+      }
+      if (previousBaseDir === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBaseDir;
+      }
+    }
   });
 
   it('classifies all managed roots for read retention and rejects symlink escapes', () => {

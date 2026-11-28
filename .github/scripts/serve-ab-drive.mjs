@@ -34,6 +34,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -198,12 +199,18 @@ export function assertCanaryStatus(scenario, status, bodyText = '', captured) {
   }
 }
 
+/** Longest single path component the filesystem accepts; mirrors `PROJECT_DIR_NAME_MAX`. */
+const PROJECT_DIR_NAME_MAX = 255;
+/** The joined `-<16 hex>` suffix, so the readable prefix gets the rest. */
+const PROJECT_DIR_HASH_SUFFIX_BYTES = 17;
+
 /**
  * Where the daemon persists a workspace's transcripts: `Storage.getProjectDir()`
- * (`<runtimeBaseDir>/projects/<sanitized cwd>`) plus SessionService's `chats`
- * leaf, with `archive/` under it. Kept in lockstep with `sanitizeCwd()` in
- * packages/core/src/utils/paths.ts. The daemon canonicalizes its workspace
- * path, so realpath first (`/tmp` is a symlink on some runners).
+ * (`<runtimeBaseDir>/projects/<bounded project identifier>`) plus
+ * SessionService's `chats` leaf, with `archive/` under it. Kept in lockstep
+ * with `boundProjectIdentifier()` in packages/core/src/utils/paths.ts. The
+ * daemon canonicalizes its workspace path, so realpath first (`/tmp` is a
+ * symlink on some runners).
  *
  * If this ever drifts from the product code the staged fixtures land nowhere
  * and every staged scenario would quietly answer 404 on BOTH arms — which is
@@ -215,7 +222,18 @@ export function chatsDirFor(home, workspaceCwd) {
   // for the other one will never read them.
   const normalized =
     process.platform === 'win32' ? workspaceCwd.toLowerCase() : workspaceCwd;
-  const projectId = normalized.replace(/[^a-zA-Z0-9]/g, '-');
+  const sanitized = normalized.replace(/[^a-zA-Z0-9]/g, '-');
+  // An over-long identifier is renamed to a readable prefix plus part of the
+  // project hash, so two long roots sharing that prefix stay distinct.
+  const projectId =
+    Buffer.byteLength(sanitized, 'utf8') <= PROJECT_DIR_NAME_MAX
+      ? sanitized
+      : `${sanitized.slice(0, PROJECT_DIR_NAME_MAX - PROJECT_DIR_HASH_SUFFIX_BYTES)}-${createHash(
+          'sha256',
+        )
+          .update(normalized)
+          .digest('hex')
+          .slice(0, 16)}`;
   return join(home, '.qwen', 'projects', projectId, 'chats');
 }
 

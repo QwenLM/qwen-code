@@ -627,7 +627,10 @@ Qwen Live runs through the Web Shell on every platform: the browser tab is the m
 > **Project memory.** Each registered workspace and its task worktrees
 > share project memory keyed by the registered directory. The directory
 > encoding replaces non-alphanumeric characters with `-`, so paths such
-> as `/repo/apps/api` and `/repo/apps-api` produce the same key. The daemon
+> as `/repo/apps/api` and `/repo/apps-api` produce the same key. A key
+> longer than 255 bytes is shortened to a 238-byte readable prefix plus
+> `-` and 16 hex characters of the project hash, keeping it to one
+> filesystem path component. The daemon
 > refuses a registration that would reuse an encoded runtime or project
 > memory directory of another registered workspace. Configure separate
 > `advanced.runtimeOutputDir` values or choose distinct workspace paths.
