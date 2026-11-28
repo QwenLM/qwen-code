@@ -776,9 +776,7 @@ export class ExtensionManager {
     ) {
       throw new Error('System and SystemDefaults scopes are not supported.');
     }
-    const extension = this.getLoadedExtensions().find(
-      (ext) => ext.name === name,
-    );
+    const extension = this.findExtensionForMutation(name, scope);
     if (!extension) {
       throw new Error(`Extension with name ${name} does not exist.`);
     }
@@ -828,9 +826,7 @@ export class ExtensionManager {
     ) {
       throw new Error('System and SystemDefaults scopes are not supported.');
     }
-    const extension = this.getLoadedExtensions().find(
-      (ext) => ext.name === name,
-    );
+    const extension = this.findExtensionForMutation(name, scope);
     if (!extension) {
       throw new Error(`Extension with name ${name} does not exist.`);
     }
@@ -851,6 +847,19 @@ export class ExtensionManager {
           scopePath,
           'disabled',
         );
+        const extensions = this.getAllLoadedExtensions().filter(
+          (candidate) => candidate.name === name,
+        );
+        if (extensions.length > 1) {
+          snapshot = await this.extensionStore.setWorkspaceActivations(
+            extensions.map((candidate) => ({
+              id: candidate.id,
+              name: candidate.name,
+            })),
+            currentDir,
+            'disabled',
+          );
+        }
       }
       onCommitted?.(snapshot.generation);
       logExtensionDisable(config, new ExtensionDisableEvent(name, scope));
@@ -1280,6 +1289,32 @@ export class ExtensionManager {
     return extension;
   }
 
+  private findExtensionForMutation(
+    name: string,
+    scope: SettingScope,
+  ): Extension | undefined {
+    const candidates = this.getAllLoadedExtensions().filter(
+      (extension) => extension.name === name,
+    );
+    if (scope !== SettingScope.Workspace) {
+      return candidates.find((extension) => !extension.versionSlot);
+    }
+    if (this.storeSnapshot) {
+      const selectedId = this.extensionStore.getWorkspaceExtensionId(
+        this.storeSnapshot,
+        name,
+        this.workspaceDir,
+      );
+      if (selectedId) {
+        return candidates.find((extension) => extension.id === selectedId);
+      }
+    }
+    return (
+      candidates.find((extension) => extension.isActive) ??
+      candidates.findLast((extension) => extension.versionSlot)
+    );
+  }
+
   private applyStoreActivation(snapshot: ExtensionStoreSnapshot): void {
     this.storeSnapshot = snapshot;
     for (const extension of this.getAllLoadedExtensions()) {
@@ -1617,6 +1652,7 @@ export class ExtensionManager {
           extensions: loaded.map((extension) => ({
             id: extension.id,
             name: extension.name,
+            versionSlot: extension.versionSlot,
           })),
         };
       });
@@ -1688,6 +1724,7 @@ export class ExtensionManager {
           extensions: loaded.map((extension) => ({
             id: extension.id,
             name: extension.name,
+            versionSlot: extension.versionSlot,
           })),
         };
       });
@@ -1706,7 +1743,11 @@ export class ExtensionManager {
         );
         return {
           value: loaded,
-          extensions: loaded.map(({ id, name }) => ({ id, name })),
+          extensions: loaded.map(({ id, name, versionSlot }) => ({
+            id,
+            name,
+            versionSlot,
+          })),
         };
       });
     const extension =
@@ -1922,6 +1963,17 @@ export class ExtensionManager {
       }
       if (!extension.isActive && existing.isActive) {
         continue;
+      }
+      if (this.storeSnapshot) {
+        const selectedId = this.extensionStore.getWorkspaceExtensionId(
+          this.storeSnapshot,
+          extension.name,
+          this.workspaceDir,
+        );
+        if (selectedId === extension.id && selectedId !== existing.id) {
+          byName.set(key, extension);
+          continue;
+        }
       }
       if (!extension.versionSlot && existing.versionSlot) {
         byName.set(key, extension);
@@ -3070,6 +3122,8 @@ export class ExtensionManager {
           });
           const refreshedSnapshot = await this.extensionStore.readSnapshot();
           extension = previous!;
+          extension.versionSlot = previous.versionSlot ?? versionSlot;
+          extension.installDir = destinationPath;
           if (this.extensionCache) {
             this.extensionCache.set(extension.id, extension);
             this.applyStoreActivation(refreshedSnapshot ?? snapshot);
@@ -3737,16 +3791,30 @@ export class ExtensionManager {
     try {
       const currentDir = cwd ?? this.workspaceDir;
       const telemetryConfig = this.getTelemetryConfig(currentDir);
-      const installedExtensions = this.getLoadedExtensions();
-      const extension = installedExtensions.find(
-        (installed) =>
-          installed.config.name.toLowerCase() ===
-            extensionIdentifier.toLowerCase() ||
-          installed.installMetadata?.source.toLowerCase() ===
-            extensionIdentifier.toLowerCase(),
-      );
+      const extension = isUpdate
+        ? this.getLoadedExtensions().find(
+            (installed) =>
+              installed.config.name.toLowerCase() ===
+                extensionIdentifier.toLowerCase() ||
+              installed.installMetadata?.source.toLowerCase() ===
+                extensionIdentifier.toLowerCase(),
+          )
+        : this.findExtensionForMutation(
+            extensionIdentifier,
+            SettingScope.Workspace,
+          );
+      const policy = extension
+        ? (await this.extensionStore.readSnapshot()).extensions[extension.id]
+        : undefined;
+      if (extension && policy?.versionSlot) {
+        extension.versionSlot = policy.versionSlot;
+        extension.installDir =
+          this.extensionStore.resolveArtifactDirectory(policy);
+      }
       if (!extension) {
-        throw new Error(`Extension not found.`);
+        throw new Error(
+          `Extension not found. Use uninstall --version to target another installed version.`,
+        );
       }
       return await this.uninstallExtensionPolicy(
         { id: extension.id, name: extension.name },
@@ -3805,6 +3873,7 @@ export class ExtensionManager {
     onCommitted?: ExtensionCommitCallback,
     hasStoredGitCredential = false,
   ): Promise<ExtensionStoreMutationResult> {
+    const snapshot = await this.extensionStore.readSnapshot();
     let deleteGitCredential: (() => Promise<void>) | undefined;
     let credentialCleanupError: unknown;
     if (hasStoredGitCredential && !isUpdate) {
@@ -3815,14 +3884,18 @@ export class ExtensionManager {
         credentialCleanupError = error;
       }
     }
-    const snapshot = await this.extensionStore.commitArtifact({
-      operation: 'uninstall',
-      identity,
-      destinationDirectory,
-    });
-    onCommitted?.(snapshot.generation);
+    const policy = snapshot.extensions[identity.id];
+    const uninstallSnapshot =
+      policy?.versionSlot && !isUpdate
+        ? (await this.pruneUnusedVersions({ identity })).snapshot
+        : await this.extensionStore.commitArtifact({
+            operation: 'uninstall',
+            identity,
+            destinationDirectory,
+          });
+    onCommitted?.(uninstallSnapshot.generation);
     this.extensionCache?.delete(identity.id);
-    if (isUpdate) return snapshot;
+    if (isUpdate) return uninstallSnapshot;
     const warnings: NonNullable<ExtensionStoreMutationResult['warnings']> = [];
     if (deleteGitCredential) {
       try {
@@ -3837,7 +3910,9 @@ export class ExtensionManager {
         error: getErrorMessage(credentialCleanupError),
       });
     }
-    const hasRemainingSameName = Object.values(snapshot.extensions).some(
+    const hasRemainingSameName = Object.values(
+      uninstallSnapshot.extensions,
+    ).some(
       (policy) =>
         !policy.declarationOnly &&
         policy.name.toLowerCase() === identity.name.toLowerCase(),
@@ -3870,7 +3945,9 @@ export class ExtensionManager {
       telemetryConfig,
       new ExtensionUninstallEvent(identity.name, 'success'),
     );
-    return warnings.length > 0 ? { ...snapshot, warnings } : snapshot;
+    return warnings.length > 0
+      ? { ...uninstallSnapshot, warnings }
+      : uninstallSnapshot;
   }
 
   async performWorkspaceExtensionMigration(

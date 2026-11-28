@@ -98,6 +98,7 @@ export const uninstallCommand: CommandModule = {
   describe: t('Uninstalls an extension.'),
   builder: (yargs) =>
     yargs
+      .version(false)
       .positional('name', {
         describe: t('The name or source path of the extension to uninstall.'),
         type: 'string',

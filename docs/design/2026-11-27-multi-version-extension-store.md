@@ -83,8 +83,8 @@ Because multiple workspaces can share an immutable version slot under `extension
 
 ### Version Pruning and Garbage Collection
 
-- **Automatic cleanup on version switch**: After committing a new versioned workspace install, `ExtensionStore.pruneUnusedVersions()` removes any versioned slot (`policy.versionSlot !== undefined`) that has `defaultActivation === 'disabled'`, zero `'enabled'` workspace overrides, and no legacy path rules. Primary installs in `<QWEN_HOME>/extensions/<name>/` are never auto-pruned.
-- **Explicit pruning**: `qwen extensions prune [--dry-run] [--keep-missing-workspaces]` removes workspace overrides pointing to deleted directories and reclaims any resulting zero-reference version slots along with their `workspace-env` and `plugin-data` directories.
+- **Automatic cleanup on version switch**: After committing a new versioned workspace install, `ExtensionStore.pruneUnusedVersions()` removes any versioned slot (`policy.versionSlot !== undefined`) that has `defaultActivation === 'disabled'`, no workspace or skill-workspace references, and no legacy path rules. Primary installs in `<QWEN_HOME>/extensions/<name>/` are never auto-pruned.
+- **Explicit pruning**: `qwen extensions prune [--dry-run]` reclaims only fully unreferenced version slots along with their `workspace-env` and `plugin-data` directories. Missing-workspace references are preserved by default because a path may be temporarily unmounted; `--keep-missing-workspaces=false` opt-in cleanup removes those references before reclaiming zero-reference slots.
 
 ### CLI Surface
 
@@ -92,19 +92,19 @@ Because multiple workspaces can share an immutable version slot under `extension
 - `qwen extensions link <path> --scope workspace`: Links a local branch into a versioned slot scoped to the current workspace.
 - `qwen extensions list [--all]`: Defaults to primary extensions plus versions active in the current workspace; `--all` shows all installed versions and their bound workspaces (flagging missing workspace paths).
 - `qwen extensions uninstall <name> [--version <version|slot|idPrefix>]`: Supports targeting a specific version slot without wiping shared preferences while another version remains.
-- `qwen extensions prune [--dry-run]`: Reclaims unreferenced versioned slots and stale workspace references.
+- `qwen extensions prune [--dry-run] [--keep-missing-workspaces=false]`: Reclaims unreferenced versioned slots. Disabling missing-workspace preservation also removes stale workspace references.
 
 ## Constraints and Risks
 
 - **Legacy binary compatibility**: Older binaries ignore `<QWEN_HOME>/extension-versions/` and continue reading `<QWEN_HOME>/extensions/` and `extension-enablement.json` (which projects the primary/default entry per name).
-- **Workspace rename / ephemeral worktrees**: Path-keyed `workspaceOverrides` reset if a directory is renamed, matching existing Folder Trust and V2 activation semantics; `qwen extensions prune` cleans up orphaned entries.
+- **Workspace rename / ephemeral worktrees**: Path-keyed `workspaceOverrides` reset if a directory is renamed, matching existing Folder Trust and V2 activation semantics; `qwen extensions prune --keep-missing-workspaces=false` cleans up orphaned entries when preserving the missing paths is no longer desired.
 - **Team sharing**: Sharing extension recommendations via Git is intentionally decoupled from binary artifact storage and left for a declarative project manifest follow-up.
 
 ## Validation Plan and Acceptance Criteria
 
 1. **Multi-version coexistence & mutual exclusion**: Global `foo@1.0.0` in `extensions/foo/` coexists with workspace `foo@2.0.0` in `extension-versions/foo/<slot>/`; workspace A runs `1.0.0`, workspace B runs `2.0.0`, disabling `2.0.0` in B does not fall back to `1.0.0`, and `getLoadedExtensions()` returns strictly one `foo` per workspace.
 2. **Idempotent reuse**: Installing the same archive/version in workspace B again and in workspace C produces the same `extensionId`, creates only one directory under `extension-versions/foo/`, and activates both workspaces independently.
-3. **Auto-prune & explicit `prune`**: Switching workspace B from `2.0.0` to `3.0.0` automatically reclaims `2.0.0` when unreferenced (and retains `2.0.0` while workspace C still uses it); deleting workspace C and running `prune` removes stale references and reclaims `2.0.0`.
+3. **Auto-prune & explicit `prune`**: Switching workspace B from `2.0.0` to `3.0.0` automatically reclaims `2.0.0` when unreferenced (and retains `2.0.0` while workspace C still uses it); deleting workspace C and running `prune --keep-missing-workspaces=false` removes stale references and reclaims `2.0.0`.
 4. **Per-workspace settings & `link --scope workspace`**: Two workspaces sharing `2.0.0` write isolated `.env` files under `extension-store/workspace-env/`, and two workspaces can link two distinct local branches concurrently.
 5. **Extension command fail-closed trust**: Undecided (`isTrusted: undefined`) workspaces are rejected on CLI extension installs instead of failing open.
 

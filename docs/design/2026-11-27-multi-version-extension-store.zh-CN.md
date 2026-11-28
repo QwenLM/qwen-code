@@ -83,8 +83,8 @@
 
 ### 版本自动回收与清理
 
-- **切换版本自动回收**：提交新的工作区版本安装后，`ExtensionStore.pruneUnusedVersions()` 自动清理所有满足 `policy.versionSlot !== undefined`、`defaultActivation === 'disabled'`、无任何 `'enabled'` 工作区覆盖且无遗留路径规则的零引用版本目录。`<QWEN_HOME>/extensions/<name>/` 下的主副本绝不会被自动回收。
-- **显式清理**：`qwen extensions prune [--dry-run] [--keep-missing-workspaces]` 清除指向已不存在工作区目录的失效覆盖，并回收因此归零的版本目录及关联的 `workspace-env` 和 `plugin-data`。
+- **切换版本自动回收**：提交新的工作区版本安装后，`ExtensionStore.pruneUnusedVersions()` 自动清理所有满足 `policy.versionSlot !== undefined`、`defaultActivation === 'disabled'`、无任何工作区或技能工作区引用且无遗留路径规则的零引用版本目录。`<QWEN_HOME>/extensions/<name>/` 下的主副本绝不会被自动回收。
+- **显式清理**：`qwen extensions prune [--dry-run]` 回收完全无引用的版本目录及关联的 `workspace-env` 和 `plugin-data`，默认保留缺失工作区引用，因为目录可能只是暂时未挂载。只有显式执行 `--keep-missing-workspaces=false` 才会删除失效引用，并回收因此归零的版本目录。
 
 ### CLI 接口
 
@@ -92,19 +92,19 @@
 - `qwen extensions link <path> --scope workspace`：将本地源码分支链接到当前工作区专属的版本槽位。
 - `qwen extensions list [--all]`：默认展示全局主副本及当前工作区激活的版本；`--all` 展示全机所有已安装版本及其绑定的工作区（并标注已缺失目录）。
 - `qwen extensions uninstall <name> [--version <version|slot|idPrefix>]`：支持按版本/槽位/ID 前缀精确卸载，且在仍有其他同名副本时保留共享偏好。
-- `qwen extensions prune [--dry-run]`：回收无引用版本槽位与失效工作区引用。
+- `qwen extensions prune [--dry-run] [--keep-missing-workspaces=false]`：回收无引用版本槽位；只有关闭缺失工作区保留行为时，才同时删除失效工作区引用。
 
 ## 约束与风险
 
 - **旧版二进制兼容**：旧版二进制忽略 `<QWEN_HOME>/extension-versions/`，继续读写 `<QWEN_HOME>/extensions/` 与 `extension-enablement.json`（同名多版本时按主/默认条目确定性投影）。
-- **目录重命名与临时 Worktree**：按路径索引的 `workspaceOverrides` 在目录重命名后会重置，与既有 Folder Trust 及 V2 激活语义一致；可通过 `qwen extensions prune` 清理残留引用。
+- **目录重命名与临时 Worktree**：按路径索引的 `workspaceOverrides` 在目录重命名后会重置，与既有 Folder Trust 及 V2 激活语义一致；确认不再保留缺失路径时，可通过 `qwen extensions prune --keep-missing-workspaces=false` 清理残留引用。
 - **团队共享**：通过 Git 共享项目推荐扩展有意与二进制产物存储解耦，留待后续声明式项目清单方案实现。
 
 ## 验证计划与验收标准
 
 1. **多版本并存与互斥**：全局 `foo@1.0.0`（位于 `extensions/foo/`）与工作区 `foo@2.0.0`（位于 `extension-versions/foo/<slot>/`）并存；工作区 A 运行 `1.0.0`、工作区 B 运行 `2.0.0`，在 B 禁用 `2.0.0` 不回退到 `1.0.0`，且 `getLoadedExtensions()` 对每个工作区至多返回 1 份 `foo`。
 2. **同版本幂等复用**：在工作区 B 重复安装或在新工作区 C 安装同一份 `foo@2.0.0` 产物时，算出同一 `extensionId`，`extension-versions/foo/` 下仅存 1 份目录，并各自独立激活。
-3. **自动回收与显式 `prune`**：工作区 B 从 `2.0.0` 切到 `3.0.0` 时，若无其他工作区引用则自动回收 `2.0.0`（若工作区 C 仍在使用则保留）；删除工作区 C 后执行 `prune` 可清除失效引用并回收 `2.0.0`。
+3. **自动回收与显式 `prune`**：工作区 B 从 `2.0.0` 切到 `3.0.0` 时，若无其他工作区引用则自动回收 `2.0.0`（若工作区 C 仍在使用则保留）；删除工作区 C 后执行 `prune --keep-missing-workspaces=false` 可清除失效引用并回收 `2.0.0`。
 4. **按工作区配置隔离与 `link --scope workspace`**：两个工作区共享 `2.0.0` 时各自读写独立的 `workspace-env/` 文件；两个工作区可同时 `link` 同一扩展的两个本地分支。
 5. **扩展命令信任 fail-closed**：未表态（`isTrusted: undefined`）目录在 CLI 扩展安装时被拒绝，不再默认信任。
 

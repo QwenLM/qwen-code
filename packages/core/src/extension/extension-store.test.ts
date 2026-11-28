@@ -467,6 +467,91 @@ describe('ExtensionStore', () => {
     ).toMatchObject({ effective: 'enabled', source: 'legacy_path_rule' });
   });
 
+  it('keeps a versioned policy when artifact cleanup fails', async () => {
+    const id = 'e4'.repeat(32);
+    const identity = { id, name: 'demo', versionSlot: '1.0.0' };
+    const store = makeStore();
+    const directory = store.resolveVersionedDirectory(
+      identity.name,
+      identity.versionSlot,
+    );
+    await fsp.mkdir(directory, { recursive: true });
+    const snapshot = await store.ensureInitialized([identity]);
+    vi.spyOn(fsp, 'rm').mockImplementationOnce(async () => {
+      throw Object.assign(new Error('locked'), { code: 'EPERM' });
+    });
+
+    await expect(store.pruneUnusedVersions()).rejects.toThrow('locked');
+    expect(await store.readSnapshot()).toEqual(snapshot);
+    expect(fs.existsSync(directory)).toBe(true);
+
+    await store.pruneUnusedVersions();
+    expect((await store.readSnapshot()).extensions[id]).toBeUndefined();
+  });
+
+  it('never adopts a discovered version slot as globally active', async () => {
+    const identity = {
+      id: 'e5'.repeat(32),
+      name: 'demo',
+      versionSlot: '1.0.0',
+    };
+    const empty = {
+      version: 2,
+      generation: 1,
+      legacyProjectionHash: '0'.repeat(64),
+      extensions: {},
+    } as const;
+    await fsp.mkdir(storeDir, { recursive: true });
+    await fsp.writeFile(statePath, JSON.stringify(empty));
+    await fsp.writeFile(
+      path.join(storeDir, 'state.previous.json'),
+      JSON.stringify(empty),
+    );
+    const store = makeStore();
+    await fsp.writeFile(enablementPath, '{}');
+
+    const snapshot = await store.ensureInitialized([identity]);
+
+    expect(snapshot.extensions[identity.id]).toMatchObject({
+      versionSlot: identity.versionSlot,
+      defaultActivation: 'disabled',
+      workspaceOverrides: {},
+    });
+    expect(snapshot.extensions[identity.id]?.legacyPathRules).toBeUndefined();
+  });
+
+  it('retains an explicit uninstall policy when private data cleanup fails', async () => {
+    const identity = {
+      id: 'e6'.repeat(32),
+      name: 'demo',
+      versionSlot: '1.0.0',
+    };
+    const store = makeStore();
+    const directory = store.resolveVersionedDirectory(
+      identity.name,
+      identity.versionSlot,
+    );
+    await fsp.mkdir(directory, { recursive: true });
+    const snapshot = await store.ensureInitialized([identity]);
+    vi.spyOn(fsp, 'rm').mockImplementation(async (target) => {
+      if (String(target).includes('workspace-env')) {
+        throw new Error('env locked');
+      }
+    });
+
+    await expect(store.pruneUnusedVersions({ identity })).rejects.toThrow(
+      'env locked',
+    );
+    expect(await store.readSnapshot()).toEqual(snapshot);
+    expect(fs.existsSync(directory)).toBe(true);
+
+    vi.restoreAllMocks();
+    await store.pruneUnusedVersions({ identity });
+    expect(
+      (await store.readSnapshot()).extensions[identity.id],
+    ).toBeUndefined();
+  });
+
   it('rejects loaded extension names that differ only by case', async () => {
     const store = makeStore();
     const projection = JSON.stringify({ unrelated });

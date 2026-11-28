@@ -66,7 +66,7 @@ describe('extensions prune command', () => {
 
     expect(mockPruneUnusedVersions).toHaveBeenCalledWith({
       dryRun: true,
-      removeMissingWorkspaces: true,
+      removeMissingWorkspaces: false,
     });
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Would prune 1 stale workspace reference(s).',
@@ -74,6 +74,20 @@ describe('extensions prune command', () => {
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Would prune foo (2.0.0) at /tmp/.qwen/extension-versions/foo/2.0.0',
     );
+  });
+
+  it('removes missing workspaces only when cleanup is explicitly enabled', async () => {
+    mockPruneUnusedVersions.mockResolvedValue({
+      pruned: [],
+      removedWorkspaceRefs: 0,
+    });
+
+    await handlePrune({ keepMissingWorkspaces: false });
+
+    expect(mockPruneUnusedVersions).toHaveBeenCalledWith({
+      dryRun: false,
+      removeMissingWorkspaces: true,
+    });
   });
 
   it('reports when nothing needs pruning', async () => {

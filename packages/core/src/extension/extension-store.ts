@@ -67,6 +67,7 @@ export interface ExtensionStoreBatchMutationOutcome {
 export interface ExtensionIdentity {
   id: string;
   name: string;
+  versionSlot?: string;
 }
 
 export interface ExtensionActivationResult {
@@ -125,6 +126,7 @@ export interface PruneUnusedVersionsOptions {
   removeMissingWorkspaces?: boolean;
   dryRun?: boolean;
   workspaceExists?: (workspacePath: string) => boolean;
+  identity?: ExtensionIdentity;
 }
 
 export interface PruneUnusedVersionsResult {
@@ -624,6 +626,38 @@ export class ExtensionStore {
     return path.join(this.versionsDir, name, versionSlot);
   }
 
+  getWorkspaceExtensionId(
+    snapshot: ExtensionStoreSnapshot,
+    name: string,
+    workspacePath: string,
+  ): string | undefined {
+    const legacyCandidates = [
+      normalizeRulePath(workspacePath),
+      normalizeRulePath(canonicalizeWorkspacePath(workspacePath)),
+    ];
+    let selected: [string, ExtensionPolicy] | undefined;
+    for (const entry of Object.entries(snapshot.extensions)) {
+      const [id, policy] = entry;
+      if (
+        policy.declarationOnly ||
+        policy.name.toLowerCase() !== name.toLowerCase()
+      ) {
+        continue;
+      }
+      const hasOverride =
+        this.getActivation(snapshot, id, policy.name, workspacePath)
+          .workspace !== 'inherit' ||
+        (policy.legacyPathRules ?? []).some((rule) => {
+          const override = Override.fromFileRule(rule);
+          return legacyCandidates.some((candidate) =>
+            override.matchesPath(candidate),
+          );
+        });
+      if (hasOverride) selected = entry;
+    }
+    return selected?.[0];
+  }
+
   workspaceEnvFilePath(extensionId: string, workspacePath: string): string {
     if (!/^[a-f0-9]{64}$/.test(extensionId)) {
       throw new Error(`Invalid extension id "${extensionId}".`);
@@ -992,13 +1026,21 @@ export class ExtensionStore {
           for (const identity of extensions) {
             assertIdentity(identity);
             if (existing.extensions[identity.id]) continue;
-            const rules = findLegacyRules(
-              existing.legacyProjectionRemainder ?? {},
-              identity.name,
-            );
+            const rules = identity.versionSlot
+              ? []
+              : findLegacyRules(
+                  existing.legacyProjectionRemainder ?? {},
+                  identity.name,
+                );
             existing.extensions[identity.id] = {
               name: identity.name,
-              defaultActivation: 'enabled',
+              ...(identity.versionSlot
+                ? {
+                    versionSlot: identity.versionSlot,
+                    artifactGeneration: existing.generation + 1,
+                  }
+                : {}),
+              defaultActivation: identity.versionSlot ? 'disabled' : 'enabled',
               workspaceOverrides: {},
               ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
             };
@@ -1008,7 +1050,13 @@ export class ExtensionStore {
           const identities = new Map(
             Object.entries(existing.extensions).map(([id, policy]) => [
               id,
-              { id, name: policy.name },
+              {
+                id,
+                name: policy.name,
+                ...(policy.versionSlot
+                  ? { versionSlot: policy.versionSlot }
+                  : {}),
+              },
             ]),
           );
           for (const identity of extensions)
@@ -1016,19 +1064,24 @@ export class ExtensionStore {
           for (const identity of identities.values()) {
             assertIdentity(identity);
             const existingPolicy = existing.extensions[identity.id];
-            const { rules, activationChanged } = this.importLegacyProjection(
-              findLegacyRules(legacy, identity.name),
-              existingPolicy,
-            );
+            const { rules, activationChanged } = identity.versionSlot
+              ? { rules: [], activationChanged: false }
+              : this.importLegacyProjection(
+                  findLegacyRules(legacy, identity.name),
+                  existingPolicy,
+                );
             if (existingPolicy) {
               const previousRules = existingPolicy.legacyPathRules ?? [];
               const policyChanged =
                 activationChanged ||
                 existingPolicy.name !== identity.name ||
+                (existingPolicy.versionSlot ?? identity.versionSlot) !==
+                  existingPolicy.versionSlot ||
                 previousRules.length !== rules.length ||
                 previousRules.some((rule, index) => rule !== rules[index]);
               if (!policyChanged) continue;
               existingPolicy.name = identity.name;
+              existingPolicy.versionSlot ??= identity.versionSlot;
               if (rules.length > 0) {
                 existingPolicy.legacyPathRules = [...rules];
               } else {
@@ -1038,7 +1091,15 @@ export class ExtensionStore {
             } else {
               existing.extensions[identity.id] = {
                 name: identity.name,
-                defaultActivation: 'enabled',
+                ...(identity.versionSlot
+                  ? {
+                      versionSlot: identity.versionSlot,
+                      artifactGeneration: existing.generation + 1,
+                    }
+                  : {}),
+                defaultActivation: identity.versionSlot
+                  ? 'disabled'
+                  : 'enabled',
                 workspaceOverrides: {},
                 ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
               };
@@ -1057,10 +1118,18 @@ export class ExtensionStore {
         for (const identity of extensions) {
           assertIdentity(identity);
           if (existing.extensions[identity.id]) continue;
-          const rules = findLegacyRules(legacy, identity.name);
+          const rules = identity.versionSlot
+            ? []
+            : findLegacyRules(legacy, identity.name);
           existing.extensions[identity.id] = {
             name: identity.name,
-            defaultActivation: 'enabled',
+            ...(identity.versionSlot
+              ? {
+                  versionSlot: identity.versionSlot,
+                  artifactGeneration: existing.generation + 1,
+                }
+              : {}),
+            defaultActivation: identity.versionSlot ? 'disabled' : 'enabled',
             workspaceOverrides: {},
             ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
           };
@@ -1091,6 +1160,16 @@ export class ExtensionStore {
     const policies: Record<string, ExtensionPolicy> = {};
     for (const identity of extensions) {
       assertIdentity(identity);
+      if (identity.versionSlot && !policies[identity.id]) {
+        policies[identity.id] = {
+          name: identity.name,
+          versionSlot: identity.versionSlot,
+          artifactGeneration: 0,
+          defaultActivation: 'disabled',
+          workspaceOverrides: {},
+        };
+        continue;
+      }
       const rules = findLegacyRules(legacy, identity.name);
       policies[identity.id] = {
         name: identity.name,
@@ -1766,7 +1845,7 @@ export class ExtensionStore {
       const targetSnapshot = structuredClone(snapshot);
       let removedWorkspaceRefs = 0;
 
-      if (options.removeMissingWorkspaces) {
+      if (!options.identity && options.removeMissingWorkspaces) {
         for (const policy of Object.values(targetSnapshot.extensions)) {
           for (const wsPath of Object.keys(policy.workspaceOverrides)) {
             if (!workspaceExists(wsPath)) {
@@ -1785,19 +1864,33 @@ export class ExtensionStore {
             }
           }
         }
+      } else if (!options.identity) {
+        for (const policy of Object.values(targetSnapshot.extensions)) {
+          if (!policy.versionSlot) continue;
+          for (const [wsPath, activation] of Object.entries(
+            policy.workspaceOverrides,
+          )) {
+            if (activation === 'disabled' && workspaceExists(wsPath)) {
+              delete policy.workspaceOverrides[wsPath];
+            }
+          }
+        }
       }
 
       const pruned: PrunedExtensionVersion[] = [];
       for (const [id, policy] of Object.entries(targetSnapshot.extensions)) {
+        if (options.identity && options.identity.id !== id) continue;
         if (!policy.versionSlot || policy.declarationOnly) continue;
-        const hasEnabledWorkspace = Object.values(
-          policy.workspaceOverrides,
-        ).some((value) => value === 'enabled');
+        const hasWorkspaceRefs =
+          Object.keys(policy.workspaceOverrides).length > 0;
+        const hasSkillWorkspaceRefs = Object.values(
+          policy.skillWorkspaceOverrides ?? {},
+        ).some((states) => Object.keys(states).length > 0);
         const hasLegacyRules = (policy.legacyPathRules?.length ?? 0) > 0;
         if (
-          policy.defaultActivation === 'disabled' &&
-          !hasEnabledWorkspace &&
-          !hasLegacyRules
+          (policy.defaultActivation === 'disabled' || options.identity) &&
+          (options.identity ||
+            (!hasWorkspaceRefs && !hasSkillWorkspaceRefs && !hasLegacyRules))
         ) {
           const directory = this.resolveArtifactDirectory(policy);
           pruned.push({
@@ -1819,26 +1912,22 @@ export class ExtensionStore {
       }
 
       targetSnapshot.generation = snapshot.generation + 1;
-      await this.writeSnapshotUnlocked(targetSnapshot);
-
       for (const item of pruned) {
-        await fsp
-          .rm(item.directory, { recursive: true, force: true })
-          .catch(() => undefined);
+        await fsp.rm(item.directory, { recursive: true, force: true });
         await fsp.rmdir(path.dirname(item.directory)).catch(() => undefined);
-        await fsp
-          .rm(path.join(this.storeDir, 'workspace-env', item.id), {
-            recursive: true,
-            force: true,
-          })
-          .catch(() => undefined);
-        await fsp
-          .rm(this.agentPluginDataRoot(item.id), {
-            recursive: true,
-            force: true,
-          })
-          .catch(() => undefined);
+        await fsp.rm(path.join(this.storeDir, 'workspace-env', item.id), {
+          recursive: true,
+          force: true,
+        });
+        if (!(await this.pathExists(item.directory))) {
+          await fsp.rm(path.dirname(item.directory)).catch(() => undefined);
+        }
+        await fsp.rm(this.agentPluginDataRoot(item.id), {
+          recursive: true,
+          force: true,
+        });
       }
+      await this.writeSnapshotUnlocked(targetSnapshot);
 
       return {
         snapshot: targetSnapshot,

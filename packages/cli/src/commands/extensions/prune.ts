@@ -17,10 +17,11 @@ interface PruneArgs {
 
 export async function handlePrune(args: PruneArgs = {}) {
   try {
+    const keepMissingWorkspaces = args.keepMissingWorkspaces ?? true;
     const extensionManager = await getExtensionManager();
     const result = await extensionManager.pruneUnusedVersions({
       dryRun: args.dryRun === true,
-      removeMissingWorkspaces: args.keepMissingWorkspaces !== true,
+      removeMissingWorkspaces: !keepMissingWorkspaces,
     });
     if (result.pruned.length === 0 && result.removedWorkspaceRefs === 0) {
       writeStdoutLine(t('No unused extension versions to prune.'));
@@ -62,7 +63,6 @@ export const pruneCommand: CommandModule = {
           'Keep workspace overrides whose directories no longer exist on disk.',
         ),
         type: 'boolean',
-        default: false,
       }),
   handler: async (argv) => {
     await handlePrune({

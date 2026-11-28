@@ -161,6 +161,39 @@ describe('single-store multi-version extensions', () => {
     expect(mgrB.getLoadedExtensions().filter((e) => e.isActive)).toHaveLength(
       0,
     );
+
+    await mgrB.uninstallExtension('foo', false);
+    expect(fsSync.existsSync(v2.path)).toBe(false);
+    expect(fsSync.existsSync(v1.path)).toBe(true);
+    const v3 = await createLocalExtensionSource(sourcesDir, 'foo', '3.0.0');
+    await mgrB.installExtension(
+      { type: 'local', source: v3 },
+      async () => undefined,
+      undefined,
+      wsB,
+      undefined,
+      { scope: 'workspace', workspacePath: wsB },
+    );
+    await mgrB.disableExtension('foo', SettingScope.User, wsB);
+    await Promise.all([mgrA.refreshCache(), mgrB.refreshCache()]);
+    expect(mgrA.getLoadedExtensions().filter((e) => e.isActive)).toHaveLength(
+      1,
+    );
+    expect(mgrB.getLoadedExtensions().filter((e) => e.isActive)).toHaveLength(
+      0,
+    );
+
+    await mgrB.enableExtension('foo', SettingScope.Workspace, wsB);
+    const reenabled = mgrB.getAllLoadedExtensions().filter((e) => e.isActive);
+    expect(reenabled.map((e) => e.version)).toEqual(['3.0.0']);
+    await mgrB.disableExtension('foo', SettingScope.Workspace, wsB);
+    await mgrB.enableExtension('foo', SettingScope.Workspace, wsB);
+    expect(
+      mgrB
+        .getAllLoadedExtensions()
+        .filter((e) => e.isActive)
+        .map((e) => e.version),
+    ).toEqual(['3.0.0']);
   });
 
   it('reuses identical versioned artifacts idempotently across workspaces without duplicating directories', async () => {
@@ -254,6 +287,11 @@ describe('single-store multi-version extensions', () => {
     );
     expect(fsSync.existsSync(v3.path)).toBe(true);
     expect(fsSync.existsSync(v2.path)).toBe(false);
+
+    const preserved = await mgrA.pruneUnusedVersions({ dryRun: true });
+    expect(preserved.pruned).toEqual([]);
+    const reused = await fs.readdir(path.join(versionsDir, 'foo'));
+    expect(reused).toHaveLength(1);
 
     // Bind v3 to wsB too, then delete wsA and wsB on disk and prune.
     const mgrB = await makeManager(wsB);
@@ -411,5 +449,12 @@ describe('single-store multi-version extensions', () => {
     );
     expect(envA['APP_MODE']).toBe('alpha');
     expect(envB['APP_MODE']).toBe('beta');
+    await mgrA.uninstallExtensionById(sharedA.id, false);
+    expect(
+      fsSync.existsSync(
+        path.dirname(mgrA.getWorkspaceEnvFilePath(sharedA.id, wsA)),
+      ),
+    ).toBe(false);
+    expect(fsSync.existsSync(sharedA.path)).toBe(false);
   });
 });
