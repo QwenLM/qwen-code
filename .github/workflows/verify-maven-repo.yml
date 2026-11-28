@@ -27,9 +27,8 @@ defaults:
 jobs:
   save:
     name: 'Save verify Maven repo'
-    # Same runs-on and image as the verify consumer. actions/cache versions
-    # an entry by the literal path plus the compression method; a different
-    # runner or a host path can never be restored from the container.
+    # Keep the same container image as the verify consumer so path and
+    # compression conventions match across the runner pools.
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     container:
       image: 'node:22-bookworm'
