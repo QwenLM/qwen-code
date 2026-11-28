@@ -122,6 +122,7 @@ import {
   forwardManagedTerminalUpgrade,
   isManagedTerminalUpgradePath,
   mountManagedLocalWeb,
+  parseManagedLocalJavaUrl,
   type ManagedLocalWebOptions,
 } from './managed-local-web.js';
 import {
@@ -1425,6 +1426,55 @@ export function createServeApp(
     );
   let reclaimIdleAcp: IdleAcpReclaimer | undefined;
   let defaultBridgeForAdmission: AcpSessionBridge | undefined;
+  // Embedded callers have no earlier CLI validation. Reject unsafe origins
+  // before creating the monitor or bridge so failed apps own no resources.
+  const parsedAllowOrigins = parseAllowOriginPatterns(opts.allowOrigins ?? []);
+  if (parsedAllowOrigins.allowAny && !opts.token) {
+    throw new Error(
+      `Refusing to start with --allow-origin '*' but no bearer token ` +
+        `configured. '*' admits any cross-origin browser to the API; ` +
+        `without a token, any local page can drive the daemon. Set a ` +
+        `token or list specific origins instead of '*'.`,
+    );
+  }
+  if (
+    parsedAllowOrigins.loopbackPortWildcards &&
+    parsedAllowOrigins.loopbackPortWildcards.length > 0 &&
+    !opts.token
+  ) {
+    throw new Error(
+      `Refusing to start with a loopback port wildcard in --allow-origin ` +
+        `but no bearer token configured. A port wildcard admits any page ` +
+        `served from that loopback host, on any port; without a token, any ` +
+        `local page can drive the daemon. Set a token or list specific ` +
+        `origins instead.`,
+    );
+  }
+  const nonLoopbackHttpOrigin = findNonLoopbackHttpOrigin(parsedAllowOrigins);
+  if (nonLoopbackHttpOrigin && !opts.token) {
+    throw new Error(
+      `Refusing to start with --allow-origin ${JSON.stringify(
+        nonLoopbackHttpOrigin,
+      )} but no bearer token configured. Non-loopback HTTP(S) browser ` +
+        `origins can drive the full operator API, including code execution ` +
+        `as the daemon user. Set a token or use a loopback origin.`,
+    );
+  }
+  if (deps.managedLocalWeb) {
+    if (
+      opts.hostname !== '127.0.0.1' ||
+      !opts.requireAuth ||
+      !opts.token ||
+      opts.profile === 'hosted-harness'
+    ) {
+      throw new Error(
+        'Managed local WebShell requires an authenticated loopback daemon.',
+      );
+    }
+  }
+  const managedLocalJava = deps.managedLocalWeb
+    ? parseManagedLocalJavaUrl(deps.managedLocalWeb.javaUrl)
+    : undefined;
   const loadAdmissionMonitor =
     !deps.bridge && !injectedWorkspaceRegistry && opts.loadAdmission !== false
       ? (deps.createLoadAdmissionMonitor ?? createLoadAdmissionMonitor)()
@@ -1478,66 +1528,72 @@ export function createServeApp(
       }),
     };
   };
-  const bridge =
-    injectedWorkspaceRegistry?.primary.bridge ??
-    deps.bridge ??
-    createAcpSessionBridge({
-      isWorkflowModeWriteAllowed: (sessionId): boolean => {
-        const registry = primaryTrustRegistry;
-        if (!registry) return false;
-        const owner = registry.resolveLiveSessionOwner(sessionId);
-        const entry = registry.primaryEntry;
-        return (
-          owner.kind === 'found' &&
-          owner.runtime.trusted &&
-          owner.runtime.bridge === defaultBridgeForAdmission &&
-          entry.state === 'active' &&
-          entry.current?.runtime === owner.runtime &&
-          !entry.current.guard.closed
-        );
-      },
-      artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
-      sessionAttachmentsRoot: attachmentsRoots.root,
-      sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
-      maxSessions: opts.maxSessions,
-      ...(totalSessionAdmission
-        ? { freshSessionAdmission: totalSessionAdmission.admit }
-        : {}),
-      ...(defaultSessionOwnerIndex
-        ? {
-            sessionLifecycle:
-              defaultSessionOwnerIndex.handleBridgeSessionLifecycle,
-          }
-        : {}),
-      maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
-      eventRingSize: opts.eventRingSize,
-      eventRingMaxBytes: opts.eventRingMaxBytes,
-      compactedReplayMaxBytes: opts.compactedReplayMaxBytes,
-      maxJournalEvents: opts.maxJournalEvents,
-      maxJournalBytes: opts.maxJournalBytes,
-      initializeTimeoutMs: opts.initializeTimeoutMs,
-      sessionRestoreTimeoutMs,
-      permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
-      ...(opts.restoreAskUserQuestion === true
-        ? { restoreAskUserQuestion: true }
-        : {}),
-      ...defaultBridgeChannels(),
-      boundWorkspace,
-      sessionShellCommandEnabled,
-      // Wire the production status provider so direct embeds / tests
-      // that don't inject `deps.bridge` get daemon env + preflight cells.
-      statusProvider,
-      delegateReadTextFileToClient: false,
-      // Final ACP text writes remain delegated. Workspace writes use WFS;
-      // marked same-host tool writes may use the factory's host writer.
-      // Unexpected delegated reads still fail closed at the WFS boundary.
-      fileSystem: createBridgeFileSystemAdapter(fsFactory, {
-        allowSameHostToolWritesOutsideWorkspace: deps.fsFactory === undefined,
-      }),
-      // Reverse tool channel: answer the child's `client_mcp/message`
-      // ext-method by reaching the WS connection that hosts the named server.
-      clientMcpSender: clientMcpSenderRegistry.lookup,
-    });
+  let bridge: AcpSessionBridge;
+  try {
+    bridge =
+      injectedWorkspaceRegistry?.primary.bridge ??
+      deps.bridge ??
+      createAcpSessionBridge({
+        isWorkflowModeWriteAllowed: (sessionId): boolean => {
+          const registry = primaryTrustRegistry;
+          if (!registry) return false;
+          const owner = registry.resolveLiveSessionOwner(sessionId);
+          const entry = registry.primaryEntry;
+          return (
+            owner.kind === 'found' &&
+            owner.runtime.trusted &&
+            owner.runtime.bridge === defaultBridgeForAdmission &&
+            entry.state === 'active' &&
+            entry.current?.runtime === owner.runtime &&
+            !entry.current.guard.closed
+          );
+        },
+        artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+        sessionAttachmentsRoot: attachmentsRoots.root,
+        sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
+        maxSessions: opts.maxSessions,
+        ...(totalSessionAdmission
+          ? { freshSessionAdmission: totalSessionAdmission.admit }
+          : {}),
+        ...(defaultSessionOwnerIndex
+          ? {
+              sessionLifecycle:
+                defaultSessionOwnerIndex.handleBridgeSessionLifecycle,
+            }
+          : {}),
+        maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
+        eventRingSize: opts.eventRingSize,
+        eventRingMaxBytes: opts.eventRingMaxBytes,
+        compactedReplayMaxBytes: opts.compactedReplayMaxBytes,
+        maxJournalEvents: opts.maxJournalEvents,
+        maxJournalBytes: opts.maxJournalBytes,
+        initializeTimeoutMs: opts.initializeTimeoutMs,
+        sessionRestoreTimeoutMs,
+        permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
+        ...(opts.restoreAskUserQuestion === true
+          ? { restoreAskUserQuestion: true }
+          : {}),
+        ...defaultBridgeChannels(),
+        boundWorkspace,
+        sessionShellCommandEnabled,
+        // Wire the production status provider so direct embeds / tests
+        // that don't inject `deps.bridge` get daemon env + preflight cells.
+        statusProvider,
+        delegateReadTextFileToClient: false,
+        // Final ACP text writes remain delegated. Workspace writes use WFS;
+        // marked same-host tool writes may use the factory's host writer.
+        // Unexpected delegated reads still fail closed at the WFS boundary.
+        fileSystem: createBridgeFileSystemAdapter(fsFactory, {
+          allowSameHostToolWritesOutsideWorkspace: deps.fsFactory === undefined,
+        }),
+        // Reverse tool channel: answer the child's `client_mcp/message`
+        // ext-method by reaching the WS connection that hosts the named server.
+        clientMcpSender: clientMcpSenderRegistry.lookup,
+      });
+  } catch (error) {
+    loadAdmissionMonitor?.dispose();
+    throw error;
+  }
   if (!injectedWorkspaceRegistry && !deps.bridge) {
     defaultBridgeForAdmission = bridge;
   }
@@ -2383,41 +2439,8 @@ export function createServeApp(
   // request gets the same 403 envelope the `denyBrowserOriginCors` wall
   // returned, so the no-`--allow-origin` posture is unchanged, and there is
   // one middleware to reason about instead of two interchangeable ones.
-  // Pattern parsing happens in `run-qwen-serve.ts` for validation; here we
-  // still keep the tokenless origin restrictions for embedded callers that
-  // construct the app directly.
-  const parsedAllowOrigins = parseAllowOriginPatterns(opts.allowOrigins ?? []);
-  if (parsedAllowOrigins.allowAny && !opts.token) {
-    throw new Error(
-      `Refusing to start with --allow-origin '*' but no bearer token ` +
-        `configured. '*' admits any cross-origin browser to the API; ` +
-        `without a token, any local page can drive the daemon. Set a ` +
-        `token or list specific origins instead of '*'.`,
-    );
-  }
-  if (
-    parsedAllowOrigins.loopbackPortWildcards &&
-    parsedAllowOrigins.loopbackPortWildcards.length > 0 &&
-    !opts.token
-  ) {
-    throw new Error(
-      `Refusing to start with a loopback port wildcard in --allow-origin ` +
-        `but no bearer token configured. A port wildcard admits any page ` +
-        `served from that loopback host, on any port; without a token, any ` +
-        `local page can drive the daemon. Set a token or list specific ` +
-        `origins instead.`,
-    );
-  }
-  const nonLoopbackHttpOrigin = findNonLoopbackHttpOrigin(parsedAllowOrigins);
-  if (nonLoopbackHttpOrigin && !opts.token) {
-    throw new Error(
-      `Refusing to start with --allow-origin ${JSON.stringify(
-        nonLoopbackHttpOrigin,
-      )} but no bearer token configured. Non-loopback HTTP(S) browser ` +
-        `origins can drive the full operator API, including code execution ` +
-        `as the daemon user. Set a token or use a loopback origin.`,
-    );
-  }
+  // Pattern parsing and tokenless embedded-caller restrictions run before
+  // bridge construction so invalid origins reject before allocating a monitor.
   // One CORS middleware for both deployments, over a set that can change.
   // With no `--allow-origin` the behavior is byte-for-byte the
   // `denyBrowserOriginCors` wall this replaces — every Origin-bearing request
@@ -2675,16 +2698,6 @@ export function createServeApp(
   }
 
   if (deps.managedLocalWeb) {
-    if (
-      opts.hostname !== '127.0.0.1' ||
-      !opts.requireAuth ||
-      !opts.token ||
-      opts.profile === 'hosted-harness'
-    ) {
-      throw new Error(
-        'Managed local WebShell requires an authenticated loopback daemon.',
-      );
-    }
     app.use(['/managed/boot', '/api/agent', '/v1/agents'], (req, res, next) => {
       if (listenerIdentityOf(req).kind !== 'primary') {
         res.status(403).json({ error: 'primary_listener_required' });
@@ -4396,10 +4409,6 @@ export function createServeApp(
     resolveSubagentSessionRuntime,
     conversationRuntimeActivity,
   });
-
-  const managedLocalJava = deps.managedLocalWeb
-    ? new URL(deps.managedLocalWeb.javaUrl)
-    : undefined;
 
   // Official ACP Streamable HTTP transport (RFD #721) mounted at `/acp`
   // alongside the REST surface, sharing this same `bridge` instance.

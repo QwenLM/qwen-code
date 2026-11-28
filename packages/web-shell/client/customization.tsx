@@ -598,6 +598,8 @@ export interface WebShellComposerApi {
   focus?(): void;
   insertText(text: string, options?: WebShellComposerTextOptions): void;
   setText(text: string): void;
+  /** Saves the current nonblank prompt text to Input history without sending it. */
+  saveCurrentDraftToHistory(): void;
   addTags(
     tags: readonly WebShellComposerTag[],
     options?: WebShellComposerTagOptions,

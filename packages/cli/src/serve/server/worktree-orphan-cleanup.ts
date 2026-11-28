@@ -238,6 +238,45 @@ async function readSidecarForArchiveLock(sidecarPath: string) {
   return sidecar;
 }
 
+function isWorktreeSidecarAbsent(sidecarPath: string): boolean {
+  try {
+    fs.lstatSync(sidecarPath);
+    return false;
+  } catch (error) {
+    // Only a genuinely missing entry skips the strict sidecar read. A
+    // dangling symlink, unreadable parent or other stat error stays on the
+    // fail-closed path below.
+    return (error as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+}
+
+/**
+ * Synchronous presence check across a session's active and archived sidecar
+ * locations. Returns true only when both paths are genuine ENOENT so callers
+ * can stay on their synchronous coordinator prefix without treating dangling
+ * symlinks or unreadable parents as absent.
+ */
+export function areWorktreeSidecarsAbsent(
+  service: SessionService,
+  sessionId: string,
+): boolean {
+  const activeSidecarPath = service.getWorktreeSessionPathForArchiveState(
+    sessionId,
+    'active',
+  );
+  if (!isWorktreeSidecarAbsent(activeSidecarPath)) {
+    return false;
+  }
+  const archivedSidecarPath = service.getWorktreeSessionPathForArchiveState(
+    sessionId,
+    'archived',
+  );
+  return (
+    archivedSidecarPath === activeSidecarPath ||
+    isWorktreeSidecarAbsent(archivedSidecarPath)
+  );
+}
+
 export async function withWorktreeArchiveMove<T>(
   service: SessionService,
   sessionId: string,
@@ -246,25 +285,7 @@ export async function withWorktreeArchiveMove<T>(
 ): Promise<T> {
   // Keep no-sidecar work on the caller's synchronous prefix so the next batch
   // item cannot acquire its coordinator first.
-  const sidecarAbsent = (sidecarPath: string): boolean => {
-    try {
-      fs.lstatSync(sidecarPath);
-      return false;
-    } catch (error) {
-      // Only a genuinely missing entry skips the strict sidecar read. A
-      // dangling symlink, unreadable parent or other stat error stays on the
-      // fail-closed path below.
-      return (error as NodeJS.ErrnoException).code === 'ENOENT';
-    }
-  };
-  if (
-    sidecarAbsent(
-      service.getWorktreeSessionPathForArchiveState(sessionId, 'active'),
-    ) &&
-    sidecarAbsent(
-      service.getWorktreeSessionPathForArchiveState(sessionId, 'archived'),
-    )
-  ) {
+  if (areWorktreeSidecarsAbsent(service, sessionId)) {
     return move();
   }
   const otherState: 'active' | 'archived' =

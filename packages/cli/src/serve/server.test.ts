@@ -28454,8 +28454,27 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ ...summary, lastUserPromptAt: timestamp });
-      expect(read).toHaveBeenCalledWith('s-time');
+      expect(read).toHaveBeenCalledWith('s-time', 'active', {
+        allowSidecarWrite: false,
+      });
       expect(read.mock.instances[0]?.getProjectRoot()).toBe(WS_BOUND);
+
+      read.mockClear();
+      read.mockResolvedValueOnce(timestamp);
+      const trustedApp = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+      const trustedRes = await request(trustedApp)
+        .get('/session/s-time/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(trustedRes.status).toBe(200);
+      expect(trustedRes.body).toEqual({
+        ...summary,
+        lastUserPromptAt: timestamp,
+      });
+      expect(read).toHaveBeenCalledWith('s-time');
       read.mockRestore();
     });
 

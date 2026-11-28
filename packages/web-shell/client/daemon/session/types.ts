@@ -919,6 +919,8 @@ export interface DaemonSessionActions {
     sessionId: string;
     displayName: string;
     switchStarted: boolean;
+    /** False when an initiated switch fails to load or is aborted. */
+    switchCompleted?: Promise<boolean>;
     sourceWarnings?: string[];
   }>;
   /** "Create branch here" on the session's detached managed worktree. */

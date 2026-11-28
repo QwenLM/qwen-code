@@ -28,18 +28,22 @@ import { matchRemotes } from '../review/lib/remote-match.js';
 import { redirectedAncestor } from '../review/lib/worktree.js';
 import {
   assertOwnedBySession,
+  assertTreeHasNoWatchFiles,
+  assertWatchFilesNotTracked,
   autofixPrPaths,
   currentSessionId,
   ghNotFound,
   historyPath,
   isBranchName,
   isCommandSafeName,
+  isTakeOver,
   cloneWorktreeRoots,
   findWatchRoot,
   vouchedScanRoots,
   readHistory,
   readState,
   repoRoot,
+  repositoryMismatchMessage,
   watchRoot,
   requireState,
   sameRepository,
@@ -354,6 +358,8 @@ export interface PrepareArgs {
   takeOver?: boolean;
   /** Fix in the user's own checkout of the head branch (`--in-place`). */
   inPlace?: boolean;
+  /** With `--in-place`: consent to scheduled rounds (`--watch`). */
+  watch?: boolean;
 }
 
 /**
@@ -471,15 +477,6 @@ function runInPlacePrepare(
   host: string,
 ): void {
   const prNumber = args.pr;
-  // A watch of this PR in either mode is cleaned up first: an in-place
-  // start is always fresh (once-shaped), and a mode conversion goes the
-  // same way.
-  const found = findWatchRoot(prNumber);
-  if (found !== null) {
-    throw new Error(
-      `PR #${prNumber} already has a watch in this clone (${found}); run \`qwen autofix-pr cleanup ${prNumber}\` first.`,
-    );
-  }
   // The checkout the session sits in.
   const checkout = git('rev-parse', '--show-toplevel');
   const sessionDir = realpathNearestExisting(process.cwd());
@@ -496,6 +493,53 @@ function runInPlacePrepare(
     throw new Error(
       `run --in-place from inside the checkout of the PR's head branch (${checkout}).`,
     );
+  }
+
+  const redirected = redirectedAncestor(
+    dirname(autofixPrPaths(checkout, prNumber).statePath),
+    checkout,
+  );
+  if (redirected !== null) {
+    throw new Error(
+      `refusing to prepare PR #${prNumber} in ${checkout}: ${redirected} is a symlink.`,
+    );
+  }
+  assertWatchFilesNotTracked(checkout, prNumber);
+
+  const alreadyWatched = (where: string) =>
+    `PR #${prNumber} already has a watch in this clone (${where}); run \`qwen autofix-pr cleanup ${prNumber}\` first.`;
+  const sameInPlaceWatch = (state: AutofixPrState, where: string) => {
+    if (!state.inPlace) {
+      throw new Error(alreadyWatched(where));
+    }
+    if (state.prNumber !== prNumber) {
+      const badPath = autofixPrPaths(where, prNumber).statePath;
+      throw new Error(
+        `PR #${prNumber}'s state file (${badPath}) records PR #${state.prNumber}; delete ${badPath} and run prepare again.`,
+      );
+    }
+    if (!sameRepository(state, { host, owner, repo: repoName })) {
+      throw new Error(
+        repositoryMismatchMessage(state, prNumber, host, args.repo),
+      );
+    }
+    if (realpathNearestExisting(where) !== checkoutReal) {
+      throw new Error(
+        `PR #${prNumber} already has an in-place watch in ${where}; run from there or run \`qwen autofix-pr cleanup ${prNumber}\` first.`,
+      );
+    }
+  };
+
+  // A worktree watch or a watch in another checkout or repository is cleaned
+  // up first (never silently converted); an in-place watch of this PR in this
+  // checkout can be resumed or taken over with --take-over.
+  const found = findWatchRoot(prNumber);
+  const existingPaths = found === null ? null : autofixPrPaths(found, prNumber);
+  const existing =
+    existingPaths === null ? null : readState(existingPaths.statePath);
+  if (existing) {
+    sameInPlaceWatch(existing, found!);
+    if (!isTakeOver(existing, args.takeOver)) assertOwnedBySession(existing);
   }
 
   ensureAuthenticated();
@@ -528,7 +572,7 @@ function runInPlacePrepare(
     pr.headRepository!.name,
   );
 
-  // The head branch is checked out, tracks the push target, and is clean.
+  // The head branch is checked out and tracks the push target.
   const head = gitOpt('-C', checkout, 'symbolic-ref', '-q', 'HEAD');
   if (head !== `refs/heads/${pr.headRefName}`) {
     throw new Error(
@@ -556,6 +600,66 @@ function runInPlacePrepare(
       `the branch ${pr.headRefName} must track ${pushTarget}/${pr.headRefName} for --in-place (it tracks ${upstream || 'nothing'}); set its upstream first.`,
     );
   }
+
+  const paths = existingPaths ?? autofixPrPaths(checkout, prNumber);
+  if (existing) {
+    // Fetch into the private ref without touching any branch or working tree,
+    // so localCopy can tell behind from unpushed local commits accurately.
+    networkGit([
+      '-C',
+      checkout,
+      'fetch',
+      '--quiet',
+      '--no-recurse-submodules',
+      remote,
+      `+refs/pull/${prNumber}/head:${paths.headRef}`,
+    ]);
+    assertTreeHasNoWatchFiles(checkout, prNumber, paths.headRef);
+    const headSha = git(
+      '-C',
+      checkout,
+      'rev-parse',
+      `${paths.headRef}^{commit}`,
+    );
+    let tookOver = false;
+    const resumedState = withWatchLock(paths, prNumber, () => {
+      assertWatchFilesNotTracked(checkout, prNumber);
+      const current = requireState(paths.statePath, prNumber);
+      sameInPlaceWatch(current, found!);
+      if (isTakeOver(current, args.takeOver)) tookOver = true;
+      else assertOwnedBySession(current);
+      const next: AutofixPrState = {
+        ...current,
+        sessionId: currentSessionId(),
+        authorCanPush: canPush,
+        remote,
+        pushTarget,
+        headRefName: pr.headRefName,
+        baseRefName: pr.baseRefName,
+        branch: pr.headRefName,
+        worktreePath: checkout,
+        ...(args.watch || current.inPlaceWatch || current.watch
+          ? { inPlaceWatch: true as const }
+          : {}),
+      };
+      writeAnchor(current, current.prNumber, repoRoot());
+      if (JSON.stringify(next) !== JSON.stringify(current)) {
+        writeState(paths.statePath, next);
+      }
+      return next;
+    });
+    report(resumedState, {
+      resumed: true,
+      inPlace: true,
+      url: pr.url,
+      isDraft: pr.isDraft,
+      isCrossRepository: pr.isCrossRepository,
+      ...localCopy({ ...resumedState, lastKnownHeadSha: headSha }),
+      ...(tookOver ? { tookOver } : {}),
+    });
+    return;
+  }
+
   const holds = checkoutHoldsWork(checkout);
   if (holds === null) {
     throw new Error(
@@ -567,7 +671,6 @@ function runInPlacePrepare(
       `${checkout} has uncommitted changes; commit or stash them before starting --in-place.`,
     );
   }
-  const paths = autofixPrPaths(checkout, prNumber);
   // The PR head, fetched into the watch's private ref without moving any
   // branch; the local tip is at it or behind it — never ahead, never
   // diverged. A behind branch is left for the first round's sync to
@@ -582,6 +685,7 @@ function runInPlacePrepare(
     remote,
     `+refs/pull/${prNumber}/head:${paths.headRef}`,
   ]);
+  assertTreeHasNoWatchFiles(checkout, prNumber, paths.headRef);
   const headSha = git('-C', checkout, 'rev-parse', `${paths.headRef}^{commit}`);
   const localSha = git(
     '-C',
@@ -597,11 +701,11 @@ function runInPlacePrepare(
 
   mkdirSync(dirname(paths.lockPath), { recursive: true });
   const state = withWatchLock(paths, prNumber, () => {
-    // Another start may have raced the check above.
-    if (readState(paths.statePath)) {
-      throw new Error(
-        `PR #${prNumber} already has a watch in this clone; run \`qwen autofix-pr cleanup ${prNumber}\` first.`,
-      );
+    assertWatchFilesNotTracked(checkout, prNumber);
+    // Another start (here or in a sibling worktree) may have raced the check above.
+    const raced = findWatchRoot(prNumber);
+    if (raced !== null) {
+      throw new Error(alreadyWatched(raced));
     }
     let history: AutofixPrHistory | null = null;
     try {
@@ -634,6 +738,7 @@ function runInPlacePrepare(
       branch: pr.headRefName,
       worktreePath: checkout,
       inPlace: true,
+      ...(args.watch ? { inPlaceWatch: true as const } : {}),
       viewer,
       prAuthor: pr.author?.login ?? '',
       authorCanPush: canPush,
@@ -671,6 +776,11 @@ export function runPrepare(args: PrepareArgs): void {
   if (!isOwnerRepo(args.repo)) {
     throw new TypeError(`--repo must be <owner>/<repo>, got ${args.repo}`);
   }
+  if (args.watch && !args.inPlace) {
+    throw new Error(
+      '--watch is only used with --in-place (worktree watches are scheduled by default).',
+    );
+  }
   const [owner, repoName] = args.repo.split('/');
   const host = resolveGhHost(args.host) ?? 'github.com';
   if (args.inPlace) {
@@ -698,16 +808,15 @@ export function runPrepare(args: PrepareArgs): void {
   // repositories with a PR of that number.
   const sameWatch = (state: AutofixPrState) => {
     if (!sameRepository(state, { host, owner, repo: repoName })) {
-      const watched = `${state.host}/${state.owner}/${state.repo}`;
       throw new Error(
-        `PR #${args.pr} here is a watch of ${watched}, not ${host}/${args.repo}. ` +
-          `Run \`qwen autofix-pr cleanup ${args.pr}\` first.`,
+        repositoryMismatchMessage(state, args.pr, host, args.repo),
       );
     }
   };
-  // An in-place watch is never resumed or converted: cleanup, then a fresh
-  // prepare in the mode the user asks for. Checked again under the lock —
-  // an in-place start may land during the gh calls above.
+  // An in-place watch is never converted into a worktree watch: pass
+  // --in-place to resume it in the user's checkout, or cleanup first to
+  // switch modes. Checked again under the lock — an in-place start may land
+  // during the gh calls above.
   const inPlaceMismatch = `PR #${args.pr} here is an in-place watch (the user's own checkout); run \`qwen autofix-pr cleanup ${args.pr}\` first, then prepare again (with --in-place to keep fixing in your checkout).`;
   let existing = readState(paths.statePath);
   if (existing?.inPlace) {
@@ -716,8 +825,7 @@ export function runPrepare(args: PrepareArgs): void {
   let tookOver = false;
   let recreated = false;
   let wasEnded: AutofixPrState['ended'];
-  const takesOver = (state: AutofixPrState) =>
-    args.takeOver === true && state.sessionId !== currentSessionId();
+  const takesOver = (state: AutofixPrState) => isTakeOver(state, args.takeOver);
   if (existing) {
     sameWatch(existing);
     // A fix agent works in the worktree now, for whichever session.
@@ -1068,7 +1176,13 @@ export const prepareCommand: CommandModule = {
         type: 'boolean',
         default: false,
         describe:
-          "Fix in the user's own checkout of the PR head branch: attended, one round per start, nothing ever discarded",
+          "Fix in the user's own checkout of the PR head branch: attended, foreground, nothing ever discarded (one round per start; --watch only records consent for scheduled rounds, which `schedule` creates)",
+      })
+      .option('watch', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'With --in-place: record that the start consented to scheduled rounds (required by schedule)',
       }),
   handler: (argv) => {
     const host = (argv as { host?: string }).host;
@@ -1079,6 +1193,7 @@ export const prepareCommand: CommandModule = {
       host,
       takeOver: Boolean(argv['takeOver']),
       inPlace: Boolean(argv['inPlace']),
+      watch: Boolean(argv['watch']),
     });
   },
 };

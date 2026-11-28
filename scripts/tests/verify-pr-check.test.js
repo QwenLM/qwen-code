@@ -5642,15 +5642,12 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     }
   });
 
-  it('R7-1: resolves POSIX artifact paths whose ancestor components contain backslashes', () => {
-    if (process.platform === 'win32') return;
-    const baseDir = mkdtempSync(join(tmpdir(), 'verify-pr-check-r71-'));
+  describe('POSIX backslash artifact path resolution (R7-1)', () => {
     const runCheck = (args) =>
       spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
-    try {
-      const cloneWithBs = join(baseDir, 'a\\b');
-      const roundDir = join(cloneWithBs, 'tmp', 'pr123-verify-20261127-010000');
-      mkdirSync(join(roundDir, 'evidence'), { recursive: true });
+
+    function makeBackslashFixture() {
+      const baseDir = mkdtempSync(join(tmpdir(), 'verify-pr-check-r71-'));
       const files = validFiles();
       const reportMd = [
         `findings — verified head \`${HEAD}\` on local-trust host round.`,
@@ -5665,9 +5662,6 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
         '**Boundary.** Waived host execution disclosed per policy.',
         '',
       ].join('\n');
-      writeFileSync(join(roundDir, 'report.md'), reportMd);
-      writeFileSync(join(roundDir, 'verdict.txt'), 'findings\n');
-      writeFileSync(join(roundDir, 'assertions.json'), files.assertions);
       const approval = localTrustApproval({
         by: 'octocat',
         reason: 'R7-1 POSIX backslash path test',
@@ -5678,9 +5672,6 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
         pr: 123,
         headRefOid: HEAD,
       });
-      writeFileSync(join(roundDir, 'boundary.json'), boundaryRaw);
-      writeFileSync(join(roundDir, 'context.json'), artifactCtxRaw);
-      writeFileSync(join(roundDir, 'evidence', '01-ab-cells.png'), 'png');
       const hostCtxPath = join(baseDir, 'host-context.json');
       const hostCtxRaw = JSON.stringify({
         repo: 'QwenLM/qwen-code',
@@ -5693,103 +5684,151 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
       });
       writeFileSync(hostCtxPath, hostCtxRaw);
       const ctxSha = createHash('sha256').update(hostCtxRaw).digest('hex');
-
-      const res = runCheck([
-        '--context',
-        hostCtxPath,
-        '--context-sha256',
-        ctxSha,
-        roundDir,
-      ]);
-      expect(res.stderr).not.toMatch(/could not resolve artifact directory/);
-      expect(res.status).toBe(0);
-
-      // Trust-root derivation still refuses a --context planted inside the `a\b` clone.
-      const inCloneCtx = join(cloneWithBs, 'planted-context.json');
-      writeFileSync(inCloneCtx, hostCtxRaw);
-      const plantedRes = runCheck([
-        '--context',
-        inCloneCtx,
-        '--context-sha256',
-        ctxSha,
-        roundDir,
-      ]);
-      expect(plantedRes.status).toBe(1);
-      expect(plantedRes.stderr).toMatch(/must not point inside/);
-
-      // Trailing backslash in a POSIX directory name must not be stripped by dirTrimmed.
-      const trailingBsRound = join(
-        baseDir,
-        'trail-clone',
-        'tmp',
-        'pr123-verify-20261127-010001\\',
-      );
-      mkdirSync(join(trailingBsRound, 'evidence'), { recursive: true });
-      writeFileSync(join(trailingBsRound, 'report.md'), reportMd);
-      writeFileSync(join(trailingBsRound, 'verdict.txt'), 'findings\n');
-      writeFileSync(join(trailingBsRound, 'assertions.json'), files.assertions);
-      writeFileSync(
-        join(trailingBsRound, 'boundary.json'),
-        readFileSync(join(roundDir, 'boundary.json')),
-      );
-      writeFileSync(join(trailingBsRound, 'context.json'), artifactCtxRaw);
-      writeFileSync(
-        join(trailingBsRound, 'evidence', '01-ab-cells.png'),
-        'png',
-      );
-      const trailingRes = runCheck([
-        '--context',
-        hostCtxPath,
-        '--context-sha256',
-        ctxSha,
-        trailingBsRound,
-      ]);
-      expect(trailingRes.stderr).not.toMatch(
-        /could not resolve artifact directory/,
-      );
-      expect(trailingRes.status).toBe(0);
-
-      // Ancestor directory ending with backslash (`anc\`) and relative symlink
-      // target containing backslash (`../anc\/tmp`) must resolve cleanly.
-      const ancEndClone = join(baseDir, 'anc\\');
-      const ancEndRound = join(
-        ancEndClone,
-        'tmp',
-        'pr123-verify-20261127-010002',
-      );
-      mkdirSync(join(ancEndRound, 'evidence'), { recursive: true });
-      writeFileSync(join(ancEndRound, 'report.md'), reportMd);
-      writeFileSync(join(ancEndRound, 'verdict.txt'), 'findings\n');
-      writeFileSync(join(ancEndRound, 'assertions.json'), files.assertions);
-      writeFileSync(join(ancEndRound, 'boundary.json'), boundaryRaw);
-      writeFileSync(join(ancEndRound, 'context.json'), artifactCtxRaw);
-      writeFileSync(join(ancEndRound, 'evidence', '01-ab-cells.png'), 'png');
-      const ancEndRes = runCheck([
-        '--context',
-        hostCtxPath,
-        '--context-sha256',
-        ctxSha,
-        ancEndRound,
-      ]);
-      expect(ancEndRes.stderr).not.toMatch(
-        /could not resolve artifact directory/,
-      );
-      expect(ancEndRes.status).toBe(0);
-
-      const symClone = join(baseDir, 'sym-holder');
-      mkdirSync(symClone, { recursive: true });
-      symlinkSync('../anc\\/tmp', join(symClone, 'tmp'));
-      const symRes = runCheck([
-        '--context',
-        hostCtxPath,
-        '--context-sha256',
-        ctxSha,
-        join(symClone, 'tmp', 'pr123-verify-20261127-010002'),
-      ]);
-      expect(symRes.stderr).not.toMatch(/could not resolve artifact directory/);
-      expect(symRes.status).toBe(0);
-    } finally {
-      rmSync(baseDir, { recursive: true, force: true });
+      const populateRound = (roundDir) => {
+        mkdirSync(join(roundDir, 'evidence'), { recursive: true });
+        writeFileSync(join(roundDir, 'report.md'), reportMd);
+        writeFileSync(join(roundDir, 'verdict.txt'), 'findings\n');
+        writeFileSync(join(roundDir, 'assertions.json'), files.assertions);
+        writeFileSync(join(roundDir, 'boundary.json'), boundaryRaw);
+        writeFileSync(join(roundDir, 'context.json'), artifactCtxRaw);
+        writeFileSync(join(roundDir, 'evidence', '01-ab-cells.png'), 'png');
+      };
+      return { baseDir, hostCtxPath, hostCtxRaw, ctxSha, populateRound };
     }
+
+    it.skipIf(process.platform === 'win32')(
+      'accepts artifact paths under a POSIX ancestor containing a backslash',
+      () => {
+        const { baseDir, hostCtxPath, ctxSha, populateRound } =
+          makeBackslashFixture();
+        try {
+          const roundDir = join(
+            baseDir,
+            'a\\b',
+            'tmp',
+            'pr123-verify-20261127-010000',
+          );
+          populateRound(roundDir);
+          const res = runCheck([
+            '--context',
+            hostCtxPath,
+            '--context-sha256',
+            ctxSha,
+            roundDir,
+          ]);
+          expect(res.stderr).not.toMatch(
+            /could not resolve artifact directory/,
+          );
+          expect(res.status).toBe(0);
+        } finally {
+          rmSync(baseDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'still refuses a --context planted inside a POSIX backslash clone root',
+      () => {
+        const { baseDir, hostCtxRaw, ctxSha, populateRound } =
+          makeBackslashFixture();
+        try {
+          const cloneWithBs = join(baseDir, 'a\\b');
+          const roundDir = join(
+            cloneWithBs,
+            'tmp',
+            'pr123-verify-20261127-010000',
+          );
+          populateRound(roundDir);
+          const inCloneCtx = join(cloneWithBs, 'planted-context.json');
+          writeFileSync(inCloneCtx, hostCtxRaw);
+          const plantedRes = runCheck([
+            '--context',
+            inCloneCtx,
+            '--context-sha256',
+            ctxSha,
+            roundDir,
+          ]);
+          expect(plantedRes.status).toBe(1);
+          expect(plantedRes.stderr).toMatch(/must not point inside/);
+        } finally {
+          rmSync(baseDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'preserves a trailing backslash on a POSIX artifact leaf directory',
+      () => {
+        const { baseDir, hostCtxPath, ctxSha, populateRound } =
+          makeBackslashFixture();
+        try {
+          const trailingBsRound = join(
+            baseDir,
+            'trail-clone',
+            'tmp',
+            'pr123-verify-20261127-010001\\',
+          );
+          populateRound(trailingBsRound);
+          const trailingRes = runCheck([
+            '--context',
+            hostCtxPath,
+            '--context-sha256',
+            ctxSha,
+            trailingBsRound,
+          ]);
+          expect(trailingRes.stderr).not.toMatch(
+            /could not resolve artifact directory/,
+          );
+          expect(trailingRes.status).toBe(0);
+        } finally {
+          rmSync(baseDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'resolves a POSIX ancestor ending with backslash and relative symlink target containing backslash',
+      () => {
+        const { baseDir, hostCtxPath, ctxSha, populateRound } =
+          makeBackslashFixture();
+        try {
+          const ancEndRound = join(
+            baseDir,
+            'anc\\',
+            'tmp',
+            'pr123-verify-20261127-010002',
+          );
+          populateRound(ancEndRound);
+          const ancEndRes = runCheck([
+            '--context',
+            hostCtxPath,
+            '--context-sha256',
+            ctxSha,
+            ancEndRound,
+          ]);
+          expect(ancEndRes.stderr).not.toMatch(
+            /could not resolve artifact directory/,
+          );
+          expect(ancEndRes.status).toBe(0);
+
+          const symClone = join(baseDir, 'sym-holder');
+          mkdirSync(symClone, { recursive: true });
+          symlinkSync('../anc\\/tmp', join(symClone, 'tmp'));
+          const symRes = runCheck([
+            '--context',
+            hostCtxPath,
+            '--context-sha256',
+            ctxSha,
+            join(symClone, 'tmp', 'pr123-verify-20261127-010002'),
+          ]);
+          expect(symRes.stderr).not.toMatch(
+            /could not resolve artifact directory/,
+          );
+          expect(symRes.status).toBe(0);
+        } finally {
+          rmSync(baseDir, { recursive: true, force: true });
+        }
+      },
+    );
   });
 });

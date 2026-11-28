@@ -75,6 +75,7 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
     private final AgentLifecycleOperations lifecycleOperations;
     private final AgentSessionAdmissions sessionAdmissions;
     private final AgentTurnExecution turnExecution;
+    private final AgentTurnHandOff turnHandOff;
     private final AgentActionParking actionParking;
     private final AgentExecutionOperations executionOperations;
 
@@ -140,6 +141,7 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
         this.lifecycleOperations = assembly.lifecycleOperations();
         this.sessionAdmissions = assembly.sessionAdmissions();
         this.turnExecution = assembly.turnExecution();
+        this.turnHandOff = assembly.turnHandOff();
         this.actionParking = assembly.actionParking();
         this.executionOperations = assembly.executionOperations();
     }
@@ -861,6 +863,15 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
             String turnId, String owner, String eventEpoch,
             long lastEventId) {
         turnExecution.recordAdmission(tenantId, sessionId, turnId, owner, eventEpoch, lastEventId);
+    }
+
+    @Override
+    @Transactional
+    public boolean recordAdmissionHandOff(String tenantId, String sessionId,
+            String turnId, String owner, String eventEpoch, long lastEventId,
+            String harnessOwner, Duration leaseDuration) {
+        return turnHandOff.recordAdmissionHandOff(tenantId, sessionId, turnId, owner,
+                eventEpoch, lastEventId, harnessOwner, leaseDuration);
     }
 
     @Transactional

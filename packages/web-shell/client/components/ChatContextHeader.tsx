@@ -11,7 +11,6 @@ import {
 import { useI18n } from '../i18n';
 import { useSharedNow } from '../hooks/useSharedNow';
 import { formatCountdown } from './dialogs/scheduledTasksSchedule';
-import { LocalControlQrButton } from './LocalControlQrButton';
 import styles from './ChatContextHeader.module.css';
 import {
   Tooltip,
@@ -70,8 +69,8 @@ interface ChatContextHeaderProps {
   scheduledTaskNextRunAt?: number | null;
   /** Opens the environment panel's scheduled-tasks section; hidden when omitted. */
   onOpenScheduledTasks?: () => void;
-  /** Shows the Local Control QR entry; hidden when omitted. */
-  onOpenLocalControlSettings?: () => void;
+  /** Renders an optional leading action button ahead of header actions. */
+  renderLeadingAction?: (actionClassName: string) => ReactNode;
 }
 
 export function ChatContextHeader({
@@ -97,7 +96,7 @@ export function ChatContextHeader({
   scheduledTaskActiveCount,
   scheduledTaskNextRunAt,
   onOpenScheduledTasks,
-  onOpenLocalControlSettings,
+  renderLeadingAction,
 }: ChatContextHeaderProps) {
   const { t } = useI18n();
   const hasActiveScheduledCountdown =
@@ -171,12 +170,7 @@ export function ChatContextHeader({
         </div>
       )}
       <div className={styles.actions}>
-        {onOpenLocalControlSettings && (
-          <LocalControlQrButton
-            onOpenSettings={onOpenLocalControlSettings}
-            className={styles.action}
-          />
-        )}
+        {renderLeadingAction?.(styles.action)}
         {environmentAvailable && (
           <button
             type="button"

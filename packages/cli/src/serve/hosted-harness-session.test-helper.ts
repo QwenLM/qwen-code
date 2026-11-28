@@ -174,6 +174,7 @@ const state = vi.hoisted(() => ({
   ownershipQuiesces: [] as Array<Record<string, unknown>>,
   ownershipReleases: [] as Array<Record<string, unknown>>,
   ownershipTransitions: [] as string[],
+  ingestRequests: [] as Array<Record<string, unknown>>,
   ownershipReleaseFault: undefined as
     | ((
         request: Record<string, unknown>,
@@ -407,6 +408,18 @@ vi.mock(
         ) => {
           state.ownershipQuiesces.push(placement);
           state.ownershipTransitions.push('quiesce');
+        },
+        ingestEvents: async (
+          request: Record<string, unknown> & { throughSequence: number },
+        ) => {
+          state.ingestRequests.push(request);
+          if (request['end'] !== undefined)
+            state.ownershipTransitions.push(`ingest:${String(request['end'])}`);
+          return {
+            cursor: request.throughSequence,
+            leaseRenewAfterMillis: 60_000,
+            terminal: false,
+          };
         },
         releaseOwnership: async (
           request: Record<string, unknown> & {
@@ -1082,6 +1095,7 @@ async function setupHostedTextSession() {
   state.ownershipQuiesces.length = 0;
   state.ownershipReleases.length = 0;
   state.ownershipTransitions.length = 0;
+  state.ingestRequests.length = 0;
   state.ownershipReleaseFault = undefined;
   state.wakeStamps.length = 0;
   state.assertWritable.mockReset();

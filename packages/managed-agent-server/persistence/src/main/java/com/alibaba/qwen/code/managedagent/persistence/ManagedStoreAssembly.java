@@ -29,6 +29,7 @@ final class ManagedStoreAssembly {
     private final AgentLifecycleOperations lifecycleOperations;
     private final AgentSessionAdmissions sessionAdmissions;
     private final AgentTurnExecution turnExecution;
+    private final AgentTurnHandOff turnHandOff;
     private final AgentActionParking actionParking;
     private final AgentExecutionOperations executionOperations;
 
@@ -71,6 +72,7 @@ final class ManagedStoreAssembly {
         this.lifecycleOperations = new AgentLifecycleOperations(eventJournal, sessionCommands, sessionPolicies, sessionQueries, storeRows, jdbc, lifecycle, objectMapper, clock, workspaces, workspaceFilesEnabled, lifecycleHandoffMillis);
         this.sessionAdmissions = new AgentSessionAdmissions(eventJournal, sessionCommands, sessionPolicies, storeRows, configRecords, jdbc, clock, approvalMode, workspaces, agentRevision, modelCatalog, definitions, creationSkills, sessionWorktrees, extensionPackages, workspaceFilesEnabled, workspaceShellEnabled, workspaceChildAgentsEnabled, managedExtensionExecutionEnabled, workspaceMounts, createdRoots, modelConfigs);
         this.turnExecution = new AgentTurnExecution(eventJournal, messageProjection, sessionCommands, storeRows, jdbc, objectMapper, clock, journalPacks);
+        this.turnHandOff = new AgentTurnHandOff(turnExecution, jdbc, clock);
         this.actionParking = new AgentActionParking(storeRows, jdbc, clock);
         this.executionOperations = new AgentExecutionOperations(eventJournal, lifecycleOperations, sessionPolicies, sessionQueries, storeRows, worktreeFiles, jdbc, clock, workspaces, workspaceFilesEnabled, journalPacks);
     }
@@ -105,6 +107,10 @@ final class ManagedStoreAssembly {
 
     AgentTurnExecution turnExecution() {
         return turnExecution;
+    }
+
+    AgentTurnHandOff turnHandOff() {
+        return turnHandOff;
     }
 
     AgentActionParking actionParking() {

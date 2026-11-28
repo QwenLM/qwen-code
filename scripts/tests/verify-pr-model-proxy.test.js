@@ -8619,6 +8619,9 @@ describe('local container recipe pins', () => {
       ['fenced unlabeled abs path no ext', '```\n/tmp/payload\n```'],
       ['fenced console extensionless path', '```console\n./payload\n```'],
       ['fenced text benign-path-name', '```text\n../escape\n```'],
+      ['bare null-builtin semicolon whoami', ':; whoami'],
+      ['inline null-builtin semicolon whoami', '`:; whoami`'],
+      ['fenced text null-builtin semicolon whoami', '```text\n:; whoami\n```'],
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(`${skill}\n${block}`),
