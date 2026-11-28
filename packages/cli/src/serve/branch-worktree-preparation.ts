@@ -28,6 +28,8 @@ import {
   assertWorktreeRootContainment,
   getWorktreeRootPrefixes,
   parseWorktreeRoot,
+  validateWorktreeRoot,
+  type ParsedWorktreeRoot,
 } from '@qwen-code/qwen-code-core/utils/worktree-root.js';
 import type { BridgeSessionExecutionSnapshot } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isWithinRoot } from '../config/path-comparison.js';
@@ -62,6 +64,9 @@ export interface BranchWorktreePreparationJournal {
   targetSessionId: string;
   slug: string;
   worktreePath: string;
+  /** Repository-relative worktree root used at preparation time. Absent on
+   * journals from older builds, which fall back to the active root. */
+  worktreeRoot?: string;
   worktreeBranch: string;
   repoTop: string;
   baseCommit: string;
@@ -216,11 +221,16 @@ export async function createBranchWorktreeJournal(args: {
   targetSessionId: string;
   slug: string;
   worktreePath: string;
+  worktreeRoot?: string;
   worktreeBranch: string;
   repoTop: string;
   baseCommit: string;
   sidecarPath: string;
 }): Promise<BranchWorktreePreparationJournal> {
+  const normalizedRoot =
+    args.worktreeRoot !== undefined
+      ? parseWorktreeRoot(args.worktreeRoot).normalized
+      : undefined;
   const journal: BranchWorktreePreparationJournal = {
     version: 1,
     ownerToken: crypto.randomUUID(),
@@ -230,6 +240,7 @@ export async function createBranchWorktreeJournal(args: {
     targetSessionId: args.targetSessionId,
     slug: args.slug,
     worktreePath: args.worktreePath,
+    ...(normalizedRoot !== undefined ? { worktreeRoot: normalizedRoot } : {}),
     worktreeBranch: args.worktreeBranch,
     repoTop: args.repoTop,
     baseCommit: args.baseCommit,
@@ -264,6 +275,7 @@ export async function updateBranchWorktreeJournal(
     onDisk.targetSessionId !== current.targetSessionId ||
     onDisk.slug !== current.slug ||
     onDisk.worktreePath !== current.worktreePath ||
+    onDisk.worktreeRoot !== current.worktreeRoot ||
     onDisk.worktreeBranch !== current.worktreeBranch ||
     onDisk.repoTop !== current.repoTop ||
     onDisk.baseCommit !== current.baseCommit ||
@@ -365,6 +377,9 @@ function isPreparationJournal(
     GitWorktreeService.validateUserWorktreeSlug(record['slug']) === null &&
     typeof record['worktreePath'] === 'string' &&
     path.isAbsolute(record['worktreePath']) &&
+    (record['worktreeRoot'] === undefined ||
+      (typeof record['worktreeRoot'] === 'string' &&
+        validateWorktreeRoot(record['worktreeRoot']) === undefined)) &&
     typeof record['worktreeBranch'] === 'string' &&
     typeof record['repoTop'] === 'string' &&
     path.isAbsolute(record['repoTop']) &&
@@ -399,21 +414,17 @@ export function recoverBranchWorktreePreparations(args: {
   const recovery = (async () => {
     const entries = await fs.readdir(chatsDir).catch(() => []);
     if (!entries.some((name) => name.startsWith('.branch-worktree-'))) return;
-    let parsedWorktreeRoot;
+    let fallbackWorktreeRoot: ParsedWorktreeRoot | undefined;
+    let fallbackRootError: string | undefined;
     try {
-      parsedWorktreeRoot = parseWorktreeRoot(args.worktreeRoot);
+      fallbackWorktreeRoot = parseWorktreeRoot(args.worktreeRoot);
     } catch (error) {
-      args.warn?.('branch worktree recovery skipped: invalid worktree.root', {
-        workspace: args.workspaceCwd,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return;
+      fallbackRootError =
+        error instanceof Error ? error.message : String(error);
     }
     const workspaceCwd = await fs.realpath(args.workspaceCwd).catch(() => null);
     const discoveredRepoTop = workspaceCwd
-      ? await new GitWorktreeService(workspaceCwd, {
-          worktreeRoot: parsedWorktreeRoot.normalized,
-        })
+      ? await new GitWorktreeService(workspaceCwd)
           .getRepoTopLevel()
           .catch(() => null)
       : null;
@@ -442,12 +453,24 @@ export function recoverBranchWorktreePreparations(args: {
         });
         continue;
       }
+      const effectiveRoot =
+        journal.worktreeRoot !== undefined
+          ? parseWorktreeRoot(journal.worktreeRoot)
+          : fallbackWorktreeRoot;
+      if (effectiveRoot === undefined) {
+        args.warn?.('branch worktree recovery skipped: invalid worktree.root', {
+          workspace: args.workspaceCwd,
+          targetSessionId: journal.targetSessionId,
+          error: fallbackRootError,
+        });
+        continue;
+      }
       const expectedJournalPath = getBranchWorktreeJournalPath(
         journal.sidecarPath,
         journal.targetSessionId,
       );
       const worktreeService = new GitWorktreeService(runtimeRepoTop, {
-        worktreeRoot: parsedWorktreeRoot.normalized,
+        worktreeRoot: effectiveRoot.normalized,
       });
       const journalRepoTop = await fs
         .realpath(journal.repoTop)
@@ -459,7 +482,7 @@ export function recoverBranchWorktreePreparations(args: {
         journalRepoTop !== runtimeRepoTop ||
         path.resolve(
           journal.repoTop,
-          ...parsedWorktreeRoot.segments,
+          ...effectiveRoot.segments,
           journal.slug,
         ) !== path.resolve(journal.worktreePath) ||
         // Detached managed worktrees record '' (no branch ref); named

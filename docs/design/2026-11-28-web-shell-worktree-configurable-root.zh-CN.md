@@ -2,7 +2,7 @@
 
 [English](2026-11-28-web-shell-worktree-configurable-root.md) | [简体中文](2026-11-28-web-shell-worktree-configurable-root.zh-CN.md)
 
-- 状态：已定稿并在分支 `feat/web-shell-worktree-p7`（基于 `origin/main` `32d857ab81`）实施中。
+- 状态：提案并实施中，分支 `feat/web-shell-worktree-p7`（基于 `origin/main` `32d857ab81`）。
 - 跟踪：[#17237](https://github.com/QwenLM/qwen-code/issues/17237)（P7），并一并覆盖 [#15292](https://github.com/QwenLM/qwen-code/issues/15292) 提出的共享配置诉求。
 - 前置设计：`2026-11-14-web-shell-codex-worktree-parity.zh-CN.md`（D2 / P7）与 `2026-11-21-web-shell-worktree-retention-restore.zh-CN.md`（P6 U4/U5）。
 - E2E 测试计划：`.qwen/e2e-tests/2026-11-28-web-shell-worktree-configurable-root.md`。
@@ -66,15 +66,15 @@ CLI 通用 worktree（`--worktree`、`enter_worktree`、`exit_worktree`、`agent
   - CLI `--worktree`、`enter_worktree`、`exit_worktree`、`agent` 与 workflow 隔离返回明确错误。
 - **符号链接 / junction 处理**：
   - 对所有根（默认与自定义），解析后的托管目录均不得落到 `canonicalRepoTop` 本身或 `canonicalGitDir` 内部；叶节点符号链接（`<root>/<slug> -> outside`）始终由 realpath 包含性拒绝。
-  - 对自定义根（`!isDefault`），`assertWorktreeRootContainment` 额外要求解析后的托管目录及仓库内每个已存在中间目录都严格位于 `canonicalRepoTop` 内部，拒绝任何指向仓库外的 symlink 或 Windows junction。
+  - 对自定义根（`!isDefault`），`assertWorktreeRootContainment` 要求 `repoTop` 下沿 `worktree.root` 的每个已存在前缀目录都必须是真实目录（拒绝任何 symlink 与 Windows junction，包括指向仓库内部的符号链接），且解析后的托管目录严格位于 `canonicalRepoTop` 内部，使创建、`changeSessionCwd` 重定位包含性、`isBranchWorktreeCreationSupported`、`removePreparedUserWorktree` 与 `.git/info/exclude` 保持完全一致。
   - 保留运维人员将默认 `.qwen/worktrees` 符号链接到外部目录的既有测试契约；`isBranchWorktreeCreationSupported` 继续通过 `lstat().isDirectory()` 逐段检查自定义根的每一级前缀并拒绝符号链接；`removePreparedUserWorktree` 继续要求严格的规范路径恒等 `<canonicalRepo>/<root>/<slug>`。
 
 ### 4. Git ignore、`symlinkDirectories`、产物路径与 daemon shell 守卫
 
-- **`.git/info/exclude`**：`ensureWorktreesExcludeRule()` 针对配置后的 `worktree.root` 生成锚定规则并执行 `check-ignore -v` 探针。仅当 `isDefault === true` 时才执行旧版 `.qwen/.gitignore` 迁移，避免切换 `worktree.root` 后误删仍在保护旧 `.qwen/worktrees/` 的 `.qwen/.gitignore`。
+- **`.git/info/exclude`**：默认 `.qwen/worktrees` 维持写入 `/.qwen/worktrees/` 并执行旧版 `.qwen/.gitignore` 迁移；任意自定义 `worktree.root` 按单检出粒度写入 `/<root>/<slug>/` 并在删除检出时精确移除对应行，避免将 `worktree.root` 指向已有文件的目录时误隐藏用户的非 worktree 文件，且不触碰既有 `.qwen/.gitignore`。
 - **`worktree.symlinkDirectories`**：除 `.git` 和 `.qwen` 外，同时拒绝（词法与 realpath 两个维度）位于自定义 `worktree.root` 内部或是其祖先目录的任何配置项（例如 `worktree.root: "tmp/wts"` 时拒绝 `symlinkDirectories: ["tmp"]`），防止递归嵌套循环。
-- **嵌套 worktree 守卫**：`worktreeStartup.ts`、`enter-worktree.ts`、`agent.ts`、`workflow-orchestrator.ts` 在 cwd 位于当前 `worktree.root` 或默认 `.qwen/worktrees` 内时均拒绝嵌套创建。
-- **工作区产物与 `--resume` 匹配**：`resolveBoundWorkspaceRoot`、`toCanonicalWorkspaceArtifactPath`、`stripWorktreeArtifactPrefix`、`pathHasSkippedDirectoryComponent` 与 `SessionService.matchesProject` 接收 `worktreeRoot`，使以点开头的自定义根（如 `.worktrees`）不会触发产物目录跳过规则，且 `--resume` 能正确命中仓库哈希。
+- **嵌套 worktree 守卫**：`worktreeStartup.ts`、`enter-worktree.ts`、`agent.ts`、`workflow-orchestrator.ts` 通过结构化 Git 检测（`GitWorktreeService.isLinkedWorktree()`，可捕获切换 `worktree.root` 前的旧根检出）结合锚定于 `repoTop` 的 `isPathInsideWorktreeRoot(cwd, worktreeRoot, repoTop)` 及保留的默认 `.qwen/worktrees` 路径进行拦截，不会因仓库本身位于同名父目录（如 `/tmp/qwen-code` 配 `worktree.root: "tmp"`）而误报。
+- **工作区产物与 `--resume` 匹配**：`resolveBoundWorkspaceRoot`、`toCanonicalWorkspaceArtifactPath`、`stripWorktreeArtifactPrefix`、`pathHasSkippedDirectoryComponent` 与 `SessionServiceOptions.worktreeRoot`（由 `sessionBelongsToCurrentProject` 消费）均接收配置的 `worktreeRoot`，使以点开头的自定义根（如 `.worktrees`）不会触发产物目录跳过规则，位于 `<parent>/<root>/<repo>` 的普通仓库不会误扩工作区根，且 `--resume` 与 daemon 会话目录均可正确命中自定义根会话。
 - **Daemon git worktree 守卫（`daemon-git-worktree-guard.ts`）**：由于自定义 `worktree.root` 严格受限于 `canonicalRepoTop` 内，隔离 sub-agent 上报的 `canonicalReported` 仍在 `sessionCwd` 内部，`resolveDiscoveredRepository(canonicalReported, sessionCwd) === canonicalReported` 会自动将 sub-agent 边界锁定到其自身 worktree，无需硬编码路径。新增回归测试显式覆盖自定义根下的 sub-agent 边界隔离。
 
 ### 5. Daemon 路由归属分类

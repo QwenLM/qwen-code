@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Application, RequestHandler, Response } from 'express';
+import { GitWorktreeService } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { getGitWorkingTreeStatus } from '@qwen-code/qwen-code-core/utils/gitDiff.js';
 import {
   commitIsReachable,
@@ -1072,11 +1073,31 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
         // the workspace can be replaced in that time. Answering then would
         // report a deletion to a connection that no longer owns the
         // repository it happened in.
+        const remains = somethingRemainsAt(entry.path);
+        if (!remains) {
+          const parsedWorktreeRoot = tryReadRuntimeWorktreeRoot(runtime);
+          if (parsedWorktreeRoot && !parsedWorktreeRoot.isDefault) {
+            try {
+              const managedDir = resolveContainedWorktreeRoot(
+                runtime.workspaceCwd,
+                parsedWorktreeRoot,
+              );
+              const removedSlug = managedSlug(entry, managedDir);
+              if (removedSlug) {
+                await new GitWorktreeService(runtime.workspaceCwd, {
+                  worktreeRoot: parsedWorktreeRoot.normalized,
+                }).removeCustomWorktreeExcludeRule(removedSlug);
+              }
+            } catch {
+              // Best-effort cleanup of the per-checkout exclude entry.
+            }
+          }
+        }
         runtime.generationGuard?.assertOpen();
         res.status(200).json({
           removed: true,
           path: entry.path,
-          ...(somethingRemainsAt(entry.path) ? { directoryRemains: true } : {}),
+          ...(remains ? { directoryRemains: true } : {}),
         });
       } catch (err) {
         failWithGitError(err);

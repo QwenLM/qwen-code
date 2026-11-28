@@ -1225,7 +1225,11 @@ export class SessionService {
       this.worktreeRoot !== undefined &&
       validateWorktreeRoot(this.worktreeRoot) === undefined
     ) {
-      const extracted = extractWorktreeFromPath(recordCwd, this.worktreeRoot);
+      const extracted = extractWorktreeFromPath(
+        recordCwd,
+        this.worktreeRoot,
+        this.projectRoot,
+      );
       if (
         extracted &&
         getProjectHash(extracted.repoRoot) === this.projectHash

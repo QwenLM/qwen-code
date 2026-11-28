@@ -147,8 +147,9 @@ say explicitly what each one should read and whether it may edit files.
   rejects the call. Use `'low'` for cheap mechanical stages and the higher tiers
   only for the hardest verify or judge stages. A different effort is a
   different resume cache key.
-- `isolation` — `'worktree'` provisions a fresh git worktree under
-  `<projectRoot>/.qwen/worktrees/agent-<7hex>`; the worktree is auto-removed if
+- `isolation` — `'worktree'` provisions a fresh git worktree under the
+  configured `worktree.root` directory (default
+  `<projectRoot>/.qwen/worktrees/agent-<7hex>`); the worktree is auto-removed if
   no changes, otherwise the path and branch are returned alongside the result.
   `'remote'` makes the admitted agent() resolve to null and records
   "agent({isolation:'remote'}) is not available in this build". A `'worktree'`

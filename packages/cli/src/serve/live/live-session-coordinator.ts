@@ -9,7 +9,6 @@ import { createWriteStream, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   escapeXml,
-  SessionService,
   stripTerminalControlSequences,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -44,6 +43,7 @@ import type {
   LiveSessionLocator,
 } from './types.js';
 import { buildRealtimeStartupContext } from './realtime-startup-context.js';
+import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import type { LiveProviderCredential } from './provider-credentials.js';
 import {
   isCompatibleLiveSessionSource,
@@ -769,7 +769,7 @@ export class LiveSessionCoordinator {
   private async findRecentCompatibleSession(
     runtime: WorkspaceRuntime,
   ): Promise<SessionListItem | undefined> {
-    const service = new SessionService(runtime.workspaceCwd);
+    const service = createWorkspaceRuntimeSessionService(runtime);
     let cursor: number | string | undefined;
     const seenCursors = new Set<number | string>();
     while (true) {
@@ -1769,8 +1769,8 @@ export class LiveSessionCoordinator {
     if (!sessionClosed) return;
     if (removeFreshTranscript) {
       try {
-        const transcriptRemoved = await new SessionService(
-          runtime.workspaceCwd,
+        const transcriptRemoved = await createWorkspaceRuntimeSessionService(
+          runtime,
         ).removeSession(session.sessionId);
         if (transcriptRemoved) bridge.markSessionCatalogChanged();
       } catch {
@@ -2037,9 +2037,10 @@ export class LiveSessionCoordinator {
     }
     context.pendingWorkerIds.add(sessionId);
     try {
-      const parentSessionId = await new SessionService(
-        runtime.workspaceCwd,
-      ).readParentSessionId(sessionId);
+      const parentSessionId =
+        await createWorkspaceRuntimeSessionService(runtime).readParentSessionId(
+          sessionId,
+        );
       if (
         !this.isActive(context) ||
         context.coordinator?.sessionId !== coordinatorId ||

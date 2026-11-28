@@ -1778,10 +1778,7 @@ async function provisionWorkflowWorktree(
 ): Promise<WorkflowWorktreeIsolation> {
   const cwd = config.getTargetDir();
   const worktreeRoot = parseWorktreeRoot(config.getWorktreeRoot?.()).normalized;
-  if (
-    isPathInsideWorktreeRoot(cwd, worktreeRoot) ||
-    isPathInsideWorktreeRoot(cwd, DEFAULT_WORKTREE_ROOT)
-  ) {
+  if (isPathInsideWorktreeRoot(cwd, DEFAULT_WORKTREE_ROOT)) {
     throw new Error(
       `agent({isolation:'worktree'}): parent is already inside a worktree ` +
         `(${cwd}). Nested isolation worktrees are not supported — the ` +
@@ -1801,6 +1798,16 @@ async function provisionWorkflowWorktree(
     );
   }
   const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
+  if (
+    (await probe.isLinkedWorktree()) ||
+    isPathInsideWorktreeRoot(cwd, worktreeRoot, projectRoot)
+  ) {
+    throw new Error(
+      `agent({isolation:'worktree'}): parent is already inside a worktree ` +
+        `(${cwd}). Nested isolation worktrees are not supported — the ` +
+        `subagent's inherited paths would still reference the outer worktree.`,
+    );
+  }
   const wtService =
     projectRoot === cwd
       ? probe

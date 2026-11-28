@@ -897,4 +897,69 @@ describe('RecordArtifactTool', () => {
 
     expectBuildThrows({ title: 'Bad\nTitle', url: RES }, /control characters/);
   });
+
+  it('threads custom worktree.root for linked worktrees without widening standalone repos (R1-6/R1-16)', async () => {
+    const base = await realpath(
+      await mkdtemp(path.join(os.tmpdir(), 'qwen-rec-custom-wt-')),
+    );
+    try {
+      // Case 1: standalone repo at `<base>/worktrees/my-repo` with
+      // `worktree.root: "worktrees"` must NOT widen its bound root to `<base>`.
+      const standalone = path.join(base, 'worktrees', 'my-repo');
+      await mkdir(path.join(standalone, '.git'), { recursive: true });
+      await writeFile(path.join(standalone, 'report.md'), '# report\n');
+      await writeFile(path.join(base, 'sibling-secret.md'), 'secret\n');
+
+      const standaloneTool = new RecordArtifactTool(
+        makeFakeConfig({
+          targetDir: standalone,
+          cwd: standalone,
+          worktree: { root: 'worktrees' },
+        }),
+      );
+      const insideRes = await run(
+        { title: 'Standalone report', workspacePath: 'report.md' },
+        standaloneTool,
+      );
+      expect(insideRes.error).toBeUndefined();
+      expect(insideRes.artifacts?.[0]?.workspacePath).toBe('report.md');
+
+      expect(() =>
+        standaloneTool.build({
+          title: 'Parent escape',
+          workspacePath: path.join(base, 'sibling-secret.md'),
+        }),
+      ).toThrow();
+
+      // Case 2: real linked worktree under `<repo>/.worktrees/my-slug` strips
+      // to `<repo>` and allows recording files despite the dot-prefixed root.
+      const repo = path.join(base, 'repo');
+      const wt = path.join(repo, '.worktrees', 'my-slug');
+      await mkdir(path.join(repo, '.git'), { recursive: true });
+      await mkdir(wt, { recursive: true });
+      await writeFile(
+        path.join(wt, '.git'),
+        `gitdir: ${path.join(repo, '.git', 'worktrees', 'my-slug')}\n`,
+      );
+      await writeFile(path.join(wt, 'report.md'), '# wt report\n');
+
+      const wtTool = new RecordArtifactTool(
+        makeFakeConfig({
+          targetDir: wt,
+          cwd: wt,
+          worktree: { root: '.worktrees' },
+        }),
+      );
+      const wtRes = await run(
+        { title: 'Worktree report', workspacePath: 'report.md' },
+        wtTool,
+      );
+      expect(wtRes.error).toBeUndefined();
+      expect(wtRes.artifacts?.[0]?.workspacePath).toBe(
+        '.worktrees/my-slug/report.md',
+      );
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
 });

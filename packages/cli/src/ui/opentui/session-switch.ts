@@ -141,7 +141,9 @@ export async function handleResumeSession(
   try {
     oldWorkflowMode = await config.captureWorkflowModeState?.();
     const cwd = config.getTargetDir();
-    const sessionService = new SessionService(cwd);
+    const sessionService = new SessionService(cwd, {
+      worktreeRoot: config.getWorktreeRoot?.(),
+    });
     sessionService.assertLegacySessionExecution(sessionId);
     const sessionData = await sessionService.loadSession(sessionId);
     if (!sessionData) {

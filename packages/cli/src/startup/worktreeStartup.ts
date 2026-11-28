@@ -178,13 +178,7 @@ export async function setupStartupWorktree(
     };
   }
 
-  // Refuse nested creation: launching with --worktree from inside an existing
-  // worktree creates `<otherRepo>/<worktree.root>/<slug>/`, which is rarely
-  // what the user wants and corrupts ownership tracking.
-  if (
-    isPathInsideWorktreeRoot(launchCwd, worktreeRoot) ||
-    isPathInsideWorktreeRoot(launchCwd, DEFAULT_WORKTREE_ROOT)
-  ) {
+  if (isPathInsideWorktreeRoot(launchCwd, DEFAULT_WORKTREE_ROOT)) {
     return {
       ok: false,
       error: `--worktree: cannot start a new worktree from inside another worktree (cwd: ${launchCwd}). Run from the main checkout.`,
@@ -206,6 +200,15 @@ export async function setupStartupWorktree(
   // before storing or comparing so the sidecar's `originalCwd` and
   // downstream `startsWith` checks don't mix `/` and `\` on Windows.
   const repoRoot = path.resolve(rawRepoRoot);
+  if (
+    (await probe.isLinkedWorktree()) ||
+    isPathInsideWorktreeRoot(launchCwd, worktreeRoot, repoRoot)
+  ) {
+    return {
+      ok: false,
+      error: `--worktree: cannot start a new worktree from inside another worktree (cwd: ${launchCwd}). Run from the main checkout.`,
+    };
+  }
   const service =
     repoRoot === launchCwd
       ? probe

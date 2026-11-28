@@ -852,10 +852,13 @@ export async function assertSessionLoadable(
   workspaceCwd: string,
   sessionId: string,
   runtimeBaseDir?: string,
-  options: { allowActiveConflict?: boolean } = {},
+  options: { allowActiveConflict?: boolean; worktreeRoot?: string } = {},
 ): Promise<SessionLocation> {
   const service = new SessionService(workspaceCwd, {
     runtimeBaseDir,
+    ...(options.worktreeRoot !== undefined
+      ? { worktreeRoot: options.worktreeRoot }
+      : {}),
   });
   const location = await service.getSessionLocation(sessionId);
   if (location === 'archived') {
@@ -901,9 +904,11 @@ export async function assertSessionRestorable(
   sessionId: string,
   requestedSessionId: string,
   runtimeBaseDir?: string,
+  worktreeRoot?: string,
 ): Promise<SessionLocation> {
   const location = await new SessionService(workspaceCwd, {
     runtimeBaseDir,
+    ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
   }).getSessionLocation(sessionId);
   if (location === 'archived') {
     throw new SessionArchivedError(sessionId);
@@ -921,9 +926,11 @@ export async function assertSessionArchived(
   workspaceCwd: string,
   sessionId: string,
   runtimeBaseDir?: string,
+  worktreeRoot?: string,
 ): Promise<void> {
   const location = await new SessionService(workspaceCwd, {
     runtimeBaseDir,
+    ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
   }).getSessionLocation(sessionId);
   if (location === 'active') {
     throw new SessionNotArchivedError(sessionId);

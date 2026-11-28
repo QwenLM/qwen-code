@@ -1270,7 +1270,10 @@ export function registerSessionRoutes(
           runtime.workspaceCwd,
           sessionId,
           runtime.sessionRuntimeBaseDir,
-          { allowActiveConflict: true },
+          {
+            allowActiveConflict: true,
+            worktreeRoot: resolveRuntimeWorktreeRootSetting(runtime),
+          },
         );
         signal?.throwIfAborted();
       }
@@ -1996,18 +1999,20 @@ export function registerSessionRoutes(
             captureRuntimeGenerationAssertion(runtime);
           assertRuntimeGenerationOpen?.();
           return runWithWorkspaceRuntimeStorage(runtime, async () => {
+            const worktreeRoot = resolveRuntimeWorktreeRootSetting(runtime);
             if (target.archiveState === 'archived') {
               await assertSessionArchived(
                 runtime.workspaceCwd,
                 sessionId,
                 runtime.sessionRuntimeBaseDir,
+                worktreeRoot,
               );
             } else {
               await assertSessionLoadable(
                 runtime.workspaceCwd,
                 sessionId,
                 runtime.sessionRuntimeBaseDir,
-                { allowActiveConflict: true },
+                { allowActiveConflict: true, worktreeRoot },
               );
             }
             assertRuntimeGenerationOpen?.();
@@ -2017,6 +2022,7 @@ export function registerSessionRoutes(
               format,
               archiveState: target.archiveState,
               config: { getChannel: () => deps.exportChannel ?? 'daemon' },
+              worktreeRoot,
             });
           });
         })(),
@@ -2492,7 +2498,10 @@ export function registerSessionRoutes(
         runtime.workspaceCwd,
         sessionId,
         runtime.sessionRuntimeBaseDir,
-        { allowActiveConflict },
+        {
+          allowActiveConflict,
+          worktreeRoot: resolveRuntimeWorktreeRootSetting(runtime),
+        },
       );
       if (location !== 'active') return false;
       if (!isInternalWorkspaceRuntime(runtime)) return true;
@@ -4040,7 +4049,9 @@ export function registerSessionRoutes(
             if (removed) {
               // Clean up the worktree if one was created for this session.
               if (worktreeMeta) {
-                await new GitWorktreeService(workspaceCwd)
+                await new GitWorktreeService(workspaceCwd, {
+                  worktreeRoot: worktreeRootParsed?.normalized,
+                })
                   .removeUserWorktree(worktreeMeta.slug, {
                     deleteBranch: true,
                     baseCommit: worktreeBaseCommit,
@@ -4105,8 +4116,17 @@ export function registerSessionRoutes(
         try {
           const parsedRoot =
             worktreeRootParsed ?? readRuntimeWorktreeRoot(runtime);
+          const canonicalizeAllowedRoot = (candidate: string): string => {
+            try {
+              return fs.realpathSync(candidate);
+            } catch {
+              return path.resolve(candidate);
+            }
+          };
           const createAllowedRoots = [
-            path.join(workspaceCwd, ...parsedRoot.segments),
+            canonicalizeAllowedRoot(
+              path.join(workspaceCwd, ...parsedRoot.segments),
+            ),
           ];
           let createRepoTop: string | null = null;
           try {
@@ -4118,7 +4138,9 @@ export function registerSessionRoutes(
           }
           if (createRepoTop && createRepoTop !== workspaceCwd) {
             createAllowedRoots.push(
-              path.join(createRepoTop, ...parsedRoot.segments),
+              canonicalizeAllowedRoot(
+                path.join(createRepoTop, ...parsedRoot.segments),
+              ),
             );
           }
           const expectedWorktreePath = fs.realpathSync(worktreeMeta.path);
@@ -4644,17 +4666,18 @@ export function registerSessionRoutes(
     if (!workspaceRoots.includes(realOriginalCwd)) {
       throw invalidState('sidecar original cwd is outside the accepted roots');
     }
-    let parsedWorktreeRoot: ParsedWorktreeRoot;
-    try {
-      parsedWorktreeRoot = readRuntimeWorktreeRoot(runtime);
-    } catch (error) {
-      throw invalidState(
-        error instanceof Error ? error.message : 'invalid worktree.root',
-      );
-    }
-    const candidateRoots = workspaceRoots.map((root) =>
-      path.join(root, ...parsedWorktreeRoot.segments),
-    );
+    // Let InvalidWorktreeRootError propagate so sendBridgeError maps it to
+    // HTTP 400 `invalid_worktree_root` instead of misblaming the sidecar with
+    // 409 `worktree_reset_invalid_state`.
+    const parsedWorktreeRoot = readRuntimeWorktreeRoot(runtime);
+    const candidateRoots = workspaceRoots.map((root) => {
+      const candidate = path.join(root, ...parsedWorktreeRoot.segments);
+      try {
+        return fs.realpathSync(candidate);
+      } catch {
+        return path.resolve(candidate);
+      }
+    });
     // Also the ownership lock key, so it must keep the rule stated in
     // `server/worktree-ownership-op.ts`.
     let realTarget: string;
@@ -4720,6 +4743,10 @@ export function registerSessionRoutes(
     try {
       await runOwnerRuntimeActivity(runtime, () =>
         archiveCoordinator.runSharedMany([sessionId], async () => {
+          // Validate worktree.root before session lookup so a corrupt setting
+          // fails closed with 400 `invalid_worktree_root` instead of hiding a
+          // custom-root session behind 404 `session_not_found`.
+          readRuntimeWorktreeRoot(runtime);
           const sessionService = createWorkspaceRuntimeSessionService(runtime);
           // The session record must exist (this resolver also normalizes
           // legacy case-variant spellings to the stored id).
@@ -5550,6 +5577,7 @@ export function registerSessionRoutes(
     try {
       await runOwnerRuntimeActivity(runtime, () =>
         archiveCoordinator.runSharedMany([sessionId], async () => {
+          readRuntimeWorktreeRoot(runtime);
           const sessionService = createWorkspaceRuntimeSessionService(runtime);
           let storageSessionId = await resolveSessionIdForRestore(
             sessionService,
@@ -5744,6 +5772,7 @@ export function registerSessionRoutes(
     try {
       await runOwnerRuntimeActivity(runtime, () =>
         archiveCoordinator.runSharedMany([sessionId], async () => {
+          readRuntimeWorktreeRoot(runtime);
           const sessionService = createWorkspaceRuntimeSessionService(runtime);
           let storageSessionId = await resolveSessionIdForRestore(
             sessionService,
@@ -5934,8 +5963,22 @@ export function registerSessionRoutes(
                 });
                 return;
               }
+              let localHandoffRoot: ParsedWorktreeRoot;
+              try {
+                localHandoffRoot = readRuntimeWorktreeRoot(runtime);
+              } catch (error) {
+                res.status(400).json({
+                  error:
+                    error instanceof Error
+                      ? error.message
+                      : 'Invalid worktree.root setting',
+                  code: 'invalid_worktree_root',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
               const wtService = new GitWorktreeService(workspaceCwd, {
-                worktreeRoot: readRuntimeWorktreeRoot(runtime).normalized,
+                worktreeRoot: localHandoffRoot.normalized,
               });
               const wtCheckoutService = new GitWorktreeService(realTarget);
               // gateBase describes originalCwd's checkout (the local HEAD
@@ -7095,6 +7138,7 @@ export function registerSessionRoutes(
                   targetSessionId,
                   slug,
                   worktreePath,
+                  worktreeRoot: branchWorktreeRoot.normalized,
                   // Detached managed worktree: no branch ref exists.
                   worktreeBranch: '',
                   repoTop: base.repoTop,
@@ -7267,11 +7311,23 @@ export function registerSessionRoutes(
                     : {}),
                 };
                 runtime.generationGuard?.assertOpen();
+                const branchAllowedRoot = path.join(
+                  base.repoTop,
+                  ...branchWorktreeRoot.segments,
+                );
                 const changed = await runtime.bridge.changeSessionCwd(
                   targetSessionId,
                   {
                     path: worktree.path,
-                    allowedRoots: [worktreeService.getUserWorktreesDir()],
+                    allowedRoots: [
+                      (() => {
+                        try {
+                          return fs.realpathSync(branchAllowedRoot);
+                        } catch {
+                          return path.resolve(branchAllowedRoot);
+                        }
+                      })(),
+                    ],
                   },
                 );
                 runtime.generationGuard?.assertOpen();
@@ -8262,6 +8318,7 @@ export function registerSessionRoutes(
                 runtime.sessionRuntimeBaseDir,
                 {
                   allowActiveConflict: true,
+                  worktreeRoot: resolveRuntimeWorktreeRootSetting(runtime),
                 },
               );
               signal.throwIfAborted();
@@ -8431,7 +8488,10 @@ export function registerSessionRoutes(
                     runtime.workspaceCwd,
                     sessionId,
                     runtime.sessionRuntimeBaseDir,
-                    { allowActiveConflict: true },
+                    {
+                      allowActiveConflict: true,
+                      worktreeRoot: resolveRuntimeWorktreeRootSetting(runtime),
+                    },
                   );
                   signal.throwIfAborted();
                   try {
@@ -8683,7 +8743,10 @@ export function registerSessionRoutes(
                   runtime.workspaceCwd,
                   sessionId,
                   runtime.sessionRuntimeBaseDir,
-                  { allowActiveConflict: true },
+                  {
+                    allowActiveConflict: true,
+                    worktreeRoot: resolveRuntimeWorktreeRootSetting(runtime),
+                  },
                 );
                 signal.throwIfAborted();
               }
@@ -13218,6 +13281,7 @@ export function registerSessionRoutes(
         const info = await runWorkspaceInspectionWithLogPolicy(runtime, () =>
           getWorkspaceSessionInfoForResponse(runtime.bridge, key, {
             includeLive: !isReadOnlyWorkspaceInspection(runtime),
+            worktreeRoot: resolveRuntimeWorktreeRootSetting(runtime),
           }),
         );
         res.status(200).json(info);

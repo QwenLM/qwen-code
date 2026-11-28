@@ -182,6 +182,15 @@ function makeFixture(worktreeSettings?: Record<string, unknown>) {
         PATH: process.env['PATH'],
         HOME: home,
         USERPROFILE: home,
+        QWEN_HOME: path.join(home, '.qwen'),
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(
+          dir,
+          'missing-system-settings.json',
+        ),
+        QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(
+          dir,
+          'missing-system-defaults.json',
+        ),
         GIT_CONFIG_GLOBAL: '/dev/null',
         GIT_CONFIG_SYSTEM: '/dev/null',
       },
@@ -309,5 +318,52 @@ describe('HTTP routes with custom worktree.root', () => {
     expect(created.status).toBe(400);
     expect(created.body.code).toBe('invalid_worktree_root');
     expect(readdirSync(outside)).toEqual([]);
+  });
+
+  it('rejects POST /session with 400 invalid_worktree_root when custom worktree.root traverses an in-repo symlink (R1-3)', async () => {
+    const fixture = makeFixture({ root: 'build/wts' });
+    const realBuild = path.join(fixture.repoRoot, 'real-build');
+    mkdirSync(realBuild, { recursive: true });
+    symlinkSync(realBuild, path.join(fixture.repoRoot, 'build'));
+
+    const created = await request(fixture.app)
+      .post('/session')
+      .send({ worktree: { slug: 'sym-prefix' } });
+    expect(created.status).toBe(400);
+    expect(created.body.code).toBe('invalid_worktree_root');
+    expect(readdirSync(realBuild)).toEqual([]);
+  });
+
+  it('returns 400 invalid_worktree_root on worktree-reset and handoff to local when worktree.root becomes invalid (R1-12/R1-14)', async () => {
+    const fixture = makeFixture({ root: '.worktrees' });
+    const created = await request(fixture.app)
+      .post('/session')
+      .send({ worktree: { slug: 'corrupt-later' } });
+    expect(created.status).toBe(200);
+    const sessionId = created.body.sessionId as string;
+
+    // Hand-edit workspace settings to an invalid worktree.root after creation.
+    writeFileSync(
+      path.join(fixture.repoRoot, '.qwen', 'settings.json'),
+      JSON.stringify({ worktree: { root: '../escape' } }),
+    );
+
+    const resetRes = await request(fixture.app)
+      .post(`/session/${sessionId}/worktree-reset`)
+      .send({});
+    expect(resetRes.status).toBe(400);
+    expect(resetRes.body.code).toBe('invalid_worktree_root');
+
+    const branchRes = await request(fixture.app)
+      .post(`/session/${sessionId}/worktree-branch`)
+      .send({ name: 'feat/new-branch' });
+    expect(branchRes.status).toBe(400);
+    expect(branchRes.body.code).toBe('invalid_worktree_root');
+
+    const handoffLocalRes = await request(fixture.app)
+      .post(`/session/${sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+    expect(handoffLocalRes.status).toBe(400);
+    expect(handoffLocalRes.body.code).toBe('invalid_worktree_root');
   });
 });

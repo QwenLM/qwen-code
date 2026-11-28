@@ -36,6 +36,7 @@ import {
   runWithWorkspaceRuntimeStorage,
 } from '../workspace-runtime-storage.js';
 import { listWorkspaceSessionsForResponse } from '../server/session-list.js';
+import { resolveRuntimeWorktreeRootSetting } from '../server/worktree-root.js';
 import { laterActivityTimestamp } from '../server/activity-timestamp.js';
 import {
   isCompatibleLiveSessionSource,
@@ -598,6 +599,7 @@ export class LiveTaskService {
               },
               {
                 runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+                worktreeRoot: resolveRuntimeWorktreeRootSetting(runtime),
                 ...(runtime.trusted === false
                   ? { allowSidecarWrite: false }
                   : {}),
@@ -1274,6 +1276,7 @@ export class LiveTaskService {
           },
           {
             runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+            worktreeRoot: resolveRuntimeWorktreeRootSetting(runtime),
             ...(runtime.trusted === false ? { allowSidecarWrite: false } : {}),
           },
         );

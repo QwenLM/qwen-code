@@ -1065,7 +1065,11 @@ export async function main() {
       const { showResumeSessionPicker } = await import(
         './ui/components/StandaloneSessionPicker.js'
       );
-      resolvedSessionId = await showResumeSessionPicker();
+      resolvedSessionId = await showResumeSessionPicker(
+        process.cwd(),
+        undefined,
+        settings.merged.worktree?.root,
+      );
     } else if (!cliConfig.isValidSessionId(argv.resume)) {
       // Non-UUID argument — treat as custom title search
       const sessionService = new SessionService(process.cwd(), {
@@ -1085,6 +1089,7 @@ export async function main() {
         resolvedSessionId = await showResumeSessionPicker(
           process.cwd(),
           matches,
+          settings.merged.worktree?.root,
         );
       }
       // matches.length === 0 → resolvedSessionId stays undefined, handled below

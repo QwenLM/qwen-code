@@ -6617,7 +6617,9 @@ class QwenAgent implements Agent {
       );
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
-          const sessionService = new SessionService(params.cwd);
+          const sessionService = new SessionService(params.cwd, {
+            worktreeRoot: settings.merged.worktree?.root,
+          });
           return resolvePersistedSessionIdForRestore(sessionService, sessionId);
         }),
       );
@@ -7076,7 +7078,9 @@ class QwenAgent implements Agent {
       );
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
-          const sessionService = new SessionService(params.cwd);
+          const sessionService = new SessionService(params.cwd, {
+            worktreeRoot: settings.merged.worktree?.root,
+          });
           return resolvePersistedSessionIdForRestore(sessionService, sessionId);
         }),
       );
@@ -7230,7 +7234,7 @@ class QwenAgent implements Agent {
         sessionPath,
         (error) => debugLogger.warn(`ACP worktree restore warning: ${error}`),
         config.getSessionId(),
-        config.getWorktreeRoot(),
+        config.getWorktreeRoot?.(),
       );
       if (restored.contextMessage) {
         session.pendingWorktreeNotice = restored.contextMessage;
@@ -7265,17 +7269,22 @@ class QwenAgent implements Agent {
     // a multi-workspace daemon it may hold another workspace's
     // advanced.runtimeOutputDir and this listing would scan the wrong runtime
     // root (returning an empty/foreign list for this cwd).
-    const result = await this.runWithPinnedRuntimeBaseDirForRequest(cwd, () => {
-      const sessionService = new SessionService(cwd);
-      return sessionService.listSessions({
-        cursor: numericCursor,
-        size,
-        excludeSourceTypes: [
-          AGENT_HOST_SESSION_SOURCE_TYPE,
-          AGENT_SESSION_SOURCE_TYPE,
-        ],
-      });
-    });
+    const result = await this.runWithPinnedRuntimeBaseDirForRequest(
+      cwd,
+      (requestSettings) => {
+        const sessionService = new SessionService(cwd, {
+          worktreeRoot: requestSettings.merged.worktree?.root,
+        });
+        return sessionService.listSessions({
+          cursor: numericCursor,
+          size,
+          excludeSourceTypes: [
+            AGENT_HOST_SESSION_SOURCE_TYPE,
+            AGENT_SESSION_SOURCE_TYPE,
+          ],
+        });
+      },
+    );
 
     const sessions: SessionInfo[] = result.items.map((item) => ({
       _meta: {
@@ -15460,8 +15469,10 @@ class QwenAgent implements Agent {
         // same-id copy under the wrong root.
         const success = await this.runWithPinnedRuntimeBaseDirForRequest(
           cwd,
-          async () => {
-            const sessionService = new SessionService(cwd);
+          async (requestSettings) => {
+            const sessionService = new SessionService(cwd, {
+              worktreeRoot: requestSettings.merged.worktree?.root,
+            });
             return sessionService.removeSession(sessionId);
           },
         );
@@ -15510,8 +15521,10 @@ class QwenAgent implements Agent {
         // Per-request settings for the same reason as deleteSession above.
         const success = await this.runWithPinnedRuntimeBaseDirForRequest(
           cwd,
-          async () => {
-            const sessionService = new SessionService(cwd);
+          async (requestSettings) => {
+            const sessionService = new SessionService(cwd, {
+              worktreeRoot: requestSettings.merged.worktree?.root,
+            });
             return sessionService.renameSession(sessionId, title);
           },
         );
@@ -15803,8 +15816,10 @@ class QwenAgent implements Agent {
         } else {
           sessionData = await this.runWithPinnedRuntimeBaseDirForRequest(
             cwd,
-            async () => {
-              const sessionService = new SessionService(cwd);
+            async (requestSettings) => {
+              const sessionService = new SessionService(cwd, {
+                worktreeRoot: requestSettings.merged.worktree?.root,
+              });
               return sessionService.loadSession(sessionId);
             },
           );
@@ -17584,6 +17599,7 @@ class QwenAgent implements Agent {
                     projectionSource: (restoreSessionId) =>
                       new SessionService(cwd, {
                         runtimeBaseDir: Storage.getRuntimeBaseDir(),
+                        worktreeRoot: settings.merged.worktree?.root,
                       }).readRestoreProjection(
                         restoreSessionId,
                         restoreOptions,

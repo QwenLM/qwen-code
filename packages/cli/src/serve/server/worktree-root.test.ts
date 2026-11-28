@@ -45,7 +45,20 @@ describe('serve worktree-root settings reader and containment', () => {
       root,
       home,
       repo,
-      env: { ...process.env, HOME: home, USERPROFILE: home },
+      env: {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        QWEN_HOME: path.join(home, '.qwen'),
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(
+          root,
+          'missing-system-settings.json',
+        ),
+        QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(
+          root,
+          'missing-system-defaults.json',
+        ),
+      },
     };
   }
 

@@ -110,8 +110,11 @@ function clearScreen(): void {
 export async function showResumeSessionPicker(
   cwd: string = process.cwd(),
   initialSessions?: SessionListItem[],
+  worktreeRoot?: string,
 ): Promise<string | undefined> {
-  const sessionService = new SessionService(cwd);
+  const sessionService = new SessionService(cwd, {
+    ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
+  });
   const hasSession = await sessionService.loadLastSession({
     excludeSourceTypes: [
       AGENT_HOST_SESSION_SOURCE_TYPE,

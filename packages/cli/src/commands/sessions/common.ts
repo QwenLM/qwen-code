@@ -13,5 +13,7 @@ export function initSessionService(): SessionService {
     settings.merged.advanced?.runtimeOutputDir,
     process.cwd(),
   );
-  return new SessionService(process.cwd());
+  return new SessionService(process.cwd(), {
+    worktreeRoot: settings.merged.worktree?.root,
+  });
 }

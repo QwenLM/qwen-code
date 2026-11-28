@@ -125,8 +125,9 @@ export function tryReadRuntimeWorktreeRoot(
  * {@link resolveWorkspaceWorktreeRootSetting} when `worktree.root` settings
  * are invalid or unreadable. Passing this into `preclassifyWorktreeCleanup` or
  * `GitWorktreeService` forces fail-closed rejection (never silently falls back
- * to `.qwen/worktrees`), while `SessionService.matchesProject` ignores invalid
- * values without breaking ordinary non-worktree listing.
+ * to `.qwen/worktrees`), while `SessionServiceOptions.worktreeRoot` (consumed
+ * by `sessionBelongsToCurrentProject`) ignores invalid values without breaking
+ * ordinary non-worktree listing.
  */
 export const INVALID_WORKTREE_ROOT_SENTINEL = '\0invalid-worktree-root';
 

@@ -16,10 +16,13 @@ import {
 } from './gitWorktreeService.js';
 import { cleanupStaleAgentWorktrees } from './worktreeCleanup.js';
 import {
+  WorktreeRestoreRefusedError,
   readWorktreeSession,
   restoreWorktreeContext,
   writeWorktreeSession,
 } from './worktreeSessionService.js';
+import { SessionService } from './sessionService.js';
+import { Storage } from '../config/storage.js';
 
 const gitEnv = {
   ...process.env,
@@ -80,7 +83,9 @@ describe('GitWorktreeService custom worktree.root integration', () => {
       path.join(repo, '.git', 'info', 'exclude'),
       'utf8',
     );
-    expect(excludeContent).toContain('/.worktrees/');
+    // Custom roots add a per-checkout exclude entry, not a whole-directory rule.
+    expect(excludeContent).toContain('/.worktrees/feat-custom/');
+    expect(excludeContent).not.toContain('\n/.worktrees/\n');
     // Legacy .qwen/.gitignore must stay intact when custom root is in use,
     // while .worktrees/ itself must be ignored by .git/info/exclude.
     expect(await fs.readFile(legacyGitignore, 'utf8')).toBe(legacyBody);
@@ -93,6 +98,57 @@ describe('GitWorktreeService custom worktree.root integration', () => {
     await expect(
       fs.access(path.join(repo, '.worktrees', 'feat-custom')),
     ).rejects.toThrow();
+    const excludeAfterRemove = await fs.readFile(
+      path.join(repo, '.git', 'info', 'exclude'),
+      'utf8',
+    );
+    expect(excludeAfterRemove).not.toContain('/.worktrees/feat-custom/');
+  });
+
+  it('scopes custom-root info/exclude per checkout so pre-existing user files in the root dir stay visible to git (R1-7)', async () => {
+    const { repo } = await initRepo();
+    await fs.mkdir(path.join(repo, 'docs'), { recursive: true });
+    await fs.writeFile(path.join(repo, 'docs', 'notes.md'), 'user note\n');
+
+    const service = new GitWorktreeService(repo, { worktreeRoot: 'docs' });
+    const created = await service.createUserWorktree('feat-doc', 'main');
+    expect(created.success).toBe(true);
+
+    const status = git(repo, [
+      'status',
+      '--porcelain',
+      '--untracked-files=all',
+    ]);
+    expect(status).toContain('?? docs/notes.md');
+    expect(status).not.toContain('docs/feat-doc');
+
+    const removed = await service.removeUserWorktree('feat-doc', {
+      deleteBranch: true,
+    });
+    expect(removed.success).toBe(true);
+    const excludeAfter = await fs.readFile(
+      path.join(repo, '.git', 'info', 'exclude'),
+      'utf8',
+    );
+    expect(excludeAfter).not.toContain('/docs/feat-doc/');
+  });
+
+  it('detects linked worktrees structurally via isLinkedWorktree() regardless of root name (R1-1/R1-9)', async () => {
+    const { repo } = await initRepo();
+    const mainSvc = new GitWorktreeService(repo, { worktreeRoot: '.wt-a' });
+    expect(await mainSvc.isLinkedWorktree()).toBe(false);
+
+    const created = await mainSvc.createUserWorktree('old-root-wt', 'main');
+    expect(created.success).toBe(true);
+    const nestedDir = path.join(created.worktree!.path, 'sub');
+    await fs.mkdir(nestedDir, { recursive: true });
+
+    // Even when probed with a different configured root `.wt-b`, git reports
+    // this checkout as a linked worktree.
+    const probeOtherRoot = new GitWorktreeService(nestedDir, {
+      worktreeRoot: '.wt-b',
+    });
+    expect(await probeOtherRoot.isLinkedWorktree()).toBe(true);
   });
 
   it('blocks symlinkDirectories entries that overlap the configured custom worktree.root', async () => {
@@ -184,7 +240,8 @@ describe('GitWorktreeService custom worktree.root integration', () => {
       originalHeadCommit: git(repo, ['rev-parse', 'HEAD']),
     });
 
-    // Invalid worktree.root setting must NOT clear the sidecar.
+    // Invalid worktree.root setting must NOT clear the sidecar and must surface
+    // a visible WorktreeRestoreRefusedError (R1-10).
     const invalidWarnings: unknown[] = [];
     const invalidRestore = await restoreWorktreeContext(
       sidecarPath,
@@ -193,7 +250,20 @@ describe('GitWorktreeService custom worktree.root integration', () => {
       '../escape',
     );
     expect(invalidRestore.session).toBeNull();
-    expect(invalidWarnings.length).toBeGreaterThan(0);
+    expect(invalidWarnings[0]).toBeInstanceOf(WorktreeRestoreRefusedError);
+    expect(await readWorktreeSession(sidecarPath)).not.toBeNull();
+
+    // Switching worktree.root to another valid root must also fail closed
+    // WITHOUT destroying the prior managed checkout's sidecar (R1-5).
+    const mismatchWarnings: unknown[] = [];
+    const mismatchRestore = await restoreWorktreeContext(
+      sidecarPath,
+      (err) => mismatchWarnings.push(err),
+      sessionId,
+      '.other-wt',
+    );
+    expect(mismatchRestore.session).toBeNull();
+    expect(mismatchWarnings[0]).toBeInstanceOf(WorktreeRestoreRefusedError);
     expect(await readWorktreeSession(sidecarPath)).not.toBeNull();
 
     // Valid custom worktree.root restores the session cleanly.
@@ -205,5 +275,40 @@ describe('GitWorktreeService custom worktree.root integration', () => {
     );
     expect(restored.session?.slug).toBe('resume-custom');
     expect(restored.contextMessage).toContain(created.worktree!.path);
+  });
+
+  it('matches custom-root session transcripts in SessionService only when worktreeRoot is supplied (R1-16)', async () => {
+    const { root, repo } = await initRepo();
+    const runtimeBaseDir = path.join(root, 'runtime');
+    const sessionId = '22222222-2222-4222-8222-222222222222';
+    const customCwd = path.join(repo, '.worktrees', 'wt-transcript');
+
+    const storage = new Storage(repo, runtimeBaseDir);
+    const chatsDir = path.join(storage.getProjectDir(), 'chats');
+    await fs.mkdir(chatsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(chatsDir, `${sessionId}.jsonl`),
+      `${JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-11-28T00:00:00.000Z',
+        type: 'user',
+        cwd: customCwd,
+        version: '0.0.0',
+        message: { role: 'user', parts: [{ text: 'hello from custom wt' }] },
+      })}\n`,
+    );
+
+    const withoutRoot = new SessionService(repo, { runtimeBaseDir });
+    expect(await withoutRoot.getSessionLocation(sessionId)).toBeUndefined();
+
+    const withCustomRoot = new SessionService(repo, {
+      runtimeBaseDir,
+      worktreeRoot: '.worktrees',
+    });
+    expect(await withCustomRoot.getSessionLocation(sessionId)).toBe('active');
+    const listed = await withCustomRoot.listSessions();
+    expect(listed.items.map((item) => item.sessionId)).toContain(sessionId);
   });
 });

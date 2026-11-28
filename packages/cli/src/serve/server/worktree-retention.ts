@@ -347,6 +347,9 @@ async function loadScopes(
         trusted: scope.runtime.trusted,
         root: scope.root,
         limit: scope.limit,
+        ...(scope.settingsError !== undefined
+          ? { settingsError: scope.settingsError }
+          : {}),
       })),
     )}`,
   );
@@ -1019,7 +1022,9 @@ async function sweepWorktreeRetentionOnceInStorage(
   if (!scopes) return report;
   const scope = scopes.find((candidate) => candidate.runtime === runtime);
   if (scope?.settingsError !== undefined) {
-    report.skipped.push('retention settings cannot be read for this root');
+    report.skipped.push(
+      `retention settings cannot be read for this root: ${scope.settingsError}`,
+    );
     return report;
   }
   if (
@@ -1035,8 +1040,13 @@ async function sweepWorktreeRetentionOnceInStorage(
     return report;
   }
   const holders = scopes.filter((candidate) => candidate.root === scope.root);
-  if (holders.some((candidate) => candidate.settingsError !== undefined)) {
-    report.skipped.push('retention settings cannot be read for this root');
+  const holderSettingsError = holders.find(
+    (candidate) => candidate.settingsError !== undefined,
+  )?.settingsError;
+  if (holderSettingsError !== undefined) {
+    report.skipped.push(
+      `retention settings cannot be read for this root: ${holderSettingsError}`,
+    );
     return report;
   }
   if (

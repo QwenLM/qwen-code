@@ -32,7 +32,7 @@ export interface EnterWorktreeParams {
   name?: string;
 }
 
-const enterWorktreeDescription = `Creates an isolated git worktree at \`<projectRoot>/.qwen/worktrees/<slug>\` and returns its absolute path so subsequent file edits, shell commands, and other tools can operate inside it.
+const enterWorktreeDescription = `Creates an isolated git worktree under the configured \`worktree.root\` directory (default \`<projectRoot>/.qwen/worktrees/<slug>\`) and returns its absolute path so subsequent file edits, shell commands, and other tools can operate inside it.
 
 ## When to Use
 
@@ -86,20 +86,13 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
     }
     const worktreeRoot = parsedWorktreeRoot.normalized;
 
-    // Refuse nested worktree creation. If the caller's cwd is itself
-    // already inside `<worktree.root>/<slug>/` (or legacy `.qwen/worktrees/<slug>/`),
-    // a fresh worktree would be provisioned at `<repo>/<worktree.root>/<new>/`
-    // while the model's inherited file paths still reference the outer worktree.
-    if (
-      isPathInsideWorktreeRoot(cwd, worktreeRoot) ||
-      isPathInsideWorktreeRoot(cwd, DEFAULT_WORKTREE_ROOT)
-    ) {
-      const reason =
-        'Already inside a git worktree. Call exit_worktree first, ' +
-        'or return to the main repository checkout before creating a ' +
-        'new worktree.';
-      debugLogger.warn(`enter_worktree: ${reason} (cwd=${cwd})`);
-      return errorResult(reason);
+    const nestedReason =
+      'Already inside a git worktree. Call exit_worktree first, ' +
+      'or return to the main repository checkout before creating a ' +
+      'new worktree.';
+    if (isPathInsideWorktreeRoot(cwd, DEFAULT_WORKTREE_ROOT)) {
+      debugLogger.warn(`enter_worktree: ${nestedReason} (cwd=${cwd})`);
+      return errorResult(nestedReason);
     }
 
     // First-pass service rooted at cwd, only to find the repo top-level.
@@ -126,10 +119,17 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
     }
 
     // Resolve to the repo's top-level so worktrees always live under
-    // `<repoRoot>/.qwen/worktrees/`, regardless of which subdirectory
+    // `<repoRoot>/<worktree.root>/`, regardless of which subdirectory
     // the user invoked the tool from.
     const projectRoot =
       (await raceWithAbort(signal, () => probe.getRepoTopLevel())) ?? cwd;
+    if (
+      (await raceWithAbort(signal, () => probe.isLinkedWorktree())) ||
+      isPathInsideWorktreeRoot(cwd, worktreeRoot, projectRoot)
+    ) {
+      debugLogger.warn(`enter_worktree: ${nestedReason} (cwd=${cwd})`);
+      return errorResult(nestedReason);
+    }
     const service =
       projectRoot === cwd
         ? probe

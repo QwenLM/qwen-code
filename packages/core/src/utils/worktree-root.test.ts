@@ -87,6 +87,11 @@ describe('worktree-root validation and parsing', () => {
     ['.git exact', '.git'],
     ['.git uppercase', '.GIT'],
     ['inside .git', '.git/worktrees'],
+    ['nested .git segment', 'tmp/.git/wt'],
+    ['trailing dot bypass .git.', '.git.'],
+    ['trailing dot bypass .qwen.', '.qwen.'],
+    ['segment trailing whitespace', 'tmp /wt'],
+    ['segment leading whitespace', 'tmp/ wt'],
     ['.qwen directly', '.qwen'],
     ['.qwen uppercase directly', '.QWEN'],
     ['.qwen with trailing slash', '.qwen/'],
@@ -111,7 +116,7 @@ describe('worktree-root path helpers', () => {
     ]);
   });
 
-  it('detects nested paths inside default and custom roots', () => {
+  it('detects nested paths inside default and custom roots without matching top-level ancestors', () => {
     expect(
       isPathInsideWorktreeRoot('/repo/.worktrees/slug-1', '.worktrees'),
     ).toBe(true);
@@ -130,6 +135,24 @@ describe('worktree-root path helpers', () => {
     expect(isPathInsideWorktreeRoot('/repo/tmp/wts/slug-2', 'tmp/wts')).toBe(
       true,
     );
+    // R1-1 witness: a repo living directly under `/tmp/qwen-code` must not
+    // match `worktree.root: "tmp"`, and an anchored repo at `/home/u/worktrees/repo`
+    // must not match `worktree.root: "worktrees"`.
+    expect(isPathInsideWorktreeRoot('/tmp/qwen-code', 'tmp')).toBe(false);
+    expect(
+      isPathInsideWorktreeRoot(
+        '/home/u/worktrees/repo',
+        'worktrees',
+        '/home/u/worktrees/repo',
+      ),
+    ).toBe(false);
+    expect(
+      isPathInsideWorktreeRoot(
+        '/home/u/worktrees/repo/worktrees/feat-1',
+        'worktrees',
+        '/home/u/worktrees/repo',
+      ),
+    ).toBe(true);
   });
 
   it('extracts repoRoot, slug, and worktreePath for single and multi-segment roots', () => {
@@ -141,8 +164,23 @@ describe('worktree-root path helpers', () => {
       slug: 'feat-a',
       worktreePath: wt,
     });
+    expect(extractWorktreeFromPath(nested, 'tmp/wts', repo)).toEqual({
+      repoRoot: repo,
+      slug: 'feat-a',
+      worktreePath: wt,
+    });
     expect(
       extractWorktreeFromPath(path.join(repo, 'src'), 'tmp/wts'),
+    ).toBeNull();
+    // R1-1 witness: filesystem-top `/tmp/qwen-code` and anchored standalone repo
+    // `/home/u/worktrees/repo` return null.
+    expect(extractWorktreeFromPath('/tmp/qwen-code', 'tmp')).toBeNull();
+    expect(
+      extractWorktreeFromPath(
+        '/home/u/worktrees/repo',
+        'worktrees',
+        '/home/u/worktrees/repo',
+      ),
     ).toBeNull();
   });
 });
@@ -273,6 +311,36 @@ describe('worktree-root runtime symlink/junction containment', () => {
     ).rejects.toThrow(InvalidWorktreeRootError);
   });
 
+  it('rejects an in-repo symlinked prefix for a custom worktree.root (R1-3)', async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'wt-root-inrepo-sym-'),
+    );
+    dirs.push(root);
+    const repo = path.join(root, 'repo');
+    const realBuild = path.join(repo, 'real-build');
+    await fs.mkdir(path.join(repo, '.git'), { recursive: true });
+    await fs.mkdir(realBuild, { recursive: true });
+    await fs.symlink(realBuild, path.join(repo, 'build'));
+
+    const parsed = parseWorktreeRoot('build/wts');
+    await expect(
+      assertWorktreeRootContainment(
+        repo,
+        path.join(repo, 'build', 'wts'),
+        parsed,
+        path.join(repo, '.git'),
+      ),
+    ).rejects.toThrow(InvalidWorktreeRootError);
+    expect(() =>
+      assertWorktreeRootContainmentSync(
+        repo,
+        path.join(repo, 'build', 'wts'),
+        parsed,
+        path.join(repo, '.git'),
+      ),
+    ).toThrow(InvalidWorktreeRootError);
+  });
+
   it('allows an operator-symlinked default .qwen/worktrees outside the repo while still rejecting .git', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wt-root-default-'));
     dirs.push(root);
@@ -291,5 +359,28 @@ describe('worktree-root runtime symlink/junction containment', () => {
         path.join(repo, '.git'),
       ),
     ).resolves.toBeUndefined();
+
+    // Repointing default `.qwen/worktrees` into `.git` must still be rejected.
+    await fs.unlink(path.join(repo, '.qwen', 'worktrees'));
+    await fs.symlink(
+      path.join(repo, '.git'),
+      path.join(repo, '.qwen', 'worktrees'),
+    );
+    await expect(
+      assertWorktreeRootContainment(
+        repo,
+        path.join(repo, '.qwen', 'worktrees'),
+        parseWorktreeRoot(undefined),
+        path.join(repo, '.git'),
+      ),
+    ).rejects.toThrow(InvalidWorktreeRootError);
+    expect(() =>
+      assertWorktreeRootContainmentSync(
+        repo,
+        path.join(repo, '.qwen', 'worktrees'),
+        parseWorktreeRoot(undefined),
+        path.join(repo, '.git'),
+      ),
+    ).toThrow(InvalidWorktreeRootError);
   });
 });

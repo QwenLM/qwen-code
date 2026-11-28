@@ -2126,7 +2126,12 @@ export async function listWorkspaceSessionsForResponse(
   if (options?.sortBy !== 'lastUserPromptAt') {
     await enrichPromptTimes(
       result.sessions,
-      new SessionService(workspaceCwd, { runtimeBaseDir }),
+      new SessionService(workspaceCwd, {
+        runtimeBaseDir,
+        ...(readOptions.worktreeRoot !== undefined
+          ? { worktreeRoot: readOptions.worktreeRoot }
+          : {}),
+      }),
       archiveState,
       readOptions,
     );
@@ -2368,7 +2373,11 @@ export async function listLiveWorkspaceSessionsForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
   options?: Pick<ListWorkspaceSessionsOptions, 'cursor' | 'size'>,
-  readOptions: { runtimeBaseDir?: string; signal?: AbortSignal } = {},
+  readOptions: {
+    runtimeBaseDir?: string;
+    worktreeRoot?: string;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<ListWorkspaceSessionsResult> {
   const runtimeBaseDir = new Storage(
     workspaceCwd,
@@ -2412,7 +2421,11 @@ export async function listLiveWorkspaceSessionsForResponse(
     // flush, and a bridge entry re-created after a restart/close/reload
     // carries no `prs`, so every live-only row must read the sidecar like
     // the sibling live-only paths do — unconditionally.
-    const sessionService = new SessionService(workspaceCwd);
+    const sessionService = new SessionService(workspaceCwd, {
+      ...(readOptions.worktreeRoot !== undefined
+        ? { worktreeRoot: readOptions.worktreeRoot }
+        : {}),
+    });
     const enriched = await Promise.all(
       page.map((summary) =>
         liveOnlySummary(summary, sessionService, readOptions.signal),
@@ -2535,9 +2548,13 @@ export async function searchWorkspaceSessionsForResponse(
 export async function getWorkspaceSessionInfoForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
-  options: { includeLive?: boolean } = {},
+  options: { includeLive?: boolean; worktreeRoot?: string } = {},
 ): Promise<WorkspaceSessionInfoResult> {
-  const counts = await new SessionService(workspaceCwd).getSessionInfoCounts({
+  const counts = await new SessionService(workspaceCwd, {
+    ...(options.worktreeRoot !== undefined
+      ? { worktreeRoot: options.worktreeRoot }
+      : {}),
+  }).getSessionInfoCounts({
     excludeSourceTypes: [...HIDDEN_CATALOG_SOURCE_TYPES],
   });
   return {

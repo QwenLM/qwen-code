@@ -629,13 +629,28 @@ async function resolveManagedWorktreeFromCwd(
   if (!extracted || extracted.slug !== slug) {
     return null;
   }
-  if (await isDirectory(extracted.worktreePath)) {
-    return {
-      repoRoot: extracted.repoRoot,
-      worktreePath: extracted.worktreePath,
-    };
+  if (!(await isDirectory(extracted.worktreePath))) {
+    return null;
   }
-  return null;
+  // Verify the candidate is actually a linked git worktree of `extracted.repoRoot`
+  // so a standalone repository located at `~/worktrees/repo` with
+  // `worktree.root: "worktrees"` is never mistaken for a managed worktree of `~/`.
+  const parsed = parseWorktreeRoot(worktreeRoot);
+  if (!parsed.isDefault) {
+    try {
+      const wtGit = await fs.lstat(path.join(extracted.worktreePath, '.git'));
+      const repoGit = await fs.lstat(path.join(extracted.repoRoot, '.git'));
+      if (!wtGit.isFile() || (!repoGit.isDirectory() && !repoGit.isFile())) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+  }
+  return {
+    repoRoot: extracted.repoRoot,
+    worktreePath: extracted.worktreePath,
+  };
 }
 
 export class ExitWorktreeTool extends BaseDeclarativeTool<

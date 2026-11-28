@@ -28,6 +28,7 @@ import {
   SessionArtifactLibraryError,
   SessionStorageEntryError,
 } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import { InvalidWorktreeRootError } from '@qwen-code/qwen-code-core/utils/worktree-root.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   AcpChildCapacityExceededError,
@@ -813,6 +814,14 @@ export function sendBridgeError(
       error: err.message,
       code: 'worktree_reset_invalid_state',
       sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof InvalidWorktreeRootError) {
+    res.status(400).json({
+      error: err.message,
+      code: err.code,
+      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
     });
     return;
   }

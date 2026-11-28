@@ -171,6 +171,17 @@ function extractSegments(raw: string): string[] | { error: string } {
     if (segment.includes(':')) {
       return { error: 'worktree.root must not contain ":" characters' };
     }
+    if (segment.length > 0 && segment !== segment.trim()) {
+      return {
+        error:
+          'worktree.root path segments must not have leading or trailing whitespace',
+      };
+    }
+    if (segment.length > 1 && segment.endsWith('.')) {
+      return {
+        error: 'worktree.root path segments must not end with "."',
+      };
+    }
   }
   const segments = rawSegments.filter(
     (segment) => segment.length > 0 && segment !== '.',
@@ -178,8 +189,8 @@ function extractSegments(raw: string): string[] | { error: string } {
   if (segments.length === 0) {
     return { error: 'worktree.root must not resolve to the repository root' };
   }
-  if (segments[0]!.toLowerCase() === '.git') {
-    return { error: 'worktree.root must not be inside .git' };
+  if (segments.some((segment) => segment.toLowerCase() === '.git')) {
+    return { error: 'worktree.root must not contain a .git segment' };
   }
   if (segments.length === 1 && segments[0]!.toLowerCase() === '.qwen') {
     return {
@@ -259,20 +270,53 @@ export function getWorktreeRootPrefixes(
 
 /**
  * Returns true when `candidatePath` sits inside a worktree directory under the
- * configured `worktreeRoot` (i.e. contains `<...segments>/<slug>`).
+ * configured `worktreeRoot` (i.e. `<repoRoot>/<...segments>/<slug>`).
+ *
+ * When `repoRoot` is supplied, the match is anchored strictly at `repoRoot` so
+ * an ancestor directory that happens to share the root's name (such as
+ * `/tmp/qwen-code` with `worktree.root: "tmp"`) never false-positives. When
+ * `repoRoot` is omitted, at least one parent directory segment must precede the
+ * root segments (ruling out filesystem-top matches like `/tmp/qwen-code`).
  */
 export function isPathInsideWorktreeRoot(
   candidatePath: string,
   worktreeRoot?: string,
+  repoRoot?: string,
 ): boolean {
   const parsed = parseWorktreeRoot(worktreeRoot);
+  const targetSegments = parsed.segments.map(normalizeForComparison);
+  const targetLen = targetSegments.length;
+
+  if (repoRoot !== undefined) {
+    const resolvedRepo = path.resolve(repoRoot);
+    const resolvedCandidate = path.resolve(candidatePath);
+    const rel = path.relative(resolvedRepo, resolvedCandidate);
+    if (
+      rel.length === 0 ||
+      rel === '..' ||
+      rel.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(rel)
+    ) {
+      return false;
+    }
+    const relSegments = rel
+      .split(/[/\\]/)
+      .filter((segment) => segment.length > 0)
+      .map(normalizeForComparison);
+    if (relSegments.length <= targetLen) return false;
+    for (let j = 0; j < targetLen; j += 1) {
+      if (relSegments[j] !== targetSegments[j]) return false;
+    }
+    return true;
+  }
+
   const pathSegments = candidatePath
     .split(/[/\\]/)
     .filter((segment) => segment.length > 0)
     .map(normalizeForComparison);
-  const targetSegments = parsed.segments.map(normalizeForComparison);
-  const targetLen = targetSegments.length;
-  for (let i = 0; i + targetLen < pathSegments.length; i += 1) {
+  // Start at index 1 so a directory directly at filesystem root (e.g. `/tmp/repo`
+  // with `worktree.root: "tmp"`) has no repository directory above it.
+  for (let i = 1; i + targetLen < pathSegments.length; i += 1) {
     let matched = true;
     for (let j = 0; j < targetLen; j += 1) {
       if (pathSegments[i + j] !== targetSegments[j]) {
@@ -286,15 +330,52 @@ export function isPathInsideWorktreeRoot(
 }
 
 /**
- * Extracts the innermost `{ repoRoot, slug, worktreePath }` when `candidatePath`
- * is at or inside `<repoRoot>/<worktreeRoot>/<slug>`.
+ * Extracts the `{ repoRoot, slug, worktreePath }` when `candidatePath` is at
+ * or inside `<repoRoot>/<worktreeRoot>/<slug>`.
+ *
+ * When `repoRoot` is supplied, matches only under that anchored repository
+ * root. When omitted, walks up from `candidatePath` and requires a non-root
+ * repository directory above `<worktreeRoot>`.
  */
 export function extractWorktreeFromPath(
   candidatePath: string,
   worktreeRoot?: string,
+  repoRoot?: string,
 ): { repoRoot: string; slug: string; worktreePath: string } | null {
   const parsed = parseWorktreeRoot(worktreeRoot);
   const targetSegments = parsed.segments.map(normalizeForComparison);
+
+  if (repoRoot !== undefined) {
+    const resolvedRepo = path.resolve(repoRoot);
+    const resolvedCandidate = path.resolve(candidatePath);
+    const rel = path.relative(resolvedRepo, resolvedCandidate);
+    if (
+      rel.length === 0 ||
+      rel === '..' ||
+      rel.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(rel)
+    ) {
+      return null;
+    }
+    const rawRelSegments = rel
+      .split(/[/\\]/)
+      .filter((segment) => segment.length > 0);
+    if (rawRelSegments.length <= targetSegments.length) {
+      return null;
+    }
+    for (let i = 0; i < targetSegments.length; i += 1) {
+      if (normalizeForComparison(rawRelSegments[i]!) !== targetSegments[i]) {
+        return null;
+      }
+    }
+    const slug = rawRelSegments[targetSegments.length]!;
+    return {
+      repoRoot: resolvedRepo,
+      slug,
+      worktreePath: path.join(resolvedRepo, ...parsed.segments, slug),
+    };
+  }
+
   let cursor = path.resolve(candidatePath);
   for (;;) {
     const slug = path.basename(cursor);
@@ -316,7 +397,10 @@ export function extractWorktreeFromPath(
         }
         dir = dirParent;
       }
-      if (matched) {
+      // Require `dir` to be an actual directory below filesystem root so
+      // `/tmp/qwen-code` with `worktree.root: "tmp"` is not mistaken for a
+      // worktree of `/`.
+      if (matched && path.dirname(dir) !== dir) {
         return { repoRoot: dir, slug, worktreePath: cursor };
       }
     }
@@ -329,9 +413,11 @@ export function extractWorktreeFromPath(
  *
  * - For all roots, rejects targets resolving to the repository root itself or
  *   inside `.git`, and rejects existing non-directory prefix components.
- * - For custom roots (`!parsedRoot.isDefault`), additionally enforces that the
- *   target root and every existing prefix component resolve strictly inside the
- *   canonical repository root (blocking symlinks/junctions that escape).
+ * - For custom roots (`!parsedRoot.isDefault`), additionally requires every
+ *   existing prefix component inside the repository to be a real directory (not
+ *   a symlink or junction) and enforces that the target root resolves strictly
+ *   inside the canonical repository root. This keeps creation, relocation
+ *   containment, branch-capability probing, and ignore rules consistent.
  */
 export async function assertWorktreeRootContainment(
   repoTop: string,
@@ -387,6 +473,11 @@ export async function assertWorktreeRootContainment(
         `Cannot inspect worktree.root component ${prefix}: ${
           error instanceof Error ? error.message : String(error)
         }`,
+      );
+    }
+    if (!parsedRoot.isDefault && stat.isSymbolicLink()) {
+      throw new InvalidWorktreeRootError(
+        `Custom worktree.root "${parsedRoot.normalized}" must not traverse a symbolic link or junction: ${prefix}`,
       );
     }
     if (!stat.isDirectory() && !stat.isSymbolicLink()) {
@@ -486,6 +577,11 @@ export function assertWorktreeRootContainmentSync(
         `Cannot inspect worktree.root component ${prefix}: ${
           error instanceof Error ? error.message : String(error)
         }`,
+      );
+    }
+    if (!parsedRoot.isDefault && stat.isSymbolicLink()) {
+      throw new InvalidWorktreeRootError(
+        `Custom worktree.root "${parsedRoot.normalized}" must not traverse a symbolic link or junction: ${prefix}`,
       );
     }
     if (!stat.isDirectory() && !stat.isSymbolicLink()) {

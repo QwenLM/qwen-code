@@ -963,7 +963,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'string',
           enum: ['worktree'],
           description:
-            "Isolation mode. 'worktree' creates a temporary git worktree under <projectRoot>/.qwen/worktrees/agent-<7hex> so the agent works on an isolated copy of the repo. The worktree is auto-removed if the agent makes no changes; otherwise the worktree path and branch are returned in the result.",
+            "Isolation mode. 'worktree' creates a temporary git worktree under the configured worktree.root directory (default <projectRoot>/.qwen/worktrees/agent-<7hex>) so the agent works on an isolated copy of the repo. The worktree is auto-removed if the agent makes no changes; otherwise the worktree path and branch are returned in the result.",
         },
         working_dir: {
           type: 'string',
@@ -3518,10 +3518,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             }`,
           );
         }
-        if (
-          isPathInsideWorktreeRoot(cwd, worktreeRoot) ||
-          isPathInsideWorktreeRoot(cwd, DEFAULT_WORKTREE_ROOT)
-        ) {
+        if (isPathInsideWorktreeRoot(cwd, DEFAULT_WORKTREE_ROOT)) {
           return failWorktreeProvisioning(
             `Failed to set up worktree isolation: parent is already inside ` +
               `a worktree (${cwd}). Nested isolation worktrees are not ` +
@@ -3542,6 +3539,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           );
         }
         const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
+        if (
+          (await probe.isLinkedWorktree()) ||
+          isPathInsideWorktreeRoot(cwd, worktreeRoot, projectRoot)
+        ) {
+          return failWorktreeProvisioning(
+            `Failed to set up worktree isolation: parent is already inside ` +
+              `a worktree (${cwd}). Nested isolation worktrees are not ` +
+              `supported — the model's inherited paths would still reference ` +
+              `the outer worktree.`,
+          );
+        }
         const wtService =
           projectRoot === cwd
             ? probe

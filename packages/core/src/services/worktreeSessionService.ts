@@ -26,6 +26,7 @@ import {
 } from './gitWorktreeService.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import {
+  DEFAULT_WORKTREE_ROOT_SEGMENTS,
   assertWorktreeRootContainmentSync,
   parseWorktreeRoot,
   type ParsedWorktreeRoot,
@@ -1084,8 +1085,16 @@ export async function restoreWorktreeContext(
   try {
     parsedRoot = parseWorktreeRoot(worktreeRoot);
   } catch (error) {
-    // An invalid worktree.root setting must not destroy a valid sidecar.
-    onWarn?.(error);
+    // An invalid worktree.root setting must not destroy a valid sidecar, and
+    // the refusal must surface visibly (WorktreeRestoreRefusedError) rather
+    // than disappearing into debug logs.
+    const reason = error instanceof Error ? error.message : String(error);
+    onWarn?.(
+      new WorktreeRestoreRefusedError(
+        `Cannot restore worktree "${session.slug}" because worktree.root is invalid (${reason}); the sidecar was preserved.`,
+        { cause: error },
+      ),
+    );
     return { contextMessage: null, session: null };
   }
   const hasParentTraversalSegment = (value: string) =>
@@ -1095,7 +1104,7 @@ export async function restoreWorktreeContext(
     process.platform === 'win32' || process.platform === 'darwin';
   const normalizeForContainment = (value: string) =>
     foldsCase ? value.toLowerCase() : value;
-  let rootContainmentOk = true;
+  let rootContainmentError: unknown;
   if (
     path.isAbsolute(session.originalCwd) &&
     !hasParentTraversalSegment(session.originalCwd)
@@ -1108,32 +1117,99 @@ export async function restoreWorktreeContext(
         path.join(session.originalCwd, '.git'),
       );
     } catch (error) {
-      rootContainmentOk = false;
-      onWarn?.(error);
+      rootContainmentError = error;
     }
   }
+  const isStrictlyInsideDir = (candidate: string, parent: string): boolean => {
+    const rel = path.relative(parent, candidate);
+    return (
+      rel.length > 0 &&
+      rel !== '..' &&
+      !rel.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(rel)
+    );
+  };
   const realExpectedParent = normalizeForContainment(
     resolveExistingOrAncestor(expectedParent),
   );
   const realWorktree = normalizeForContainment(
     resolveExistingOrAncestor(session.worktreePath),
   );
-  const relWorktree = path.relative(realExpectedParent, realWorktree);
-  const isContained =
-    rootContainmentOk &&
+  const pathsWellFormed =
     path.isAbsolute(session.originalCwd) &&
     path.isAbsolute(session.worktreePath) &&
     !hasParentTraversalSegment(session.originalCwd) &&
-    !hasParentTraversalSegment(session.worktreePath) &&
-    relWorktree.length > 0 &&
-    relWorktree !== '..' &&
-    !relWorktree.startsWith(`..${path.sep}`) &&
-    !path.isAbsolute(relWorktree);
+    !hasParentTraversalSegment(session.worktreePath);
+  const isContained =
+    rootContainmentError === undefined &&
+    pathsWellFormed &&
+    isStrictlyInsideDir(realWorktree, realExpectedParent);
   if (!isContained) {
-    if (!rootContainmentOk) {
+    if (rootContainmentError !== undefined) {
       // Containment failed because the configured worktree root itself is
-      // unsafe (e.g. symlink escaping the repo) — refuse without destroying
-      // the sidecar.
+      // unsafe (e.g. symlink escaping the repo) — refuse visibly without
+      // destroying the sidecar.
+      const reason =
+        rootContainmentError instanceof Error
+          ? rootContainmentError.message
+          : String(rootContainmentError);
+      onWarn?.(
+        new WorktreeRestoreRefusedError(
+          `Cannot restore worktree "${session.slug}" because worktree.root failed containment (${reason}); the sidecar was preserved.`,
+          { cause: rootContainmentError },
+        ),
+      );
+      return { contextMessage: null, session: null };
+    }
+    // Check whether the sidecar belongs to a previous managed root (the
+    // default `.qwen/worktrees` or a real linked git worktree inside
+    // `originalCwd`). Changing `worktree.root` must fail closed WITHOUT
+    // destroying the sidecar so reverting `worktree.root` can still recover
+    // the binding.
+    let fromPriorManagedRoot = false;
+    if (pathsWellFormed) {
+      if (!parsedRoot.isDefault) {
+        const defaultParent = path.join(
+          session.originalCwd,
+          ...DEFAULT_WORKTREE_ROOT_SEGMENTS,
+        );
+        const realDefaultParent = normalizeForContainment(
+          resolveExistingOrAncestor(defaultParent),
+        );
+        if (isStrictlyInsideDir(realWorktree, realDefaultParent)) {
+          fromPriorManagedRoot = true;
+        }
+      }
+      if (!fromPriorManagedRoot) {
+        try {
+          const realOrig = normalizeForContainment(
+            resolveExistingOrAncestor(session.originalCwd),
+          );
+          const realGitDir = normalizeForContainment(
+            resolveExistingOrAncestor(path.join(session.originalCwd, '.git')),
+          );
+          const wtGitStat = nodeFs.lstatSync(
+            path.join(session.worktreePath, '.git'),
+          );
+          if (
+            wtGitStat.isFile() &&
+            isStrictlyInsideDir(realWorktree, realOrig) &&
+            !isStrictlyInsideDir(realWorktree, realGitDir) &&
+            realWorktree !== realGitDir
+          ) {
+            fromPriorManagedRoot = true;
+          }
+        } catch {
+          // Not an existing linked worktree under originalCwd.
+        }
+      }
+    }
+    if (fromPriorManagedRoot) {
+      onWarn?.(
+        new WorktreeRestoreRefusedError(
+          `Worktree "${session.slug}" at ${session.worktreePath} is outside the configured worktree.root "${parsedRoot.normalized}"; the sidecar was preserved. Revert worktree.root or remove the checkout manually.`,
+        ),
+      );
       return { contextMessage: null, session: null };
     }
     onWarn?.(

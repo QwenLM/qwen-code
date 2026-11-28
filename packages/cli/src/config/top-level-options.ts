@@ -420,7 +420,8 @@ export const DEFAULT_COMMAND_OPTIONS = {
   worktree: {
     type: 'string' as const,
     description:
-      'Start the session inside a git worktree at <repoRoot>/.qwen/worktrees/<slug>/. ' +
+      'Start the session inside a git worktree under the configured `worktree.root` ' +
+      'directory (default `<repoRoot>/.qwen/worktrees/<slug>/`). ' +
       'Pass a slug (`--worktree my-feature`), a PR reference (`--worktree=#123` or a full ' +
       'GitHub pull-request URL), or use bare `--worktree` to auto-generate a slug. ' +
       'On exit, the WorktreeExitDialog prompts to keep or remove the worktree.',

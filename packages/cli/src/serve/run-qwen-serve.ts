@@ -3455,12 +3455,14 @@ function bridgeHasLiveSessionWithin(
 
 async function createBranchRecoverySessionService(
   runtime: WorkspaceRuntime,
+  worktreeRoot?: string,
 ): Promise<SessionService> {
   const { SessionService } = await import(
     '@qwen-code/qwen-code-core/services/sessionService.js'
   );
   return new SessionService(runtime.workspaceCwd, {
     runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+    ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
   });
 }
 
@@ -6963,14 +6965,16 @@ async function runQwenServeImpl(
       },
     ];
     if (trustedWorkspace && opts.profile !== 'hosted-harness') {
+      const recoveryWorktreeRoot = await loadRuntimeWorktreeRootSetting(
+        workspaceRuntimes[0],
+      );
       await recoverBranchWorktreePreparations({
         workspaceCwd: boundWorkspace,
         sessionService: await createBranchRecoverySessionService(
           workspaceRuntimes[0],
+          recoveryWorktreeRoot,
         ),
-        worktreeRoot: await loadRuntimeWorktreeRootSetting(
-          workspaceRuntimes[0],
-        ),
+        worktreeRoot: recoveryWorktreeRoot,
         assertGenerationOpen: () => primaryGenerationGuard.assertOpen(),
         isWorktreeOccupied: (worktreePath) =>
           bridgeHasLiveSessionWithin(bridge, boundWorkspace, worktreePath),
@@ -8758,10 +8762,15 @@ async function runQwenServeImpl(
         wsRuntime.trusted &&
         opts.profile !== 'hosted-harness'
       ) {
+        const recoveryWorktreeRoot =
+          await loadRuntimeWorktreeRootSetting(wsRuntime);
         await recoverBranchWorktreePreparations({
           workspaceCwd: cwd,
-          sessionService: await createBranchRecoverySessionService(wsRuntime),
-          worktreeRoot: await loadRuntimeWorktreeRootSetting(wsRuntime),
+          sessionService: await createBranchRecoverySessionService(
+            wsRuntime,
+            recoveryWorktreeRoot,
+          ),
+          worktreeRoot: recoveryWorktreeRoot,
           assertGenerationOpen: () => generationGuard.assertOpen(),
           isWorktreeOccupied: (worktreePath) =>
             bridgeHasLiveSessionWithin(wsBridge, cwd, worktreePath),

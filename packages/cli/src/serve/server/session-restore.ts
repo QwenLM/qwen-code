@@ -32,6 +32,7 @@ import { acquireWorktreeOwnershipOp } from './worktree-ownership-op.js';
 import {
   isWorktreePathInManagedRoots,
   readRuntimeWorktreeRoot,
+  resolveRuntimeWorktreeRootSetting,
 } from './worktree-root.js';
 import { WorktreeRestoreUnavailableError } from './worktree-restore-errors.js';
 import {
@@ -587,6 +588,7 @@ export async function restoreSessionCore(options: {
           restoredStorageSessionId,
           sessionId,
           runtime.sessionRuntimeBaseDir,
+          resolveRuntimeWorktreeRootSetting(runtime),
         );
         if (location === undefined && isInternalWorkspaceRuntime(runtime)) {
           throw new SessionNotFoundError(sessionId);

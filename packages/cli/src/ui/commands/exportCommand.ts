@@ -284,7 +284,9 @@ async function exportSessionAction(
     });
 
     // Load the current session using the current session ID
-    const sessionService = new SessionService(cwd);
+    const sessionService = new SessionService(cwd, {
+      worktreeRoot: config.getWorktreeRoot?.(),
+    });
     const sessionId = config.getSessionId();
     debugLogger.debug('Loading session for export:', { sessionId, cwd });
     const sessionData = await sessionService.loadSession(sessionId);

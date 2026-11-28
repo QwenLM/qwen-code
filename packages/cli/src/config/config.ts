@@ -2369,7 +2369,9 @@ export async function loadCliConfig(
   let deferProjectionUntilWriterLease = false;
 
   if (argv.continue || argv.resume) {
-    const sessionService = new SessionService(cwd);
+    const sessionService = new SessionService(cwd, {
+      worktreeRoot: settings.worktree?.root,
+    });
     if (argv.continue) {
       sessionData = await sessionService.loadLastSession({
         excludeSourceTypes: [
@@ -2469,7 +2471,9 @@ export async function loadCliConfig(
     // Daemon-generated fresh UUIDs and Hosted-store IDs with local recording
     // disabled (`sessionIdGenerated`) skip this local occupancy check.
     if (!argv.sessionIdGenerated) {
-      const sessionService = new SessionService(cwd);
+      const sessionService = new SessionService(cwd, {
+        worktreeRoot: settings.worktree?.root,
+      });
       let occupied: boolean;
       try {
         occupied =

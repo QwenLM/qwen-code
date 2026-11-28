@@ -37,20 +37,32 @@ describe('resolveBoundWorkspaceRoot', () => {
     );
     expect(resolveBoundWorkspaceRoot(worktree)).toBe(path.parse(worktree).root);
   });
-  it('strips a configured custom worktree root suffix', () => {
+  it('strips a configured custom worktree root suffix when anchored to repoRoot', () => {
     const customWorktree = `${agent}/.worktrees/my-feature`;
-    expect(resolveBoundWorkspaceRoot(customWorktree, '.worktrees')).toBe(
+    expect(resolveBoundWorkspaceRoot(customWorktree, '.worktrees', agent)).toBe(
       path.resolve(agent),
     );
     const multiSegment = `${agent}/tmp/wts/my-feature`;
-    expect(resolveBoundWorkspaceRoot(multiSegment, 'tmp/wts')).toBe(
+    expect(resolveBoundWorkspaceRoot(multiSegment, 'tmp/wts', agent)).toBe(
+      path.resolve(agent),
+    );
+  });
+
+  it('does not widen a non-worktree repo matching a custom root segment (R1-6)', () => {
+    const standaloneRepo = '/x/worktrees/repo';
+    expect(resolveBoundWorkspaceRoot(standaloneRepo, 'worktrees')).toBe(
+      path.resolve(standaloneRepo),
+    );
+    // Legacy .qwen/worktrees/<slug> must still strip to repo root, not `.qwen`,
+    // even when worktree.root is configured as `worktrees`.
+    expect(resolveBoundWorkspaceRoot(myWorktree, 'worktrees')).toBe(
       path.resolve(agent),
     );
   });
 
   it('does not strip a custom prefix when worktreeRoot is invalid', () => {
     const customWorktree = `${agent}/.worktrees/my-feature`;
-    expect(resolveBoundWorkspaceRoot(customWorktree, '../escape')).toBe(
+    expect(resolveBoundWorkspaceRoot(customWorktree, '../escape', agent)).toBe(
       path.resolve(customWorktree),
     );
   });
@@ -73,6 +85,7 @@ describe('toCanonicalWorkspaceArtifactPath', () => {
         `${customWorktree}/report.csv`,
         customWorktree,
         '.worktrees',
+        agent,
       ),
     ).toBe('.worktrees/my-feature/report.csv');
   });
