@@ -1434,6 +1434,17 @@ describe('BaseLlmClient', () => {
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 
+    it('leaves the window unset for a routed custom model without a configured limit', async () => {
+      getResolvedModel.mockReturnValue(
+        anthropicKey({ id: fastModel, generationConfig: {} }),
+      );
+
+      const resolved = await resolve(fastModel);
+
+      expect(resolved.contentGenerator).toBe(fastContentGenerator);
+      expect(resolved.contextWindowSize).toBeUndefined();
+    });
+
     it('does not cache the unregistered-model fallback across runtime-view changes', async () => {
       // An unregistered selector falls back to getCurrentContentGenerator(),
       // and the runtime view changes between calls: caching would pin the
@@ -2020,32 +2031,22 @@ describe('BaseLlmClient', () => {
       expect(sentThinking()).toEqual({ includeThoughts: false });
     });
 
-    it('budgets against the target window, not the session window', async () => {
-      // Side queries default to the fast model, and a same-provider target
-      // whose registry entry declares no window inherits the *session* model's
-      // number through `{ ...parentConfig }` — a number, so the
-      // `?? tokenLimit(targetModel, 'input')` arm is the only thing standing
-      // between that route and the session window. Session `test-model` on
-      // 8_192, target `deepseek-r1` declaring nothing and tabled at 131_072:
-      // budgeting against the inherited number leaves no room at all, so the
-      // assertion below only holds when the window comes from the target, and
-      // only when the target's own window still binds (a roomy one would emit
-      // nothing either way). Deleting `contextWindowSize` from
-      // `ResolvedGeneratorForModel`, or the `?? tokenLimit(...)` arm that
-      // supplies it here, must redden it.
-      useWindow('test-model', 8_192);
+    it('uses the configured window when the same model ID is routed to another endpoint', async () => {
+      const model = 'deepseek-r1';
+      const baseUrl = 'https://target.example.com';
+      useWindow(model, 8_192);
       mockConfig.getModelsConfig.mockReturnValue({
         getResolvedModel: vi.fn().mockReturnValue({
-          id: 'deepseek-r1',
+          id: model,
           authType: AuthType.USE_GEMINI,
+          baseUrl,
           generationConfig: {},
         }),
       } as unknown as ReturnType<Config['getModelsConfig']>);
       mockBuildAgentContentGeneratorConfig.mockReturnValue({
-        model: 'deepseek-r1',
+        model,
         authType: AuthType.USE_GEMINI,
-        // what the real builder hands back for a same-provider target that
-        // declares no window of its own: the session's, inherited
+        baseUrl,
         contextWindowSize: 8_192,
       });
       const targetGenerateContent = vi
@@ -2057,11 +2058,10 @@ describe('BaseLlmClient', () => {
         embedContent: vi.fn(),
       });
 
-      await askText('deepseek-r1', 100_000);
+      await askText(`${model}\0${baseUrl}`, 7_000);
 
       expect(targetGenerateContent).toHaveBeenCalledTimes(1);
-      expect(sentBudget(targetGenerateContent)).toBe(31_072);
-      expect(100_000 + 31_072).toBeLessThanOrEqual(131_072);
+      expect(sentBudget(targetGenerateContent)).toBe(1_192);
     });
 
     it('budgets against the session window when the target model is not registered', async () => {

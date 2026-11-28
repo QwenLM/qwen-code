@@ -157,7 +157,7 @@ describe('buildAgentContentGeneratorConfig', () => {
   });
 
   describe('same-provider, bare model ID, no registry match', () => {
-    it('should override the model but keep parent generation config', () => {
+    it('leaves an unknown target window unset and retains other parent generation settings', () => {
       const result = buildOver('custom-model', { authType: 'openai' });
 
       expect(result.model).toBe('custom-model');
@@ -165,13 +165,12 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.apiKey).toBe('parent-key');
       expect(result.baseUrl).toBe('https://parent.example.com');
       expect(result.apiKeyEnvKey).toBe('PARENT_KEY_ENV');
-      // Generation config inherited from parent
       expect(result.samplingParams).toEqual({ temperature: 0.7, top_p: 0.9 });
       expect(result.reasoning).toEqual({ effort: 'high' });
       expect(result.timeout).toBe(30000);
       expect(result.streamIdleTimeoutMs).toBe(300000);
       expect(result.maxRetries).toBe(3);
-      expect(result.contextWindowSize).toBe(128000);
+      expect(result.contextWindowSize).toBeUndefined();
       expect(result.extra_body).toEqual({ custom: 'value' });
     });
 
@@ -262,6 +261,41 @@ describe('buildAgentContentGeneratorConfig', () => {
 
     afterEach(() => {
       vi.unstubAllEnvs();
+    });
+
+    it.each([
+      ['deepseek-r1', {}, 131_072],
+      ['deepseek-r1', { contextWindowSize: 64_000 }, 64_000],
+      ['custom-model', {}, undefined],
+    ] as const)(
+      'resolves the same-provider window for %s with config %j',
+      (model, generationConfig, contextWindowSize) => {
+        const target = {
+          ...openaiResolved,
+          id: model,
+          baseUrl: 'https://parent.example.com',
+          generationConfig,
+        };
+        const result = buildOver(
+          target.id,
+          { authType: 'openai' },
+          parentConfig,
+          target,
+        );
+
+        expect(result).toMatchObject({ model: target.id, contextWindowSize });
+      },
+    );
+
+    it('keeps the configured window when reusing the parent model', () => {
+      const result = buildOver(
+        parentConfig.model,
+        { authType: 'openai' },
+        parentConfig,
+        { ...openaiResolved, id: parentConfig.model, generationConfig: {} },
+      );
+
+      expect(result.contextWindowSize).toBe(parentConfig.contextWindowSize);
     });
 
     it('should apply registry generation config over cleared parent config', () => {
