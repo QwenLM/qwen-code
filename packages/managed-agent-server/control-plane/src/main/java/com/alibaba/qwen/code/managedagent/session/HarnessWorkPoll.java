@@ -34,6 +34,7 @@ public class HarnessWorkPoll {
     public static final long MAX_WAIT_MILLIS = 20_000;
     private static final long RECHECK_MILLIS = 500;
     private static final int MAX_SLOTS = 100;
+    private static final int ATTEMPT_THREADS = 4;
     private static final List<String> REQUIRED_FEATURES =
             List.of("work-pull/1", "harness-pool-owner/1", "harness-instance-lifecycle/1");
     private static final Set<String> SKIPPED_CLAIMS = Set.of("harness_owner_still_live",
@@ -44,8 +45,9 @@ public class HarnessWorkPoll {
     private final HarnessConnector harness;
     private final ManagedAgentSettings settings;
     private final ConcurrentMap<ProcessKey, Waiter> waiters = new ConcurrentHashMap<>();
+    private final ConcurrentMap<ProcessKey, Waiter> inFlight = new ConcurrentHashMap<>();
     private final AtomicBoolean wakePending = new AtomicBoolean();
-    private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor(runnable -> {
+    private final ScheduledExecutorService poller = Executors.newScheduledThreadPool(ATTEMPT_THREADS, runnable -> {
         Thread thread = new Thread(runnable, "managed-harness-work-poll");
         thread.setDaemon(true);
         return thread;
@@ -85,7 +87,13 @@ public class HarnessWorkPoll {
         authenticate(token, poll);
         long wait = Math.min(Math.max(poll.waitMillis(), 0), MAX_WAIT_MILLIS);
         var key = new ProcessKey(poll.instanceId(), poll.bootId());
-        var waiter = new Waiter(key, poll, System.currentTimeMillis() + wait, new CompletableFuture<>());
+        var reply = new CompletableFuture<Reply>();
+        // Positive deadlines do not depend on saturated workers; zero-wait polls still get one offer attempt.
+        // A reservation committed after the timeout remains re-offerable on the next poll.
+        if (wait > 0) {
+            reply.completeOnTimeout(new Reply(List.of()), wait, TimeUnit.MILLISECONDS);
+        }
+        var waiter = new Waiter(key, poll, System.currentTimeMillis() + wait, reply);
         // One open poll per process: a newer poll supersedes an older one, whose caller has given up,
         // so the same reserved claim is never offered twice and free slots are never counted twice.
         Waiter older = waiters.put(key, waiter);
@@ -137,20 +145,33 @@ public class HarnessWorkPoll {
             waiters.remove(waiter.key(), waiter);
             return true;
         }
-        List<ClaimOffer> offers;
+        // Worker threads keep unrelated offer attempts moving during a blocked store call. This separate
+        // ownership map still serializes attempts for a process when supersession replaces its waiter.
+        if (inFlight.putIfAbsent(waiter.key(), waiter) != null) {
+            return false;
+        }
         try {
-            offers = offers(waiter.poll());
-        } catch (RuntimeException failure) {
-            LOG.warn("work poll attempt failed instance={} failure={}", waiter.poll().instanceId(),
-                    failure.getMessage(), failure);
-            offers = List.of();
+            if (waiter.reply().isDone() || waiters.get(waiter.key()) != waiter) {
+                waiters.remove(waiter.key(), waiter);
+                return true;
+            }
+            List<ClaimOffer> offers;
+            try {
+                offers = offers(waiter.poll());
+            } catch (RuntimeException failure) {
+                LOG.warn("work poll attempt failed instance={} failure={}", waiter.poll().instanceId(),
+                        failure.getMessage(), failure);
+                offers = List.of();
+            }
+            if (!offers.isEmpty() || System.currentTimeMillis() >= waiter.deadline()) {
+                waiters.remove(waiter.key(), waiter);
+                waiter.reply().complete(new Reply(offers));
+                return true;
+            }
+            return false;
+        } finally {
+            inFlight.remove(waiter.key(), waiter);
         }
-        if (!offers.isEmpty() || System.currentTimeMillis() >= waiter.deadline()) {
-            waiters.remove(waiter.key(), waiter);
-            waiter.reply().complete(new Reply(offers));
-            return true;
-        }
-        return false;
     }
 
     private List<ClaimOffer> offers(Poll poll) {
@@ -171,7 +192,10 @@ public class HarnessWorkPoll {
         if (!acceptsNew || remaining <= 0) {
             return offers;
         }
-        for (Placement candidate : placements.findClaimCandidates(remaining)) {
+        for (Placement candidate : placements.findClaimCandidates(MAX_SLOTS)) {
+            if (offers.size() >= poll.freeSlots()) {
+                break;
+            }
             // The load is built for the placement the claim will create, so a Session that cannot
             // be loaded is never claimed; the takeover always advances the epoch by one.
             Placement next = new Placement(candidate.tenantId(), candidate.sessionId(), candidate.workspaceId(),
