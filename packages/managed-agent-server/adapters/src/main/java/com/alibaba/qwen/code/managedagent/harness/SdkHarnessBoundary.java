@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.harness;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.InputStream;
@@ -107,6 +108,27 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     @Override
     public boolean supportsEventIngest() {
         return call(delegate::supportsEventIngest);
+    }
+
+    @Override
+    public boolean acceptsWorkPullClaims(String instanceId, String bootId) {
+        return call(() -> delegate.acceptsWorkPullClaims(instanceId, bootId));
+    }
+
+    @Override
+    public boolean acceptsWorkPullReoffers(String instanceId, String bootId) {
+        return call(() -> delegate.acceptsWorkPullReoffers(instanceId, bootId));
+    }
+
+    @Override
+    public Map<String, Object> claimLoad(String tenantId, String sessionId,
+            HarnessPlacementStore.Placement placement) {
+        return call(() -> delegate.claimLoad(tenantId, sessionId, placement));
+    }
+
+    @Override
+    public void onClaimDemand(Runnable listener) {
+        delegate.onClaimDemand(listener);
     }
 
     @Override

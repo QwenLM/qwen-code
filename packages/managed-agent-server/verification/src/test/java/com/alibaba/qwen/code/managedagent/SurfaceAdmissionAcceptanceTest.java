@@ -106,6 +106,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
             "qwen.managed-agent.session-store.enabled=true",
             "qwen.managed-agent.session-store.binding-key=" + "0123456789abcdef0123456789abcdef",
             "qwen.managed-agent.client-files.enabled=true",
+            "qwen.managed-agent.harness-pull.enabled=true",
             "qwen.managed-agent.runtime-broker.ssh.enabled=false",
             "qwen.managed-agent.runtime-broker.web-terminal=true",
             "qwen.managed-agent.tool-publication.entry-concurrency=4",
@@ -342,11 +343,13 @@ public class SurfaceAdmissionAcceptanceTest {
     }
 
     public static Stream<SurfaceRegistry> everyRoute() {
-        // The client-files MCP leg carries no tenant context by design: the
-        // relay credential is its only admission (probed in the rule-class
-        // matrix), so a cross-tenant principal is not a meaningful probe.
+        // The client-files MCP leg and the Harness work poll carry no tenant
+        // context by design: the relay credential or the Harness token is
+        // their only admission (probed in the rule-class matrix), so a
+        // cross-tenant principal is not a meaningful probe.
         return Stream.of(SurfaceRegistry.values())
-                .filter(entry -> entry != SurfaceRegistry.INTERNAL_CLIENT_FILES_MCP);
+                .filter(entry -> entry != SurfaceRegistry.INTERNAL_CLIENT_FILES_MCP
+                        && entry != SurfaceRegistry.INTERNAL_HARNESS_WORK_POLL);
     }
 
     public static Stream<SurfaceRegistry> refusalProbedRoutes() {
@@ -405,6 +408,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 }
             }
             case INTERNAL_CLIENT_FILES -> expect(entry, null, 403, "client_files_credential_invalid");
+            case INTERNAL_HARNESS_WORK -> expect(entry, null, 403, "harness_work_poller_refused");
             case PERSONAL_MEMORY -> {
                 expect(entry, null, 401, "actor_required");
                 expect(entry, STRANGER, 503, "memory_disabled");
@@ -1919,6 +1923,7 @@ public class SurfaceAdmissionAcceptanceTest {
             case CLIENT_FILES_RESPOND -> "{\"sessionId\":\"" + session
                     + "\",\"generation\":1,\"rpcRequestId\":\"probe\",\"responseJson\":\"{}\"}";
             case INTERNAL_CLIENT_FILES_MCP -> "{\"jsonrpc\":\"2.0\",\"id\":\"probe\",\"method\":\"tools/list\"}";
+            case HARNESS_WORK_POLL -> "{}";
             case SIDE_QUERY_GET, SIDE_QUERY_STREAM, SIDE_QUERY_CANCEL -> "{\"sessionId\":\"" + session
                     + "\",\"queryId\":\"11111111-1111-4111-8111-111111111111\"}";
             case STORE_SIDE_QUERY -> {
