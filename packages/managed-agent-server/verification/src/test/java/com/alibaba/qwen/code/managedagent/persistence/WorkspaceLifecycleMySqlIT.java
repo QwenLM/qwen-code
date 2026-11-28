@@ -299,7 +299,6 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
         // below would see the late revision anyway.
         var definition = new DefaultTransactionDefinition();
         definition.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
-        definition.setReadOnly(true);
         var snapshot = txManager.getTransaction(definition);
         try {
             // Pin this REPEATABLE READ transaction's read view with a plain

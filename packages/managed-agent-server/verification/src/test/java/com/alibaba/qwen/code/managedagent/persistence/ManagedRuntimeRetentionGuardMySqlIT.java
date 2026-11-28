@@ -76,7 +76,7 @@ class ManagedRuntimeRetentionGuardMySqlIT {
         // which is the only legal form here: a 512-wide identity column would
         // push these tables' composite keys past InnoDB's 3072-byte limit.
         assertThatThrownBy(() -> contract.configureSessionRecordIdentity(VARCHAR_512_PERMISSIVE))
-                .hasMessageContaining("Specified key was too long");
+                .hasStackTraceContaining("Specified key was too long; max key length is 3072 bytes");
         contract.backgroundOwnersRemainDistinctUnderPermissiveCollation();
     }
 
