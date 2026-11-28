@@ -29,6 +29,7 @@ export {
   type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
+  type RestoreWorktreeSessionRequest,
   type ResumeSessionRequest,
   type SubscribeOptions,
   type WorktreeResetSessionRequest,
@@ -76,6 +77,7 @@ export {
   type DaemonSessionClientOptions,
   type DaemonSessionRestoreStrategy,
   type DaemonSessionSubscribeOptions,
+  type StandaloneSessionMetadata,
 } from './DaemonSessionClient.js';
 export {
   DaemonStandaloneCreationOutcomeUnknownError,
@@ -771,6 +773,8 @@ export type {
   DaemonSessionShellTaskRuntime,
   DaemonSessionShellTaskStatus,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionCancelableTaskKind,
+  DaemonSessionScheduledTaskStatus,
   DaemonSessionTaskLifecycleStatus,
   DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskStatus,

@@ -55,7 +55,7 @@ describe('submitted prompt provenance', () => {
     }
   });
 
-  it('keeps expanded file content out of submitted_prompt and omits it on tool continuation', async () => {
+  it('keeps expanded file content out of submitted_prompt and runs once per user message', async () => {
     const submittedPrompt = '@context.txt Inspect this context.';
     const fileCanary = 'EXPANDED_FILE_CANARY_7585';
 
@@ -149,16 +149,10 @@ describe('submitted prompt provenance', () => {
       const completed = await rig.waitForText('PROVENANCE_E2E_DONE', 30_000);
       expect(completed, 'Fake model turn did not complete').toBe(true);
 
-      const capturedBothEvents = await rig.poll(
+      const capturedPrompt = await rig.poll(
         () => {
           try {
-            return (
-              rig
-                .readFile('hook-inputs.jsonl')
-                .trim()
-                .split('\n')
-                .filter(Boolean).length >= 2
-            );
+            return rig.readFile('hook-inputs.jsonl').trim().length > 0;
           } catch {
             return false;
           }
@@ -166,7 +160,7 @@ describe('submitted prompt provenance', () => {
         15_000,
         200,
       );
-      expect(capturedBothEvents, 'Expected two hook invocations').toBe(true);
+      expect(capturedPrompt, 'Expected the user prompt hook to run').toBe(true);
 
       const inputs = rig
         .readFile('hook-inputs.jsonl')
@@ -175,7 +169,9 @@ describe('submitted prompt provenance', () => {
         .filter(Boolean)
         .map((line) => JSON.parse(line) as CapturedHookInput);
 
-      expect(inputs).toHaveLength(2);
+      // The tool continuation is not a fresh user message, so the hook runs
+      // once for this turn.
+      expect(inputs).toHaveLength(1);
       expect(inputs[0]).toMatchObject({
         hook_event_name: 'UserPromptSubmit',
         submitted_prompt: submittedPrompt,
@@ -184,11 +180,6 @@ describe('submitted prompt provenance', () => {
       expect(inputs[0]?.submitted_prompt).not.toEqual(
         expect.stringContaining(fileCanary),
       );
-
-      expect(inputs[1]).toMatchObject({
-        hook_event_name: 'UserPromptSubmit',
-      });
-      expect(inputs[1]).not.toHaveProperty('submitted_prompt');
     } finally {
       ptyProcess.kill();
       await promise;

@@ -3,8 +3,10 @@ package com.alibaba.qwen.code.managedagent.harness;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore;
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -104,6 +106,32 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsEventIngest() {
+        return call(delegate::supportsEventIngest);
+    }
+
+    @Override
+    public boolean acceptsWorkPullClaims(String instanceId, String bootId) {
+        return call(() -> delegate.acceptsWorkPullClaims(instanceId, bootId));
+    }
+
+    @Override
+    public boolean acceptsWorkPullReoffers(String instanceId, String bootId) {
+        return call(() -> delegate.acceptsWorkPullReoffers(instanceId, bootId));
+    }
+
+    @Override
+    public Map<String, Object> claimLoad(String tenantId, String sessionId,
+            HarnessPlacementStore.Placement placement) {
+        return call(() -> delegate.claimLoad(tenantId, sessionId, placement));
+    }
+
+    @Override
+    public void onClaimDemand(Runnable listener) {
+        delegate.onClaimDemand(listener);
+    }
+
+    @Override
     public ContextCompressionSubmission prepareContextCompression(String tenantId, String sessionId,
             Map<String, Object> body) {
         return call(() -> {
@@ -184,17 +212,17 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     public boolean supportsPackagePreparation() { return call(delegate::supportsPackagePreparation); }
 
     @Override
-    public PreparedPackage preparePackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public PreparedPackage preparePackage(Map<String, Object> metadata, InputStream source) {
         return call(() -> delegate.preparePackage(metadata, source));
     }
 
     @Override
-    public Map<String, Object> inspectPackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public Map<String, Object> inspectPackage(Map<String, Object> metadata, InputStream source) {
         return call(() -> delegate.inspectPackage(metadata, source));
     }
 
     @Override
-    public Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public Map<String, Object> previewPackage(Map<String, Object> metadata, InputStream source) {
         return call(() -> delegate.previewPackage(metadata, source));
     }
 
@@ -330,6 +358,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public RecoveryStatus inspectUnattachedRecovery(SessionRecord session, String promptId) {
+        return call(() -> delegate.inspectUnattachedRecovery(session, promptId));
+    }
+
+    @Override
     public Attachment cachedRecoveryAttachment(String tenantId, String sessionId) {
         return call(() -> delegate.cachedRecoveryAttachment(tenantId, sessionId));
     }
@@ -343,6 +376,12 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     public Admission submit(String tenantId, String sessionId, String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
         return call(() -> delegate.submit(tenantId, sessionId, promptId, input, payloadDigest));
+    }
+
+    @Override
+    public Admission submit(String tenantId, String sessionId, String promptId,
+            List<Map<String, Object>> input, String payloadDigest, String ingestTurnId) {
+        return call(() -> delegate.submit(tenantId, sessionId, promptId, input, payloadDigest, ingestTurnId));
     }
 
     @Override

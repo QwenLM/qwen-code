@@ -24,6 +24,16 @@ const transports = (...kinds: Array<ReturnType<typeof mcpTransportOf>>) =>
 
 describe('mcp-pool-key', () => {
   describe('fingerprint', () => {
+    it('shares the same installed artifact but reconnects after a managed package swap at the same path', () => {
+      const base = { command: 'node', args: ['/extensions/probe/mcp.js'] };
+      const first = { ...base, extensionArtifactRevision: 'package:1' };
+      expect(fingerprint(first)).toBe(fingerprint({ ...first }));
+      expect(fingerprint(first)).not.toBe(
+        fingerprint({ ...base, extensionArtifactRevision: 'package:2' }),
+      );
+      expect(fingerprint(first)).not.toBe(fingerprint(base));
+    });
+
     it('is stable across two MCPServerConfig instances with identical content', () => {
       const a = new MCPServerConfig('node', ['./srv.js'], { FOO: 'bar' });
       const b = new MCPServerConfig('node', ['./srv.js'], { FOO: 'bar' });

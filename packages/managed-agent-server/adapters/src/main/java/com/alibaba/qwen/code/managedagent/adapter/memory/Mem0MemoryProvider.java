@@ -24,6 +24,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 public final class Mem0MemoryProvider implements MemoryProvider {
     private static final int MAX_RESPONSE_BYTES = 64 * 1024;
@@ -139,7 +140,7 @@ public final class Mem0MemoryProvider implements MemoryProvider {
     private Response request(String method, String path, Object body, long deadline) throws Exception {
         long remaining = deadline - System.nanoTime();
         if (remaining <= 0) {
-            throw new java.util.concurrent.TimeoutException();
+            throw new TimeoutException();
         }
         var request = HttpRequest.newBuilder(endpoint.resolve(path)).timeout(Duration.ofNanos(remaining))
                 .header("Accept", "application/json").header("Authorization", "Token " + apiKey)

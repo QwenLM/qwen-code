@@ -125,6 +125,11 @@ export async function spawnDaemon(
     '127.0.0.1',
     '--workspace',
     workspaceCwd,
+    // Session contracts, not host-load admission, are under test here.
+    // Keep a shared runner's real load out of every fixture's creation
+    // path; a caller that tests the gate itself passes --load-admission
+    // in extraArgs, which yargs resolves last.
+    '--no-load-admission',
     '--initialize-timeout-ms',
     '60000',
     ...extraArgs,

@@ -174,6 +174,18 @@ public class SessionMessageRelay {
                 }
             }
         } catch (RuntimeException error) {
+            if (error instanceof HarnessHttpFailure http
+                    && ("hosted_session_closing".equals(http.getErrorCode())
+                            || "hosted_session_open_busy"
+                                    .equals(http.getErrorCode()))) {
+                // A Session a step must load is tearing down or out of
+                // cold-open slots: a wait on either side, as for a command,
+                // never an attempt. A suspended or Action-parked child meets
+                // it on every step that reloads it.
+                store.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                        now + LEASE_MS, now);
+                return;
+            }
             defer(row, pending.domain(), error, now);
         }
     }

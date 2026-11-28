@@ -1053,6 +1053,84 @@ function testAppImageDependencyClosure(directory, canSpawnShebang) {
       '',
     );
     verifyAppImageClosure(extractedRoot);
+    // libwayland-client.so.0 is host-baseline, so an image that passes it
+    // through shadows the host copy under the AppImage's LD_LIBRARY_PATH,
+    // breaking the host libEGL_mesa.so.0 (issue #18486). The copy is filed
+    // under the Debian multiarch directory rather than usr/lib, so the error
+    // has to name where it sits: the extraction tree is deleted before anyone
+    // reads the message.
+    writeElf('usr/lib/x86_64-linux-gnu/libwayland-client.so.0');
+    assert.throws(
+      () => verifyAppImageClosure(extractedRoot),
+      /AppImage must not bundle host-baseline libraries: usr\/lib\/x86_64-linux-gnu\/libwayland-client\.so\.0\./,
+    );
+    fs.rmSync(
+      path.join(
+        extractedRoot,
+        'usr/lib/x86_64-linux-gnu/libwayland-client.so.0',
+      ),
+    );
+    fs.rmdirSync(path.join(extractedRoot, 'usr/lib/x86_64-linux-gnu'));
+    // The wayland siblings resolve from the host too, so a GTK or WebKitGTK
+    // library can depend on them without carrying a copy; that image passes
+    // closure only because nothing else is missing.
+    fs.rmSync(bundledLibrary);
+    const gdk = writeElf('usr/lib/libgdk-3.so.0');
+    fs.writeFileSync(
+      fakeReadelf,
+      [
+        '#!/usr/bin/env sh',
+        'case "$2" in',
+        `  ${gdk})`,
+        "    printf '  (NEEDED) Shared library: [libwayland-egl.so.1]\\n'",
+        "    printf '  (NEEDED) Shared library: [libportal.so.0]\\n'",
+        '    ;;',
+        'esac',
+        '',
+      ].join('\n'),
+    );
+    assert.throws(
+      () => verifyAppImageClosure(extractedRoot),
+      /AppImage dependency closure is incomplete: libportal\.so\.0$/,
+    );
+    fs.writeFileSync(
+      path.join(extractedRoot, 'usr', 'lib', 'libportal.so.0'),
+      '',
+    );
+    verifyAppImageClosure(extractedRoot);
+    // Every sibling must resolve from the host on its own, and a copy inside
+    // the image shadows it just like a bundled libwayland-client.so.0 does.
+    // Listed literally rather than looped over HOST_PROVIDED_SONAMES, so an
+    // entry dropped from that set fails here instead of at release time.
+    fs.rmSync(gdk);
+    for (const soname of [
+      'libwayland-cursor.so.0',
+      'libwayland-egl.so.1',
+      'libwayland-server.so.0',
+    ]) {
+      fs.writeFileSync(
+        fakeReadelf,
+        [
+          '#!/usr/bin/env sh',
+          'case "$2" in',
+          `  ${executable})`,
+          `    printf '  (NEEDED) Shared library: [${soname}]\\\\n'`,
+          '    ;;',
+          'esac',
+          '',
+        ].join('\n'),
+      );
+      verifyAppImageClosure(extractedRoot);
+      const library = writeElf(`usr/lib/${soname}`);
+      assert.throws(
+        () => verifyAppImageClosure(extractedRoot),
+        new RegExp(
+          `AppImage must not bundle host-baseline libraries: usr/lib/${soname.replaceAll('.', '\\.')}\\. ` +
+            'Stop linuxdeploy from copying them at packaging time, e\\.g\\. `linuxdeploy --exclude-library=<soname>`',
+        ),
+      );
+      fs.rmSync(library);
+    }
   } finally {
     process.env.PATH = previousPath;
   }

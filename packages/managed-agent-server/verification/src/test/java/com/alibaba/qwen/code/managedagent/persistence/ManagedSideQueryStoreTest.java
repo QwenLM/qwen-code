@@ -5,7 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.sidequery.ManagedSideQueryMo
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -44,7 +44,7 @@ class ManagedSideQueryStoreTest {
         jdbc = new ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
         transactions = new TransactionTemplate(manager);
-        tenant = "tenant-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
         initialize();
     }
 
@@ -56,9 +56,8 @@ class ManagedSideQueryStoreTest {
     }
 
     private void initialize() {
-        String scope = SideQueryConversation.scope(tenant, session);
-        jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified,tenant_key,session_key,session_scope_key)"
-                        + " VALUES (?,?,'qwen-code',1,1,?,?,?)", tenant, session, ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session), scope);
+        jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,'qwen-code',1,1)", tenant, session);
         jdbc.update("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,stream_id,gmt_modified) VALUES (?,?,'SESSION','',1)", tenant, session);
         jdbc.update("INSERT INTO ma_session_head (tenant_id,workspace_id,session_id,state,writer_generation,"
                         + "journal_revision,committed_sequence,activation_epoch,gmt_create,gmt_modified,harness_session_id,head_kind)"
@@ -236,11 +235,11 @@ class ManagedSideQueryStoreTest {
         }
         byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
         String commit = "a".repeat(64);
-        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id,workspace_id,session_id,journal_revision,command_key_hash,"
+        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id,workspace_id,session_id,journal_revision,command_ref,"
                         + "transaction_id,operation,command_id,content_digest,first_sequence,last_sequence,event_count,commit_digest,"
                         + "writer_generation,writer_id,writer_token_hash,activation_epoch,record_encoding,record_bytes,byte_length,record_digest,gmt_create)"
                         + " VALUES (?,'ws',?,1,?,'tx','test','command',?,1,7,7,?,1,'writer',?,1,'identity',?,?,?,1)",
-                tenant, session, "b".repeat(64), "c".repeat(64), commit, "d".repeat(64), bytes, bytes.length, JournalStoreRows.sha256(bytes));
+                tenant, session, ManagedIdentityRefs.commandRef("test", "command"), "c".repeat(64), commit, "d".repeat(64), bytes, bytes.length, JournalStoreRows.sha256(bytes));
         jdbc.update("UPDATE ma_session_head SET journal_revision=1,committed_sequence=7,last_commit_digest=?", commit);
         Context context = tx(() -> queries.context(tenant, actor, session));
         assertThat(context.completedUserTurnCount()).isEqualTo(1);
@@ -263,11 +262,11 @@ class ManagedSideQueryStoreTest {
         var event = Map.of("subtype", "managed_session_event_v1", "managedSession",
                 Map.of("kind", kind, "sequence", sequence, "payload", payload));
         byte[] bytes = (new ObjectMapper().writeValueAsString(event) + "\n").getBytes(StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id,workspace_id,session_id,journal_revision,command_key_hash,"
+        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id,workspace_id,session_id,journal_revision,command_ref,"
                         + "transaction_id,operation,command_id,content_digest,first_sequence,last_sequence,event_count,previous_commit_digest,commit_digest,"
                         + "writer_generation,writer_id,writer_token_hash,activation_epoch,record_encoding,record_bytes,byte_length,record_digest,gmt_create)"
                         + " VALUES (?,'ws',?,?,?,?,'test',?,?,?, ?,1,?,?,1,'writer',?,1,'identity',?,?,?,1)",
-                tenant, session, revision, ManagedSchemaKeys.key("tx", Long.toString(revision)), "tx-" + revision,
+                tenant, session, revision, ManagedIdentityRefs.commandRef("test", "command-" + revision), "tx-" + revision,
                 "command-" + revision, "c".repeat(64), sequence, sequence, previous, commit, "d".repeat(64),
                 bytes, bytes.length, JournalStoreRows.sha256(bytes));
         jdbc.update("UPDATE ma_session_head SET journal_revision=?,committed_sequence=?,last_commit_digest=?", revision, sequence, commit);

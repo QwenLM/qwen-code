@@ -37,11 +37,10 @@ export const MAX_SESSION_BYTES = 500 * 1024 * 1024; // 500MB
  * Label of the line `buildStub` embeds carrying a sha256 of the FULL
  * pre-truncation output. The preview only covers the first
  * PREVIEW_SIZE_CHARS chars and the envelope embeds a per-call unique file
- * path, so consumers that fingerprint results (the loop guards in
- * services/loopDetectionService.ts) read this digest instead of hashing the
- * envelope: a board mutating beyond the preview window still fingerprints
- * differently each poll, and a frozen board identically no matter where it
- * was persisted (issue #9450).
+ * path, so a consumer that fingerprints results reads this digest instead of
+ * hashing the envelope: a board mutating beyond the preview window still
+ * fingerprints differently each poll, and a frozen board identically no
+ * matter where it was persisted (issue #9450).
  */
 export const FULL_OUTPUT_DIGEST_LABEL = 'Full output sha256: ';
 
@@ -312,7 +311,7 @@ export async function truncateAndSaveToFile(
   // One envelope shape for every bounded body: the sentinel must LEAD it,
   // because downstream guards recognize an already-truncated result by
   // `startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)` (truncateLlmContent,
-  // tool-result-retention, loopDetectionService). Only the header, the
+  // tool-result-retention). Only the header, the
   // recovery hint and the preview description differ between a saved spill
   // and one skipped for disk budget — a skipped body must not claim a file.
   const envelope = (
@@ -858,7 +857,7 @@ function buildStub(
     generatePreview(content);
   // sha256 of the FULL pre-truncation output (see FULL_OUTPUT_DIGEST_LABEL):
   // the envelope's per-call unique path would otherwise fingerprint uniquely
-  // every poll, silently disabling every result-aware loop guard for exactly
+  // every poll, defeating any consumer that fingerprints results for exactly
   // the largest results (issue #9450).
   const fullDigest = crypto.createHash('sha256').update(content).digest('hex');
 

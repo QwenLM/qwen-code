@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { AcpWsTransport } from '../../src/daemon/AcpWsTransport.js';
 import { DaemonClient } from '../../src/daemon/DaemonClient.js';
+import { DaemonSessionClient } from '../../src/daemon/DaemonSessionClient.js';
 import { DaemonTransportClosedError } from '../../src/daemon/DaemonTransport.js';
 import {
   matchRoute,
@@ -228,7 +229,7 @@ describe('AcpWsTransport', () => {
     });
   });
 
-  describe('request cancellation', () => {
+  describe('connected session transport', () => {
     let original: PropertyDescriptor | undefined;
     let frames: Array<Record<string, unknown>>;
     let transport: AcpWsTransport;
@@ -275,6 +276,22 @@ describe('AcpWsTransport', () => {
       transport.dispose();
       if (original) Object.defineProperty(globalThis, 'WebSocket', original);
       else Reflect.deleteProperty(globalThis, 'WebSocket');
+    });
+
+    it('unblocks prompt submission on an idle ACP WebSocket subscription', async () => {
+      const client = new DaemonClient({ baseUrl: 'http://daemon', transport });
+      const session = new DaemonSessionClient({
+        client,
+        session: { sessionId: 'sa-1', workspaceCwd: '', attached: false },
+      });
+      const controller = new AbortController();
+      const read = session.events({ signal: controller.signal }).next();
+      try {
+        await session.waitForEventStream(AbortSignal.timeout(1000));
+      } finally {
+        controller.abort();
+        await read.catch(() => undefined);
+      }
     });
 
     it('preserves both explicit cancellation reason and header client identity', async () => {

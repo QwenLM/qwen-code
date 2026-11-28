@@ -28,7 +28,8 @@ import {
   supportsHyperlinks,
   wrapForMultiplexer,
   HYPERLINK_ENV_KEYS,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/utils/osc8.js';
+import { INLINE_CODE_SPAN_PATTERN_SOURCE } from './inline-math.js';
 
 export {
   osc8Hyperlink,
@@ -206,6 +207,10 @@ export const MD_LINK_CAPTURE = /^\[(.*?)\]\(((?:[^()]|\([^()]*\))*)\)$/;
  * `trimTrailingUrlPunctuation`.
  */
 export const BARE_URL_PATTERN = String.raw`https?:\/\/[^\s${BARE_URL_BREAK_CHARACTERS}]+`;
+
+export const INK_INLINE_MARKDOWN_PATTERN =
+  String.raw`(\*\*.*?\*\*|\*.*?\*|(?<![\w\u3400-\u9fff])_(?!_)[^_]*_(?![\w\u3400-\u9fff])|~~.*?~~|${MD_LINK_PATTERN}|` +
+  String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|<u>.*?<\/u>|${BARE_URL_PATTERN})`;
 
 /**
  * Should the markdown renderers wrap a `[label](url)` token in an OSC 8

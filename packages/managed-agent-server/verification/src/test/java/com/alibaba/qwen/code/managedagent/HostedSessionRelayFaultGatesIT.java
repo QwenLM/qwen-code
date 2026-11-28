@@ -6,7 +6,6 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
-import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
@@ -1492,7 +1491,7 @@ class HostedSessionRelayFaultGatesIT {
                         + " event_type, gmt_create, data_json, is_terminal"
                         + " FROM ma_public_event WHERE tenant_id = ? AND"
                         + " session_id = ? AND stream_kind = 'SESSION' AND"
-                        + " stream_id = X'' ORDER BY sequence_id",
+                        + " stream_id = '' ORDER BY sequence_id",
                 tenant, session);
     }
 
@@ -1983,8 +1982,7 @@ class HostedSessionRelayFaultGatesIT {
             harnessPort = reservation.getLocalPort();
             startSpring(cli, node, caseCount, letter);
             port = spring.getWebServer().getPort();
-            brokerPort = spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri()
-                    .getPort();
+            brokerPort = port;
             storeProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
             publicProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
         }
@@ -2057,7 +2055,6 @@ class HostedSessionRelayFaultGatesIT {
                 "--qwen.managed-agent.harness.token=" + TOKEN,
                 "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",

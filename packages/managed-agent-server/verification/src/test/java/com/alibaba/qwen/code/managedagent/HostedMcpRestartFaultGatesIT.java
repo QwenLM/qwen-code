@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -123,7 +122,7 @@ class HostedMcpRestartFaultGatesIT {
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3)).build();
-    private final String tenant = "mcp-restart-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final List<ProxyCall> proxyCalls = new CopyOnWriteArrayList<>();
     private final java.util.concurrent.atomic.AtomicInteger proxySequence =
             new java.util.concurrent.atomic.AtomicInteger();
@@ -1517,7 +1516,7 @@ class HostedMcpRestartFaultGatesIT {
                 + " AND s.runtime_generation = b.runtime_generation"
                 + " WHERE s.tenant_id = ? AND b.tenant_id = ? AND"
                 + " s.harness_session_id = ? AND"
-                + " s.execution_storage_key IS NOT NULL", Integer.class,
+                + " s.execution_storage_id IS NOT NULL", Integer.class,
                 tenant, tenant, session.id());
     }
 
@@ -1610,7 +1609,6 @@ class HostedMcpRestartFaultGatesIT {
     }
 
     private JsonNode published(String session, JsonNode ref) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String body = jdbc.queryForObject(
                 "SELECT CONVERT(inline_bytes USING utf8mb4) FROM ma_resource"
                         + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?"
@@ -1993,8 +1991,6 @@ class HostedMcpRestartFaultGatesIT {
                         "--qwen.managed-agent.harness.capability-digest="
                                 + CAPABILITY,
                         "--qwen.managed-agent.runtime-broker.enabled=true",
-                        "--qwen.managed-agent.runtime-broker.port="
-                                + brokerPort,
                         "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                         "--qwen.managed-agent.runtime-broker.durable-local-process=true",
                         "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
@@ -2421,6 +2417,6 @@ class HostedMcpRestartFaultGatesIT {
     private void probePorts() {
         port = reservePort();
         harnessPort = reservePort();
-        brokerPort = reservePort();
+        brokerPort = port;
     }
 }

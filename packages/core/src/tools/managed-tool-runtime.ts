@@ -85,6 +85,22 @@ function refuseUpdatedInput(
 }
 
 /**
+ * The managed protocol keeps its shape: a PostToolUse `continue: false` is
+ * reported as a stop, and PostToolUseFailure carries no stop.
+ */
+function managedPostHook(result: PostToolUseHookResult): PostToolUseHookResult {
+  const { endsTurn, ...rest } = result;
+  return endsTurn ? { ...rest, shouldStop: true } : rest;
+}
+
+function managedFailureHook(
+  result: PostToolUseFailureHookResult,
+): PostToolUseFailureHookResult {
+  const { endsTurn: _endsTurn, stopReason: _stopReason, ...rest } = result;
+  return rest;
+}
+
+/**
  * Hook payloads arrive untyped over the message bus, so the non-cloneable
  * fallback carries a hook's text fields only when they really are strings:
  * any other value could be the one that made the clone throw.
@@ -776,36 +792,40 @@ export class ManagedToolRuntime {
         result.executionStatus === 'cancelled' ||
         result.result?.error !== undefined
       ) {
-        result.failureHook = await firePostToolUseFailureHook(
-          messageBus,
-          entry.toolUseId,
-          entry.tool.name,
-          entry.invocation.params as Record<string, unknown>,
-          result.result?.error?.message ??
-            result.error?.message ??
-            'Tool execution failed.',
-          result.executionStatus === 'cancelled' || signal.aborted,
-          this.config.getApprovalMode(),
-          undefined,
-          entry.reference.callId,
-          undefined,
-          entry.hookOwner,
+        result.failureHook = managedFailureHook(
+          await firePostToolUseFailureHook(
+            messageBus,
+            entry.toolUseId,
+            entry.tool.name,
+            entry.invocation.params as Record<string, unknown>,
+            result.result?.error?.message ??
+              result.error?.message ??
+              'Tool execution failed.',
+            result.executionStatus === 'cancelled' || signal.aborted,
+            this.config.getApprovalMode(),
+            undefined,
+            entry.reference.callId,
+            undefined,
+            entry.hookOwner,
+          ),
         );
       } else if (result.executionStatus === 'success' && result.result) {
-        result.postHook = await firePostToolUseHook(
-          messageBus,
-          entry.tool.name,
-          entry.invocation.params as Record<string, unknown>,
-          {
-            llmContent: result.result.llmContent,
-            returnDisplay: result.result.returnDisplay,
-          },
-          entry.toolUseId,
-          this.config.getApprovalMode(),
-          undefined,
-          entry.reference.callId,
-          undefined,
-          entry.hookOwner,
+        result.postHook = managedPostHook(
+          await firePostToolUseHook(
+            messageBus,
+            entry.tool.name,
+            entry.invocation.params as Record<string, unknown>,
+            {
+              llmContent: result.result.llmContent,
+              returnDisplay: result.result.returnDisplay,
+            },
+            entry.toolUseId,
+            this.config.getApprovalMode(),
+            undefined,
+            entry.reference.callId,
+            undefined,
+            entry.hookOwner,
+          ),
         );
       }
     } catch (error) {

@@ -12,7 +12,7 @@ public interface ToolExecutionRepository {
      * Adds observational metadata to the identical settled execution; cannot change its outcome.
      */
     public default ToolExecutionRecord attachMeasurements(
-            ToolExecutionRecord expected, Map<String, Object> metadata) {
+            ToolExecutionRecord expected, RuntimeToolMeasurements.Metadata metadata) {
         throw new RuntimeBrokerException(
                 501,
                 "runtime_tool_v4_unsupported",
@@ -43,6 +43,17 @@ public interface ToolExecutionRepository {
      * a terminal or UNKNOWN record the call returns null. */
     public ToolExecutionRecord claimDispatch(String executionCallId, String owner,
             Duration leaseDuration);
+
+    /**
+     * Claims dispatch with evidence derived from the exact payload digest.
+     * Repositories that support shared Workspace dispatch admit concurrent
+     * reads while fencing writes and indeterminate operations. Existing
+     * implementations retain exclusive behavior through this default.
+     */
+    public default ToolExecutionRecord claimValidatedDispatch(String executionCallId, String owner,
+            Duration leaseDuration, VerifiedDispatchPayload payload) {
+        return claimDispatch(executionCallId, owner, leaseDuration);
+    }
 
     public ToolExecutionRecord renewDispatch(String executionCallId, String owner,
             long dispatchGeneration, Duration leaseDuration);
