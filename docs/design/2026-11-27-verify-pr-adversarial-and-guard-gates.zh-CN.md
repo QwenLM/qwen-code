@@ -86,7 +86,7 @@ I/O 回归（`7210889200`、`7214891441`、`7215477398`、`7215982054`、`721809
   `verify-pr-check.mjs` 时不增加对 `verify-pr-guard.mjs` 的运行时依赖。
 - **`verify-pr-guard.mjs`**：
   - `fetchSnapshot()` 在首次读取元数据前记录 UTC ISO-8601 `capturedAt`（`isSnapshot()` 对缺少 `capturedAt` 的旧快照保持向后兼容），收紧 `owner/repo` slug 校验，并拒绝空值参数与多余位置参数。
-  - 在三类评论全部分页拉取完成后再次读取 PR head 与状态，若分页在途期间发生推送或状态变更则直接拒绝写出快照并要求重抓。
+  - 在三类评论全部分页拉取完成后再次读取 PR head、状态、`reviews` 与 `reviewComments`（内部以显式 `{ ok, value }` 区分调用失败与 JSON `null` 响应，杜绝末次确认返回 `null` 被静默跳过），若分页在途期间发生推送、状态变更、无行内评论的 `CHANGES_REQUESTED` 评审或行内评论变动则直接拒绝写出快照并要求重抓。
   - 为本轮独占目录中的起始快照新增 `--no-clobber`（内核级 `O_EXCL` 排他创建），防止并发两轮互相覆盖或删除彼此的 `guard-start.json`。
   - 在非 `--no-clobber` 的 `--snapshot <file>` 刷新及 `--compare --out <verdict-file>` 中，预先校验目标安全性；无论抓取失败还是写入失败（例如可写目录中只读旧文件触发 `EACCES`），均自动移除单链接普通旧文件使之失效（绝不触动 symlink、hardlink 或非普通文件）。
   - `--compare` 通过 `realpathSync`、父目录规范化与 `(dev, ino)` 强化同文件判定，防止经由 symlink 或 hardlink 自我对比，并将倒序时间戳（`now.capturedAt < start.capturedAt`）直接判为 dirty。
@@ -95,7 +95,7 @@ I/O 回归（`7210889200`、`7214891441`、`7215477398`、`7215982054`、`721809
   - 新增 `--guard <verdict>`、`--guard-sha256 <64-hex>`、`--guard-max-age-sec <1..86400>`（默认 `600`）与 `--require-guard`（同时要求经 `--context-sha256` 摘要绑定的宿主 `--context` 快照携带 repo、PR 号和 `headRefOid`，防止拿其他 PR 或旧 head 的新鲜 verdict 重放）。
   - 复用与 `--context`、`--execution-record` 相同的宿主信任边界：拒绝 PR 可写树内路径、文件系统根信任根、hardlink、symlink、非普通文件/FIFO/超大文件、摘要不匹配，并始终拒绝 PR 可写产物目录内私自植入的 `guard-verdict.json`。
   - 校验 verdict schema、`clean === true` 且 `reasons` 为空、合法 `owner/repo` 与正整数 `pr` 且匹配 `--context` 坐标、40-hex `startHeadRefOid`/`nowHeadRefOid`/`expectedHead` 一致、起止 PR 状态均为 `OPEN`、UTC 时间戳单调（`startCapturedAt <= nowCapturedAt <= comparedAt`）、`nowCapturedAt` 与 `comparedAt` 均在鲜度窗口内且不超过 60 秒未来时钟偏移。
-- **`SKILL.md`**：定义按轮次隔离的宿主目录布局（`~/.cache/qwen-verify/pr<n>/<round-id>/`），将起始快照（`--no-clobber`）、最终快照刷新、裁决、日志与摘要全部与同 PR 的并发轮次隔离；本地 `--publish` 流程在同一独占目录中清理陈旧文件、同步骤重抓 `guard-now.json`（失败即退出）、比对写出 `guard-verdict.json` 与 `guard.sha256`，仅在 `verify-pr-check.mjs`（带 `--require-guard`）退出 0 后允许发评论；并单列 runner 驱动 VM 轮次（`microvm`/`provider-vm`）的发布检查命令，在同一次检查中沿用 runner 的 `--execution-record`、`--execution-record-sha256` 与宿主 vault 产物目录。
+- **`SKILL.md`**：定义位于容器挂载树之外的按轮次隔离宿主目录布局（`~/.cache/qwen-verify-guard/pr<n>/<round-id>/`，与 Docker 挂载为 `/verify-context:ro` 的 `~/.cache/qwen-verify/pr<n>` 彻底分离，避免含未过滤外部评论正文的原始 guard 快照暴露给沙箱容器）；要求在 `verify-pr-prepare.mjs` 抓取 `review-threads.json` **之前**分配独立 `<round-id>` 并用 `--no-clobber` 建立起始快照 `guard-start.json`（若 `prepare` 已先执行则在基线建立后重跑 `prepare`），彻底闭合准备评审材料与建立基线之间的漏评窗口；本地 `--publish` 流程在同一独占目录中清理陈旧文件、同步骤重抓 `guard-now.json`（失败即退出）、比对写出 `guard-verdict.json` 与 `guard.sha256`，仅在 `verify-pr-check.mjs`（带 `--require-guard`）退出 0 后允许发评论；并单列 runner 驱动 VM 轮次（`microvm`/`provider-vm`）的发布检查命令，在同一次检查中沿用 runner 的 `--execution-record`、`--execution-record-sha256` 与宿主 vault 产物目录。
 
 ## 设计决策与权衡
 

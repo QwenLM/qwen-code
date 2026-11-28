@@ -118,7 +118,8 @@ describe('fetchSnapshot', () => {
     };
     fetchSnapshot({ pr: 7, repo: 'owner/repo', run });
     const apiCalls = calls.filter((args) => args[0] === 'api');
-    expect(apiCalls).toHaveLength(3);
+    // 3 initial paginated list fetches + 2 closing confirmations (reviews, reviewComments).
+    expect(apiCalls).toHaveLength(5);
     for (const args of apiCalls) expect(args).toContain('--paginate');
   });
 
@@ -290,8 +291,8 @@ describe('fetchSnapshot', () => {
       /pr view \(confirm\): gh exited 1/,
     );
 
-    // Non-object JSON literals (`null`, `[]`) from `pr view` fail closed
-    // without throwing a TypeError during confirmation.
+    // Non-object JSON literals (`null`, `[]`) from either opening or closing
+    // `pr view` fail closed without skipping confirmation or throwing.
     const nullMeta = fetchSnapshot({
       pr: 7,
       repo: 'owner/repo',
@@ -299,6 +300,20 @@ describe('fetchSnapshot', () => {
     });
     expect(nullMeta.ok).toBe(false);
     expect(nullMeta.snapshot).toBeNull();
+    expect(nullMeta.errors.join('\n')).toMatch(
+      /pr view: expected an object, got null/,
+    );
+
+    const nullConfirm = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: makeSequencedRun(ok(null)),
+    });
+    expect(nullConfirm.ok).toBe(false);
+    expect(nullConfirm.snapshot).toBeNull();
+    expect(nullConfirm.errors.join('\n')).toMatch(
+      /pr view \(confirm\): expected an object, got null/,
+    );
 
     const arrayConfirm = fetchSnapshot({
       pr: 7,
@@ -307,7 +322,102 @@ describe('fetchSnapshot', () => {
     });
     expect(arrayConfirm.ok).toBe(false);
     expect(arrayConfirm.errors.join('\n')).toMatch(
-      /pr view \(confirm\): expected an object/,
+      /pr view \(confirm\): expected an object, got array/,
+    );
+  });
+
+  it('rejects a snapshot when a CHANGES_REQUESTED review or inline review comment lands during pagination, or when list confirmation returns null', () => {
+    const base = allLists();
+    const runWithMidListChange = (targetPath, secondResponse) => {
+      const counts = new Map();
+      return (args) => {
+        const key = args[0] === 'api' ? args[2] : 'pr view';
+        const seen = (counts.get(key) ?? 0) + 1;
+        counts.set(key, seen);
+        if (key === targetPath && seen === 2) return secondResponse;
+        return base[key];
+      };
+    };
+
+    // Head and state remain unchanged, but a body-only CHANGES_REQUESTED
+    // review lands after the initial `reviews` read while later lists paginate.
+    const reviewLanded = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: runWithMidListChange(
+        'repos/owner/repo/pulls/7/reviews',
+        ok([
+          {
+            id: 1,
+            submitted_at: '2026-10-28T00:00:00Z',
+            body: '',
+            state: 'COMMENTED',
+          },
+          {
+            id: 55,
+            submitted_at: '2026-10-28T00:02:00Z',
+            body: 'Blocking change request with no inline comments',
+            state: 'CHANGES_REQUESTED',
+          },
+        ]),
+      ),
+    });
+    expect(reviewLanded.ok).toBe(false);
+    expect(reviewLanded.snapshot).toBeNull();
+    expect(reviewLanded.errors.join('\n')).toMatch(
+      /reviews changed during snapshot fetch/,
+    );
+
+    // Inline review comment lands while `issueComments` is paginating.
+    const commentLanded = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: runWithMidListChange(
+        'repos/owner/repo/pulls/7/comments',
+        ok([
+          { id: 2, updated_at: '2026-10-28T00:01:00Z', body: '' },
+          { id: 56, updated_at: '2026-10-28T00:02:00Z', body: 'P1 inline' },
+        ]),
+      ),
+    });
+    expect(commentLanded.ok).toBe(false);
+    expect(commentLanded.snapshot).toBeNull();
+    expect(commentLanded.errors.join('\n')).toMatch(
+      /reviewComments changed during snapshot fetch/,
+    );
+
+    // JSON `null` or non-object array entries on list fetch or confirmation fail closed without throwing.
+    const nullReviewConfirm = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: runWithMidListChange('repos/owner/repo/pulls/7/reviews', ok(null)),
+    });
+    expect(nullReviewConfirm.ok).toBe(false);
+    expect(nullReviewConfirm.errors.join('\n')).toMatch(
+      /reviews \(confirm\): expected an array, got null/,
+    );
+
+    const nullElemConfirm = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: runWithMidListChange('repos/owner/repo/pulls/7/reviews', ok([null])),
+    });
+    expect(nullElemConfirm.ok).toBe(false);
+    expect(nullElemConfirm.errors.join('\n')).toMatch(
+      /reviews \(confirm\): expected an array of objects/,
+    );
+
+    const nullElemInitial = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: fakeRun({
+        ...base,
+        'repos/owner/repo/issues/7/comments': ok([null]),
+      }),
+    });
+    expect(nullElemInitial.ok).toBe(false);
+    expect(nullElemInitial.errors.join('\n')).toMatch(
+      /issueComments: expected an array of objects/,
     );
   });
 });
@@ -1081,6 +1191,84 @@ esac
     expect(res.status).toBe(1);
     expect(res.stderr).toContain('PR head moved during snapshot fetch');
     expect(res.stderr).toContain(`removed stale ${nowPath}`);
+    expect(existsSync(nowPath)).toBe(false);
+  });
+
+  it('rejects a mid-fetch CHANGES_REQUESTED review and a closing null pr view via CLI', () => {
+    const dir = tmpDir();
+    const startPath = join(dir, 'guard-start.json');
+    const nowPath = join(dir, 'guard-now.json');
+    const reviewMarker = join(dir, 'review-arrived');
+    const nullMarker = join(dir, 'null-confirm');
+
+    const okEnv = withGh(dir, GH_OK);
+    expect(
+      run(['--pr', '7', '--repo', 'owner/repo', '--snapshot', startPath], okEnv)
+        .status,
+    ).toBe(0);
+    expect(
+      run(['--pr', '7', '--repo', 'owner/repo', '--snapshot', nowPath], okEnv)
+        .status,
+    ).toBe(0);
+
+    // Head and state stay identical, while a CHANGES_REQUESTED review with no
+    // inline comments arrives while `pulls/7/comments` is being read.
+    const midReviewGh = `#!/bin/sh
+case "$*" in
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
+  *pulls/7/reviews*)
+    if [ -f "${reviewMarker}" ]; then
+      echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":"","state":"COMMENTED"},{"id":90,"submitted_at":"2026-10-28T00:03:00Z","body":"please fix","state":"CHANGES_REQUESTED"}]'
+    else
+      echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":"","state":"COMMENTED"}]'
+    fi ;;
+  *pulls/7/comments*)
+    touch "${reviewMarker}"
+    echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *issues/7/comments*) echo '[]' ;;
+  *) echo "unexpected gh call: $*" >&2; exit 2 ;;
+esac
+`;
+    const midReviewRes = run(
+      ['--pr', '7', '--repo', 'owner/repo', '--snapshot', nowPath],
+      withGh(join(dir, 'gh-midreview'), midReviewGh),
+    );
+    expect(midReviewRes.status).toBe(1);
+    expect(midReviewRes.stderr).toContain(
+      'reviews changed during snapshot fetch',
+    );
+    expect(midReviewRes.stderr).toContain(`removed stale ${nowPath}`);
+    expect(existsSync(nowPath)).toBe(false);
+
+    // Opening pr view succeeds, closing pr view returns exit 0 with JSON `null`.
+    expect(
+      run(['--pr', '7', '--repo', 'owner/repo', '--snapshot', nowPath], okEnv)
+        .status,
+    ).toBe(0);
+    const nullConfirmGh = `#!/bin/sh
+case "$*" in
+  *'pr view'*)
+    if [ -f "${nullMarker}" ]; then
+      echo 'null'
+    else
+      touch "${nullMarker}"
+      echo '{"headRefOid":"${HEAD}","state":"OPEN"}'
+    fi ;;
+  *pulls/7/reviews*) echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":"","state":"COMMENTED"}]' ;;
+  *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *issues/7/comments*) echo '[]' ;;
+  *) echo "unexpected gh call: $*" >&2; exit 2 ;;
+esac
+`;
+    const nullConfirmRes = run(
+      ['--pr', '7', '--repo', 'owner/repo', '--snapshot', nowPath],
+      withGh(join(dir, 'gh-nullconfirm'), nullConfirmGh),
+    );
+    expect(nullConfirmRes.status).toBe(1);
+    expect(nullConfirmRes.stderr).toContain(
+      'pr view (confirm): expected an object, got null',
+    );
+    expect(nullConfirmRes.stderr).toContain(`removed stale ${nowPath}`);
     expect(existsSync(nowPath)).toBe(false);
   });
 

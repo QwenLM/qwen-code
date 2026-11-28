@@ -2307,13 +2307,16 @@ describe('qwen-triage verify workflow', () => {
     expect(flat).toContain('adversarially attack your own patch too');
     expect(flat).toContain('**Bind the guard before every local publish.**');
     expect(flat).toContain(
-      "Keep every round's start snapshot, final snapshot, verdict, log, and digest in a **per-round host directory** under the host verify cache (`pr<n>/<round-id>/`",
+      "Keep every round's start snapshot, final snapshot, verdict, log, and digest in a **per-round host directory** outside the container-mounted verify cache (`qwen-verify-guard/pr<n>/<round-id>/`",
+    );
+    expect(flat).toContain(
+      'create `guard-start.json` exclusively with `--no-clobber` **before** `verify-pr-prepare.mjs` fetches `review-threads.json`',
     );
     expect(verifySkill).toContain(
-      'mkdir -p ~/.cache/qwen-verify/pr<n>/<round-id>',
+      'mkdir -p ~/.cache/qwen-verify-guard/pr<n>/<round-id>',
     );
     expect(verifySkill).toContain(
-      '--snapshot ~/.cache/qwen-verify/pr<n>/<round-id>/guard-start.json \\',
+      '--snapshot ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-start.json \\',
     );
     expect(verifySkill).toContain('--no-clobber \\');
     expect(flat).toContain(
@@ -2323,24 +2326,29 @@ describe('qwen-triage verify workflow', () => {
       'run `verify-pr-check.mjs` with `--require-guard` before posting the PR comment',
     );
     expect(verifySkill).toContain(
-      'rm -f ~/.cache/qwen-verify/pr<n>/<round-id>/guard-now.json ~/.cache/qwen-verify/pr<n>/<round-id>/guard-verdict.json ~/.cache/qwen-verify/pr<n>/<round-id>/guard.log ~/.cache/qwen-verify/pr<n>/<round-id>/guard.sha256',
+      'rm -f ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-now.json ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256',
     );
     expect(verifySkill).toContain(
-      '--snapshot ~/.cache/qwen-verify/pr<n>/<round-id>/guard-now.json \\',
+      '--snapshot ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-now.json \\',
     );
     expect(verifySkill).toContain(
-      '--out ~/.cache/qwen-verify/pr<n>/<round-id>/guard-verdict.json',
+      '--out ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json',
     );
     expect(verifySkill).toContain(
-      "sed -n 's/^  guard-sha256  //p' ~/.cache/qwen-verify/pr<n>/<round-id>/guard.log > ~/.cache/qwen-verify/pr<n>/<round-id>/guard.sha256",
+      "sed -n 's/^  guard-sha256  //p' ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log > ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256",
     );
     expect(verifySkill).toContain('--require-guard \\');
     expect(verifySkill).toContain(
-      '--guard ~/.cache/qwen-verify/pr<n>/<round-id>/guard-verdict.json \\',
+      '--guard ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json \\',
     );
     expect(verifySkill).toContain(
-      '--guard-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/<round-id>/guard.sha256)" \\',
+      '--guard-sha256 "$(cat ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256)" \\',
     );
+    // Guard paths must never live inside the container-mounted verify-context directory.
+    expect(verifySkill).not.toContain(
+      '~/.cache/qwen-verify/pr<n>/<round-id>/guard-',
+    );
+    expect(verifySkill).not.toContain('~/.cache/qwen-verify/pr<n>/guard-');
     // Runner-backed VM publish preserves --execution-record and its digest in
     // the same final verify-pr-check.mjs invocation as --require-guard.
     expect(flat).toContain(

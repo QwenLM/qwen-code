@@ -492,6 +492,12 @@ come from `<trusted-clone>`. A PR can rewrite a script in its own tree, and
 these steps run with the real key, the maintainer's `gh` access, or the
 authority to certify the round.
 
+On local `--publish` rounds, allocate `<round-id>` and capture the per-round
+`guard-start.json` outside the container-mounted verify cache **before**
+running step 1 below (see **Bind the guard before every local publish**), so
+`review-threads.json` is never older than the guard baseline and unfiltered
+guard snapshots are never mounted into the container.
+
 1. **Prepare from the trusted copy with the PR clone as its cwd**, writing the
    authoritative snapshot straight to a host destination outside the tree
    (`--context-out`) and base-pinning `.qwen`:
@@ -1485,49 +1491,57 @@ mid-round push: on PR #18494, Round 4 published 8 minutes after a new
 top-level P1 review on the same head, and Round 5 published `merge-ready` 23
 minutes after two new P1s and 18 minutes after the head had already moved.
 Keep every round's start snapshot, final snapshot, verdict, log, and digest in
-a **per-round host directory** under the host verify cache (`pr<n>/<round-id>/`
-— unique to this round, for example its artifact directory name
-`pr<n>-verify-<ts>`, never shared directly under `pr<n>/`), and reference that
-same `<round-id>` from round start through publication so concurrent local
-rounds on the same PR cannot overwrite each other's `guard-start.json`. At
-round start, create the start snapshot exclusively with `--no-clobber`:
+a **per-round host directory** outside the container-mounted verify cache
+(`qwen-verify-guard/pr<n>/<round-id>/`, never under the `qwen-verify/pr<n>/`
+tree that Docker mounts read-only as the container's `verify-context` mount,
+because raw guard snapshots store unfiltered comment bodies for edit detection
+and must stay unreadable from inside the verification sandbox). Allocate
+`<round-id>` (a unique per-round identifier independent of `prepare`'s
+artifact directory name) and create `guard-start.json` exclusively with
+`--no-clobber` **before** `verify-pr-prepare.mjs` fetches `review-threads.json`
+(if `prepare` already ran first, re-run `prepare` after creating
+`guard-start.json` so the validator's `review-threads.json` is never older
+than the guard baseline), and reference that same `<round-id>` through
+publication so concurrent local rounds on the same PR cannot overwrite each
+other's `guard-start.json`:
 
 ```bash
-mkdir -p ~/.cache/qwen-verify/pr<n>/<round-id>
+mkdir -p ~/.cache/qwen-verify-guard/pr<n>/<round-id>
 node <trusted-clone>/scripts/verify-pr-guard.mjs \
   --pr <n> --repo <owner>/<repo> \
-  --snapshot ~/.cache/qwen-verify/pr<n>/<round-id>/guard-start.json \
+  --snapshot ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-start.json \
   --no-clobber \
-  > ~/.cache/qwen-verify/pr<n>/<round-id>/guard.log 2>&1 || { cat ~/.cache/qwen-verify/pr<n>/<round-id>/guard.log >&2; exit 1; }
+  > ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log 2>&1 || { cat ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log >&2; exit 1; }
 ```
 
 On every local `--publish` path, clear stale guard files in that same
 `<round-id>` directory, refresh `guard-now.json` in the same publish step
-(failing closed immediately if the refresh errors or if the PR head or state
-changes while comment pages are being fetched), write the structured verdict
-into that per-round host directory outside the PR clone, and run
-`verify-pr-check.mjs` with `--require-guard` before posting the PR comment:
+(failing closed immediately if the refresh errors or if the PR head, state,
+formal reviews, or inline review comments change while pages are being
+fetched), write the structured verdict into that per-round host directory
+outside the PR clone and outside the container's `verify-context` mount, and
+run `verify-pr-check.mjs` with `--require-guard` before posting the PR comment:
 
 ```bash
-rm -f ~/.cache/qwen-verify/pr<n>/<round-id>/guard-now.json ~/.cache/qwen-verify/pr<n>/<round-id>/guard-verdict.json ~/.cache/qwen-verify/pr<n>/<round-id>/guard.log ~/.cache/qwen-verify/pr<n>/<round-id>/guard.sha256
+rm -f ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-now.json ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256
 node <trusted-clone>/scripts/verify-pr-guard.mjs \
   --pr <n> --repo <owner>/<repo> \
-  --snapshot ~/.cache/qwen-verify/pr<n>/<round-id>/guard-now.json \
-  > ~/.cache/qwen-verify/pr<n>/<round-id>/guard.log 2>&1 || { cat ~/.cache/qwen-verify/pr<n>/<round-id>/guard.log >&2; exit 1; }
+  --snapshot ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-now.json \
+  > ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log 2>&1 || { cat ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log >&2; exit 1; }
 node <trusted-clone>/scripts/verify-pr-guard.mjs --compare \
-  --start ~/.cache/qwen-verify/pr<n>/<round-id>/guard-start.json \
-  --now ~/.cache/qwen-verify/pr<n>/<round-id>/guard-now.json \
-  --out ~/.cache/qwen-verify/pr<n>/<round-id>/guard-verdict.json \
-  > ~/.cache/qwen-verify/pr<n>/<round-id>/guard.log 2>&1 || { cat ~/.cache/qwen-verify/pr<n>/<round-id>/guard.log >&2; exit 1; }
-sed -n 's/^  guard-sha256  //p' ~/.cache/qwen-verify/pr<n>/<round-id>/guard.log > ~/.cache/qwen-verify/pr<n>/<round-id>/guard.sha256
-grep -Eq '^[0-9a-f]{64}$' ~/.cache/qwen-verify/pr<n>/<round-id>/guard.sha256 || { echo "guard printed no valid guard-sha256; see guard.log" >&2; exit 1; }
+  --start ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-start.json \
+  --now ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-now.json \
+  --out ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json \
+  > ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log 2>&1 || { cat ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log >&2; exit 1; }
+sed -n 's/^  guard-sha256  //p' ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log > ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256
+grep -Eq '^[0-9a-f]{64}$' ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256 || { echo "guard printed no valid guard-sha256; see guard.log" >&2; exit 1; }
 node <trusted-clone>/scripts/verify-pr-check.mjs \
   --context ~/.cache/qwen-verify/pr<n>/pr.json \
   --context-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)" \
   --context-root "<pr-clone>" \
   --require-guard \
-  --guard ~/.cache/qwen-verify/pr<n>/<round-id>/guard-verdict.json \
-  --guard-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/<round-id>/guard.sha256)" \
+  --guard ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json \
+  --guard-sha256 "$(cat ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256)" \
   "$rd"
 ```
 
@@ -1544,15 +1558,17 @@ node <trusted-clone>/scripts/verify-pr-check.mjs \
   --execution-record <execution-record> \
   --execution-record-sha256 <execution-record-sha256> \
   --require-guard \
-  --guard ~/.cache/qwen-verify/pr<n>/<round-id>/guard-verdict.json \
-  --guard-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/<round-id>/guard.sha256)" \
+  --guard ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json \
+  --guard-sha256 "$(cat ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256)" \
   <artifact-dir>
 ```
 
-A `--snapshot` refresh re-reads PR head and state after all paginated comment
-fetches complete (rejecting mid-fetch pushes or state changes), and removes any
-stale regular snapshot already at that path on either fetch failure or write
-failure (while refusing to touch symlinks, hardlinks, or non-regular files).
+A `--snapshot` refresh re-reads PR head, PR state, `reviews`, and
+`reviewComments` after all paginated comment fetches complete (requiring valid
+JSON objects/arrays and rejecting mid-fetch pushes, state changes,
+`CHANGES_REQUESTED` reviews, or inline review comments), and removes any stale
+regular snapshot already at that path on either fetch failure or write failure
+(while refusing to touch symlinks, hardlinks, or non-regular files).
 `--compare --out` overwrites the verdict on dirty runs and invalidates any
 stale regular verdict on write failure (so an older `clean: true` file cannot
 survive), and `verify-pr-check.mjs` with `--require-guard` refuses a missing

@@ -126,9 +126,11 @@ exact same commits (`7210889200`, `7214891441`, `7215477398`, `7215982054`,
     in `fetchSnapshot()` (keeping `isSnapshot()` backwards-compatible when
     `capturedAt` is absent), enforce strict `owner/repo` slug validation, and
     reject empty flag values or stray positional arguments.
-  - Re-read PR head and state after all paginated comment lists finish and fail
-    closed if either changed while pages were in flight, requiring a fresh
-    snapshot before comparing.
+  - Re-read PR head, PR state, `reviews`, and `reviewComments` after all
+    paginated comment lists finish (using explicit `{ ok, value }` call results
+    so a JSON `null` response can never skip confirmation) and fail closed if
+    any of them changed while pages were in flight, requiring a fresh snapshot
+    before comparing.
   - Add `--no-clobber` (`O_EXCL` atomic create) for round-start snapshots in
     per-round host directories so concurrent rounds cannot overwrite or delete
     each other's `guard-start.json`.
@@ -160,16 +162,21 @@ exact same commits (`7210889200`, `7214891441`, `7215477398`, `7215982054`,
     both ends, monotonic UTC timestamps
     (`startCapturedAt <= nowCapturedAt <= comparedAt`), freshness against
     `nowCapturedAt` and `comparedAt`, and a 60 s future-skew bound.
-- **`SKILL.md`**: Document the per-round host directory layout
-  (`~/.cache/qwen-verify/pr<n>/<round-id>/`) isolating start snapshot
-  (`--no-clobber`), final snapshot refresh, verdict, log, and digest from
-  concurrent local rounds on the same PR. The local `--publish` gate clears
-  stale per-round files, refreshes `guard-now.json` in the same step (exiting
-  immediately on failure), compares into `guard-verdict.json` + `guard.sha256`,
-  and requires `verify-pr-check.mjs` with `--require-guard` to exit 0 before
-  posting — including the runner-backed VM variant (`microvm` / `provider-vm`)
-  that keeps the runner's `--execution-record`, `--execution-record-sha256`, and
-  vault artifact directory in the same final check.
+- **`SKILL.md`**: Document the per-round host directory layout outside the
+  container-mounted verify cache (`~/.cache/qwen-verify-guard/pr<n>/<round-id>/`,
+  strictly separate from the `~/.cache/qwen-verify/pr<n>` directory mounted as
+  `/verify-context:ro` so raw unfiltered guard snapshots stay unreadable from
+  inside the verification container). Require allocating `<round-id>` and
+  creating `guard-start.json` with `--no-clobber` **before** `verify-pr-prepare.mjs`
+  fetches `review-threads.json` (or re-running `prepare` afterward if it ran
+  first), closing the gap between material preparation and guard baseline
+  creation. The local `--publish` gate clears stale per-round files, refreshes
+  `guard-now.json` in the same step (exiting immediately on failure), compares
+  into `guard-verdict.json` + `guard.sha256`, and requires
+  `verify-pr-check.mjs` with `--require-guard` to exit 0 before posting —
+  including the runner-backed VM variant (`microvm` / `provider-vm`) that keeps
+  the runner's `--execution-record`, `--execution-record-sha256`, and vault
+  artifact directory in the same final check.
 
 ## Design Decisions and Rationale
 

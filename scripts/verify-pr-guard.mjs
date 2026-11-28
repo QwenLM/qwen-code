@@ -71,13 +71,13 @@ const HELP = `Usage:
   node scripts/verify-pr-guard.mjs --compare --start <file> --now <file> [--out <verdict-file>]
 
 --snapshot fetches the head and PR state, paginates all three comment lists,
-then re-reads the head and PR state to confirm neither changed while pages were
-in flight. It writes the file only when every call succeeded and the opening
-and closing metadata match. A failed fetch or failed write exits 1 and leaves
-no stale regular snapshot behind (removing any stale regular snapshot already
-at that path while refusing to touch symlinks, hardlinks, or non-regular
-files), so a retry after a failed refresh cannot be mistaken for a fresh
-snapshot.
+then re-reads the head, PR state, reviews, and review comments to confirm none
+changed while pages were in flight. It writes the file only when every call
+succeeded with valid JSON objects/arrays and the opening and closing reads
+match. A failed fetch or failed write exits 1 and leaves no stale regular
+snapshot behind (removing any stale regular snapshot already at that path while
+refusing to touch symlinks, hardlinks, or non-regular files), so a retry after
+a failed refresh cannot be mistaken for a fresh snapshot.
 
 With --no-clobber (for round-start snapshots in a per-round host directory),
 --snapshot creates the file exclusively (O_EXCL) and exits 1 without touching
@@ -136,28 +136,33 @@ export function fetchSnapshot({ pr, repo, run, now = () => new Date() }) {
       errors.push(
         `${label}: gh exited ${result.status ?? 'null'}${result.stderr ? ` — ${result.stderr.trim().split('\n')[0]}` : ''}`,
       );
-      return null;
+      return { ok: false, value: null };
     }
     try {
-      return JSON.parse(result.stdout);
+      return { ok: true, value: JSON.parse(result.stdout) };
     } catch {
       errors.push(`${label}: response was not JSON`);
-      return null;
+      return { ok: false, value: null };
     }
   };
 
   const isPlainObject = (value) =>
     value !== null && typeof value === 'object' && !Array.isArray(value);
+  const describeType = (value) =>
+    value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
 
   const capturedAt = now().toISOString();
-  const meta = call(
+  const metaRes = call(
     ['pr', 'view', String(pr), '--repo', repo, '--json', 'headRefOid,state'],
     'pr view',
   );
-  if (meta !== null && !isPlainObject(meta)) {
-    errors.push(`pr view: expected an object, got ${typeof meta}`);
+  if (metaRes.ok && !isPlainObject(metaRes.value)) {
+    errors.push(
+      `pr view: expected an object, got ${describeType(metaRes.value)}`,
+    );
   }
-  const metaObj = isPlainObject(meta) ? meta : null;
+  const metaObj =
+    metaRes.ok && isPlainObject(metaRes.value) ? metaRes.value : null;
   const snapshot = {
     pr,
     repo,
@@ -166,43 +171,79 @@ export function fetchSnapshot({ pr, repo, run, now = () => new Date() }) {
     capturedAt,
   };
 
+  const canonicalListKey = (list) =>
+    JSON.stringify([...list].sort((a, b) => (a.id ?? 0) - (b.id ?? 0)));
+
   for (const [key, path, carriesState] of LISTS) {
     // `--paginate` merges array pages into one JSON array (verified on gh
     // 2.103.0: 17 comments over 4 pages parsed as a single array). `--slurp`
     // would instead nest one array per page and break the normalize below.
-    const items = call(
+    const itemsRes = call(
       ['api', '--paginate', path(pr).replace('{repo}', repo)],
       key,
     );
-    if (items === null) continue;
-    if (!Array.isArray(items)) {
-      errors.push(`${key}: expected an array, got ${typeof items}`);
+    if (!itemsRes.ok) continue;
+    if (!Array.isArray(itemsRes.value)) {
+      errors.push(
+        `${key}: expected an array, got ${describeType(itemsRes.value)}`,
+      );
       continue;
     }
-    snapshot[key] = normalize(items, carriesState);
+    if (!itemsRes.value.every(isPlainObject)) {
+      errors.push(`${key}: expected an array of objects`);
+      continue;
+    }
+    snapshot[key] = normalize(itemsRes.value, carriesState);
   }
 
-  // Re-read head and state after all paginated comment fetches finish so a
-  // push or state transition landing while pages were in flight cannot hide
-  // behind the opening `pr view`.
+  // Re-read head, state, and the earlier paginated lists (`reviews` and
+  // `reviewComments`) after `issueComments` finishes so any push, state
+  // change, CHANGES_REQUESTED review, review edit/dismissal, or inline review
+  // comment landing while pages were in flight is caught and rejected.
   if (errors.length === 0 && metaObj !== null) {
-    const confirm = call(
+    const confirmMetaRes = call(
       ['pr', 'view', String(pr), '--repo', repo, '--json', 'headRefOid,state'],
       'pr view (confirm)',
     );
-    if (confirm !== null && !isPlainObject(confirm)) {
-      errors.push(
-        `pr view (confirm): expected an object, got ${typeof confirm}`,
-      );
-    } else if (confirm !== null) {
-      if (confirm.headRefOid !== metaObj.headRefOid) {
+    if (confirmMetaRes.ok) {
+      if (!isPlainObject(confirmMetaRes.value)) {
         errors.push(
-          `PR head moved during snapshot fetch (${metaObj.headRefOid} -> ${confirm.headRefOid}); re-fetch before comparing`,
+          `pr view (confirm): expected an object, got ${describeType(confirmMetaRes.value)}`,
         );
+      } else {
+        if (confirmMetaRes.value.headRefOid !== metaObj.headRefOid) {
+          errors.push(
+            `PR head moved during snapshot fetch (${metaObj.headRefOid} -> ${confirmMetaRes.value.headRefOid}); re-fetch before comparing`,
+          );
+        }
+        if (confirmMetaRes.value.state !== metaObj.state) {
+          errors.push(
+            `PR state changed during snapshot fetch (${metaObj.state} -> ${confirmMetaRes.value.state}); re-fetch before comparing`,
+          );
+        }
       }
-      if (confirm.state !== metaObj.state) {
+    }
+
+    for (const [key, path, carriesState] of LISTS.slice(0, -1)) {
+      const confirmListRes = call(
+        ['api', '--paginate', path(pr).replace('{repo}', repo)],
+        `${key} (confirm)`,
+      );
+      if (!confirmListRes.ok) continue;
+      if (!Array.isArray(confirmListRes.value)) {
         errors.push(
-          `PR state changed during snapshot fetch (${metaObj.state} -> ${confirm.state}); re-fetch before comparing`,
+          `${key} (confirm): expected an array, got ${describeType(confirmListRes.value)}`,
+        );
+        continue;
+      }
+      if (!confirmListRes.value.every(isPlainObject)) {
+        errors.push(`${key} (confirm): expected an array of objects`);
+        continue;
+      }
+      const confirmed = normalize(confirmListRes.value, carriesState);
+      if (canonicalListKey(confirmed) !== canonicalListKey(snapshot[key])) {
+        errors.push(
+          `${key} changed during snapshot fetch; re-fetch before comparing`,
         );
       }
     }
