@@ -131,17 +131,21 @@ exact same commits (`7210889200`, `7214891441`, `7215477398`, `7215982054`,
     (`GUARD_CONFIRM_QUERY`) **after** all paginated fetches finish (using
     explicit `{ ok, value }` call results so a JSON `null` response can never
     skip confirmation) to verify `headRefOid`, `state`, formal review count and
-    latest review (`databaseId`, `state`, `submittedAt`), and top-level comment
-    count and latest comment (`databaseId`, `updatedAt`) atomically before
-    writing the snapshot.
+    recent reviews (`reviews(last: 100)` checking `databaseId`, `state`,
+    `submittedAt`, and normalized `body` — catching edits/dismissals on earlier
+    reviews as well as body-only edits on the latest review), top-level comment
+    count and latest created comment (`databaseId`, `updatedAt`), and the
+    most-recently-updated top-level comment
+    (`orderBy: { field: UPDATED_AT, direction: DESC }`, checking `databaseId`,
+    `updatedAt`, and normalized `body`) atomically before writing the snapshot.
   - Add `--no-clobber` (`O_EXCL` atomic create) for round-start snapshots in
     per-round host directories so concurrent rounds cannot overwrite or delete
     each other's `guard-start.json`.
-  - On refresh `--snapshot <file>` (without `--no-clobber`) and `--compare
---out <verdict-file>`, pre-check target safety and invalidate any stale
-    regular file at that path on either fetch failure or write failure (such as
-    `EACCES` on a read-only file in a writable directory, without touching
-    symlinks, hardlinks, or non-regular files).
+  - On refresh `--snapshot <file>` (without `--no-clobber`) and
+    `--compare --out <verdict-file>`, pre-check target safety and invalidate
+    any stale regular file at that path on either fetch failure or write
+    failure (such as `EACCES` on a read-only file in a writable directory,
+    without touching symlinks, hardlinks, or non-regular files).
   - Harden same-file detection on `--compare` via `realpathSync`, parent-dir
     canonicalization, and `(dev, ino)` so symlink and hardlink aliases cannot
     compare a snapshot with itself, and flag inverted timestamps

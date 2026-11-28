@@ -75,6 +75,23 @@ function ok(body) {
 }
 
 function confirmPayload(overrides = {}) {
+  const comments = overrides.comments ?? {
+    totalCount: 0,
+    nodes: [],
+  };
+  const latestEditedComment =
+    overrides.latestEditedComment ??
+    (Array.isArray(comments?.nodes) && comments.nodes.length > 0
+      ? {
+          nodes: [
+            {
+              databaseId: comments.nodes[0].databaseId,
+              updatedAt: comments.nodes[0].updatedAt,
+              body: comments.nodes[0].body ?? '',
+            },
+          ],
+        }
+      : { nodes: [] });
   return {
     data: {
       repository: {
@@ -88,13 +105,12 @@ function confirmPayload(overrides = {}) {
                 databaseId: 1,
                 state: 'COMMENTED',
                 submittedAt: '2026-10-28T00:00:00Z',
+                body: '',
               },
             ],
           },
-          comments: {
-            totalCount: 0,
-            nodes: [],
-          },
+          comments,
+          latestEditedComment,
           ...overrides,
         },
       },
@@ -171,7 +187,7 @@ describe('fetchSnapshot', () => {
     expect(lastCall).not.toContain('--paginate');
     expect(lastCall).toContain(`query=${GUARD_CONFIRM_QUERY}`);
     expect(GUARD_CONFIRM_QUERY).toBe(
-      'query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid state reviews(last: 1) { totalCount nodes { databaseId state submittedAt } } comments(last: 1) { totalCount nodes { databaseId updatedAt } } } } }',
+      'query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid state reviews(last: 100) { totalCount nodes { databaseId state submittedAt body } } comments(last: 1) { totalCount nodes { databaseId updatedAt } } latestEditedComment: comments(first: 1, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { databaseId updatedAt body } } } } }',
     );
   });
 
@@ -436,6 +452,255 @@ describe('fetchSnapshot', () => {
     expect(graphqlErrors.errors.join('\n')).toMatch(
       /guard confirm: GraphQL response returned errors/,
     );
+
+    // Earlier top-level comment #71 edited in place while #72 remains last by
+    // creation order and totalCount stays 2.
+    const twoCommentsBase = {
+      ...allLists(),
+      'repos/owner/repo/issues/7/comments': ok([
+        { id: 71, updated_at: '2026-10-28T00:02:00Z', body: 'Checks passed' },
+        { id: 72, updated_at: '2026-10-28T00:03:00Z', body: 'Follow-up note' },
+      ]),
+    };
+    const editedEarlier = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: fakeRun({
+        ...twoCommentsBase,
+        graphql: ok(
+          confirmPayload({
+            comments: {
+              totalCount: 2,
+              nodes: [{ databaseId: 72, updatedAt: '2026-10-28T00:03:00Z' }],
+            },
+            latestEditedComment: {
+              nodes: [
+                {
+                  databaseId: 71,
+                  updatedAt: '2026-10-28T00:04:00Z',
+                  body: '[P1] updated in place',
+                },
+              ],
+            },
+          }),
+        ),
+      }),
+    });
+    expect(editedEarlier.ok).toBe(false);
+    expect(editedEarlier.errors.join('\n')).toMatch(
+      /issueComments changed during snapshot fetch/,
+    );
+
+    // Same-second in-place edit (body changes while updatedAt matches) is caught.
+    const sameSecondEdit = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: fakeRun({
+        ...twoCommentsBase,
+        graphql: ok(
+          confirmPayload({
+            comments: {
+              totalCount: 2,
+              nodes: [{ databaseId: 72, updatedAt: '2026-10-28T00:03:00Z' }],
+            },
+            latestEditedComment: {
+              nodes: [
+                {
+                  databaseId: 72,
+                  updatedAt: '2026-10-28T00:03:00Z',
+                  body: '[P1] edited within same second',
+                },
+              ],
+            },
+          }),
+        ),
+      }),
+    });
+    expect(sameSecondEdit.ok).toBe(false);
+    expect(sameSecondEdit.errors.join('\n')).toMatch(
+      /issueComments changed during snapshot fetch/,
+    );
+
+    // Negative controls (no false positives):
+    // 1. Two comments tied at the same updatedAt pass regardless of tie-break order.
+    // 2. REST CRLF body matches GraphQL LF body when content is unchanged.
+    const tiedCrlfBase = {
+      ...allLists(),
+      'repos/owner/repo/issues/7/comments': ok([
+        {
+          id: 71,
+          updated_at: '2026-10-28T00:03:00Z',
+          body: 'line1\r\nline2',
+        },
+        { id: 72, updated_at: '2026-10-28T00:03:00Z', body: 'second' },
+      ]),
+    };
+    const tiedOk = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: fakeRun({
+        ...tiedCrlfBase,
+        graphql: ok(
+          confirmPayload({
+            comments: {
+              totalCount: 2,
+              nodes: [{ databaseId: 72, updatedAt: '2026-10-28T00:03:00Z' }],
+            },
+            latestEditedComment: {
+              nodes: [
+                {
+                  databaseId: 71,
+                  updatedAt: '2026-10-28T00:03:00Z',
+                  body: 'line1\nline2',
+                },
+              ],
+            },
+          }),
+        ),
+      }),
+    });
+    expect(tiedOk.ok).toBe(true);
+
+    // Malformed latestEditedComment fails closed.
+    const malformedEdited = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: fakeRun({
+        ...twoCommentsBase,
+        graphql: ok(
+          confirmPayload({
+            comments: {
+              totalCount: 2,
+              nodes: [{ databaseId: 72, updatedAt: '2026-10-28T00:03:00Z' }],
+            },
+            latestEditedComment: null,
+          }),
+        ),
+      }),
+    });
+    expect(malformedEdited.ok).toBe(false);
+    expect(malformedEdited.errors.join('\n')).toMatch(
+      /malformed latestEditedComment summary/,
+    );
+
+    // Review sibling cases (B1 & B2):
+    // B1: Earlier review #60 changes state to CHANGES_REQUESTED while latest
+    // review #61 and totalCount=2 remain unchanged.
+    // B2: Latest review #61 has a body-only edit while state and submittedAt
+    // remain unchanged.
+    const twoReviewsBase = {
+      ...allLists(),
+      'repos/owner/repo/pulls/7/reviews': ok([
+        {
+          id: 60,
+          submitted_at: '2026-10-28T00:00:00Z',
+          body: 'looks ok\r\nfor now',
+          state: 'COMMENTED',
+        },
+        {
+          id: 61,
+          submitted_at: '2026-10-28T00:01:00Z',
+          body: 'approved body',
+          state: 'APPROVED',
+        },
+      ]),
+    };
+    const earlierReviewChanged = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: fakeRun({
+        ...twoReviewsBase,
+        graphql: ok(
+          confirmPayload({
+            reviews: {
+              totalCount: 2,
+              nodes: [
+                {
+                  databaseId: 60,
+                  state: 'CHANGES_REQUESTED',
+                  submittedAt: '2026-10-28T00:00:00Z',
+                  body: 'looks ok\nfor now',
+                },
+                {
+                  databaseId: 61,
+                  state: 'APPROVED',
+                  submittedAt: '2026-10-28T00:01:00Z',
+                  body: 'approved body',
+                },
+              ],
+            },
+          }),
+        ),
+      }),
+    });
+    expect(earlierReviewChanged.ok).toBe(false);
+    expect(earlierReviewChanged.errors.join('\n')).toMatch(
+      /reviews changed during snapshot fetch/,
+    );
+
+    const latestReviewBodyEdited = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: fakeRun({
+        ...twoReviewsBase,
+        graphql: ok(
+          confirmPayload({
+            reviews: {
+              totalCount: 2,
+              nodes: [
+                {
+                  databaseId: 60,
+                  state: 'COMMENTED',
+                  submittedAt: '2026-10-28T00:00:00Z',
+                  body: 'looks ok\nfor now',
+                },
+                {
+                  databaseId: 61,
+                  state: 'APPROVED',
+                  submittedAt: '2026-10-28T00:01:00Z',
+                  body: '[P1] edited body in place',
+                },
+              ],
+            },
+          }),
+        ),
+      }),
+    });
+    expect(latestReviewBodyEdited.ok).toBe(false);
+    expect(latestReviewBodyEdited.errors.join('\n')).toMatch(
+      /reviews changed during snapshot fetch/,
+    );
+
+    // Benign control: unchanged reviews with REST CRLF vs GraphQL LF pass cleanly.
+    const unchangedReviewsOk = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: fakeRun({
+        ...twoReviewsBase,
+        graphql: ok(
+          confirmPayload({
+            reviews: {
+              totalCount: 2,
+              nodes: [
+                {
+                  databaseId: 60,
+                  state: 'COMMENTED',
+                  submittedAt: '2026-10-28T00:00:00Z',
+                  body: 'looks ok\nfor now',
+                },
+                {
+                  databaseId: 61,
+                  state: 'APPROVED',
+                  submittedAt: '2026-10-28T00:01:00Z',
+                  body: 'approved body',
+                },
+              ],
+            },
+          }),
+        ),
+      }),
+    });
+    expect(unchangedReviewsOk.ok).toBe(true);
   });
 
   it('rejects a snapshot when a CHANGES_REQUESTED review or inline review comment lands during pagination, or when list confirmation returns null', () => {
@@ -1196,7 +1461,13 @@ esac`;
         confirmPayload({
           comments: {
             totalCount: 1,
-            nodes: [{ databaseId: 99, updatedAt: '2026-10-28T00:05:00Z' }],
+            nodes: [
+              {
+                databaseId: 99,
+                updatedAt: '2026-10-28T00:05:00Z',
+                body: '[P1] new finding',
+              },
+            ],
           },
         }),
       ),
@@ -1503,7 +1774,13 @@ esac`,
         confirmPayload({
           comments: {
             totalCount: 1,
-            nodes: [{ databaseId: 77, updatedAt: '2026-10-28T00:06:00Z' }],
+            nodes: [
+              {
+                databaseId: 77,
+                updatedAt: '2026-10-28T00:06:00Z',
+                body: '[P1] late top-level review',
+              },
+            ],
           },
         }),
       )}'
@@ -1542,6 +1819,242 @@ esac`,
     expect(secondCommentTry.stage).toBe('compare');
     expect(secondCommentTry.res.status).toBe(1);
     expect(secondCommentTry.res.stdout).toContain('issueComments: 77 is new');
+
+    // Case 3: Existing top-level comments #71 ("Checks passed") and #72
+    // (created later). On the SECOND `pulls/7/reviews` call, a bot edits #71
+    // in place to "[P1] blocking finding" while #72, totalCount=2, and head
+    // all stay unchanged. First attempt must block immediately; immediate
+    // retry must report `issueComments: 71 was edited`.
+    const editRoundDir = join(dir, 'guard-edit');
+    mkdirSync(editRoundDir, { recursive: true });
+    const editInitGql = JSON.stringify(
+      confirmPayload({
+        comments: {
+          totalCount: 2,
+          nodes: [{ databaseId: 72, updatedAt: '2026-10-28T00:03:00Z' }],
+        },
+        latestEditedComment: {
+          nodes: [
+            {
+              databaseId: 72,
+              updatedAt: '2026-10-28T00:03:00Z',
+              body: 'Later comment',
+            },
+          ],
+        },
+      }),
+    );
+    const editAfterGql = JSON.stringify(
+      confirmPayload({
+        comments: {
+          totalCount: 2,
+          nodes: [{ databaseId: 72, updatedAt: '2026-10-28T00:03:00Z' }],
+        },
+        latestEditedComment: {
+          nodes: [
+            {
+              databaseId: 71,
+              updatedAt: '2026-10-28T00:06:00Z',
+              body: '[P1] blocking finding',
+            },
+          ],
+        },
+      }),
+    );
+    const editStartEnv = withGh(
+      join(dir, 'gh-edit-start'),
+      `case "$*" in
+  *graphql*) echo '${editInitGql}' ;;
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
+  *pulls/7/reviews*) echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":"","state":"COMMENTED"}]' ;;
+  *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *issues/7/comments*) echo '[{"id":71,"updated_at":"2026-10-28T00:02:00Z","body":"Checks passed"},{"id":72,"updated_at":"2026-10-28T00:03:00Z","body":"Later comment"}]' ;;
+esac`,
+    );
+    expect(
+      run(
+        [
+          '--pr',
+          '7',
+          '--repo',
+          'owner/repo',
+          '--snapshot',
+          join(editRoundDir, 'guard-start.json'),
+          '--no-clobber',
+        ],
+        editStartEnv,
+      ).status,
+    ).toBe(0);
+    const editCountFile = join(dir, 'reviews-count-edit');
+    const editActiveFile = join(dir, 'edit-active');
+    const secondPassEditEnv = withGh(
+      join(dir, 'gh-second-edit'),
+      `case "$*" in
+  *graphql*)
+    if [ -f "${editActiveFile}" ]; then
+      echo '${editAfterGql}'
+    else
+      echo '${editInitGql}'
+    fi ;;
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
+  *pulls/7/reviews*)
+    n=$(cat "${editCountFile}" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "${editCountFile}"
+    if [ "$n" -ge 2 ]; then touch "${editActiveFile}"; fi
+    echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":"","state":"COMMENTED"}]' ;;
+  *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *issues/7/comments*)
+    if [ -f "${editActiveFile}" ]; then
+      echo '[{"id":71,"updated_at":"2026-10-28T00:06:00Z","body":"[P1] blocking finding"},{"id":72,"updated_at":"2026-10-28T00:03:00Z","body":"Later comment"}]'
+    else
+      echo '[{"id":71,"updated_at":"2026-10-28T00:02:00Z","body":"Checks passed"},{"id":72,"updated_at":"2026-10-28T00:03:00Z","body":"Later comment"}]'
+    fi ;;
+esac`,
+    );
+    const firstEditTry = runPublishChain(editRoundDir, secondPassEditEnv);
+    expect(firstEditTry.stage).toBe('snapshot');
+    expect(firstEditTry.res.status).toBe(1);
+    expect(firstEditTry.res.stderr).toContain(
+      'issueComments changed during snapshot fetch',
+    );
+    const secondEditTry = runPublishChain(editRoundDir, secondPassEditEnv);
+    expect(secondEditTry.stage).toBe('compare');
+    expect(secondEditTry.res.status).toBe(1);
+    expect(secondEditTry.res.stdout).toContain('issueComments: 71 was edited');
+
+    // Case 4 (review siblings B1 & B2): On the SECOND `pulls/7/comments` call
+    // (after `reviews` confirm already ran), either earlier review #60 flips
+    // to CHANGES_REQUESTED or latest review #61 has a body-only edit. Both
+    // must block on the first publish attempt and report dirty on retry.
+    for (const reviewCase of [
+      {
+        name: 'earlier-review-state',
+        afterRest:
+          '[{"id":60,"submitted_at":"2026-10-28T00:00:00Z","body":"ok","state":"CHANGES_REQUESTED"},{"id":61,"submitted_at":"2026-10-28T00:01:00Z","body":"approved","state":"APPROVED"}]',
+        afterNodes: [
+          {
+            databaseId: 60,
+            state: 'CHANGES_REQUESTED',
+            submittedAt: '2026-10-28T00:00:00Z',
+            body: 'ok',
+          },
+          {
+            databaseId: 61,
+            state: 'APPROVED',
+            submittedAt: '2026-10-28T00:01:00Z',
+            body: 'approved',
+          },
+        ],
+        expectedCompare:
+          'reviews: 60 changed state (COMMENTED -> CHANGES_REQUESTED)',
+      },
+      {
+        name: 'latest-review-body',
+        afterRest:
+          '[{"id":60,"submitted_at":"2026-10-28T00:00:00Z","body":"ok","state":"COMMENTED"},{"id":61,"submitted_at":"2026-10-28T00:01:00Z","body":"[P1] edited body","state":"APPROVED"}]',
+        afterNodes: [
+          {
+            databaseId: 60,
+            state: 'COMMENTED',
+            submittedAt: '2026-10-28T00:00:00Z',
+            body: 'ok',
+          },
+          {
+            databaseId: 61,
+            state: 'APPROVED',
+            submittedAt: '2026-10-28T00:01:00Z',
+            body: '[P1] edited body',
+          },
+        ],
+        expectedCompare: 'reviews: 61 was edited',
+      },
+    ]) {
+      const rDir = join(dir, `guard-${reviewCase.name}`);
+      mkdirSync(rDir, { recursive: true });
+      const initRest =
+        '[{"id":60,"submitted_at":"2026-10-28T00:00:00Z","body":"ok","state":"COMMENTED"},{"id":61,"submitted_at":"2026-10-28T00:01:00Z","body":"approved","state":"APPROVED"}]';
+      const initGql = JSON.stringify(
+        confirmPayload({
+          reviews: {
+            totalCount: 2,
+            nodes: [
+              {
+                databaseId: 60,
+                state: 'COMMENTED',
+                submittedAt: '2026-10-28T00:00:00Z',
+                body: 'ok',
+              },
+              {
+                databaseId: 61,
+                state: 'APPROVED',
+                submittedAt: '2026-10-28T00:01:00Z',
+                body: 'approved',
+              },
+            ],
+          },
+        }),
+      );
+      const afterGql = JSON.stringify(
+        confirmPayload({
+          reviews: { totalCount: 2, nodes: reviewCase.afterNodes },
+        }),
+      );
+      const startEnv = withGh(
+        join(dir, `gh-start-${reviewCase.name}`),
+        `case "$*" in
+  *graphql*) echo '${initGql}' ;;
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
+  *pulls/7/reviews*) echo '${initRest}' ;;
+  *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *issues/7/comments*) echo '[]' ;;
+esac`,
+      );
+      expect(
+        run(
+          [
+            '--pr',
+            '7',
+            '--repo',
+            'owner/repo',
+            '--snapshot',
+            join(rDir, 'guard-start.json'),
+            '--no-clobber',
+          ],
+          startEnv,
+        ).status,
+      ).toBe(0);
+
+      const rcCount = join(dir, `rc-count-${reviewCase.name}`);
+      const rcFlag = join(dir, `rc-flag-${reviewCase.name}`);
+      const secondRcEnv = withGh(
+        join(dir, `gh-second-${reviewCase.name}`),
+        `case "$*" in
+  *graphql*)
+    if [ -f "${rcFlag}" ]; then echo '${afterGql}'; else echo '${initGql}'; fi ;;
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
+  *pulls/7/reviews*)
+    if [ -f "${rcFlag}" ]; then echo '${reviewCase.afterRest}'; else echo '${initRest}'; fi ;;
+  *pulls/7/comments*)
+    n=$(cat "${rcCount}" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "${rcCount}"
+    if [ "$n" -ge 2 ]; then touch "${rcFlag}"; fi
+    echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *issues/7/comments*) echo '[]' ;;
+esac`,
+      );
+      const try1 = runPublishChain(rDir, secondRcEnv);
+      expect(try1.stage).toBe('snapshot');
+      expect(try1.res.status).toBe(1);
+      expect(try1.res.stderr).toContain(
+        'reviews changed during snapshot fetch',
+      );
+      const try2 = runPublishChain(rDir, secondRcEnv);
+      expect(try2.stage).toBe('compare');
+      expect(try2.res.status).toBe(1);
+      expect(try2.res.stdout).toContain(reviewCase.expectedCompare);
+    }
   });
 
   it('rejects a mid-fetch CHANGES_REQUESTED review and a closing null confirmation via CLI', () => {

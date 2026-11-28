@@ -43,12 +43,14 @@ import { GUARD_VERDICT_SCHEMA } from './verify-pr-check.mjs';
 
 export { GUARD_VERDICT_SCHEMA };
 
-// Checked against live GitHub PRs (#18549, #18494): single non-paginated
-// closing probe run after all paginated list fetches finish so any push, state
-// transition, formal review, or top-level comment arriving during pagination
-// is caught atomically before the snapshot is written.
+// Checked against live GitHub PRs (#18549, #18494, #18522): single
+// non-paginated closing probe run after all paginated list fetches finish so
+// any push, state transition, formal review addition/edit/dismissal (covering
+// up to the last 100 reviews with body), new top-level comment, or in-place
+// edit of an earlier top-level comment arriving during pagination is caught
+// atomically before the snapshot is written.
 export const GUARD_CONFIRM_QUERY =
-  'query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid state reviews(last: 1) { totalCount nodes { databaseId state submittedAt } } comments(last: 1) { totalCount nodes { databaseId updatedAt } } } } }';
+  'query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid state reviews(last: 100) { totalCount nodes { databaseId state submittedAt body } } comments(last: 1) { totalCount nodes { databaseId updatedAt } } latestEditedComment: comments(first: 1, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { databaseId updatedAt body } } } } }';
 
 const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 const REPO_SLUG_RE = /^[\w.-]+\/[\w.-]+$/;
@@ -80,13 +82,15 @@ const HELP = `Usage:
 --snapshot fetches the head and PR state, paginates all three comment lists,
 re-checks the earlier review/review-comment lists, then runs a single
 non-paginated closing GraphQL probe after all paginated fetches complete to
-confirm head, PR state, formal review count/latest review, and top-level
-comment count/latest comment all remained unchanged. It writes the file only
-when every call succeeded with valid JSON objects/arrays and the opening and
-closing reads match. A failed fetch or failed write exits 1 and leaves no stale
-regular snapshot behind (removing any stale regular snapshot already at that
-path while refusing to touch symlinks, hardlinks, or non-regular files), so a
-retry after a failed refresh cannot be mistaken for a fresh snapshot.
+confirm head, PR state, formal review count and recent reviews (state,
+submittedAt, and body), top-level comment count/latest created comment, and
+most-recently-updated top-level comment all remained unchanged. It writes the
+file only when every call succeeded with valid JSON objects/arrays and the
+opening and closing reads match. A failed fetch or failed write exits 1 and
+leaves no stale regular snapshot behind (removing any stale regular snapshot
+already at that path while refusing to touch symlinks, hardlinks, or
+non-regular files), so a retry after a failed refresh cannot be mistaken for a
+fresh snapshot.
 
 With --no-clobber (for round-start snapshots in a per-round host directory),
 --snapshot creates the file exclusively (O_EXCL) and exits 1 without touching
@@ -336,20 +340,138 @@ export function fetchSnapshot({ pr, repo, run, now = () => new Date() }) {
             }
           };
 
-          checkConnection(
-            pull.reviews,
-            snapshot.reviews,
-            'reviews',
-            (node, latest) =>
-              node.state === latest.state &&
-              (node.submittedAt ?? null) === latest.stamp,
-          );
+          const normalizeNewlines = (text) => text.replace(/\r\n/g, '\n');
+
+          // Check formal reviews (last 100, with state/submittedAt/body) so
+          // edits or state changes to earlier reviews and body-only edits to
+          // the latest review arriving during the final pagination pass are
+          // caught atomically.
+          const reviewsConn = pull.reviews;
+          if (
+            !isPlainObject(reviewsConn) ||
+            !Number.isInteger(reviewsConn.totalCount) ||
+            reviewsConn.totalCount < 0 ||
+            !Array.isArray(reviewsConn.nodes) ||
+            !reviewsConn.nodes.every(isPlainObject)
+          ) {
+            errors.push(
+              'guard confirm: malformed reviews summary in closing probe',
+            );
+          } else if (reviewsConn.totalCount !== snapshot.reviews.length) {
+            errors.push(
+              `reviews changed during snapshot fetch (${snapshot.reviews.length} -> ${reviewsConn.totalCount}); re-fetch before comparing`,
+            );
+          } else {
+            const expectedReviewNodes = Math.min(100, snapshot.reviews.length);
+            if (reviewsConn.nodes.length !== expectedReviewNodes) {
+              errors.push(
+                `guard confirm: expected ${expectedReviewNodes} review node(s) in closing probe, got ${reviewsConn.nodes.length}`,
+              );
+            } else {
+              const reviewsById = new Map(
+                snapshot.reviews.map((item) => [item.id, item]),
+              );
+              const seenReviewIds = new Set();
+              let reviewChanged = false;
+              let malformedReviewBody = false;
+              for (const node of reviewsConn.nodes) {
+                if (typeof node.body !== 'string') {
+                  malformedReviewBody = true;
+                  break;
+                }
+                if (seenReviewIds.has(node.databaseId)) {
+                  reviewChanged = true;
+                  break;
+                }
+                seenReviewIds.add(node.databaseId);
+                const matched = reviewsById.get(node.databaseId);
+                if (
+                  !matched ||
+                  node.state !== matched.state ||
+                  (node.submittedAt ?? null) !== matched.stamp ||
+                  normalizeNewlines(node.body) !==
+                    normalizeNewlines(matched.body)
+                ) {
+                  reviewChanged = true;
+                  break;
+                }
+              }
+              if (malformedReviewBody) {
+                errors.push(
+                  'guard confirm: malformed review body in closing probe',
+                );
+              } else if (reviewChanged) {
+                errors.push(
+                  'reviews changed during snapshot fetch; re-fetch before comparing',
+                );
+              }
+            }
+          }
+
           checkConnection(
             pull.comments,
             snapshot.issueComments,
             'issueComments',
             (node, latest) => (node.updatedAt ?? null) === latest.stamp,
           );
+
+          // Catch in-place edits of an earlier top-level comment (such as a
+          // bot updating an older status comment to P1 while comment count and
+          // last-created comment stay unchanged).
+          const editedConn = pull.latestEditedComment;
+          if (
+            !isPlainObject(editedConn) ||
+            !Array.isArray(editedConn.nodes) ||
+            !editedConn.nodes.every(isPlainObject)
+          ) {
+            errors.push(
+              'guard confirm: malformed latestEditedComment summary in closing probe',
+            );
+          } else if (snapshot.issueComments.length === 0) {
+            if (editedConn.nodes.length !== 0) {
+              errors.push(
+                'issueComments changed during snapshot fetch; re-fetch before comparing',
+              );
+            }
+          } else if (editedConn.nodes.length !== 1) {
+            errors.push(
+              'guard confirm: missing latestEditedComment node in closing probe',
+            );
+          } else {
+            const editedNode = editedConn.nodes[0];
+            if (typeof editedNode.body !== 'string') {
+              errors.push(
+                'guard confirm: malformed latestEditedComment body in closing probe',
+              );
+            } else {
+              const matched = snapshot.issueComments.find(
+                (comment) => comment.id === editedNode.databaseId,
+              );
+              const editedStamp = editedNode.updatedAt ?? null;
+              const stampTimes = snapshot.issueComments
+                .map((comment) =>
+                  comment.stamp === null ? NaN : Date.parse(comment.stamp),
+                )
+                .filter((ms) => Number.isFinite(ms));
+              const maxStampMs =
+                stampTimes.length > 0 ? Math.max(...stampTimes) : null;
+              const editedStampMs =
+                editedStamp === null ? NaN : Date.parse(editedStamp);
+              if (
+                !matched ||
+                editedStamp !== matched.stamp ||
+                normalizeNewlines(editedNode.body) !==
+                  normalizeNewlines(matched.body) ||
+                (maxStampMs !== null &&
+                  (!Number.isFinite(editedStampMs) ||
+                    editedStampMs !== maxStampMs))
+              ) {
+                errors.push(
+                  'issueComments changed during snapshot fetch; re-fetch before comparing',
+                );
+              }
+            }
+          }
         }
       }
     }
