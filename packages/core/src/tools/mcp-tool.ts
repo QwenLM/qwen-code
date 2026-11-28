@@ -40,9 +40,15 @@ import {
 } from '../utils/image-view.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import {
+  addMCPStatusChangeListener,
   getAllMCPServerStatuses,
+  getMCPConnectionGeneration,
+  getMCPConnectionStatus,
   getMCPServerStatus,
+  isMCPConnectionTeardownIntent,
+  isMCPServerTeardownIntent,
   MCPServerStatus,
+  removeMCPStatusChangeListener,
 } from './mcp-status.js';
 import {
   getInvocationContext,
@@ -358,6 +364,18 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ToolParams,
   ToolResult
 > {
+  /** How long a post-abort repair listener waits for the teardown to surface. */
+  private static readonly REPAIR_LISTENER_TTL_MS = 60_000;
+  /**
+   * The repair armed per server name. A batch shares one abort signal, so a
+   * single Escape rejects every MCP call in flight at once; without this each
+   * rejection would stack another listener and timer, and each closure would
+   * retain its invocation (and its payload) until the TTL fired.
+   */
+  private static readonly pendingRepairs = new Map<
+    string,
+    { teardown: () => void }
+  >();
   private static readonly MAX_RECONNECT_RETRIES = 3;
   private static readonly UNSAFE_REPLAY_ERROR_MESSAGE =
     'MCP tool execution may have completed before the connection failed. Automatic replay was skipped because the call could not be verified as safe to replay. Do not retry automatically; verify the outcome before trying again.';
@@ -433,6 +451,57 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     return confirmationDetails;
   }
 
+  /** The transport generation this invocation is currently attached to. */
+  private connectionGeneration(): number | undefined {
+    return this.mcpClient === undefined
+      ? undefined
+      : getMCPConnectionGeneration(this.mcpClient);
+  }
+
+  /** This invocation's own connection status, falling back to the shared name. */
+  private connectionStatus(): MCPServerStatus | undefined {
+    return (
+      getMCPConnectionStatus(this.mcpClient) ??
+      getMCPServerStatus(this.serverName)
+    );
+  }
+
+  /**
+   * Whether this invocation's server was stopped on purpose. The connection's
+   * own marker outranks the name: a sibling connection registered under the
+   * same name clears the name-keyed intent when it reaches `CONNECTED`, but the
+   * owner's stop of *this* transport still holds.
+   *
+   * `generation` is the transport lifetime the invocation started in. A
+   * restart reuses the same SDK `Client`, so asking about the marker without
+   * it would let one stop suppress repair forever — and, once the marker is
+   * cleared on `CONNECTED`, revive work the owner had already cancelled.
+   * Callers that act on an in-flight call pass the captured generation;
+   * callers deciding about the live transport omit it.
+   */
+  private isTeardownIntent(generation?: number): boolean {
+    if (this.mcpClient === undefined) {
+      return isMCPServerTeardownIntent(this.serverName);
+    }
+    if (
+      isMCPConnectionTeardownIntent(
+        this.mcpClient,
+        generation ?? getMCPConnectionGeneration(this.mcpClient),
+      )
+    ) {
+      return true;
+    }
+    // The name-keyed marker is shared by every connection under this name, so
+    // it only speaks for a connection with no status of its own. Once this
+    // invocation's transport is tracked, another owner's stop of the *name*
+    // says nothing about it: honouring it would keep a live sibling
+    // unrepaired, which is the opposite of the fail-closed direction.
+    return (
+      getMCPConnectionStatus(this.mcpClient) === undefined &&
+      isMCPServerTeardownIntent(this.serverName)
+    );
+  }
+
   private async attemptReconnect(): Promise<DiscoveredMCPTool | null> {
     if (!this.cliConfig) {
       return null;
@@ -464,18 +533,168 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
   }
 
+  /**
+   * An abort tore this transport down. The cancelled invocation must reject
+   * immediately and the transport usually reports the failure one round trip
+   * later, so watch the status registry and repair when the server actually
+   * leaves `CONNECTED` (issue #12160). A transport error can also surface
+   * before the abort rejects the call, which leaves no later transition to
+   * watch — `statusAtCall` is what this invocation's connection reported
+   * before the call went out, so a drop from that live state is repaired
+   * directly.
+   */
+  private repairConnectionOnDisconnectAfterAbort(
+    statusAtCall: MCPServerStatus | undefined,
+    generationAtCall?: number,
+  ): void {
+    if (!this.cliConfig) {
+      return;
+    }
+    // Every deliberate teardown that goes through `McpClient.disconnect()` --
+    // operator Disconnect, Clear OAuth, `disableMcpServer` -- also writes
+    // `CONNECTED -> DISCONNECTED` to the same process-wide registry, so the
+    // transition alone cannot tell abort damage apart. The owner records its
+    // intent before closing the transport; read that instead of a status
+    // field, which the tool's client (the raw SDK `Client`) does not have.
+    // Release of an already-evicted pooled entry records nothing: it only
+    // detaches the session, so there is no transition for it to mark.
+    //
+    // The name-keyed registry also cannot tell two live connections for the
+    // same server apart, and the pool keeps one entry per `serverName +
+    // fingerprint`. A sibling connection's drop writes the same name, so
+    // provenance comes from this invocation's own connection when one is
+    // tracked; the name is only the fallback for legacy single-connection
+    // paths.
+    const connection: object | undefined = this.mcpClient;
+    // The lifetime this call started in. A restart keeps the same SDK
+    // `Client`, so only the generation can tell a rejection from the
+    // transport the owner stopped apart from the one now live. `generation`
+    // is read here, after the abort may have been followed by reconnects;
+    // `generationAtCall` is the one the invocation actually ran in and is
+    // what the marker question has to be answered against, or an old abort
+    // binds its repair to a generation that did not produce it.
+    const generation = generationAtCall ?? this.connectionGeneration();
+    const status = this.connectionStatus();
+    // The transport reported the drop before this catch ran, so no later
+    // transition is coming to fire the latch below. Only a connection that
+    // was live when the call started is this abort's damage — one that was
+    // already down belongs to whoever dropped it, and repairing it here would
+    // resurrect a transport this invocation never had.
+    if (
+      statusAtCall === MCPServerStatus.CONNECTED &&
+      status === MCPServerStatus.DISCONNECTED &&
+      !this.isTeardownIntent(generation)
+    ) {
+      void this.attemptReconnect().catch(() => undefined);
+      return;
+    }
+    let wasConnected = status === MCPServerStatus.CONNECTED;
+    const listener = (
+      serverName: string,
+      status: MCPServerStatus | undefined,
+    ) => {
+      if (serverName !== this.serverName) {
+        return;
+      }
+      // Only a live connection dropping to DISCONNECTED is the teardown the
+      // abort causes. A move into CONNECTING is an ordinary reconnect, and
+      // `undefined` means the server was disabled or removed.
+      const connectionStatus = getMCPConnectionStatus(connection);
+      const connected =
+        (connectionStatus ?? status) === MCPServerStatus.CONNECTED;
+      const tornDown = wasConnected && status === MCPServerStatus.DISCONNECTED;
+      wasConnected = connected;
+      if (!tornDown) {
+        return;
+      }
+      // A transition that left this invocation's own connection CONNECTED
+      // belongs to a sibling that shares the name: it is not this abort's
+      // damage, and repairing it would restart a healthy transport another
+      // session is using. Keep listening; the expiry still bounds it.
+      if (
+        connectionStatus !== undefined &&
+        connectionStatus !== MCPServerStatus.DISCONNECTED
+      ) {
+        return;
+      }
+      // A server its owner is stopping on purpose must stay stopped:
+      // resurrecting it would leave a connected but untracked transport that
+      // nothing ever closes. Ask about the lifetime this call started in, not
+      // the live one: a restart in the meantime starts a fresh generation
+      // whose repair is legitimate, while a rejection that belongs to the
+      // stopped generation must still be suppressed. Keep the listener armed
+      // for this one: the teardown may belong to a sibling connection that
+      // shares the name, and detaching here would spend this invocation's
+      // only listener on someone else's transition — the later drop that is
+      // this abort's damage would then never be repaired. The expiry still
+      // bounds the listener.
+      if (this.isTeardownIntent(generation)) {
+        return;
+      }
+      repair.teardown();
+      // Best-effort and detached from the caller: `attemptReconnect` needs
+      // this invocation only for its name and config, and a late failure must
+      // not surface anywhere.
+      void this.attemptReconnect().catch(() => undefined);
+    };
+    // A cancel whose teardown never reaches this process (the server kept the
+    // connection, or the session ends first) must not leak a registry
+    // listener for the life of the process. Arming replaces any repair still
+    // waiting for this server: the batch shares one abort signal, so a single
+    // Escape rejects every call to it at once, and the older arm would watch
+    // the same transition and repair the same server a second time.
+    const repair: { teardown: (expired?: boolean) => void } = {
+      teardown: (expired?: boolean) => {
+        if (expired) {
+          debugLogger.info(
+            `MCP server '${this.serverName}': no teardown surfaced within ${DiscoveredMCPToolInvocation.REPAIR_LISTENER_TTL_MS}ms, dropping the abort repair`,
+          );
+        }
+        clearTimeout(expiry);
+        removeMCPStatusChangeListener(listener);
+        if (
+          DiscoveredMCPToolInvocation.pendingRepairs.get(this.serverName) ===
+          repair
+        ) {
+          DiscoveredMCPToolInvocation.pendingRepairs.delete(this.serverName);
+        }
+      },
+    };
+    const expiry = setTimeout(
+      () => repair.teardown(true),
+      DiscoveredMCPToolInvocation.REPAIR_LISTENER_TTL_MS,
+    );
+    expiry.unref?.();
+    DiscoveredMCPToolInvocation.pendingRepairs.get(this.serverName)?.teardown();
+    DiscoveredMCPToolInvocation.pendingRepairs.set(this.serverName, repair);
+    addMCPStatusChangeListener(listener);
+  }
+
   private async handleReconnectOnError(
     error: unknown,
     signal: AbortSignal,
+    statusAtCall: MCPServerStatus | undefined,
+    generationAtCall: number | undefined,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
     debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
 
     if (signal.aborted) {
+      // The cancelled call must not be replayed, but an abort can tear the
+      // transport down. The status cannot be read here: the transport only
+      // reports the failure after the server reacts to
+      // `notifications/cancelled`, one round trip after the local rejection,
+      // so a read at this point always sees the stale `connected` value.
+      // Repair on the later transition instead, and never make this
+      // invocation's rejection wait for a reconnect (issue #12160).
+      this.repairConnectionOnDisconnectAfterAbort(
+        statusAtCall,
+        generationAtCall,
+      );
       throw error;
     }
 
-    if (!this.shouldAttemptReconnect(error)) {
+    if (!this.shouldAttemptReconnect(error, generationAtCall)) {
       throw error;
     }
 
@@ -565,8 +784,16 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     );
   }
 
-  private shouldAttemptReconnect(error: unknown): boolean {
+  private shouldAttemptReconnect(error: unknown, generation?: number): boolean {
     if (isAbortError(error)) {
+      return false;
+    }
+
+    // The owner is tearing this server down on purpose: reconnecting would
+    // resurrect a transport the operator just stopped. Ask about the
+    // generation the call started in so a stop on an older lifetime does not
+    // veto repair of the current one.
+    if (this.isTeardownIntent(generation)) {
       return false;
     }
 
@@ -579,7 +806,13 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       return false;
     }
 
-    if (getMCPServerStatus(this.serverName) === MCPServerStatus.DISCONNECTED) {
+    // The positive counterpart of the teardown veto above has to use the same
+    // identity. A pool keeps one entry per `serverName + fingerprint`, so the
+    // shared name reads DISCONNECTED whenever a sibling is down even though
+    // this transport is healthy, and reads CONNECTED whenever a sibling is up
+    // even though this one is dead. Deciding from the name alone reconnects a
+    // live connection or strands a dead one.
+    if (this.connectionStatus() === MCPServerStatus.DISCONNECTED) {
       return true;
     }
 
@@ -668,6 +901,11 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         idleTimeoutId = timer;
       }
     };
+
+    const statusAtCall = this.connectionStatus();
+    // Captured with the status: a restart during the call keeps the same SDK
+    // `Client`, so only this pairing identifies the lifetime that failed.
+    const generationAtCall = this.connectionGeneration();
 
     try {
       // Start the idle timeout
@@ -758,7 +996,16 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       return appDisplay ? { ...result, returnDisplay: appDisplay } : result;
     } catch (error) {
       if (this.onAppResult) {
-        if (signal.aborted) throw createToolCallAbortError();
+        if (signal.aborted) {
+          // The App branch classifies the abort before reaching
+          // handleReconnectOnError, so arm the same repair here or an aborted
+          // App call keeps the dead transport for the health monitor's budget.
+          this.repairConnectionOnDisconnectAfterAbort(
+            statusAtCall,
+            generationAtCall,
+          );
+          throw createToolCallAbortError();
+        }
         if (
           idleTimeoutWon ||
           isExecutionTimeoutFailure(error, this.serverName, signal)
@@ -769,7 +1016,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           );
         }
         // Repair the connection for later calls without replaying this attempt.
-        if (this.shouldAttemptReconnect(error)) await this.attemptReconnect();
+        if (this.shouldAttemptReconnect(error, generationAtCall))
+          await this.attemptReconnect();
         throw new StructuredToolError(
           'MCP App tool call failed.',
           ToolErrorType.EXECUTION_FAILED,
@@ -786,7 +1034,13 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           ToolErrorType.EXECUTION_TIMEOUT,
         );
       }
-      return this.handleReconnectOnError(error, signal, updateOutput);
+      return this.handleReconnectOnError(
+        error,
+        signal,
+        statusAtCall,
+        generationAtCall,
+        updateOutput,
+      );
     } finally {
       // Clear the idle timeout in all cases
       if (idleTimeoutId) {
@@ -1032,6 +1286,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       },
     ];
     const parentAbortRace = createParentAbortRace(signal);
+    const statusAtCall = this.connectionStatus();
+    const generationAtCall = this.connectionGeneration();
 
     // Race MCP tool call with abort signal to respect cancellation
     try {
@@ -1051,7 +1307,12 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           ToolErrorType.EXECUTION_TIMEOUT,
         );
       }
-      return this.handleReconnectOnError(error, signal);
+      return this.handleReconnectOnError(
+        error,
+        signal,
+        statusAtCall,
+        generationAtCall,
+      );
     } finally {
       parentAbortRace.dispose();
     }

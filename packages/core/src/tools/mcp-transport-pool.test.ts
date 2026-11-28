@@ -24,6 +24,15 @@ import { ResourceRegistry } from '../resources/resource-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { MCPServerStatus, updateMCPServerStatus } from './mcp-client.js';
+import {
+  addMCPStatusChangeListener,
+  getMCPConnectionGeneration,
+  getMCPServerStatus,
+  isMCPConnectionTeardownIntent,
+  isMCPServerTeardownIntent,
+  removeMCPServerStatus,
+  removeMCPStatusChangeListener,
+} from './mcp-status.js';
 import { WorkspaceMcpBudget } from './mcp-workspace-budget.js';
 import { listDescendantPids, sigtermPids } from './pid-descendants.js';
 import {
@@ -1042,6 +1051,91 @@ describe('McpTransportPool', () => {
       expect(message).toContain('descendantsSignaled=1');
       expect(message).toContain('pidSweepError=none');
       expect(message).toContain('orphan-process pressure');
+    });
+
+    it('does not certify the silent-drop cleanup as a deliberate teardown (issue #12160)', async () => {
+      // The pool's reactive sweep closes the transport after an unsolicited
+      // drop. `McpClient.disconnect()` used to record teardown intent for
+      // every caller, which told the abort repair hanging off the very same
+      // transition that the owner had stopped this server — so the repair
+      // declined on exactly the drop #12160 reports, and the surviving
+      // session never got the server back.
+      const { mocked } = await acquireOne();
+      // Remote transports expose no pid, so the sweep reaches
+      // `client.disconnect()` with no preceding await — the same shape the
+      // real HTTP/streamable path has.
+      const connection = (mocked as unknown as object) ?? {};
+
+      sdkOnError(mocked, new Error('EPIPE: connection lost'));
+
+      await vi.waitFor(() => {
+        expect(getMCPServerStatus('srv')).toBe(MCPServerStatus.DISCONNECTED);
+      });
+      // The sweep's disconnect must leave both markers clear: the
+      // name-keyed one and the per-connection one the repair actually reads.
+      expect(isMCPServerTeardownIntent('srv')).toBe(false);
+      expect(isMCPConnectionTeardownIntent(connection, 0)).toBe(false);
+      removeMCPServerStatus('srv');
+    });
+
+    it('does not certify a discarded pooled acquire failure as a deliberate teardown (issue #12160)', async () => {
+      // The catch that discards a failed acquire also calls
+      // `client.disconnect()`. Left at the default `deliberate: true` it
+      // mints the name-wide teardown marker, telling an abort repair that
+      // the owner stopped `srv` — and vetoing recovery for a live sibling
+      // connection registered under the same name.
+      const pool = mkPool();
+      const cfg = new MCPServerConfig('node');
+      const r = mkSessionRegistries();
+      const mocked = mockMcpSuccess();
+      mocked.connect.mockRejectedValueOnce(new Error('spawn failed'));
+
+      await expect(acquire(pool, 'srv', cfg, 's1', r)).rejects.toThrow(
+        'spawn failed',
+      );
+
+      expect(isMCPServerTeardownIntent('srv')).toBe(false);
+      removeMCPServerStatus('srv');
+    });
+
+    it('records teardown intent before the process sweep reports the transport down (issue #12160)', async () => {
+      const { pool, cfg, mocked } = await acquireOne({
+        beforePool: () => {
+          vi.mocked(SdkClientStdioLib.StdioClientTransport).mockReturnValue({
+            close: vi.fn().mockResolvedValue(undefined),
+            pid: 99999,
+          } as unknown as SdkClientStdioLib.StdioClientTransport);
+        },
+      });
+      vi.mocked(listDescendantPids).mockResolvedValueOnce([1001]);
+      vi.mocked(sigtermPids).mockImplementationOnce(() => {
+        sdkOnError(mocked, new Error('stdio exited during the sweep'));
+        return 1;
+      });
+      const entry = entryOf(pool, cfg);
+      const generation = getMCPConnectionGeneration(mocked);
+      const seen: boolean[] = [];
+      const listener = (
+        serverName: string,
+        status: MCPServerStatus | undefined,
+      ) => {
+        if (serverName === 'srv' && status === MCPServerStatus.DISCONNECTED) {
+          seen.push(
+            isMCPServerTeardownIntent('srv') &&
+              isMCPConnectionTeardownIntent(mocked, generation),
+          );
+        }
+      };
+      addMCPStatusChangeListener(listener);
+      try {
+        await entry.forceShutdown('manual');
+      } finally {
+        removeMCPStatusChangeListener(listener);
+      }
+      expect(sigtermPids).toHaveBeenCalledWith([1001]);
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen.every((marked) => marked)).toBe(true);
+      removeMCPServerStatus('srv');
     });
   });
 

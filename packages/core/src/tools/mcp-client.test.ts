@@ -70,6 +70,10 @@ import {
   removeMCPStatusChangeListener,
   updateMCPServerStatus,
 } from './mcp-client.js';
+import {
+  getMCPConnectionStatus,
+  isMCPServerTeardownIntent,
+} from './mcp-status.js';
 import type { DiscoveredMCPTool } from './mcp-tool.js';
 import type { ToolRegistry } from './tool-registry.js';
 
@@ -1395,6 +1399,78 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       await expect(client.discover(cfgWithResources())).rejects.toThrow(
         'No prompts, tools, or resources found on the server.',
       );
+    });
+
+    it('a completion after a stop does not mark the stopped connect live', async () => {
+      // A stop can run while `connect()` is still awaiting the SDK. The
+      // completion that arrives afterwards belongs to a lifetime the owner
+      // ended: it must not write CONNECTED back locally, into the
+      // per-connection registry, or (via `getStatus()`) admit `discover()`.
+      let finishConnect!: () => void;
+      const connectGate = new Promise<void>((resolve) => {
+        finishConnect = resolve;
+      });
+      const sdkClient = mockStdioClient(
+        { connect: vi.fn(() => connectGate), close: vi.fn() },
+        { close: vi.fn(() => Promise.resolve()) },
+      );
+      const serverName = `late-connect-after-stop-${Date.now()}`;
+      const client = newClient(serverName);
+
+      const connecting = client.connect();
+      await vi.waitFor(() =>
+        expect(sdkClient.connect).toHaveBeenCalledTimes(1),
+      );
+      await client.disconnect();
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+
+      finishConnect();
+      await connecting;
+
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+      expect(getMCPConnectionStatus(client['client'])).toBe(
+        MCPServerStatus.DISCONNECTED,
+      );
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
+      removeMCPServerStatus(serverName);
+    });
+
+    it('a stop during transport allocation discards the late transport', async () => {
+      // `createTransport()` can await auth-module loading, so a stop can land
+      // before the transport exists for `disconnect()` to close. The factory's
+      // late result is unowned: it must not reach the SDK connect, and it must
+      // be closed rather than left running.
+      let finishTransport!: (transport: Obj) => void;
+      const factoryGate = new Promise<Obj>((resolve) => {
+        finishTransport = resolve;
+      });
+      const transport = { close: vi.fn(() => Promise.resolve()) };
+      const sdkClient = mockClient({ close: vi.fn() });
+      const serverName = `stop-during-allocation-${Date.now()}`;
+      const client = newClient(serverName);
+      const createTransportSpy = vi
+        .spyOn(
+          client as unknown as { createTransport: () => Promise<Obj> },
+          'createTransport',
+        )
+        .mockReturnValue(factoryGate);
+
+      const connecting = client.connect();
+      await vi.waitFor(() =>
+        expect(createTransportSpy).toHaveBeenCalledTimes(1),
+      );
+      await client.disconnect();
+
+      finishTransport(transport);
+      await connecting;
+
+      expect(sdkClient.connect).not.toHaveBeenCalled();
+      expect(transport.close).toHaveBeenCalledTimes(1);
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+      expect(getMCPConnectionStatus(client['client'])).toBe(
+        MCPServerStatus.DISCONNECTED,
+      );
+      removeMCPServerStatus(serverName);
     });
 
     it('flips status to DISCONNECTED when discover() throws', async () => {
@@ -3413,8 +3489,10 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       await client.disconnect();
       removeMCPServerStatus('racy-server');
 
-      // Now let the rejected connect propagate.
-      await expect(connectPromise).rejects.toThrow('connect failed');
+      // The stop claimed this attempt's outcome: `connect()` settles without
+      // rejecting, because its failure is the one `disconnect()` already
+      // turned into a stop. What matters is that it stays silent.
+      await expect(connectPromise).resolves.toBeUndefined();
 
       // The entry must remain absent — no resurrection.
       expect(getAllMCPServerStatuses().has('racy-server')).toBe(false);
@@ -3449,6 +3527,78 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       // After an intentional disconnect, the global registry MUST reflect
       // DISCONNECTED — otherwise downstream code (failure banner, health
       // pill) treats the server as still healthy.
+      expect(getMCPServerStatus('healthy-server')).toBe(
+        MCPServerStatus.DISCONNECTED,
+      );
+
+      // Cleanup the registry entry so this test doesn't leak.
+      removeMCPServerStatus('healthy-server');
+    });
+
+    it('disconnect() records the teardown intent before it writes DISCONNECTED', async () => {
+      // The abort repair reads this marker inside the status notification, so
+      // the ordering is the contract: writing the status first would let a
+      // listener resurrect a server the operator just stopped.
+      closableClient({ close: vi.fn().mockResolvedValue(undefined) });
+      const client = clientInWorkspace('healthy-server');
+
+      await client.connect();
+      expect(getMCPServerStatus('healthy-server')).toBe(
+        MCPServerStatus.CONNECTED,
+      );
+
+      const seen: boolean[] = [];
+      const listener = (
+        serverName: string,
+        status: MCPServerStatus | undefined,
+      ) => {
+        if (serverName !== 'healthy-server') return;
+        if (status !== MCPServerStatus.DISCONNECTED) return;
+        seen.push(isMCPServerTeardownIntent('healthy-server'));
+      };
+      addMCPStatusChangeListener(listener);
+      try {
+        await client.disconnect();
+      } finally {
+        removeMCPStatusChangeListener(listener);
+      }
+
+      expect(seen).toEqual([true]);
+      expect(getMCPServerStatus('healthy-server')).toBe(
+        MCPServerStatus.DISCONNECTED,
+      );
+
+      // Cleanup the registry entry so this test doesn't leak.
+      removeMCPServerStatus('healthy-server');
+    });
+
+    it('disconnect() leaves the name-keyed stop clear when it is not deliberate', async () => {
+      // Disposing of a failed acquire closes this transport but is not an
+      // owner stop: minting the name-wide marker would veto recovery for a
+      // live sibling connection registered under the same name.
+      closableClient({ close: vi.fn().mockResolvedValue(undefined) });
+      const client = clientInWorkspace('healthy-server');
+
+      await client.connect();
+      const seen: boolean[] = [];
+      const listener = (
+        serverName: string,
+        status: MCPServerStatus | undefined,
+      ) => {
+        if (serverName !== 'healthy-server') return;
+        if (status !== MCPServerStatus.DISCONNECTED) return;
+        seen.push(isMCPServerTeardownIntent('healthy-server'));
+      };
+      addMCPStatusChangeListener(listener);
+      try {
+        await client.disconnect({ deliberate: false });
+      } finally {
+        removeMCPStatusChangeListener(listener);
+      }
+
+      expect(seen).toEqual([false]);
+      expect(isMCPServerTeardownIntent('healthy-server')).toBe(false);
+      // The status still reaches the registry; only the owner stop is absent.
       expect(getMCPServerStatus('healthy-server')).toBe(
         MCPServerStatus.DISCONNECTED,
       );

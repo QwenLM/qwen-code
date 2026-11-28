@@ -1097,17 +1097,18 @@ export class McpTransportPool {
       // try/catch because the entry is in an inconsistent state
       // (state machine never reached `active`); errors are
       // non-actionable here.
+      // `failed_acquire`: a discarded acquire is not an owner stop.
+      // Certifying one would mint the name-wide teardown marker and veto
+      // recovery for a live sibling connection under the same name
+      // (issue #12160). The shutdown is the only disconnect on this path —
+      // sweeping here and calling `client.disconnect()` again below would
+      // close the transport twice.
       try {
-        await entry.forceShutdown('manual');
+        await entry.forceShutdown('failed_acquire');
       } catch {
         /* best effort — entry never reached active state */
       }
       this.entries.delete(id);
-      try {
-        await client.disconnect();
-      } catch {
-        /* best effort */
-      }
       throw err;
     }
   }
@@ -1325,8 +1326,17 @@ export class McpTransportPool {
       // `addMCPStatusChangeListener`, and only `forceShutdown`
       // removes it. Pre-fix every unpooled connect/discover failure
       // leaked one listener permanently.
+
+      // A completion after the owner stopped leaves the client
+      // DISCONNECTED, so `discoverAndReturn` rejects at its status guard
+      // before the post-await cancellation branch can classify this as a
+      // cancelled acquire. Capture the cancellation state before the
+      // cleanup below deletes the entry, and report it as cancellation so
+      // callers do not see a generic "not connected" for a stopped attempt.
+      const cancelled =
+        this.draining || !this.entries.has(id) || entry.isTerminated();
       try {
-        await entry.forceShutdown('manual');
+        await entry.forceShutdown('failed_acquire');
       } catch {
         /* best effort — entry never reached active state */
       }
@@ -1339,10 +1349,18 @@ export class McpTransportPool {
       // `entries.set` itself, which is impossible today but defends
       // against future restructuring).
       this.indexDetach(sessionId, id);
-      try {
-        await client.disconnect();
-      } catch {
-        /* best effort */
+      // The `failed_acquire` shutdown above is the only disconnect on this
+      // path; discarding the acquire must not certify an owner stop, for the
+      // same reason as the pooled path (issue #12160).
+      if (cancelled) {
+        try {
+          view.teardown();
+        } catch {
+          /* best effort — view may already be torn down */
+        }
+        throw new Error(
+          `McpTransportPool is draining or unpooled ${id} was cancelled`,
+        );
       }
       throw err;
     }

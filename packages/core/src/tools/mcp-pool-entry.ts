@@ -763,7 +763,7 @@ export class PoolEntry {
    * `failed`.
    */
   async forceShutdown(
-    reason: 'drain_timer' | 'max_idle' | 'manual',
+    reason: 'drain_timer' | 'max_idle' | 'manual' | 'failed_acquire',
   ): Promise<void> {
     if (this.state === 'closed' || this.state === 'failed') return;
     // flip state to
@@ -859,6 +859,11 @@ export class PoolEntry {
    */
   private async sweepAndDisconnect(reason: string): Promise<SweepResult> {
     const result: SweepResult = {};
+    // A silent drop or an acquire that never became live is already a
+    // failure. For an owner stop, record intent before the sweep: signaling
+    // a descendant can publish DISCONNECTED before disconnect() runs.
+    const deliberate = reason !== 'silent_drop' && reason !== 'failed_acquire';
+    if (deliberate) this.client.markTeardownIntent();
     try {
       const rootPid = this.client.getTransportPid?.();
       if (rootPid !== undefined) {
@@ -882,7 +887,7 @@ export class PoolEntry {
       );
     }
     try {
-      await this.client.disconnect();
+      await this.client.disconnect({ deliberate });
     } catch (err) {
       // Disconnect failure is rare (usually a transport bug worth
       // surfacing) and gets a structured error log here. No

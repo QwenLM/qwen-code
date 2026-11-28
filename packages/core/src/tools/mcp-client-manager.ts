@@ -1193,8 +1193,13 @@ export class McpClientManager {
             // intentionally swallowed (we're already in a discovery-
             // failure catch; double-throwing would lose the original
             // error context).
+            //
+            // `deliberate: false`: this is a failed acquire being discarded,
+            // not an owner stop. Certifying it would set the name-wide marker
+            // and veto recovery for a live sibling connection under the same
+            // name.
             try {
-              await client.disconnect();
+              await client.disconnect({ deliberate: false });
             } catch {
               // best-effort transport cleanup
             }
@@ -1492,7 +1497,7 @@ export class McpClientManager {
         // (we're already in a discovery-failure catch; double-
         // throwing would lose the original error context).
         try {
-          await client.disconnect();
+          await client.disconnect({ deliberate: false });
         } catch {
           // best-effort transport cleanup
         }
@@ -2923,7 +2928,7 @@ export class McpClientManager {
         // R8 #1 fixes in the discovery-side catch blocks.
         if (weReservedSlot) {
           try {
-            await client.disconnect();
+            await client.disconnect({ deliberate: false });
           } catch {
             // best-effort transport cleanup
           }
@@ -3228,7 +3233,7 @@ export class McpClientManager {
       const failedClient = this.clients.get(name);
       if (failedClient) {
         try {
-          await failedClient.disconnect();
+          await failedClient.disconnect({ deliberate: false });
         } catch {
           /* best effort */
         }
