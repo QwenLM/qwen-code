@@ -6,7 +6,6 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
-import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
@@ -1389,9 +1388,8 @@ class HostedWorkflowRelayFaultGatesIT {
                     temporary.resolve("workspace-" + i));
             Files.createDirectory(workspace.resolve("child"));
         }
-        // Spring and the embedded broker bind ephemeral ports read back
-        // after boot; the Harness port is picked ahead because Spring's
-        // connector is configured with it.
+        // Spring binds an ephemeral port read back after boot; the Harness
+        // port is picked ahead because Spring's connector is configured with it.
         harnessPort = reservePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelThreads = Executors.newCachedThreadPool();
@@ -1417,8 +1415,7 @@ class HostedWorkflowRelayFaultGatesIT {
                 casesRoot.resolve("public-proxy.log"));
         startSpring(cli, node, caseCount, letter);
         port = spring.getWebServer().getPort();
-        brokerPort = spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri()
-                .getPort();
+        brokerPort = port;
         storeProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
         publicProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
         startHarness();
@@ -1485,7 +1482,6 @@ class HostedWorkflowRelayFaultGatesIT {
                 "--qwen.managed-agent.harness.token=" + TOKEN,
                 "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",

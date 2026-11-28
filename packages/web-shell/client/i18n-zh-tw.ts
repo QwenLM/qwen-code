@@ -1731,7 +1731,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'daemon.usage.dailyTokensTitle': 'Tokens',
   'daemon.usage.dailyTokensSub': '每日 token 總量',
   'daemon.usage.dailySessionsTitle': '會話',
-  'daemon.usage.dailySessionsSub': '每日結束執行數',
+  'daemon.usage.dailySessionsSub': '每日活躍會話數',
   'delete.cannotCurrent': '當前會話正在執行，無法刪除。',
   'delete.action': '刪除',
   'delete.deleted': '會話已刪除。',
@@ -2335,6 +2335,9 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.toggleMenu': '切換選單',
   'sidebar.newChat': '新對話',
   'sidebar.newTask': '新建會話',
+  'sidebar.overloadPaused': '系統過載 · 暫停新建',
+  'sidebar.overloadDetail': (v) =>
+    `主機負荷比 ${v?.['ratio'] ?? '?'}，事件迴圈 p99 ${v?.['lag'] ?? '?'} ms（${v?.['reason'] ?? 'unknown'}）。負荷回落後恢復新建。`,
   'sidebar.newWorktreeTask': '新建 Worktree 會話',
   'sidebar.moveWorkspaceUp': '上移',
   'sidebar.moveWorkspaceDown': '下移',
@@ -2822,18 +2825,8 @@ export const ZH_TW: Record<string, MessageValue> = {
     '模型在呼叫工具時反覆嘗試或達到了安全上限，因此系統停止了本輪操作。會話並未結束，你可以換一個更明確的指令繼續。',
   'error.loopDetected.explicitCap': (vars) =>
     `本輪工具呼叫達到了 model.maxToolCallsPerTurn 設定的上限（${vars?.limit} 次），因此系統停止了本輪操作。會話並未結束，你可以在設定中調高上限，或傳送新的指令繼續。`,
-  'error.loopDetected.backstop': (vars) =>
-    `本輪工具呼叫達到了 ${vars?.limit} 次的安全上限，因此系統停止了本輪操作。會話並未結束，你可以傳送新的指令繼續，也可以透過 model.maxToolCallsPerTurn 設定其他上限。`,
-  'error.loopDetected.stuckRepetition': (vars) =>
-    `工具呼叫超過 ${vars?.limit} 次後，模型仍在重複同一個呼叫，因此系統停止了本輪操作。會話並未結束，你可以換一種方式或給出更明確的指令。`,
-  'error.loopDetected.repeatedCall':
-    '模型在本輪中反覆發起同一個工具呼叫，因此系統停止了本輪操作。會話並未結束，你可以換一種方式或給出更明確的指令。',
   'error.loopDetected.providerDuplicateId':
     '模型服務發來了一個已經執行過的工具呼叫，為避免重複執行，系統停止了本輪操作。會話並未結束，你可以傳送新訊息繼續。',
-  'error.loopDetected.invalidToolParams':
-    '模型反覆向同一個工具傳入無效參數，因此系統停止了本輪操作。會話並未結束，你可以換一個更明確的指令繼續。',
-  'error.loopDetected.repeatedToolFailure':
-    '同一個工具在收到提醒後仍因相同原因失敗，因此系統停止了本輪操作。會話並未結束，你可以檢視上面的錯誤，或換一種方式。',
   'shell.command': 'Shell 命令',
   'shell.result.timedOut': '執行超時',
   'shell.result.notices': '提示',
@@ -4185,6 +4178,28 @@ export const ZH_TW: Record<string, MessageValue> = {
   'chat.scrollToBottom': '回到底部',
   'chatHeader.toggleEnvironment': '切換環境資訊',
   'chatHeader.toggleRightPanel': '切換右側擴充區',
+  'chatHeader.openScheduledTasks': (v) => `定時任務（${v?.count ?? 0}）`,
+  'chatHeader.scheduledTasksPaused': (v) =>
+    `定時任務（${v?.count ?? 0}，已暫停）`,
+  'environment.scheduledTasks': '定時任務',
+  'environment.scheduledTasks.scopeDurable': '持久化',
+  'environment.scheduledTasks.scopeSession': '僅目前對話',
+  'environment.scheduledTasks.scopeWakeup': '循環喚醒',
+  'environment.scheduledTasks.statusActive': '執行中',
+  'environment.scheduledTasks.statusPaused': '已暫停',
+  'environment.scheduledTasks.nextRun': (v) => `${v?.when ?? ''}後`,
+  'environment.scheduledTasks.stop': '停止',
+  'environment.scheduledTasks.viewAll': '管理全部',
+  'scheduledTasks.durableHistoricalSnapshot':
+    '這是持久排程任務；即時狀態無法取得，顯示其建立時的快照。',
+  'scheduledTasks.sessionScopedActive':
+    '目前對話執行中，停止後會立即取消後續觸發。',
+  'scheduledTasks.sessionScopedPaused':
+    '目前對話的定時任務已暫停。停止後會移除剩餘排程。',
+  'scheduledTasks.sessionScopedCancelled': '該對話級定時任務已停止或已過期。',
+  'scheduledTasks.stopSessionTask': '停止任務',
+  'scheduledTasks.error.cancelFailed': '停止定時任務失敗',
+  'tasks.pill.scheduled': (v) => `${v?.count ?? 0} 個定時任務`,
   'environment.title': '環境資訊',
   'environment.changes': '變更',
   'environment.changeCount': (v) => `${v?.count ?? 0} 項變更`,

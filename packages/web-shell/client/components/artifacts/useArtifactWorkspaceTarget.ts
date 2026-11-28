@@ -43,6 +43,7 @@ interface ArtifactWorkspaceAuthority {
 export interface ArtifactWorkspaceTarget {
   workspaceCwd: string;
   workspaceId?: string;
+  primary?: boolean;
   actions: ArtifactWorkspaceActions;
 }
 
@@ -199,7 +200,8 @@ export function useArtifactWorkspaceTarget(
     };
     const requireScheduledTaskOwner = (workspaceId: string | undefined) => {
       const current = requireOwner();
-      if (current.id !== workspaceId) {
+      const matchesPrimaryRoute = current.primary && workspaceId === undefined;
+      if (!matchesPrimaryRoute && current.id !== workspaceId) {
         throw new Error('Scheduled task workspace owner no longer matches');
       }
       return current;
@@ -325,19 +327,24 @@ export function useArtifactWorkspaceTarget(
         requireScheduledTaskOwner(workspaceId);
         return result;
       },
-      async updateScheduledTask(id, update, workspaceId) {
+      async updateScheduledTask(id, update, workspaceId, expectedSessionId) {
         requireScheduledTaskOwner(workspaceId);
         const result = await primaryActions.updateScheduledTask(
           id,
           update,
           workspaceId,
+          expectedSessionId,
         );
         requireScheduledTaskOwner(workspaceId);
         return result;
       },
-      async deleteScheduledTask(id, workspaceId) {
+      async deleteScheduledTask(id, workspaceId, expectedSessionId) {
         requireScheduledTaskOwner(workspaceId);
-        await primaryActions.deleteScheduledTask(id, workspaceId);
+        await primaryActions.deleteScheduledTask(
+          id,
+          workspaceId,
+          expectedSessionId,
+        );
         requireScheduledTaskOwner(workspaceId);
       },
     };
@@ -356,6 +363,7 @@ export function useArtifactWorkspaceTarget(
   return {
     workspaceCwd: authority.owner.cwd,
     ...(authority.owner.id ? { workspaceId: authority.owner.id } : {}),
+    primary: authority.owner.primary,
     actions,
   };
 }

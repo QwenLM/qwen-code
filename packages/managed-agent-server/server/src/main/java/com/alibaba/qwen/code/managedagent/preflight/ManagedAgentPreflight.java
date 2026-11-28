@@ -50,17 +50,11 @@ import java.io.IOException;
 import java.io.Reader;
 import java.io.StringReader;
 import java.io.StringWriter;
-import java.net.Inet4Address;
-import java.net.Inet6Address;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.URI;
-import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -226,11 +220,6 @@ public final class ManagedAgentPreflight {
             return online ? listeningCheck("server", serverAddress, serverPort)
                     : portCheck("server", serverAddress, serverPort);
         }));
-        if (properties.getRuntimeBroker().isEnabled()) {
-            ManagedAgentProperties.RuntimeBroker broker = properties.getRuntimeBroker();
-            checks.add(online ? listeningCheck("broker", broker.getHost(), broker.getPort())
-                    : portCheck("broker", broker.getHost(), broker.getPort()));
-        }
         checks.add(workersCheck(properties, () -> ProcessHandle.allProcesses()
                 .collect(Collectors.toList()), online));
         Check database = row("database", () -> databaseCheck(environment));
@@ -1823,13 +1812,9 @@ public final class ManagedAgentPreflight {
             checks.add(new Check("broker", Status.FAIL, "token is empty",
                     fix));
         }
-        Check listen = brokerListenCheck(broker);
-        if (listen != null) {
-            checks.add(listen);
-        }
         if (readsFile && properties.harnessCredentialsApplied()) {
-            checks.add(harnessBrokerUrlCheck(
-                    properties.harnessBrokerUrl(), broker, file));
+            checks.add(harnessBrokerUrlCheck(properties.harnessBrokerUrl(),
+                    properties.getSessionStore().getBaseUrl(), file));
         }
         if (StringUtils.isBlank(broker.getCredentialKeyId())
                 || StringUtils.isBlank(broker.getCredentialKey())) {
@@ -1867,18 +1852,11 @@ public final class ManagedAgentPreflight {
         return checks;
     }
 
-    // The Harness takes its Broker URL from its own environment file, which
-    // nothing else reconciles with the address the Broker binds. The URL is
-    // first read the way the Harness reads it when it starts
-    // (HarnessBrokerUrl); then only a URL that names the Broker's own
-    // plain-HTTP listener can be checked, and one that names another address
-    // may reach it through a proxy.
+    // The Harness takes its Broker URL from its own environment file. Read it
+    // the way the Harness does, then compare it with the resolved Managed Agent
+    // internal origin that serves both the Broker and the Session Store.
     static Check harnessBrokerUrlCheck(String url,
-            ManagedAgentProperties.RuntimeBroker broker, String file) {
-        String host = broker.getHost();
-        // An IPv6 literal needs brackets before the port.
-        String address = (host.contains(":") && !host.startsWith("[")
-                ? "[" + host + "]" : host) + ":" + broker.getPort();
+            String managedAgentOrigin, String file) {
         if (StringUtils.isBlank(url)) {
             return new Check("broker-url", Status.WARN,
                     file + " gives the Hosted Harness no Broker URL",
@@ -1887,11 +1865,9 @@ public final class ManagedAgentPreflight {
                             + ", unless the Harness environment or command"
                             + " line sets them");
         }
-        String direct = directBrokerUrl(broker);
         String fix = "point QWEN_MANAGED_RUNTIME_BROKER_URL in " + file
-                + " at " + (direct != null ? direct
-                        : "the https URL of the TLS-terminating proxy in front"
-                                + " of " + address);
+                + " at " + (StringUtils.isBlank(managedAgentOrigin)
+                        ? "the Managed Agent internal origin" : managedAgentOrigin);
         HarnessBrokerUrl.Result read = HarnessBrokerUrl.read(url);
         String refusal = switch (read.verdict()) {
             case INVALID -> ", which is not a valid URL";
@@ -1910,130 +1886,28 @@ public final class ManagedAgentPreflight {
             return new Check("broker-url", Status.WARN, "preflight cannot read "
                     + url + " the way the Hosted Harness does",
                     "check that the Hosted Harness starts and reaches "
-                            + address);
+                            + (StringUtils.isBlank(managedAgentOrigin)
+                                    ? "the Managed Agent internal origin"
+                                    : managedAgentOrigin));
         }
-        // The URL names the Broker's own socket, which speaks plain HTTP.
-        Check tls = new Check("broker-url", Status.FAIL, "the Hosted Harness"
-                + " dials " + url + ", but the Broker serves plain HTTP there,"
-                + " so TLS cannot connect", fix);
-        if (read.port() == broker.getPort()
-                && served(read.hostname(), broker.getHost())) {
-            return read.https() ? tls
-                    : new Check("broker-url", Status.PASS, url, null);
-        }
-        if (read.port() == broker.getPort()
-                && servedOnlyDualStack(read.hostname(), broker.getHost())) {
-            // Whether the Broker's socket takes this address depends on a JVM
-            // option preflight cannot see; when it does not, another listener,
-            // such as a TLS proxy, may hold it.
-            if (read.https()) {
-                return new Check("broker-url", Status.WARN, "the Hosted Harness"
-                        + " dials " + url + " over IPv6: a Broker JVM that"
-                        + " listens on both families takes it on the plain-HTTP"
-                        + " socket at " + address + ", where TLS cannot"
-                        + " connect, while under -Djava.net.preferIPv4Stack=true"
-                        + " another listener, such as a TLS proxy, may hold it",
-                        fix + ", unless a proxy forwards " + url + " there");
-            }
+        if (StringUtils.isBlank(managedAgentOrigin)) {
             return new Check("broker-url", Status.WARN,
-                    "the Hosted Harness dials " + url + " over IPv6, but the"
-                            + " Broker binds " + broker.getHost() + ", which"
-                            + " takes IPv6 only when its JVM listens on both"
-                            + " families, unlike under"
-                            + " -Djava.net.preferIPv4Stack=true", fix);
+                    "the Managed Agent internal origin is not resolved;"
+                            + " see the session-store row",
+                    "resolve the Session Store base URL, then run --check again");
+        }
+        HarnessBrokerUrl.Result expected = HarnessBrokerUrl.read(managedAgentOrigin);
+        if (expected.verdict() == HarnessBrokerUrl.Verdict.ACCEPTED
+                && read.https() == expected.https()
+                && read.port() == expected.port()
+                && read.hostname().equals(expected.hostname())) {
+            return new Check("broker-url", Status.PASS, url, null);
         }
         return new Check("broker-url", Status.WARN, "the Hosted Harness dials "
-                + url + ", not the Broker's listener at " + address
+                + url + ", not the Managed Agent's internal origin at "
+                + managedAgentOrigin
                 + "; a proxy may forward it, which preflight cannot verify",
-                direct != null
-                        ? fix + ", unless a proxy forwards " + url + " there"
-                        : "check that a proxy forwards " + url + " to "
-                                + address);
-    }
-
-    // The URL that reaches the Broker's listener directly, which the Harness
-    // accepts only on the loopback interface; null for a non-loopback bind,
-    // which the Harness reaches through a TLS-terminating proxy. It is built
-    // from the bound address, which the Harness reads the same way whatever
-    // the configured spelling.
-    private static String directBrokerUrl(
-            ManagedAgentProperties.RuntimeBroker broker) {
-        InetAddress bind = new InetSocketAddress(broker.getHost(), 0)
-                .getAddress();
-        if (bind == null
-                || (!bind.isAnyLocalAddress() && !bind.isLoopbackAddress())) {
-            return null;
-        }
-        String host;
-        if (bind instanceof Inet6Address) {
-            // ::1 is the only IPv6 loopback address.
-            host = "[::1]";
-        } else {
-            host = bind.isAnyLocalAddress() ? "127.0.0.1"
-                    : bind.getHostAddress();
-        }
-        return "http://" + host + ":" + broker.getPort();
-    }
-
-    // The Broker refuses a non-loopback listen address unless told it sits
-    // behind a TLS-terminating layer (RuntimeBrokerHttpServer).
-    static Check brokerListenCheck(ManagedAgentProperties.RuntimeBroker broker) {
-        InetAddress bind = new InetSocketAddress(broker.getHost(), 0)
-                .getAddress();
-        if (broker.isAllowNonLoopback()
-                || (bind != null && bind.isLoopbackAddress())) {
-            return null;
-        }
-        return new Check("broker", Status.FAIL, "the Broker refuses to listen"
-                + " on " + broker.getHost() + " without"
-                + " runtime-broker.allow-non-loopback",
-                "bind 127.0.0.1, or set"
-                        + " QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK=true"
-                        + " behind a TLS-terminating proxy");
-    }
-
-    // Whether the Broker's socket accepts connections to this host: a
-    // specific bind serves only its own address, and a wildcard bind every
-    // address of this machine in its family. The JDK binds :: only on a
-    // dual-stack socket, which takes IPv4 as well, but binds 0.0.0.0 to IPv4
-    // alone under -Djava.net.preferIPv4Stack=true, a JVM option the server
-    // may get from an environment preflight does not share.
-    private static boolean served(String host, String bindHost) {
-        return servedBy(host, bindHost, false);
-    }
-
-    // Whether only a dual-stack listener would serve this host: an IPv6
-    // address of this machine against the IPv4 wildcard.
-    private static boolean servedOnlyDualStack(String host, String bindHost) {
-        return !served(host, bindHost) && servedBy(host, bindHost, true);
-    }
-
-    private static boolean servedBy(String host, String bindHost,
-            boolean dualStack) {
-        try {
-            InetAddress bind = InetAddress.getByName(bindHost);
-            for (InetAddress address : InetAddress.getAllByName(host)) {
-                if (bind.isAnyLocalAddress()
-                        ? isLocal(address) && (dualStack
-                                || bind instanceof Inet6Address
-                                || address instanceof Inet4Address)
-                        : address.equals(bind)) {
-                    return true;
-                }
-            }
-        } catch (UnknownHostException | SecurityException unresolved) {
-            return false;
-        }
-        return false;
-    }
-
-    private static boolean isLocal(InetAddress address) {
-        try {
-            return address.isLoopbackAddress() || address.isAnyLocalAddress()
-                    || NetworkInterface.getByInetAddress(address) != null;
-        } catch (SocketException error) {
-            return false;
-        }
+                fix + ", unless a proxy forwards " + url + " there");
     }
 
     private static Check workspaceCheck(ManagedAgentProperties properties) {
@@ -2090,9 +1964,9 @@ public final class ManagedAgentPreflight {
                     "cannot resolve " + address,
                     "fix the bind address");
         }
-        // Keeps the JDK's SO_REUSEADDR, as Tomcat and the Broker's
-        // HttpServer do: a port the stopped server left in TIME_WAIT is free
-        // to them, while a live listener still refuses the bind.
+        // Keeps the JDK's SO_REUSEADDR, as Tomcat does: a port the stopped
+        // server left in TIME_WAIT is free to it, while a live listener still
+        // refuses the bind.
         try (ServerSocket socket = new ServerSocket()) {
             socket.bind(endpoint);
             return new Check(name + "-port", Status.PASS,

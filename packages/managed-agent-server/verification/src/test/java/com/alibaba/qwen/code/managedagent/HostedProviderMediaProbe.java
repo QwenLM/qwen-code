@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -37,7 +38,7 @@ final class HostedProviderMediaProbe implements AutoCloseable {
     private final String tenant;
     private final List<Map<String, Object>> sessions;
     private final EmbeddedRuntimeBroker original;
-    private final Supplier<EmbeddedRuntimeBroker> restart;
+    private final Supplier<ServletWebServerApplicationContext> restart;
     private volatile Object provisioner;
     private final HttpClient upstream = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build();
     private final HttpClient forwarded;
@@ -51,10 +52,12 @@ final class HostedProviderMediaProbe implements AutoCloseable {
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final AtomicReference<Throwable> failure = new AtomicReference<>();
     private volatile EmbeddedRuntimeBroker restarted;
+    private volatile ServletWebServerApplicationContext restartedSpring;
     private volatile int dropped;
 
     HostedProviderMediaProbe(JdbcTemplate jdbc, String tenant, List<Map<String, Object>> sessions,
-            EmbeddedRuntimeBroker broker, HttpServer server, Supplier<EmbeddedRuntimeBroker> restart) {
+            EmbeddedRuntimeBroker broker, HttpServer server,
+            Supplier<ServletWebServerApplicationContext> restart) {
         this.jdbc = jdbc;
         this.tenant = tenant;
         this.sessions = sessions;
@@ -203,9 +206,11 @@ final class HostedProviderMediaProbe implements AutoCloseable {
                 }
                 assertThat(process.isAlive()).as("original media worker stopped").isFalse();
             }
-            restarted = restart.get();
+            restartedSpring = restart.get();
+            restarted = restartedSpring.getBean(EmbeddedRuntimeBroker.class);
             provisioner = injectReadProbe(restarted);
-            return Map.of("brokerUrl", restarted.getBaseUri().toString());
+            return Map.of("brokerUrl", "http://127.0.0.1:"
+                    + restartedSpring.getWebServer().getPort());
         }
         var row = execution(session);
         String runtimeId = row.get("runtime_session_id").toString();
@@ -294,8 +299,8 @@ final class HostedProviderMediaProbe implements AutoCloseable {
     @Override
     public void close() throws Exception {
         executor.shutdownNow();
-        if (restarted != null) {
-            restarted.close();
+        if (restartedSpring != null) {
+            restartedSpring.close();
         }
         forwarded.shutdownNow();
         upstream.shutdownNow();

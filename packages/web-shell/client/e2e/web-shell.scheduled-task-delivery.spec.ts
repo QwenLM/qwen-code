@@ -66,6 +66,7 @@ async function install(
         'session_source_metadata',
         'channel_management',
         'workspace_qualified_rest_core',
+        'scheduled_task_owner_selection',
         'workspace_channel_observed_contacts',
         ...(options.capable === false ? [] : ['channel_delivery']),
       ],

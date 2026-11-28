@@ -187,6 +187,27 @@ export interface ManagedMemoryQuery {
   readonly expectedContent?: string;
 }
 
+/**
+ * Committed event envelopes of one Harness-owned Turn, in journal order,
+ * covering `(afterSequence, throughSequence]`.
+ */
+export interface ManagedEventIngestRequest {
+  readonly eventEpoch: string;
+  readonly turnId: string;
+  readonly promptId: string;
+  readonly afterSequence: number;
+  readonly throughSequence: number;
+  readonly events: readonly unknown[];
+  readonly end?: 'parked' | 'recovery_blocked';
+}
+
+export interface ManagedEventIngestReceipt {
+  readonly cursor: number;
+  readonly leaseRenewAfterMillis: number;
+  /** The request recorded the Turn's terminal event. */
+  readonly terminal: boolean;
+}
+
 export interface HttpManagedSessionStores {
   supportsModelDiagnostics(): boolean;
   supportsExecutionDiagnostics(): boolean;
@@ -227,6 +248,14 @@ export interface HttpManagedSessionStores {
   releaseOwnership(
     request: HostedHarnessReleaseRequest,
   ): Promise<HostedHarnessReleaseReceipt>;
+  /**
+   * Pushes a Turn's committed envelopes. After a clean seal only the park
+   * marker may follow, on the sealed incarnation and before the placement
+   * release.
+   */
+  ingestEvents(
+    request: ManagedEventIngestRequest,
+  ): Promise<ManagedEventIngestReceipt>;
   close(): Promise<void>;
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
   authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
@@ -477,6 +506,7 @@ export function createHttpManagedSessionStores(
     stopWriterRenewal: () => client.stopWriterRenewal(),
     quiesceOwnership: (placement) => client.quiesceOwnership(placement),
     releaseOwnership: (request) => client.releaseOwnership(request),
+    ingestEvents: (request) => client.ingestEvents(request),
     close: () => client.seal(),
     setLifecycleAuthority: (authority) =>
       client.setLifecycleAuthority(authority),
@@ -2917,6 +2947,44 @@ class ManagedSessionStoreHttpClient {
     this.stopRenewal();
     await this.renewPromise?.catch(() => undefined);
     await this.acquirePromise?.catch(() => undefined);
+  }
+
+  async ingestEvents(
+    request: ManagedEventIngestRequest,
+  ): Promise<ManagedEventIngestReceipt> {
+    let grant: WriterGrant;
+    if (this.sealed) {
+      if (
+        request.end !== 'parked' ||
+        this.grant === undefined ||
+        this.locallyStopped ||
+        this.ownershipRelease
+      )
+        throw new ManagedSessionRecordError(
+          'the HTTP Managed Session writer is not active.',
+        );
+      grant = this.grant;
+    } else {
+      await this.ensureWriter();
+      grant = this.requireGrant();
+    }
+    const receipt = asRecord(
+      await this.json('/events:ingest', 'POST', {
+        workspaceId: this.sessionKey.workspaceId,
+        writerId: this.writerId,
+        writerGeneration: grant.writerGeneration,
+        ...request,
+      }),
+      'event ingest receipt',
+    );
+    return {
+      cursor: safeCounter(receipt['cursor'], 'cursor'),
+      leaseRenewAfterMillis: safeCounter(
+        receipt['leaseRenewAfterMillis'],
+        'leaseRenewAfterMillis',
+      ),
+      terminal: boolean(receipt['terminal'], 'terminal'),
+    };
   }
 
   async releaseOwnership(
