@@ -11,6 +11,7 @@ import { watch as watchFs, type FSWatcher } from 'chokidar';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { type LoadedSettings, SettingScope } from './settings.js';
 import { getFlattenedSchema } from './settingsUtils.js';
+import { bootstrapWatchFilter } from './path-comparison.js';
 
 const debugLogger = createDebugLogger('SETTINGS_WATCHER');
 
@@ -91,7 +92,7 @@ export type SettingsChangeListener = (
  * once at startup and cannot take effect without a restart.
  *
  * The watcher never creates `.qwen` itself. When the directory is missing at
- * startup it bootstrap-watches the parent (depth: 0, `.qwen`-only filter) and
+ * startup it bootstrap-watches the parent (depth: 0, root + `.qwen` filter) and
  * promotes to watching `.qwen` once it appears — so a `settings.json` added
  * later in the session is still detected without recursing the project tree.
  */
@@ -195,8 +196,9 @@ export class SettingsWatcher {
 
   /**
    * Bootstrap watcher: monitors the parent directory (depth 0) with a strict
-   * predicate that only allows the `.qwen` entry through, so unrelated
-   * top-level churn is suppressed and the project tree is never recursed.
+   * predicate that allows only the watch root and the `.qwen` entry through,
+   * so unrelated top-level churn is suppressed and the project tree is never
+   * recursed. chokidar must see the root or it never reports `.qwen`.
    * Promotes to a target watcher once `.qwen` appears.
    */
   private watchParentForDir(scope: SettingScope, settingsPath: string): void {
@@ -209,8 +211,7 @@ export class SettingsWatcher {
       const watcher = watchFs(parentDir, {
         ignoreInitial: true,
         depth: 0,
-        ignored: (filePath: string) =>
-          filePath !== parentDir && path.basename(filePath) !== dirBasename,
+        ignored: bootstrapWatchFilter(parentDir, dirBasename),
       })
         .on('all', (_event: string, changedPath: string) => {
           if (this.watchGeneration.get(scope) !== gen) return;

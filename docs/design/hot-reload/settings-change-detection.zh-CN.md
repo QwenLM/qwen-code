@@ -28,7 +28,7 @@
 为了在不创建目录、不递归项目树的前提下，检测会话期间新增的 `settings.json`，watcher 按每个 scope 的**目录**是否存在采用两阶段策略：
 
 - **启动时 `.qwen` 已存在** → 直接监听该目录（`watchTargetDir`，即上述策略）。
-- **`.qwen` 缺失** → **先监听父目录以引导建立监听**（`watchParentForDir`）：`chokidar.watch(parentDir, { depth: 0, ignoreInitial: true, ignored })`，其中 `ignored` 谓词 `(p) => p !== parentDir && basename(p) !== '.qwen'` 只允许 `.qwen` 条目通过，抑制其他顶层变动且从不递归。`.qwen` 出现后 watcher **提升**：关闭引导 watcher，在 `.qwen` 上创建目标 watcher，并安排一次刷新以读取其中可能已存在的 `settings.json`。
+- **`.qwen` 缺失** → **先监听父目录以引导建立监听**（`watchParentForDir`）：`chokidar.watch(parentDir, { depth: 0, ignoreInitial: true, ignored })`，其中 `ignored` 谓词 `bootstrapWatchFilter(parentDir, '.qwen')` 只允许根目录和 `.qwen` 条目通过。它比较 `path.resolve` 之后的根目录，因为 chokidar 传回根目录时用自己的写法（Windows 上是正斜杠），直接比较字符串会把根目录本身忽略，监听器永远不触发。extensions 的引导 watcher 也用同一个函数。它抑制其他顶层变动且从不递归。`.qwen` 出现后 watcher **提升**：关闭引导 watcher，在 `.qwen` 上创建目标 watcher，并安排一次刷新以读取其中可能已存在的 `settings.json`。
 
 健壮性细节：
 
@@ -115,7 +115,7 @@ startWatching(): void {
 }
 ```
 
-`watchTargetDir` 是上述父目录与严格 basename 监听器；`.qwen` 本身被移除时也会降级为引导 watcher。`watchParentForDir` 设置仅关注 `.qwen` 的引导 watcher，并在 `.qwen` 出现后提升：
+`watchTargetDir` 是上述父目录与严格 basename 监听器；`.qwen` 本身被移除时也会降级为引导 watcher。`watchParentForDir` 设置引导 watcher，它只放行自己的根目录和 `.qwen`，并在 `.qwen` 出现后提升：
 
 ```typescript
 private watchParentForDir(scope: SettingScope, settingsPath: string): void {
@@ -127,8 +127,8 @@ private watchParentForDir(scope: SettingScope, settingsPath: string): void {
   const watcher = watchFs(parentDir, {
     ignoreInitial: true,
     depth: 0,
-    ignored: (filePath: string) =>
-      filePath !== parentDir && path.basename(filePath) !== dirBasename,
+    // only the root and `.qwen`; the root is compared after path.resolve
+    ignored: bootstrapWatchFilter(parentDir, dirBasename),
   })
     .on('all', (_event: string, changedPath: string) => {
       if (this.watchGeneration.get(scope) !== gen) return; // stale callback
@@ -314,7 +314,7 @@ settingsWatcher?.addChangeListener(async (events) => {
 
 | 场景                                  | 处理方式                                                                       |
 | ------------------------------------- | ------------------------------------------------------------------------------ |
-| `.qwen` 目录不存在                    | **从不创建。** 先监听父目录（`depth: 0`、仅允许 `.qwen` 的过滤），出现后提升   |
+| `.qwen` 目录不存在                    | **从不创建。** 先监听父目录（`depth: 0`、根目录与 `.qwen` 过滤），出现后提升   |
 | 启动后创建 `.qwen`                    | 引导 watcher 捕获 `addDir`，提升为目标 watcher 并安排刷新                      |
 | 提升后删除 `.qwen`                    | 目标 watcher 捕获 `unlinkDir`，降级为父目录上的引导 watcher                    |
 | 删除文件                              | `reloadScopeFromDisk` 检测 `!existsSync`，重置为 `{}`，差异触发 `deleted` 事件 |
@@ -374,7 +374,7 @@ mock chokidar，复用 `skill-manager.test.ts` 的模式：
 6. **串行化**：`handleChange` 期间出现的新事件累积，并在处理后排空。
 7. **错误隔离**：chokidar 错误、监听器异常不会引起崩溃或影响其他监听器；捕获 `reloadScopeFromDisk` 失败。
 8. **监听器超时**：30s 超时保护。
-9. **延迟监听目录**：`.qwen` 缺失时不调用 `mkdirSync`；在父目录设置引导 watcher，`ignored` 谓词仅允许 `.qwen` 条目。
+9. **延迟监听目录**：`.qwen` 缺失时不调用 `mkdirSync`；在父目录设置引导 watcher，`ignored` 谓词只允许监听根目录和 `.qwen` 条目。
 10. **提升/TOCTOU**：`.qwen` 出现（`addDir` 或设置监听后的复查）时关闭引导 watcher，在 `.qwen` 上打开目标 watcher 并安排刷新。
 11. **降级/重建**：删除 `.qwen`（`unlinkDir`）后重新引导监听父目录；后续重建再次提升。
 12. **代次守卫**：已关闭的引导 watcher 的过期回调不创建第二个目标 watcher。
