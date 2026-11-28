@@ -8690,6 +8690,9 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(rule).toContain(
       '`daemon` coverage that runs the `Real daemon E2E / Java 11` job in `sdk-java.yml`',
     );
+    expect(rule).toContain(
+      'so a round with no JDK lists that job under _Not covered_ for a diff under those paths even when no Java changed',
+    );
     const daemonJob = sdkJavaWorkflow.slice(
       sdkJavaWorkflow.indexOf('\n  daemon-e2e:\n'),
     );

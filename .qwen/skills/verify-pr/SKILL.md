@@ -1748,10 +1748,12 @@ and job. Instance: the verify lane provisions a JDK only for diffs under
 `.github/scripts/managed-agent-gate-scope.mjs` also gives
 `packages/cli/src/serve/` and `packages/core/src/managed-runtime/` the
 `daemon` coverage that runs the `Real daemon E2E / Java 11` job in
-`sdk-java.yml`. That script splits its input on NUL: the gate pipes it the
-output of `git diff --name-only --no-renames -z`. Measured example: a real
-commit touching `packages/cli/src/serve/` and design docs classified as
-`daemon` that way, and as `none` from a newline-separated list.
+`sdk-java.yml`, so a round with no JDK lists that job under _Not covered_
+for a diff under those paths even when no Java changed. That script splits
+its input on NUL: the gate pipes it the output of
+`git diff --name-only --no-renames -z`. Measured example: a real commit
+touching `packages/cli/src/serve/` and design docs classified as `daemon`
+that way, and as `none` from a newline-separated list.
 
 **Module instructions bind the evidence, not the round's budget.** A nested
 `AGENTS.md` may cap local verification time for everyday changes, sometimes
