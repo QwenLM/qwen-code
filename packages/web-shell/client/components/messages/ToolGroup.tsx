@@ -67,6 +67,7 @@ import {
   getAgentType,
   getTaskExecutionRecord,
   getShellToolSemanticDescription,
+  getExecSource,
   getToolDescription,
   getAdvisorDisplayText,
   getToolSummaryDescription,
@@ -366,7 +367,7 @@ function ToolPayloadBlock({
   payload,
   limit,
 }: {
-  payload: { text: string; json: boolean };
+  payload: { text: string; json: boolean; language?: string };
   limit: number;
 }) {
   const { t } = useI18n();
@@ -383,16 +384,21 @@ function ToolPayloadBlock({
   // records). formatJsonPayload already caps the formatted text by render mode,
   // and the read-file line budget lives on to guard ExpandedReadContent below.
   const renderAsMarkdown =
-    payload.json && shown.length <= MAX_MARKDOWN_READ_CHARS;
+    (payload.json || payload.language !== undefined) &&
+    shown.length <= MAX_MARKDOWN_READ_CHARS;
   return (
     <>
       {renderAsMarkdown ? (
         <div className={styles.payloadJson}>
-          <Markdown content={fencedCodeBlock('json', shown)} />
+          <Markdown
+            content={fencedCodeBlock(payload.language ?? 'json', shown)}
+          />
         </div>
       ) : (
         <pre className={styles.payloadText}>
-          {payload.json ? shown : renderWithSessionLinks(shown, renderMode)}
+          {payload.json || payload.language !== undefined
+            ? shown
+            : renderWithSessionLinks(shown, renderMode)}
         </pre>
       )}
       {truncated && (
@@ -446,12 +452,14 @@ function GenericToolDetails({
   cancelled: boolean;
 }) {
   const { t } = useI18n();
+  const execSource = getExecSource(tool);
   const argumentsText = useMemo(
     () =>
-      tool.args && Object.keys(tool.args).length > 0
+      execSource ??
+      (tool.args && Object.keys(tool.args).length > 0
         ? stringifyValue(tool.args)
-        : '',
-    [tool],
+        : ''),
+    [tool, execSource],
   );
   const resultText = useMemo(
     () =>
@@ -477,8 +485,11 @@ function GenericToolDetails({
   // Pretty-printing grows a compact payload, and the blocks truncate what they
   // render, so the "Show more" decision has to use the formatted lengths.
   const argumentsPayload = useMemo(
-    () => formatJsonPayload(argumentsText, formatBudget, formatBudget),
-    [argumentsText, formatBudget],
+    () =>
+      execSource !== undefined
+        ? { text: execSource, json: false, language: 'javascript' }
+        : formatJsonPayload(argumentsText, formatBudget, formatBudget),
+    [argumentsText, execSource, formatBudget],
   );
   const resultPayload = useMemo(
     () => formatJsonPayload(resultText, formatBudget, formatBudget),

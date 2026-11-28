@@ -360,6 +360,17 @@ export function getShellToolSemanticDescription(tool: ACPToolCall): string {
   return getStringArg(tool.args, 'description');
 }
 
+/**
+ * The exec tool's JavaScript source, kept verbatim: it is the call's whole
+ * payload, so newlines and indentation must survive (getStringArg would
+ * collapse them into a single-line label).
+ */
+export function getExecSource(tool: ACPToolCall): string | undefined {
+  if (tool.toolName.toLowerCase() !== 'exec') return undefined;
+  const source = tool.args?.['source'];
+  return typeof source === 'string' && source.length > 0 ? source : undefined;
+}
+
 export function extractText(tool: ACPToolCall): string | null {
   if (!tool.content) {
     return extractRawOutputText(tool.rawOutput);

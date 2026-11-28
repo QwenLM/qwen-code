@@ -406,6 +406,19 @@ it('describes a turn with its counts and prompt', async () => {
   expect(section(container, 'text')?.textContent).toContain('fix it');
 });
 
+it('renders exec input as JavaScript code instead of JSON', async () => {
+  const source = 'const x = 1;\ntext(x);';
+  const container = await render(tool({ source }, 'done', 'exec'));
+  const input = section(container, 'input')!;
+  expect(
+    [...input.querySelectorAll('[class*="codeBlockLang"]')].map(
+      (label) => label.textContent,
+    ),
+  ).toEqual(['javascript']);
+  expect(input.querySelector('pre code')?.textContent).toBe(source);
+  expect(input.textContent).not.toContain('"source"');
+});
+
 const execution = (
   status: TrajectoryExecutionRow['status'],
 ): TrajectoryExecutionRow => ({

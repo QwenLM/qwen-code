@@ -875,6 +875,32 @@ it('renders JSON arguments and results as Markdown code and keeps plain output u
   ).toEqual(['echo hello', 'hello {invalid JSON}']);
 });
 
+it('renders exec source as JavaScript code instead of JSON arguments', () => {
+  const source = 'const x = 1;\ntext(x);';
+  transcript.blocks = [
+    userBlock('u1', 1),
+    toolBlock({
+      id: 'exec',
+      toolCallId: 'exec',
+      toolName: 'exec',
+      rawInput: { source },
+      rawOutput: 'done',
+    }),
+  ];
+  const view = render(<TurnCallsPanel turnId="u1" />);
+  for (const button of view.querySelectorAll<HTMLButtonElement>('li > button'))
+    act(() => button.click());
+  const row = view.querySelector('li')!;
+  expect(
+    [...row.querySelectorAll('[class*="codeBlockLang"]')].map(
+      (label) => label.textContent,
+    ),
+  ).toEqual(['javascript']);
+  expect(row.querySelector('pre code')?.textContent).toBe(source);
+  expect(row.textContent).not.toContain('"source"');
+  expect(row.textContent).toContain('done');
+});
+
 it('renders an empty state when the turn has no calls', () => {
   transcript.blocks = [userBlock('u1', 1)];
   const view = render(<TurnCallsPanel turnId="u1" />);
