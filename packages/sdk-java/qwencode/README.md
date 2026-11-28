@@ -119,6 +119,77 @@ Before creating a session, the SDK requires the daemon to advertise the REST tra
 
 An indeterminate completion is an outcome boundary, not a session-reuse boundary. After `PromptAdmissionUnknownException` or `PromptOutcomeIndeterminateException`, that `DaemonSessionClient` permanently rejects further prompts even if local stream cleanup later succeeds; close or destroy the session instead. An observation timeout is published without waiting forever for a blocked stream close, while cleanup continues asynchronously and retains bounded client capacity until it finishes.
 
+## Managed Agent public API
+
+Use `ManagedAgentClient` to call a standalone Managed Agent Server. Its methods use typed requests and responses. The client signs requests for the supplied tenant and actor. Provide the signing key from the trusted service's secret store.
+
+### Create or update an Agent
+
+`ManagedAgentDefinitionRequest` is the definition shared by `createAgent` and `updateAgent`. Start with instructions and select the model, hosted tool profile and approval policy as needed. The builder defaults to the deployment's model and approval policy and an empty tool list. It also accepts static Skills, MCP server pins, a Hook catalog pin, and application metadata. Workspace sessions require an eligible hosted tool profile.
+
+```java
+import com.alibaba.qwen.code.daemon.ManagedAgentDefinition;
+import com.alibaba.qwen.code.daemon.ManagedAgentDefinitionRequest;
+import java.util.Map;
+
+var definition = ManagedAgentDefinitionRequest.builder("Summarize the workspace.")
+        .hostedToolProfile(ManagedAgentDefinitionRequest.HostedToolProfile.FILES)
+        .metadata(Map.of("source", "dataagent"))
+        .build();
+ManagedAgentDefinition revision = managed.updateAgent(agentId, definition, updateKey);
+System.out.println(revision.getId() + "@" + revision.getRevision());
+```
+
+Create, update, and get return the saved revision summary. Use the returned ID, revision, digest, creation time, and optional metadata from its getters.
+
+### Run a session
+
+```java
+import com.alibaba.qwen.code.daemon.ManagedAgentClient;
+import com.alibaba.qwen.code.daemon.ManagedCreateSessionRequest;
+import com.alibaba.qwen.code.daemon.ManagedTurnAdmission;
+import java.net.URI;
+
+ManagedAgentClient managed = new ManagedAgentClient(
+        URI.create("https://managed.example.com"), tenantId, actorId, signingKey);
+var session = managed.createSession(
+        ManagedCreateSessionRequest.builder("qwen-code").workspace(workspaceId).title("Summary").build(),
+        createKey);
+String sessionId = session.getId();
+ManagedTurnAdmission admission;
+try (var events = managed.streamEvents(sessionId, 0)) {
+    admission = managed.submitText(sessionId, "Summarize the workspace", messageKey);
+    for (var event = events.next(); event != null; event = events.next()) {
+        if (event.isResyncRequired()) {
+            // Reload Items and resume at the fresh snapshot sequence.
+            break;
+        }
+        if (admission.getTurnId().equals(event.getTurnId())) {
+            String delta = event.getOutputTextDelta();
+            if (delta != null) {
+                System.out.print(delta);
+            }
+            if (event.isTerminal()) {
+                break;
+            }
+        }
+    }
+}
+System.out.println(managed.getTurn(sessionId, admission.getTurnId()).getStatusCode());
+```
+
+The client follows the [public OpenAPI contract](../../managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json). Read paginated results through `getEntries()`, `hasMore()`, and `getNextCursor()`. The Workspace page also exposes the default Workspace and discovery capabilities. `listSessions` accepts archive and title filters. Pass `unarchived` to exclude archived sessions. Workspace filtering requires server support.
+
+Supply a stable idempotency key for each write that takes one. The admission receipt exposes the Turn and operation IDs. Use `getTurn` to observe execution, and `getSessionOperation` for command delivery and lifecycle operations. Retry decisions belong to the caller.
+
+After `event.isResyncRequired()`, page through Items to rebuild the snapshot, then reopen SSE at the Items page's `getSnapshotThroughSequence()`. For HTTP 503 with `message_projection_pending`, retry the Items read within your application's deadline. On ordinary reconnect, pass the last `event.getSequence()` your application processed successfully. Close streams when finished. JSON responses and individual SSE frames are bounded to 8 MiB. Use a smaller page limit for large history queries.
+
+`respondToAction` accepts `ManagedActionResponse.permission` or `question`. Use the Action's owning Session ID, input revision, and policy revision. `getMcpCatalog` exposes tool names and descriptions. Read `tool.getInputSchema().getProperties()` and `getRequired()` to discover the current tool's arguments. `asJson()` provides the complete schema. Use the revision and available server pins from `getMcpManagement` when creating a `ManagedMcpManagementCommand`.
+
+Use `managed.extensions()` to publish or import workspace packages, look up an operation, load the published pin, and apply revisions to an existing Session. For initial Session creation, use `ManagedCreateSessionRequest.Builder.skills` and `extensionPins`. An explicit empty pin list disables the default extension selection.
+
+When upgrading from the Map-based Managed Agent SNAPSHOT, recompile with the new request types and replace response Map access with the corresponding getters.
+
 ## Hosted Harness private API
 
 `HostedHarnessClient` is the Java control-plane transport for `qwen serve --profile hosted-harness`. Construction performs capability negotiation, verifies the deployment capability digest, and pins the process `bootId`. Every Session request then carries protocol and generation fencing automatically. This API keeps model-loop events raw; product services remain responsible for public Session, Turn, Event, tenant, and workspace authorization state.

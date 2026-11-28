@@ -1,49 +1,35 @@
 package com.alibaba.qwen.code.daemon;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
-
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
-import java.net.URLEncoder;
-import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
+import static com.alibaba.qwen.code.daemon.ManagedHttpTransport.encode;
+import static com.alibaba.qwen.code.daemon.ManagedHttpTransport.hex;
+import static com.alibaba.qwen.code.daemon.ManagedHttpTransport.identity;
+import static com.alibaba.qwen.code.daemon.ManagedHttpTransport.sha256;
+
 /** Signed public Managed package, configuration and recovery APIs. No mutation is retried automatically. */
 public final class ManagedExtensionsClient {
     private static final long MAXIMUM_ARCHIVE_BYTES = 100L * 1024 * 1024;
-    private final URI baseUri;
-    private final String tenantId;
-    private final String actorId;
-    private final byte[] signingKey;
-    private final HttpClient http = HttpClient.newBuilder()
-            .followRedirects(HttpClient.Redirect.NEVER).build();
+    private final ManagedHttpTransport transport;
 
     public ManagedExtensionsClient(URI baseUri, String tenantId, String actorId, byte[] signingKey) {
-        if (baseUri == null || !List.of("http", "https").contains(baseUri.getScheme())
-                || baseUri.getHost() == null || baseUri.getUserInfo() != null
-                || baseUri.getRawQuery() != null || baseUri.getRawFragment() != null) {
-            throw new IllegalArgumentException("Invalid Managed API base URI");
-        }
-        this.baseUri = URI.create(baseUri.toString().replaceAll("/+$", "") + "/");
-        this.tenantId = header(tenantId);
-        this.actorId = header(actorId);
-        if (signingKey == null || signingKey.length == 0) {
-            throw new IllegalArgumentException("A signing key is required");
-        }
-        this.signingKey = signingKey.clone();
+        this(new ManagedHttpTransport(baseUri, tenantId, actorId, signingKey));
+    }
+
+    ManagedExtensionsClient(ManagedHttpTransport transport) {
+        this.transport = transport;
     }
 
     public Map<String, Object> catalog(String workspaceId) {
@@ -61,7 +47,7 @@ public final class ManagedExtensionsClient {
             String route = extensionId == null ? workspace(workspaceId) + "?packageDigest=" + digest + "&manifest=" + encoded
                     : workspace(workspaceId) + "/" + segment(extensionId) + "/packages/" + digest + "?manifest=" + encoded;
             return send(extensionId == null ? "POST" : "PUT", route, digest,
-                    HttpRequest.BodyPublishers.ofFile(snapshot), "application/octet-stream", header(idempotencyKey));
+                    HttpRequest.BodyPublishers.ofFile(snapshot), "application/octet-stream", identity(idempotencyKey));
         } catch (IOException error) {
             throw new DaemonTransportException("The package archive could not be read", error);
         } finally {
@@ -88,7 +74,7 @@ public final class ManagedExtensionsClient {
             String resourceId, String revision, Map<String, Object> target, String idempotencyKey) {
         return json("POST", workspace(workspaceId) + "/source-imports", Map.of("reference", Map.of(
                 "providerId", providerId, "kind", kind, "resourceId", resourceId, "revision", revision), "target", target),
-                header(idempotencyKey));
+                identity(idempotencyKey));
     }
 
     public Map<String, Object> sourceImportReceipt(String workspaceId, String operationId) {
@@ -96,12 +82,12 @@ public final class ManagedExtensionsClient {
     }
 
     public Map<String, Object> lookupSourceImport(String workspaceId, String idempotencyKey) {
-        return json("GET", workspace(workspaceId) + "/source-imports", null, header(idempotencyKey));
+        return json("GET", workspace(workspaceId) + "/source-imports", null, identity(idempotencyKey));
     }
 
     public Map<String, Object> importPackage(String workspaceId, String extensionId, Path input,
             Map<String, Object> metadata, String idempotencyKey) {
-        return importInput(workspaceId, extensionId, input, metadata, header(idempotencyKey), false);
+        return importInput(workspaceId, extensionId, input, metadata, identity(idempotencyKey), false);
     }
 
     private Map<String, Object> importInput(String workspaceId, String extensionId, Path input,
@@ -138,11 +124,11 @@ public final class ManagedExtensionsClient {
     }
 
     public Map<String, Object> lookupPackageOperation(String workspaceId, String kind, String key) {
-        return json("POST", workspace(workspaceId) + "/operations/lookup", Map.of("kind", kind, "idempotencyKey", header(key)), null);
+        return json("POST", workspace(workspaceId) + "/operations/lookup", Map.of("kind", kind, "idempotencyKey", identity(key)), null);
     }
 
     public Map<String, Object> lookupConfigurationOperation(String sessionId, String key) {
-        return json("POST", session(sessionId) + "/operations/lookup", Map.of("idempotencyKey", header(key)), null);
+        return json("POST", session(sessionId) + "/operations/lookup", Map.of("idempotencyKey", identity(key)), null);
     }
 
     public Map<String, Object> runtimeSkillCandidates(String sessionId) {
@@ -154,7 +140,7 @@ public final class ManagedExtensionsClient {
     }
 
     public Map<String, Object> importRuntimeSkill(String sessionId, Map<String, Object> request, String key) {
-        return json("POST", session(sessionId) + "/skills/imports", request, header(key));
+        return json("POST", session(sessionId) + "/skills/imports", request, identity(key));
     }
 
     public Map<String, Object> settings(String workspaceId, String extensionId) {
@@ -164,7 +150,7 @@ public final class ManagedExtensionsClient {
     public Map<String, Object> saveSettings(String workspaceId, String extensionId, long expectedRevision,
             Map<String, String> values, String idempotencyKey) {
         return json("POST", workspace(workspaceId) + "/" + segment(extensionId) + "/settings",
-                Map.of("expectedRevision", expectedRevision, "values", values), header(idempotencyKey));
+                Map.of("expectedRevision", expectedRevision, "values", values), identity(idempotencyKey));
     }
 
     public Map<String, Object> packageOperation(String workspaceId, String operationId) {
@@ -178,7 +164,7 @@ public final class ManagedExtensionsClient {
     public Map<String, Object> apply(String sessionId, long expectedConfigRevision,
             List<Map<String, Object>> pins, String idempotencyKey) {
         return json("POST", session(sessionId), Map.of("expectedConfigRevision", expectedConfigRevision, "extensions", pins),
-                header(idempotencyKey));
+                identity(idempotencyKey));
     }
 
     public Map<String, Object> configurationOperation(String sessionId, String operationId) {
@@ -209,41 +195,12 @@ public final class ManagedExtensionsClient {
 
     private Map<String, Object> send(String method, String route, String digest, HttpRequest.BodyPublisher body,
             String contentType, String key, Duration timeout) {
-        URI target = baseUri.resolve(route);
-        String timestamp = Long.toString(System.currentTimeMillis() / 1000);
-        String canonical = "qwen-broker-auth-v1\n" + method + "\n" + target.getRawPath() + "\n"
-                + (target.getRawQuery() == null ? "" : target.getRawQuery()) + "\n" + tenantId + "\n" + actorId
-                + "\n" + timestamp + "\n" + digest + "\n" + (key == null ? "" : key);
-        HttpRequest.Builder request = HttpRequest.newBuilder(target).timeout(timeout)
-                .header("X-Qwen-Tenant-Id", tenantId).header("X-Qwen-Actor-Id", actorId)
-                .header("X-Qwen-Signature-Timestamp", timestamp).header("X-Qwen-Signature", "v1=" + signature(canonical))
-                .header("Content-Type", contentType).method(method, body);
-        if (key != null) {
-            request.header("Idempotency-Key", key);
-        }
         String operation = method + " Managed extensions";
-        try {
-            int limit = route.contains("/imports") || route.contains("/inspection") || route.contains("/skills/")
-                    ? 8 * 1024 * 1024 : HttpSupport.MAXIMUM_JSON_BYTES;
-            HttpSupport.Response response = HttpSupport.consume(http.send(request.build(), HttpSupport.bodyHandler(limit)), operation);
-            DaemonClient.requireStatus(response, 200, operation);
-            return JsonSupport.parseObject(response.getBody(), operation);
-        } catch (InterruptedException error) {
-            Thread.currentThread().interrupt();
-            throw new DaemonTransportException(operation + " interrupted; query the original operation", error);
-        } catch (IOException error) {
-            throw new DaemonTransportException(operation + " outcome is unconfirmed; query or retry the original operation", error);
-        }
-    }
-
-    private String signature(String canonical) {
-        try {
-            Mac hmac = Mac.getInstance("HmacSHA256");
-            hmac.init(new SecretKeySpec(signingKey, "HmacSHA256"));
-            return hex(hmac.doFinal(canonical.getBytes(StandardCharsets.UTF_8)));
-        } catch (GeneralSecurityException error) {
-            throw new IllegalStateException("HmacSHA256 is unavailable", error);
-        }
+        int maximumBytes = route.contains("/imports") || route.contains("/inspection") || route.contains("/skills/")
+                ? 8 * 1024 * 1024 : HttpSupport.MAXIMUM_JSON_BYTES;
+        HttpRequest request = transport.signedRequest(method, route, digest, key)
+                .timeout(timeout).header("Content-Type", contentType).method(method, body).build();
+        return transport.sendJson(request, 200, maximumBytes, operation);
     }
 
     private static String archiveDigest(Path archive, Path snapshot) throws IOException {
@@ -268,31 +225,8 @@ public final class ManagedExtensionsClient {
         return hex(digest.digest());
     }
 
-    private static MessageDigest sha256() {
-        try {
-            return MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException error) {
-            throw new IllegalStateException("SHA-256 is unavailable", error);
-        }
-    }
-
-    private static String hex(byte[] bytes) {
-        StringBuilder value = new StringBuilder(bytes.length * 2);
-        for (byte item : bytes) {
-            value.append(Character.forDigit((item >>> 4) & 15, 16)).append(Character.forDigit(item & 15, 16));
-        }
-        return value.toString();
-    }
-
-    private static String header(String value) {
-        if (value == null || value.isEmpty() || value.length() > 512 || value.chars().anyMatch(c -> c < 32 || c == 127)) {
-            throw new IllegalArgumentException("Invalid Managed request identity");
-        }
-        return value;
-    }
-
     private static String segment(String value) {
-        return URLEncoder.encode(header(value), StandardCharsets.UTF_8).replace("+", "%20");
+        return encode(identity(value));
     }
 
     private static String workspace(String id) {

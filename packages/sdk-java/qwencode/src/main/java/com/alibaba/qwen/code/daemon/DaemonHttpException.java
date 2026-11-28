@@ -36,8 +36,7 @@ public class DaemonHttpException extends DaemonException {
         return getBodyField("code");
     }
 
-    /** A string field of the JSON error body, or null when absent or not a
-     * string. */
+    /** A string field of the JSON error body or its Managed error envelope. */
     public String getBodyField(String name) {
         if (responseBody == null || responseBody.isEmpty()) {
             return null;
@@ -50,6 +49,9 @@ public class DaemonHttpException extends DaemonException {
             return null;
         }
         Object value = body.get(name);
+        if (!(value instanceof String) && body.get("error") instanceof Map) {
+            value = ((Map<?, ?>) body.get("error")).get(name);
+        }
         return value instanceof String ? (String) value : null;
     }
 }
