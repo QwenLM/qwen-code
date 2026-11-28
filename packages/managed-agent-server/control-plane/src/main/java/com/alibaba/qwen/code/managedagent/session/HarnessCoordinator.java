@@ -28,6 +28,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -113,6 +114,8 @@ public class HarnessCoordinator {
     private final int batchMaxEvents;
     private final int batchMaxBytes;
     private final boolean sessionCreateWarm;
+    @Value("${qwen.managed-agent.event-ingest.enabled:false}")
+    private boolean eventIngestEnabled;
     private final LeaseRenewalRunner runner =
             new LeaseRenewalRunner("managed-agent-dispatch-lease");
     private final String owner = runner.owner();
@@ -825,11 +828,16 @@ public class HarnessCoordinator {
                 store.markSubmissionAttempted(current.tenantId(),
                         current.sessionId(), current.turnId(), owner);
                 submissionAttempted.set(true);
+                boolean ingest = eventIngestEnabled && harness.supportsEventIngest();
                 Admission admission = null;
                 try {
-                    admission = harness.submit(session.tenantId(),
-                            session.sessionId(), current.promptId(),
-                            current.input(), current.payloadDigest());
+                    admission = ingest
+                            ? harness.submit(session.tenantId(), session.sessionId(),
+                                    current.promptId(), current.input(),
+                                    current.payloadDigest(), current.turnId())
+                            : harness.submit(session.tenantId(),
+                                    session.sessionId(), current.promptId(),
+                                    current.input(), current.payloadDigest());
                     requireLease(leaseLost);
                 } catch (HarnessHttpFailure error) {
                     // A coded 409 on this prompt proves the mark's lineage:
@@ -911,9 +919,19 @@ public class HarnessCoordinator {
                     }
                 }
                 if (admission != null) {
-                    store.recordAdmission(current.tenantId(),
+                    if (!ingest) {
+                        store.recordAdmission(current.tenantId(),
+                                current.sessionId(), current.turnId(), owner,
+                                admission.eventEpoch(), admission.lastEventId());
+                    } else if (store.recordAdmissionHandOff(current.tenantId(),
                             current.sessionId(), current.turnId(), owner,
-                            admission.eventEpoch(), admission.lastEventId());
+                            admission.eventEpoch(), admission.lastEventId(),
+                            AgentStateStore.HARNESS_DISPATCH_OWNER_PREFIX + attachment.bootId(),
+                            leaseDuration)) {
+                        // The Harness now holds the lease and pushes the
+                        // Turn's events; no stream opens here.
+                        return true;
+                    }
                     current = store.findTurn(current.tenantId(),
                             current.sessionId(), current.turnId())
                             .orElseThrow();

@@ -6687,6 +6687,79 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('pushes ingest batches as the writer and allows only the park marker after the seal', async () => {
+    const server = new FakeManagedSessionStore();
+    const ingested: Array<Record<string, unknown>> = [];
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).endsWith('/events:ingest')) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        ingested.push(body);
+        if (body['afterSequence'] === 9)
+          return jsonResponse(
+            {
+              error: {
+                code: 'managed_event_ingest_cursor_mismatch',
+                message: 'behind',
+                cursor: 2,
+              },
+            },
+            409,
+          );
+        return jsonResponse({
+          cursor: body['throughSequence'],
+          leaseRenewAfterMillis: 20_000,
+          terminal: body['end'] === undefined,
+        });
+      }
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    const request = {
+      eventEpoch: 'epoch_1',
+      turnId: 'turn_1',
+      promptId: 'prompt-1',
+      afterSequence: 0,
+      throughSequence: 2,
+      events: [{ v: 1, id: 1, type: 'session_update', data: {} }],
+    };
+    await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    await stores.assertWritable();
+    await expect(stores.ingestEvents(request)).resolves.toEqual({
+      cursor: 2,
+      leaseRenewAfterMillis: 20_000,
+      terminal: true,
+    });
+    expect(ingested[0]).toMatchObject({
+      workspaceId: SESSION_KEY.workspaceId,
+      writerId: 'harness-a',
+      writerGeneration: expect.any(Number),
+      ...request,
+    });
+    expect(ingested[0]).not.toHaveProperty('end');
+    await expect(
+      stores.ingestEvents({ ...request, afterSequence: 9 }),
+    ).rejects.toMatchObject({
+      remoteCode: 'managed_event_ingest_cursor_mismatch',
+      details: { cursor: 2 },
+    });
+
+    await stores.close();
+    await expect(stores.ingestEvents(request)).rejects.toThrow(
+      'writer is not active',
+    );
+    await expect(
+      stores.ingestEvents({ ...request, end: 'parked' }),
+    ).resolves.toMatchObject({ cursor: 2, terminal: false });
+    expect(ingested.at(-1)).toMatchObject({ end: 'parked' });
+  });
+
   it('gives up on a persistently contended guard at the request deadline', async () => {
     const server = new FakeManagedSessionStore();
     const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
