@@ -68,6 +68,10 @@ const SHA256_RE = /^[0-9a-f]{64}$/;
 const MIN_IMAGE_SIZE_MIB = 32;
 const MAX_IMAGE_SIZE_MIB = 16 * 1024;
 const TOOL_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
+const EXT4_SUPERBLOCK_OFFSET = 1024;
+const EXT4_SUPERBLOCK_SIZE = 1024;
+const EXT4_SUPER_MAGIC = 0xef53;
+const EXT4_FEATURE_INCOMPAT_64BIT = 0x80;
 const DEBUGFS_BANNER_LINE = /^debugfs \d/;
 const SPACE_ERR_RE =
   /No space left|ENOSPC|Could not allocate|EXT2_ET_BLOCK_ALLOC_FAIL|no space/i;
@@ -143,14 +147,14 @@ function sha256SingleLinkRegularFile(filePath, label, realVault) {
 
 /**
  * Validates and normalizes an in-image target path (e.g. `/opt/qwen/guest-runner.py`).
- * Rejects relative paths, `..` traversal, control characters, NUL bytes, and
- * root-level overwrites.
+ * Rejects relative paths, `..` traversal, control characters, quotes, backslashes,
+ * NUL bytes, and root-level overwrites.
  */
 export function normalizeImageTargetPath(guestPath) {
   if (
     typeof guestPath !== 'string' ||
     !guestPath.startsWith('/') ||
-    /[\0\r\n\\]/.test(guestPath)
+    /[\0\r\n\\"]/.test(guestPath)
   ) {
     throw new Error(
       `invalid guest image target path: ${JSON.stringify(guestPath)}`,
@@ -248,10 +252,68 @@ function runTool(bin, args, options) {
 }
 
 function escapeDebugfsArg(value) {
-  if (/[\0\r\n]/.test(value)) {
-    throw new Error('debugfs argument must not contain newlines or NUL bytes');
+  // Real e2fsprogs debugfs does not process backslash escapes inside double
+  // quotes, so fail closed on quotes, backslashes, newlines, and NUL bytes.
+  if (/[\0\r\n\\"]/.test(value)) {
+    throw new Error(
+      `debugfs argument must not contain quotes, backslashes, newlines, or NUL bytes: ${JSON.stringify(value)}`,
+    );
   }
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return value;
+}
+
+/**
+ * Reads the ext4 superblock at byte offset 1024 and fails closed if the
+ * filesystem's declared byte size (blockCount * blockSize) exceeds the
+ * physical file length. Must run BEFORE `truncateSync` + `resize2fs`, otherwise
+ * an incomplete transfer would be silently zero-filled.
+ */
+function assertExt4NotTruncated(filePath, fileBytes) {
+  if (fileBytes < EXT4_SUPERBLOCK_OFFSET + EXT4_SUPERBLOCK_SIZE) {
+    return null;
+  }
+  const fd = openSync(
+    filePath,
+    fsConstants.O_RDONLY |
+      (typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0),
+  );
+  try {
+    const sb = Buffer.alloc(EXT4_SUPERBLOCK_SIZE);
+    const n = readSync(fd, sb, 0, EXT4_SUPERBLOCK_SIZE, EXT4_SUPERBLOCK_OFFSET);
+    if (n < EXT4_SUPERBLOCK_SIZE) {
+      return null;
+    }
+    const magic = sb.readUInt16LE(0x38);
+    if (magic !== EXT4_SUPER_MAGIC) {
+      return null;
+    }
+    const logBlockSize = sb.readUInt32LE(0x18);
+    if (logBlockSize > 6) {
+      throw new Error(
+        `baseImagePath has invalid ext4 s_log_block_size (${logBlockSize})`,
+      );
+    }
+    const blockSize = 1024n << BigInt(logBlockSize);
+    const blocksLo = BigInt(sb.readUInt32LE(0x04));
+    const incompat = sb.readUInt32LE(0x60);
+    const blocksHi =
+      (incompat & EXT4_FEATURE_INCOMPAT_64BIT) !== 0
+        ? BigInt(sb.readUInt32LE(0x150))
+        : 0n;
+    const blockCount = (blocksHi << 32n) | blocksLo;
+    if (blockCount === 0n) {
+      throw new Error('baseImagePath has invalid ext4 block count 0');
+    }
+    const declaredBytes = blockCount * blockSize;
+    if (declaredBytes > BigInt(fileBytes)) {
+      throw new Error(
+        `baseImagePath is truncated: ext4 superblock declares ${declaredBytes} bytes (${blockCount} x ${blockSize}) but file is only ${fileBytes} bytes`,
+      );
+    }
+    return declaredBytes;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function ancestorDirsOf(guestPath) {
@@ -567,6 +629,8 @@ export function deriveExt4GuestImage({
   if (canonicalOut === baseInfo.path) {
     throw new Error('outputImagePath must differ from baseImagePath');
   }
+
+  assertExt4NotTruncated(baseInfo.path, baseInfo.bytes);
 
   const targetBytes =
     imageSizeMib !== null && imageSizeMib !== undefined

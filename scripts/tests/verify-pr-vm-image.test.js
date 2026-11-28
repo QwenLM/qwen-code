@@ -138,6 +138,9 @@ describe('verify-pr-vm-image offline golden ext4 derivation', () => {
     expect(() => normalizeImageTargetPath('/opt/qwen/a\\b')).toThrow(
       /invalid guest image target path/,
     );
+    expect(() => normalizeImageTargetPath('/opt/qwen/a"b"c')).toThrow(
+      /invalid guest image target path/,
+    );
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -539,6 +542,75 @@ describe('verify-pr-vm-image offline golden ext4 derivation', () => {
       expect(readFileSync(okCmdLog, 'utf8')).toMatch(
         /write ".*temp dir with spaces.*staged\/inject-0"/,
       );
+
+      // 8. Quote-bearing tempParentDir fails closed in escapeDebugfsArg (R4-3)
+      const quoteParent = join(root, 'bad"quote');
+      mkdirSync(quoteParent, { mode: 0o700 });
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'quote-tmp.ext4'),
+          approvedRoots: [approved],
+          debugfsBin: okDebugfs,
+          tune2fsBin: fakeTune2fs,
+          tempParentDir: quoteParent,
+        }),
+      ).toThrow(/must not contain quotes/);
+      expect(existsSync(join(approved, 'quote-tmp.ext4'))).toBe(false);
+
+      // 9. Truncated ext4 source image + --size-mib 48 MUST fail closed BEFORE truncateSync/resize2fs
+      const resizeMarker = join(root, 'resize-should-not-run');
+      const guardResize2fs = join(root, 'guard-resize2fs');
+      writeExecutable(
+        guardResize2fs,
+        `#!/bin/sh\nprintf "ran" > "${resizeMarker}"\nexit 0\n`,
+      );
+      const makeTruncatedExt4 = (filePath, { blocksLo, blocksHi = 0 }) => {
+        const buf = Buffer.alloc(4096, 0);
+        // ext4 superblock at offset 1024: magic 0xef53, 4 KiB blocks (s_log_block_size = 2)
+        buf.writeUInt32LE(blocksLo, 1024 + 0x04);
+        buf.writeUInt32LE(2, 1024 + 0x18);
+        buf.writeUInt16LE(0xef53, 1024 + 0x38);
+        if (blocksHi > 0) {
+          buf.writeUInt32LE(0x80, 1024 + 0x60);
+          buf.writeUInt32LE(blocksHi, 1024 + 0x150);
+        }
+        writeFileSync(filePath, buf, { mode: 0o444 });
+      };
+      const trunc32 = join(root, 'truncated-32m.ext4');
+      makeTruncatedExt4(trunc32, { blocksLo: 8192 }); // declares 32 MiB in 4 KiB file
+      const truncOut32 = join(approved, 'trunc-32-out.ext4');
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: trunc32,
+          outputImagePath: truncOut32,
+          approvedRoots: [approved],
+          imageSizeMib: 48,
+          debugfsBin: okDebugfs,
+          resize2fsBin: guardResize2fs,
+          tune2fsBin: fakeTune2fs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/baseImagePath is truncated/);
+      expect(existsSync(truncOut32)).toBe(false);
+      expect(existsSync(resizeMarker)).toBe(false);
+
+      const trunc64 = join(root, 'truncated-64bit.ext4');
+      makeTruncatedExt4(trunc64, { blocksLo: 0, blocksHi: 1 }); // 64-bit ext4 declaring 16 TiB
+      const truncOut64 = join(approved, 'trunc-64-out.ext4');
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: trunc64,
+          outputImagePath: truncOut64,
+          approvedRoots: [approved],
+          imageSizeMib: 48,
+          debugfsBin: okDebugfs,
+          resize2fsBin: guardResize2fs,
+          tune2fsBin: fakeTune2fs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/baseImagePath is truncated/);
+      expect(existsSync(truncOut64)).toBe(false);
     },
     15_000,
   );

@@ -159,6 +159,16 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
     expect(badSkillRes.status).toBe(1);
     expect(badSkillRes.stderr).toMatch(/invalid cmdline qwen\.skill/);
 
+    const badPortCmdline = join(root, 'bad-port-cmdline');
+    writeFileSync(badPortCmdline, 'qwen.collector_port=70000\n');
+    const badPortRes = spawnSync(
+      'python3',
+      [GUEST_RUNNER_PY, '--from-cmdline', '--cmdline-file', badPortCmdline],
+      { encoding: 'utf8' },
+    );
+    expect(badPortRes.status).toBe(1);
+    expect(badPortRes.stderr).toMatch(/expected port in 1\.\.65535/);
+
     // deriveCollectorAcceptDeadlineMs aligns collector accept window with qwen.workload_timeout
     // including real buildVfkitLaunchPlan plans where cmdline="..." wraps the token at start or end.
     expect(
@@ -462,6 +472,16 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
       expect(upstreamHits).toBe(1);
       expect(seenAuthHeader).toBe('Bearer host-real-upstream-secret');
       expect(readFileSync(urandomSink).toString('hex')).toBe(entropyHex);
+      // R3-1(a): No-workload self-test MUST emit inconclusive (never merge-ready)
+      expect(
+        readFileSync(join(root, 'vault', 'verdict.txt'), 'utf8').trim(),
+      ).toBe('inconclusive');
+      const selfAssertions = JSON.parse(
+        readFileSync(join(root, 'vault', 'assertions.json'), 'utf8'),
+      );
+      expect(selfAssertions.failures.map((f) => f.id)).toEqual([
+        'workload-completed',
+      ]);
 
       const runtimeLog = JSON.parse(
         readFileSync(join(root, 'vault', 'logs', 'guest-runtime.json'), 'utf8'),
@@ -692,6 +712,7 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
         'entropy-injected',
         'guest-no-nic',
         'guest-no-directory-share',
+        'workload-completed',
       ]);
       expect(
         isoAssertions.failures.every((f) => f.attribution === 'harness'),
@@ -1282,6 +1303,7 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
         readFileSync(join(root, 'v', 'assertions.json'), 'utf8'),
       );
       expect(assertions.failures.map((f) => f.id)).toEqual([
+        'workload-completed',
         'guest-lifecycle-error',
       ]);
       // Wait past the background child's 2s sleep to confirm SIGKILL reaped the process group
@@ -1407,11 +1429,223 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
       const a1 = JSON.parse(
         readFileSync(join(root, 'v1', 'assertions.json'), 'utf8'),
       );
-      expect(a1.failures.map((f) => f.id)).toEqual(['guest-lifecycle-error']);
+      expect(a1.failures.map((f) => f.id)).toEqual([
+        'workload-completed',
+        'guest-lifecycle-error',
+      ]);
       const rt1 = JSON.parse(
         readFileSync(join(root, 'v1', 'logs', 'guest-runtime.json'), 'utf8'),
       );
       expect(rt1.error).toMatch(/timed out/);
+
+      // 1b. R3-1(b): Workload writes merge-ready AND THEN exits non-zero (exit 7) ->
+      // runner MUST demote uploaded artifacts to inconclusive + guest-lifecycle-error.
+      const exit7Workload = join(root, 'exit7-wl.sh');
+      writeFileSync(
+        exit7Workload,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'printf "merge-ready\\n" > "$QWEN_VERIFY_ARTIFACTS_DIR/verdict.txt"',
+          'printf \'{"pass":1,"fail":0,"total":1}\\n\' > "$QWEN_VERIFY_ARTIFACTS_DIR/assertions.json"',
+          'printf "merge-ready · 1 passed · 0 failed · 1 total · %s\\n\\n## Methodology\\n\\n**Boundary.** microvm.\\n" "$QWEN_VERIFY_HEAD_OID" > "$QWEN_VERIFY_ARTIFACTS_DIR/report.md"',
+          'printf "merge-ready\\n" > "$QWEN_VERIFY_ARTIFACTS_DIR/comment.md"',
+          'exit 7',
+        ].join('\n') + '\n',
+        { mode: 0o755 },
+      );
+      chmodSync(exit7Workload, 0o755);
+      const planExit7 = buildFirecrackerLaunchPlan({
+        runId: 'gr-r3-1b',
+        jailBaseDir: join(root, 'j'),
+        firecrackerBin: '/opt/firecracker',
+        jailerBin: '/opt/jailer',
+        vmmUid: currentUid,
+        vmmGid: currentGid,
+        vsockPort: 52,
+        inputVsockPort: 53,
+      });
+      const resExit7 = await runHardwareRound({
+        contextPath: ctx.path,
+        contextSha256: ctx.sha256,
+        launcherDir: join(root, 'l1b'),
+        vaultDir: join(root, 'v1b'),
+        approvedRoots: [root],
+        plan: planExit7,
+        sourceKernelPath: goldenKernel,
+        sourceRootfsPath: goldenRootfs,
+        stageAssets: true,
+        applyChown: false,
+        runChecker: true,
+        roundInput: { repoDir, baseRefOid, headRefOid },
+        launchBackend: async ({ collectorSocketPath, inputSocketPath }) => {
+          const child = spawn(
+            'python3',
+            [
+              GUEST_RUNNER_PY,
+              '--vsock-script',
+              GUEST_VSOCK_PY,
+              '--work-dir',
+              join(root, 'gw1b'),
+              '--unix-collector',
+              collectorSocketPath,
+              '--unix-input',
+              inputSocketPath,
+              '--workload',
+              exit7Workload,
+              '--urandom-path',
+              join(root, 'ur1b'),
+              '--sys-net-dir',
+              cleanNet,
+              '--proc-mounts',
+              cleanMounts,
+            ],
+            { stdio: 'pipe' },
+          );
+          await new Promise((ok) => child.once('exit', ok));
+          return {
+            workerPid: child.pid,
+            supervisorPid: child.pid,
+            workerExe: 'python3',
+            expectedExeTokens: ['python'],
+            child,
+          };
+        },
+      });
+      expect(resExit7.errors).toEqual([]);
+      expect(resExit7.ok).toBe(true);
+      expect(resExit7.checkExitCode).toBe(0);
+      expect(
+        readFileSync(join(root, 'v1b', 'verdict.txt'), 'utf8').trim(),
+      ).toBe('inconclusive');
+      const aExit7 = JSON.parse(
+        readFileSync(join(root, 'v1b', 'assertions.json'), 'utf8'),
+      );
+      expect(aExit7.failures.map((f) => f.id)).toEqual([
+        'workload-completed',
+        'guest-lifecycle-error',
+      ]);
+      const rtExit7 = JSON.parse(
+        readFileSync(join(root, 'v1b', 'logs', 'guest-runtime.json'), 'utf8'),
+      );
+      expect(rtExit7.error).toMatch(/rc=7/);
+
+      // 1c. R3-1(c): Workload spawns a detached setsid descendant that continuously
+      // rewrites $QWEN_VERIFY_ARTIFACTS_DIR/verdict.txt=merge-ready past timeout;
+      // runner MUST upload demoted inconclusive artifacts from a fresh private dir.
+      const setsidWorkload = join(root, 'setsid-wl.py');
+      const setsidPidFile = join(root, 'setsid-writer.pid');
+      writeFileSync(
+        setsidWorkload,
+        [
+          '#!/usr/bin/env python3',
+          'import os, subprocess, sys, time',
+          'art = os.environ["QWEN_VERIFY_ARTIFACTS_DIR"]',
+          'head = os.environ["QWEN_VERIFY_HEAD_OID"]',
+          'writer = f"""import os, time',
+          'open({setsidPidFile!r}, "w").write(str(os.getpid()))',
+          'end = time.monotonic() + 3.0',
+          'while time.monotonic() < end:',
+          '    try:',
+          '        open({art!r} + "/verdict.txt", "w").write("merge-ready\\\\n")',
+          '        open({art!r} + "/assertions.json", "w").write(\'{"pass":1,"fail":0,"total":1}\\\\n\')',
+          '        open({art!r} + "/report.md", "w").write("merge-ready · 1 passed · 0 failed · 1 total · " + {head!r} + "\\\\n\\\\n## Methodology\\\\n\\\\n**Boundary.** microvm.\\\\n")',
+          '        open({art!r} + "/comment.md", "w").write("merge-ready\\\\n")',
+          '    except OSError: pass',
+          '    time.sleep(0.01)',
+          '"""',
+          'subprocess.Popen([sys.executable, "-c", writer], start_new_session=True)',
+          'time.sleep(10)',
+        ]
+          .join('\n')
+          .replace('{setsidPidFile!r}', JSON.stringify(setsidPidFile)) + '\n',
+        { mode: 0o755 },
+      );
+      chmodSync(setsidWorkload, 0o755);
+      cleanups.push(() => {
+        if (existsSync(setsidPidFile)) {
+          const pid = Number(readFileSync(setsidPidFile, 'utf8').trim());
+          if (Number.isInteger(pid) && pid > 1) {
+            try {
+              process.kill(pid, 'SIGKILL');
+            } catch {
+              // Already exited.
+            }
+          }
+        }
+      });
+      const planSetsid = buildFirecrackerLaunchPlan({
+        runId: 'gr-r3-1c',
+        jailBaseDir: join(root, 'j'),
+        firecrackerBin: '/opt/firecracker',
+        jailerBin: '/opt/jailer',
+        vmmUid: currentUid,
+        vmmGid: currentGid,
+        vsockPort: 52,
+        inputVsockPort: 53,
+      });
+      const resSetsid = await runHardwareRound({
+        contextPath: ctx.path,
+        contextSha256: ctx.sha256,
+        launcherDir: join(root, 'l1c'),
+        vaultDir: join(root, 'v1c'),
+        approvedRoots: [root],
+        plan: planSetsid,
+        sourceKernelPath: goldenKernel,
+        sourceRootfsPath: goldenRootfs,
+        stageAssets: true,
+        applyChown: false,
+        runChecker: true,
+        roundInput: { repoDir, baseRefOid, headRefOid },
+        launchBackend: async ({ collectorSocketPath, inputSocketPath }) => {
+          const child = spawn(
+            'python3',
+            [
+              GUEST_RUNNER_PY,
+              '--vsock-script',
+              GUEST_VSOCK_PY,
+              '--work-dir',
+              join(root, 'gw1c'),
+              '--unix-collector',
+              collectorSocketPath,
+              '--unix-input',
+              inputSocketPath,
+              '--workload',
+              setsidWorkload,
+              '--workload-timeout',
+              '1',
+              '--urandom-path',
+              join(root, 'ur1c'),
+              '--sys-net-dir',
+              cleanNet,
+              '--proc-mounts',
+              cleanMounts,
+            ],
+            { stdio: 'pipe' },
+          );
+          await new Promise((ok) => child.once('exit', ok));
+          return {
+            workerPid: child.pid,
+            supervisorPid: child.pid,
+            workerExe: 'python3',
+            expectedExeTokens: ['python'],
+            child,
+          };
+        },
+      });
+      expect(resSetsid.errors).toEqual([]);
+      expect(resSetsid.ok).toBe(true);
+      expect(resSetsid.checkExitCode).toBe(0);
+      expect(
+        readFileSync(join(root, 'v1c', 'verdict.txt'), 'utf8').trim(),
+      ).toBe('inconclusive');
+      const aSetsid = JSON.parse(
+        readFileSync(join(root, 'v1c', 'assertions.json'), 'utf8'),
+      );
+      expect(aSetsid.failures.map((f) => f.id)).toEqual([
+        'workload-completed',
+        'guest-lifecycle-error',
+      ]);
 
       // 2. R3-4: Self-test renders footer from qwen.skill=<12-hex> when supplied,
       // and omits any fabricated footer when absent.

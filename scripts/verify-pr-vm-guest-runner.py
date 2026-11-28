@@ -402,6 +402,7 @@ def write_self_test_artifacts(
     error_message=None,
     include_model_probe=True,
     skill_digest=None,
+    workload_completed=False,
 ):
     os.makedirs(artifacts_dir, mode=0o700, exist_ok=True)
 
@@ -425,6 +426,8 @@ def write_self_test_artifacts(
             checks.append(
                 {"name": "model-proxy-probe", "ok": model_probe_status == 200}
             )
+    if not workload_completed:
+        checks.append({"name": "workload-completed", "ok": False})
     if error_message is not None:
         checks.append({"name": "guest-lifecycle-error", "ok": False})
 
@@ -432,6 +435,17 @@ def write_self_test_artifacts(
     verdict = "merge-ready" if not failed else "inconclusive"
     passed_count = len(checks) - len(failed)
     total_count = len(checks)
+
+    def _failure_reason(check_name):
+        if check_name == "guest-lifecycle-error" and error_message:
+            return error_message
+        if check_name == "workload-completed":
+            return (
+                error_message
+                if error_message
+                else "no verification workload was executed (guest self-test only)"
+            )
+        return f"guest check failed: {check_name}"
 
     # Write verdict/report/assertions BEFORE guest-runtime.json so a sabotaged
     # log path can never leave a workload-authored merge-ready verdict intact.
@@ -447,11 +461,7 @@ def write_self_test_artifacts(
                     {
                         "id": c["name"],
                         "attribution": "harness",
-                        "reason": (
-                            error_message
-                            if c["name"] == "guest-lifecycle-error" and error_message
-                            else f"guest check failed: {c['name']}"
-                        ),
+                        "reason": _failure_reason(c["name"]),
                     }
                     for c in failed
                 ],
@@ -564,6 +574,8 @@ def run_guest_round(args):
     workload_rc = 0
     round_error = None
     harness_wrote_artifacts = False
+    upload_dir = artifacts_dir
+    demoted_dir = None
 
     skill_digest = getattr(args, "skill_digest", None)
     if skill_digest is not None and not SKILL_DIGEST_RE.fullmatch(skill_digest):
@@ -690,6 +702,8 @@ def run_guest_round(args):
                 except subprocess.TimeoutExpired:
                     pass
                 raise
+            if workload_rc != 0:
+                raise RuntimeError(f"workload exited with rc={workload_rc}")
         else:
             if proxy is not None and bridge_url is not None:
                 probe_req = urllib.request.Request(
@@ -707,6 +721,8 @@ def run_guest_round(args):
                         model_probe_status = resp.status
                 except urllib.error.HTTPError as exc:
                     model_probe_status = exc.code
+            # Self-test verifies plumbing only and never runs a PR workload, so
+            # it records workload_completed=False (verdict=inconclusive).
             write_self_test_artifacts(
                 artifacts_dir,
                 manifest=manifest,
@@ -717,15 +733,21 @@ def run_guest_round(args):
                 bridge_url=bridge_url,
                 model_probe_status=model_probe_status,
                 skill_digest=skill_digest,
+                workload_completed=False,
             )
             harness_wrote_artifacts = True
     except Exception as exc:
         round_error = exc
-        # Always overwrite any workload-authored verdict on harness error (e.g.
-        # a workload that wrote `verdict.txt=merge-ready` before hanging past timeout).
+        # Write demoted inconclusive artifacts into a fresh private directory
+        # created AFTER workload teardown so neither a pre-written merge-ready
+        # nor a detached setsid descendant rewriting artifacts_dir can override it.
         if not harness_wrote_artifacts:
+            demoted_dir = Path(
+                tempfile.mkdtemp(prefix="qc-demoted-", dir=str(work_root.parent))
+            )
+            os.chmod(demoted_dir, 0o700)
             write_self_test_artifacts(
-                artifacts_dir,
+                demoted_dir,
                 manifest=manifest,
                 isolation=isolation,
                 entropy_status=entropy_status,
@@ -736,7 +758,9 @@ def run_guest_round(args):
                 error_message=str(exc),
                 include_model_probe=(workload_path is None),
                 skill_digest=skill_digest,
+                workload_completed=False,
             )
+            upload_dir = demoted_dir
             harness_wrote_artifacts = True
         raise
     finally:
@@ -746,7 +770,7 @@ def run_guest_round(args):
             cid=args.cid,
             port=args.collector_port,
             unix=args.unix_collector,
-            dir=str(artifacts_dir),
+            dir=str(upload_dir),
         )
         try:
             rc_upload = vsock_mod.cmd_upload_artifacts(upload_ns)
@@ -758,6 +782,9 @@ def run_guest_round(args):
             sys.stderr.write(
                 f"guest-runner: artifact upload after error failed: {upload_exc}\n"
             )
+        finally:
+            if demoted_dir is not None:
+                shutil.rmtree(demoted_dir, ignore_errors=True)
     return workload_rc
 
 
@@ -792,6 +819,13 @@ def _parse_positive_int(name, raw):
     return int(raw)
 
 
+def _parse_port(name, raw):
+    val = _parse_positive_int(name, raw)
+    if val > 65535:
+        raise RuntimeError(f"invalid cmdline qwen.{name}: expected port in 1..65535")
+    return val
+
+
 def _parse_skill_digest(raw):
     if not isinstance(raw, str) or not SKILL_DIGEST_RE.fullmatch(raw):
         raise RuntimeError("invalid cmdline qwen.skill: expected 12-char lowercase hex")
@@ -806,11 +840,11 @@ def apply_cmdline_overrides(args):
     if "cid" in kv:
         args.cid = _parse_positive_int("cid", kv["cid"])
     if "collector_port" in kv:
-        args.collector_port = _parse_positive_int("collector_port", kv["collector_port"])
+        args.collector_port = _parse_port("collector_port", kv["collector_port"])
     if "input_port" in kv:
-        args.input_port = _parse_positive_int("input_port", kv["input_port"])
+        args.input_port = _parse_port("input_port", kv["input_port"])
     if "model_port" in kv:
-        args.model_port = _parse_positive_int("model_port", kv["model_port"])
+        args.model_port = _parse_port("model_port", kv["model_port"])
     if "workload" in kv and args.workload is None:
         args.workload = kv["workload"]
     if "workload_timeout" in kv:

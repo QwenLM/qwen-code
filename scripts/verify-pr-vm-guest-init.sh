@@ -7,6 +7,8 @@
 # runner, and powers off cleanly on exit (avoiding a PID-1 kernel panic).
 set -eu
 
+trap 'sync || true; if [ "$$" -eq 1 ]; then poweroff -f 2>/dev/null || reboot -f 2>/dev/null || true; fi' EXIT
+
 if [ -x /bin/busybox ] && [ ! -e /bin/mount ]; then
   /bin/busybox --install -s
 fi
@@ -68,13 +70,4 @@ else
   echo "verify-pr guest-init: missing python3 or $RUNNER_SCRIPT" >&2
 fi
 
-sync || true
-if [ "$$" -eq 1 ]; then
-  if command -v poweroff >/dev/null 2>&1; then
-    poweroff -f || true
-  fi
-  if command -v reboot >/dev/null 2>&1; then
-    reboot -f || true
-  fi
-fi
 exit "$RC"
