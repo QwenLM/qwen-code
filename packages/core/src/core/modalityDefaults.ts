@@ -133,15 +133,14 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // Other open-weight vision models, commonly served through Ollama, vLLM and
   // other OpenAI-compatible servers: Meta's Llama 3.2 Vision and Llama 4,
   // LLaVA, Mistral's Pixtral and Small 3.1 / 3.2, and Google's Gemma 3 and
-  // Gemma 4 all accept images. Gemma 3 1B is text-only; Ollama's `gemma3:1b`
-  // loses its size in normalize(), so only the Hugging Face name excludes it.
+  // Gemma 4 all accept images. Gemma 3 1B and 270M are text-only.
   // -------------------
   [/^llama-?3\.2-(?:\d+b-)?vision/, { image: true }],
   [/^llama-?4(?:-|$)/, { image: true }],
   [/^llava/, { image: true }],
   [/^pixtral/, { image: true }],
   [/^mistral-small-?3\.[12](?:-|$)/, { image: true }],
-  [/^gemma-?3(?!-1b)(?:-|$)/, { image: true }],
+  [/^gemma-?3(?!-(?:1b|270m))(?:-|$)/, { image: true }],
   [/^gemma-?4(?:-|$)/, { image: true }],
 ];
 
@@ -158,6 +157,11 @@ export function defaultModalities(model: string): InputModalities {
   const norm = normalize(model);
   const fromCatalog = { ...lookupModelCatalog(norm)?.modalities };
   delete fromCatalog.pdf;
+  // normalize() drops Ollama's size tag, so `gemma3:1b` (text-only) would
+  // otherwise read as the vision sizes of `gemma3`.
+  if (/(?:^|\/)gemma3:1b(?:-|$)/i.test(model.trim())) {
+    return fromCatalog;
+  }
   for (const [regex, modalities] of MODALITY_PATTERNS) {
     if (regex.test(norm)) {
       return { ...fromCatalog, ...modalities };

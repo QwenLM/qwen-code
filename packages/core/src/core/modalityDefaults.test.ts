@@ -302,6 +302,7 @@ describe('defaultModalities', () => {
       ['mistral-small3.2 (Ollama)', IMAGE, 'mistral-small3.2:24b'],
       ['gemma-3-27b-it', IMAGE, 'google/gemma-3-27b-it'],
       ['gemma3 (Ollama)', IMAGE, 'gemma3:27b'],
+      ['gemma-3-12b-it', IMAGE, 'google/gemma-3-12b-it'],
       ['gemma-4-E4B-it', IMAGE, 'google/gemma-4-E4B-it'],
       ['gemma4 (Ollama)', IMAGE, 'gemma4:31b'],
     ]);
@@ -315,6 +316,10 @@ describe('defaultModalities', () => {
         'mistralai/Mistral-Small-24B-Instruct-2501',
       ],
       ['Gemma 3 1B (text model)', TEXT_ONLY, 'google/gemma-3-1b-it'],
+      ['Gemma 3 270M (text model)', TEXT_ONLY, 'google/gemma-3-270m-it'],
+      ['gemma3:1b (Ollama)', TEXT_ONLY, 'gemma3:1b'],
+      ['gemma3:1b QAT (Ollama)', TEXT_ONLY, 'gemma3:1b-it-qat'],
+      ['gemma3n (not Gemma 3)', TEXT_ONLY, 'google/gemma-3n-E4B-it'],
       ['Gemma 2', TEXT_ONLY, 'google/gemma-2-9b-it'],
     ]);
   });
