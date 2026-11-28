@@ -51,7 +51,11 @@ export function ToolCallDetail({
       return undefined;
     }
   }, [text, language]);
-  const displayed = truncateText(json ?? text, limit);
+  // Escape before capping, in ToolPayloadBlock's order: escapes can grow the
+  // text past the cap, and raw C0/bidi bytes must not reach the DOM.
+  const escaped = sanitizeControlChars(truncateText(json ?? text, limit));
+  const displayed =
+    escaped.length > limit ? truncateText(escaped, limit) : escaped;
   const fenceLanguage = language ?? (json !== undefined ? 'json' : undefined);
   return fenceLanguage !== undefined ? (
     <div className={styles.json}>
