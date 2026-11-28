@@ -2154,7 +2154,7 @@ describe('WebShellSidebar PR badge rows', () => {
       await setCoarse(true);
       expect(row?.querySelector('button[aria-label="Pin"]')).toBeNull();
       expect(slot.style.getPropertyValue('--session-actions-width')).toBe(
-        '26px',
+        '36px',
       );
 
       // Fine pointers preserve an explicitly configured inline action again.
@@ -2171,8 +2171,12 @@ describe('WebShellSidebar PR badge rows', () => {
         'button[aria-label="More actions"]',
       );
       await act(async () => click(more!, true));
+      const sheet = document.querySelector<HTMLElement>(
+        '[data-web-shell-session-action-sheet]',
+      );
+      expect(sheet).not.toBeNull();
       const pin = Array.from(
-        document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+        sheet!.querySelectorAll<HTMLElement>('button'),
       ).find((item) => item.textContent?.trim() === 'Pin');
       expect(pin).toBeDefined();
     } finally {

@@ -50319,6 +50319,72 @@ describe('App session callbacks', () => {
     expect(swipe(document.body)).toBe(true);
   });
 
+  it('allows touch scrolling and preserves the sidebar drawer on Escape while a session action sheet or dropdown menu is open', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    const drawer = container.querySelector('[data-sidebar-shell]');
+    expect(drawer).not.toBeNull();
+
+    // Simulate a portaled SessionActionSheet and DropdownMenu mounted outside
+    // [data-sidebar-shell].
+    const sheet = document.createElement('div');
+    sheet.setAttribute('data-web-shell-session-action-sheet', '');
+    sheet.setAttribute('data-state', 'open');
+    const sheetChild = document.createElement('div');
+    sheet.appendChild(sheetChild);
+    const menu = document.createElement('div');
+    menu.setAttribute('data-slot', 'dropdown-menu-content');
+    menu.setAttribute('data-state', 'open');
+    const menuChild = document.createElement('div');
+    menu.appendChild(menuChild);
+    document.body.append(sheet, menu);
+
+    try {
+      const swipe = (target: EventTarget | null) => {
+        const event = new Event('touchmove', {
+          bubbles: true,
+          cancelable: true,
+        });
+        target?.dispatchEvent(event);
+        return event.defaultPrevented;
+      };
+
+      expect(swipe(sheet)).toBe(false);
+      expect(swipe(sheetChild)).toBe(false);
+      expect(swipe(menu)).toBe(false);
+      expect(swipe(menuChild)).toBe(false);
+
+      // Escape fired from the underlying sidebar trigger must not close the
+      // mobile sidebar drawer while the session action sheet or dropdown menu
+      // is open.
+      act(() => {
+        drawer!.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+      });
+      await flush();
+      expect(container.querySelector('[data-sidebar-shell]')).not.toBeNull();
+
+      sheet.remove();
+      act(() => {
+        drawer!.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+      });
+      await flush();
+      expect(container.querySelector('[data-sidebar-shell]')).not.toBeNull();
+    } finally {
+      sheet.remove();
+      menu.remove();
+    }
+  });
+
   it('keeps the real session search scrollable and dismissible over the drawer', async () => {
     const shellRef = createRef<WebShellApi>();
     const { container } = renderApp({ sidebar: true, shellRef });

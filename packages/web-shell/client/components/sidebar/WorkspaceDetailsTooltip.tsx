@@ -214,6 +214,7 @@ export function WorkspaceDetailsTooltip({
   // from anywhere into the picker fires an enter. The row button and the
   // picker content are siblings in that tree, so its own leave does fire.
   const rowHoverRef = useRef(false);
+  const lastPointerDownTypeRef = useRef<string | null>(null);
   const collisionBoundary = open
     ? resolveSessionDetailsCollisionBoundary(
         anchorRef.current?.closest<HTMLElement>('aside') ?? null,
@@ -375,6 +376,7 @@ export function WorkspaceDetailsTooltip({
         ref={anchorRef}
         asChild
         onPointerEnter={(event) => {
+          if (event.pointerType && event.pointerType !== 'mouse') return;
           if (event.currentTarget.contains(event.target as Node)) {
             openAfterDelay();
           }
@@ -387,16 +389,26 @@ export function WorkspaceDetailsTooltip({
         // Keyboard parity with hover: focusing the header button opens the
         // details after the same delay; moving focus out closes them.
         onFocus={(event) => {
+          const pointerType = lastPointerDownTypeRef.current;
+          lastPointerDownTypeRef.current = null;
+          if (pointerType && pointerType !== 'mouse') return;
           if (event.currentTarget.contains(event.target as Node)) {
             openAfterDelay();
           }
         }}
         onBlur={(event) => {
+          lastPointerDownTypeRef.current = null;
           if (!containsFocusTarget(event.relatedTarget)) {
             closeAfterDelay();
           }
         }}
-        onPointerDownCapture={() => close()}
+        onKeyDownCapture={() => {
+          lastPointerDownTypeRef.current = null;
+        }}
+        onPointerDownCapture={(event) => {
+          lastPointerDownTypeRef.current = event.pointerType || null;
+          close();
+        }}
         onClick={() => close()}
       >
         {children}

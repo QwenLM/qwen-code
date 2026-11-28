@@ -4276,11 +4276,24 @@ export function App({
       // The fullscreen artifact surface owns Escape too (it shrinks back);
       // a force-hidden drawer must not swallow the key first.
       if (artifactPanelFullscreenRef.current) return;
+      // An open session action sheet or sidebar dropdown menu portals outside
+      // [data-sidebar-shell] and may leave focus on the underlying trigger, so
+      // let Escape dismiss the overlay first instead of closing the drawer.
+      const sidebarRoot = sidebarLayoutRef.current?.getRootNode();
+      const openOverlaySelector =
+        '[data-web-shell-session-action-sheet][data-state="open"], [data-slot="dropdown-menu-content"][data-state="open"]';
+      if (
+        document.querySelector(openOverlaySelector) !== null ||
+        (sidebarRoot instanceof ShadowRoot &&
+          sidebarRoot.querySelector(openOverlaySelector) !== null)
+      ) {
+        return;
+      }
       const target = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
       if (
         target instanceof Element &&
         target.closest(
-          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual], [data-slot="dropdown-menu-content"], [data-web-shell-session-group-menu]',
+          '[data-web-shell-session-action-sheet], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual], [data-slot="dropdown-menu-content"], [data-web-shell-session-group-menu]',
         )
       ) {
         return;
@@ -4311,7 +4324,7 @@ export function App({
       if (
         el instanceof Element &&
         el.closest(
-          '[data-web-shell-dialog], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual], [data-slot="dropdown-menu-content"], [data-web-shell-session-group-menu]',
+          '[data-web-shell-dialog], [data-web-shell-session-action-sheet], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual], [data-slot="dropdown-menu-content"], [data-web-shell-session-group-menu]',
         )
       ) {
         return;

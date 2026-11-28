@@ -2,7 +2,7 @@
 
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { SessionGroupSection } from './SessionGroupSection';
 
@@ -112,6 +112,69 @@ describe('SessionGroupSection', () => {
 
     expect(container.textContent).toContain('Session 6');
     expect(container.textContent).not.toMatch(/Show \d+ more/);
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('renders a single always-visible overflow menu for rename/delete on touch', async () => {
+    const onRename = vi.fn();
+    const onDelete = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionGroupSection
+            id="group-touch"
+            label="Sprint"
+            count={1}
+            expanded
+            isTouchActions
+            onToggle={() => {}}
+            onRename={onRename}
+            onDelete={onDelete}
+            renameLabel="Rename group"
+            deleteLabel="Delete group"
+          >
+            <div>Session 1</div>
+          </SessionGroupSection>
+        </I18nProvider>,
+      );
+    });
+
+    const actionsWrapper = container.querySelector(
+      '[data-touch-actions="true"]',
+    );
+    expect(actionsWrapper).not.toBeNull();
+    const triggers = actionsWrapper!.querySelectorAll('button');
+    expect(triggers).toHaveLength(1);
+
+    await act(async () => {
+      triggers[0]!.dispatchEvent(
+        new MouseEvent('pointerdown', {
+          bubbles: true,
+          button: 0,
+          ctrlKey: false,
+        }),
+      );
+      triggers[0]!.click();
+      await Promise.resolve();
+    });
+
+    const menuItems = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    );
+    expect(menuItems.map((el) => el.textContent?.trim())).toEqual([
+      'Rename group',
+      'Delete group',
+    ]);
+    act(() => {
+      menuItems[0]!.click();
+    });
+    expect(onRename).toHaveBeenCalledTimes(1);
+
     act(() => root.unmount());
     container.remove();
   });

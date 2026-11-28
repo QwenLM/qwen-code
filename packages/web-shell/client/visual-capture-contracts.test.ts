@@ -256,7 +256,7 @@ describe('visual capture contracts', () => {
       '.sessionRow:has(.sessionBackgroundRunning:hover) .sessionActions';
     expect(css.indexOf(hideRule)).toBe(css.lastIndexOf(hideRule));
     expect(css, 'the hide rule must live inside @media (hover: hover)').toMatch(
-      /@media \(hover: hover\) \{\s*\.sessionRow:has\(\.sessionBackgroundRunning:hover\) \.sessionActions \{/,
+      /@media \(hover: hover\)(?:\s+and\s+\(pointer: fine\))?\s*\{\s*\.sessionRow:has\(\.sessionBackgroundRunning:hover\) \.sessionActions \{/,
     );
   });
 

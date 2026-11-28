@@ -219,6 +219,27 @@ describe('WebShellSidebar session row actions stylesheet', () => {
       );
     }
   });
+
+  it('covers hybrid-pointer iPads and mobile drawers with enlarged touch targets and workspace/group visibility', () => {
+    expect(touchMedia).toMatch(
+      /@media\s+\(hover:\s*none\),\s*\(pointer:\s*coarse\)/,
+    );
+    expect(touchMedia).toMatch(
+      /\.sidebar:not\(\[data-narrow\]\)\s+\.sessionRow:not\(\.archivedRow\)\s*\{[^}]*min-height:\s*40px;[^}]*-webkit-touch-callout:\s*none;/,
+    );
+    expect(touchMedia).toMatch(
+      /\.sidebar:not\(\[data-narrow\]\)\s+\.sessionRow:not\(\.archivedRow\)\s+\.sessionActionButton\s*\{[^}]*width:\s*36px;[^}]*height:\s*36px;/,
+    );
+    expect(touchMedia).toMatch(
+      /\.workspaceHeaderActions\[data-workspace-actions\]\s*\{[^}]*position:\s*static;[^}]*visibility:\s*visible;/,
+    );
+    expect(touchMedia).toMatch(
+      /\.sessionGroupHeaderActions\s*\{[^}]*opacity:\s*1;/,
+    );
+    expect(sidebarCss).toMatch(
+      /\.sidebar\.mobileOpen\s+\.sessionRow:not\(\.archivedRow\)\s+\.sessionActions\s*\{[^}]*position:\s*static;[^}]*opacity:\s*1;/,
+    );
+  });
 });
 
 describe('WebShellSidebar more-menu stylesheet', () => {

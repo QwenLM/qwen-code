@@ -1446,16 +1446,13 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       );
       expect(more).not.toBeNull();
       act(() => {
-        more!.dispatchEvent(
-          new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
-        );
+        more!.click();
       });
       await flushSidebar();
-      const menu = document.querySelector<HTMLElement>('[role="menu"]');
-      expect(menu).not.toBeNull();
-      expect(menu?.style.zIndex).toBe(
-        'calc(var(--web-shell-popover-z-index, 1000) + 1)',
+      const sheet = document.querySelector<HTMLElement>(
+        '[data-web-shell-session-action-sheet]',
       );
+      expect(sheet).not.toBeNull();
 
       await act(async () => {
         switcher?.dispatchEvent(
@@ -1464,7 +1461,9 @@ describe('WebShellSidebar collapsed session group persistence', () => {
         await new Promise((resolve) => setTimeout(resolve, 250));
       });
       expect(switcher?.dataset.state).toBe('open');
-      expect(document.querySelector('[role="menu"]')).not.toBeNull();
+      expect(
+        document.querySelector('[data-web-shell-session-action-sheet]'),
+      ).not.toBeNull();
     } finally {
       window.matchMedia = previousMatchMedia;
     }
@@ -3445,14 +3444,16 @@ describe('Recent sessions shared rows', () => {
   it.each(['session', 'group'] as const)(
     'suppresses hover details while the %s menu is open',
     async (kind) => {
-      vi.spyOn(window, 'matchMedia').mockImplementation(
-        (query) =>
-          ({
-            matches: query === TOUCH_COMPOSER_QUERY,
-            addEventListener: () => {},
-            removeEventListener: () => {},
-          }) as unknown as MediaQueryList,
-      );
+      if (kind === 'session') {
+        vi.spyOn(window, 'matchMedia').mockImplementation(
+          (query) =>
+            ({
+              matches: query === TOUCH_COMPOSER_QUERY,
+              addEventListener: () => {},
+              removeEventListener: () => {},
+            }) as unknown as MediaQueryList,
+        );
+      }
       enableRecentSessions();
       if (kind === 'group') {
         connection.capabilities = {
@@ -3568,30 +3569,41 @@ describe('Recent sessions shared rows', () => {
               '[data-web-shell-session-group-menu]',
             )
           : document.body.querySelector<HTMLElement>(
-              '[data-slot="dropdown-menu-content"]',
+              '[data-web-shell-session-action-sheet]',
             );
       expect(menu).not.toBeNull();
-      expect(menu!.contains(document.activeElement)).toBe(true);
+      if (kind === 'group') {
+        expect(menu!.contains(document.activeElement)).toBe(true);
+      }
       await act(async () => {
         row.dispatchEvent(new Event('pointerover', { bubbles: true }));
         await new Promise((resolve) => setTimeout(resolve, 350));
       });
-      expect(document.querySelector('[role="dialog"]')).toBeNull();
-      expect(menu!.contains(document.activeElement)).toBe(true);
+      expect(
+        document.querySelector('[data-web-shell-session-details-content]'),
+      ).toBeNull();
+      if (kind === 'group') {
+        expect(menu!.contains(document.activeElement)).toBe(true);
+      }
       for (const target of otherHoverTargets) {
         await hover(target);
-        expect(document.querySelector('[role="dialog"]')).toBeNull();
+        expect(
+          document.querySelector('[data-web-shell-session-details-content]'),
+        ).toBeNull();
         expect(menu!.contains(document.activeElement)).toBe(true);
       }
       await act(async () => {
-        document.activeElement?.dispatchEvent(
+        const escapeTarget = kind === 'group' ? document.activeElement : menu!;
+        escapeTarget?.dispatchEvent(
           new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
         );
         await flushSidebar();
       });
       expect(document.body.contains(menu!)).toBe(false);
       await hover(row);
-      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+      expect(
+        document.querySelector('[data-web-shell-session-details-content]'),
+      ).not.toBeNull();
     },
   );
 

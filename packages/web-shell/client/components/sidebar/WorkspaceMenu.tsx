@@ -18,7 +18,9 @@ import {
   BlocksIcon,
   CopyIcon,
   EllipsisVerticalIcon,
+  FolderClosedIcon,
   FolderOpenIcon,
+  GitBranchIcon,
   GitForkIcon,
   PencilIcon,
   PlusIcon,
@@ -77,11 +79,21 @@ export interface WorkspaceMenuActions {
 
 type ContentProps = ComponentProps<typeof DropdownMenuContent>;
 
+export interface WorkspaceMenuSummary {
+  path: string;
+  branch?: string | null;
+  gitSummary?: string;
+}
+
 export interface WorkspaceMenuProps {
   workspace: DaemonWorkspaceCapability;
   actions: WorkspaceMenuActions;
   /** Live counts shown next to the management entries. */
   overview?: WorkspaceOverviewSnapshot;
+  /** Optional read-only path/branch summary shown at the top on touch devices. */
+  summary?: WorkspaceMenuSummary;
+  /** Enlarges menu item rows for coarse touch pointers. */
+  touchFriendly?: boolean;
   disabled?: boolean;
   triggerClassName?: string;
   contentStyle?: CSSProperties;
@@ -132,6 +144,8 @@ export function WorkspaceMenu({
   workspace,
   actions,
   overview,
+  summary,
+  touchFriendly = false,
   disabled = false,
   triggerClassName,
   contentStyle,
@@ -154,11 +168,13 @@ export function WorkspaceMenu({
   );
   if (!hasWorkspaceMenuActions(actions)) return null;
 
+  const itemClass = touchFriendly ? 'min-h-11 gap-2 px-3 py-2' : undefined;
   const sections: ReactNode[][] = [];
   if (actions.trust) {
     sections.push([
       <DropdownMenuItem
         key="trust"
+        className={itemClass}
         disabled={actions.trustPending}
         onSelect={actions.trust}
       >
@@ -172,7 +188,11 @@ export function WorkspaceMenu({
   const primary: ReactNode[] = [];
   if (actions.rename) {
     primary.push(
-      <DropdownMenuItem key="rename" onSelect={actions.rename}>
+      <DropdownMenuItem
+        key="rename"
+        className={itemClass}
+        onSelect={actions.rename}
+      >
         <PencilIcon />
         {t('sidebar.renameWorkspace')}
       </DropdownMenuItem>,
@@ -180,7 +200,11 @@ export function WorkspaceMenu({
   }
   if (actions.copyPath) {
     primary.push(
-      <DropdownMenuItem key="copy" onSelect={actions.copyPath}>
+      <DropdownMenuItem
+        key="copy"
+        className={itemClass}
+        onSelect={actions.copyPath}
+      >
         <CopyIcon />
         {t('sidebar.copyWorkspacePath')}
       </DropdownMenuItem>,
@@ -188,7 +212,11 @@ export function WorkspaceMenu({
   }
   if (actions.openFolder) {
     primary.push(
-      <DropdownMenuItem key="open-folder" onSelect={actions.openFolder}>
+      <DropdownMenuItem
+        key="open-folder"
+        className={itemClass}
+        onSelect={actions.openFolder}
+      >
         <FolderOpenIcon />
         {t('sidebar.openWorkspaceFolder')}
       </DropdownMenuItem>,
@@ -196,7 +224,11 @@ export function WorkspaceMenu({
   }
   if (actions.openTerminal) {
     primary.push(
-      <DropdownMenuItem key="open-terminal" onSelect={actions.openTerminal}>
+      <DropdownMenuItem
+        key="open-terminal"
+        className={itemClass}
+        onSelect={actions.openTerminal}
+      >
         <TerminalIcon />
         {t('sidebar.openWorkspaceTerminal')}
       </DropdownMenuItem>,
@@ -204,7 +236,11 @@ export function WorkspaceMenu({
   }
   if (actions.newSession) {
     primary.push(
-      <DropdownMenuItem key="new" onSelect={actions.newSession}>
+      <DropdownMenuItem
+        key="new"
+        className={itemClass}
+        onSelect={actions.newSession}
+      >
         <SquarePenIcon />
         {t('sidebar.newTask')}
       </DropdownMenuItem>,
@@ -212,7 +248,11 @@ export function WorkspaceMenu({
   }
   if (actions.newWorktreeSession) {
     primary.push(
-      <DropdownMenuItem key="worktree" onSelect={actions.newWorktreeSession}>
+      <DropdownMenuItem
+        key="worktree"
+        className={itemClass}
+        onSelect={actions.newWorktreeSession}
+      >
         <GitForkIcon />
         {t('sidebar.newWorktreeTask')}
       </DropdownMenuItem>,
@@ -220,7 +260,11 @@ export function WorkspaceMenu({
   }
   if (actions.createGroup) {
     primary.push(
-      <DropdownMenuItem key="create-group" onSelect={actions.createGroup}>
+      <DropdownMenuItem
+        key="create-group"
+        className={itemClass}
+        onSelect={actions.createGroup}
+      >
         <PlusIcon />
         {t('sidebar.groupCreate')}
       </DropdownMenuItem>,
@@ -228,7 +272,11 @@ export function WorkspaceMenu({
   }
   if (actions.moveUp) {
     primary.push(
-      <DropdownMenuItem key="move-up" onSelect={actions.moveUp}>
+      <DropdownMenuItem
+        key="move-up"
+        className={itemClass}
+        onSelect={actions.moveUp}
+      >
         <ArrowUpIcon />
         {t('sidebar.moveWorkspaceUp')}
       </DropdownMenuItem>,
@@ -236,7 +284,11 @@ export function WorkspaceMenu({
   }
   if (actions.moveDown) {
     primary.push(
-      <DropdownMenuItem key="move-down" onSelect={actions.moveDown}>
+      <DropdownMenuItem
+        key="move-down"
+        className={itemClass}
+        onSelect={actions.moveDown}
+      >
         <ArrowDownIcon />
         {t('sidebar.moveWorkspaceDown')}
       </DropdownMenuItem>,
@@ -261,6 +313,7 @@ export function WorkspaceMenu({
         return (
           <DropdownMenuItem
             key={target}
+            className={itemClass}
             onSelect={() => openManagement(target)}
           >
             <Icon />
@@ -280,7 +333,11 @@ export function WorkspaceMenu({
 
   if (actions.reload) {
     sections.push([
-      <DropdownMenuItem key="reload" onSelect={actions.reload}>
+      <DropdownMenuItem
+        key="reload"
+        className={itemClass}
+        onSelect={actions.reload}
+      >
         <RefreshCwIcon />
         {t('sidebar.reloadWorkspace')}
       </DropdownMenuItem>,
@@ -292,6 +349,7 @@ export function WorkspaceMenu({
       <DropdownMenuItem
         key="remove"
         variant="destructive"
+        className={itemClass}
         aria-label={`${t('sidebar.removeWorkspace')}: ${workspace.cwd}`}
         onSelect={actions.remove}
       >
@@ -321,11 +379,44 @@ export function WorkspaceMenu({
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="end"
-        className="w-auto min-w-40"
+        className={
+          summary ? 'w-64 max-w-[calc(100vw-1rem)]' : 'w-auto min-w-40'
+        }
         style={contentStyle}
         onPointerDownOutside={onPointerDownOutside}
         onCloseAutoFocus={onCloseAutoFocus}
       >
+        {summary && (
+          <>
+            <div
+              className="flex flex-col gap-1 px-2.5 py-2 text-xs text-muted-foreground"
+              data-web-shell-workspace-menu-summary
+            >
+              <div className="flex items-start gap-1.5">
+                <FolderClosedIcon
+                  className="mt-0.5 size-3.5 shrink-0"
+                  aria-hidden="true"
+                />
+                <span className="min-w-0 break-all" title={summary.path}>
+                  {summary.path}
+                </span>
+              </div>
+              {summary.branch && (
+                <div className="flex items-center gap-1.5">
+                  <GitBranchIcon
+                    className="size-3.5 shrink-0"
+                    aria-hidden="true"
+                  />
+                  <span className="min-w-0 truncate" title={summary.branch}>
+                    {summary.branch}
+                    {summary.gitSummary ? ` · ${summary.gitSummary}` : ''}
+                  </span>
+                </div>
+              )}
+            </div>
+            <DropdownMenuSeparator />
+          </>
+        )}
         {sections.map((section, index) => (
           <DropdownMenuGroup key={index}>
             {index > 0 && <DropdownMenuSeparator />}
