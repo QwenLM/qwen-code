@@ -473,7 +473,11 @@ export function mcpVersionNegotiationFor(
   };
 }
 
-export function createMcpClient(name: string, cfg: MCPServerConfig): Client {
+export function createMcpClient(
+  name: string,
+  cfg: MCPServerConfig,
+  options?: { declareElicitation?: boolean },
+): Client {
   return new Client(
     { name, version: '0.0.1' },
     {
@@ -483,6 +487,11 @@ export function createMcpClient(name: string, cfg: MCPServerConfig): Client {
       // catalogs into a discovery failure that this module reports as empty.
       listMaxPages: 0,
       capabilities: {
+        // Opt-in per caller (#17316 / review R1-2): declaring the
+        // capability in the shared factory advertised it for every client
+        // this module builds, not just the one that answers
+        // elicitation/create.
+        ...(options?.declareElicitation ? { elicitation: {} } : {}),
         extensions: {
           [MCP_APPS_EXTENSION_ID]: {
             mimeTypes: [MCP_APP_RESOURCE_MIME_TYPE],
@@ -491,6 +500,28 @@ export function createMcpClient(name: string, cfg: MCPServerConfig): Client {
       },
     },
   );
+}
+
+/**
+ * Client-side request handlers the CLI's MCP client answers (#17316).
+ * `elicitation/create` is declined until the confirmation-bus wiring lands:
+ * a decline is protocol-correct (the server sees an explicit refusal rather
+ * than a timeout) and leaves the tool call free to surface its own error
+ * path. Exported so tests drive the real registration against a scripted
+ * transport instead of re-deriving it.
+ */
+export function registerMcpClientHandlers(
+  client: Client,
+  serverName: string,
+): void {
+  client.setRequestHandler('elicitation/create', async (request) => {
+    debugLogger.debug(
+      `MCP ELICITATION (${serverName}): declining ` +
+        `"${request.params.message}" — interactive elicitation is ` +
+        `not yet wired to the confirmation flow (#17316 follow-up).`,
+    );
+    return { action: 'decline' };
+  });
 }
 
 export function getMcpAppResourceUri(tool: {
@@ -580,6 +611,10 @@ export class McpClient {
     this.client = createMcpClient(
       `qwen-cli-mcp-client-${this.serverName}`,
       this.serverConfig,
+      // This is the client whose connect() registers the elicitation
+      // decline handler (#17316) — it must be the one to declare the
+      // capability.
+      { declareElicitation: true },
     );
   }
 
@@ -641,6 +676,12 @@ export class McpClient {
           roots,
         };
       });
+
+      // MCP elicitation (#17316): the capability is declared in the
+      // handshake (createMcpClient); answer `elicitation/create` requests
+      // through the same string-method registration `roots/list` above
+      // already uses.
+      registerMcpClientHandlers(this.client, this.serverName);
 
       await this.client.connect(this.transport, {
         timeout: this.serverConfig.timeout,
