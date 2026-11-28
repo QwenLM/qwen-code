@@ -913,6 +913,31 @@ it('renders exec source as JavaScript code instead of JSON arguments', () => {
   expect(row.textContent).toContain('done');
 });
 
+it('escapes control characters in exec source', () => {
+  const source =
+    'const esc = "\x1b[31m";\nconst bel = "\x07";\nconst rlo = "\u202e";';
+  transcript.blocks = [
+    userBlock('u1', 1),
+    toolBlock({
+      id: 'exec',
+      toolCallId: 'exec',
+      toolName: 'exec',
+      rawInput: { source },
+      rawOutput: 'done',
+    }),
+  ];
+  const view = render(<TurnCallsPanel turnId="u1" />);
+  for (const button of view.querySelectorAll<HTMLButtonElement>('li > button'))
+    act(() => button.click());
+  const text = view.querySelector('li pre code')?.textContent ?? '';
+  expect(text).toContain('\\u001b[31m');
+  expect(text).toContain('\\u0007');
+  expect(text).toContain('\\u202e');
+  expect(text).not.toContain('\x1b');
+  expect(text).not.toContain('\x07');
+  expect(text).not.toContain('\u202e');
+});
+
 it('renders an empty state when the turn has no calls', () => {
   transcript.blocks = [userBlock('u1', 1)];
   const view = render(<TurnCallsPanel turnId="u1" />);
