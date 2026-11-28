@@ -26,6 +26,7 @@ import * as os from 'node:os';
 
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { getExtensionContextFileNames } from './context-files.js';
 import {
   EXTENSIONS_CONFIG_FILENAME,
   EXTENSION_SETTINGS_FILENAME,
@@ -459,15 +460,6 @@ function filterMcpConfig(original: MCPServerConfig): MCPServerConfig {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { trust, ...rest } = original;
   return Object.freeze(rest);
-}
-
-function getContextFileNames(config: ExtensionConfig): string[] {
-  if (!config.contextFileName || config.contextFileName.length === 0) {
-    return ['QWEN.md'];
-  } else if (!Array.isArray(config.contextFileName)) {
-    return [config.contextFileName];
-  }
-  return config.contextFileName;
 }
 
 async function loadCommandsFromDir(dir: string): Promise<string[]> {
@@ -2079,7 +2071,9 @@ export class ExtensionManager {
           loadCommandsFromDir(`${effectiveExtensionPath}/commands`).then(
             (commands) => {
               head.extension.commands = commands;
-              head.extension.contextFiles = getContextFileNames(config)
+              head.extension.contextFiles = getExtensionContextFileNames(
+                head.extension,
+              )
                 .map((contextFileName) =>
                   path.join(effectiveExtensionPath, contextFileName),
                 )

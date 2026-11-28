@@ -2821,23 +2821,39 @@ describe('extension tests', () => {
       expect(extensions[0].config.name).toBe('test-extension');
     });
 
-    it('should load context file path when QWEN.md is present', async () => {
+    it('should load each default context file when present', async () => {
       addExt({ name: 'ext1', addContextFile: true });
       addExt({ name: 'ext2', version: '2.0.0' });
+      const agentsOnly = addExt({ name: 'agents-only' });
+      writeTree(agentsOnly, { 'AGENTS.md': 'agents context' });
+      const both = addExt({ name: 'both', addContextFile: true });
+      writeTree(both, { 'AGENTS.md': 'agents context' });
 
       const { extensions } = await ready();
 
-      expect(extensions).toHaveLength(2);
+      expect(extensions).toHaveLength(4);
       const ext1 = extensions.find((e) => e.config.name === 'ext1');
       const ext2 = extensions.find((e) => e.config.name === 'ext2');
       expect(ext1?.contextFiles).toEqual([
         path.join(userExtensionsDir, 'ext1', 'QWEN.md'),
       ]);
       expect(ext2?.contextFiles).toEqual([]);
+      expect(
+        extensions.find((e) => e.name === 'agents-only')?.contextFiles,
+      ).toEqual([path.join(agentsOnly, 'AGENTS.md')]);
+      expect(extensions.find((e) => e.name === 'both')?.contextFiles).toEqual([
+        path.join(both, 'QWEN.md'),
+        path.join(both, 'AGENTS.md'),
+      ]);
     });
 
     it('should load context file path from the extension config', async () => {
-      addExt({ name: 'ext1', contextFileName: 'my-context-file.md' });
+      const dir = addExt({
+        name: 'ext1',
+        addContextFile: true,
+        contextFileName: 'my-context-file.md',
+      });
+      writeTree(dir, { 'AGENTS.md': 'agents context' });
 
       const { extensions } = await ready();
 
@@ -2848,7 +2864,7 @@ describe('extension tests', () => {
       ]);
     });
 
-    it('should use default QWEN.md when contextFileName is empty array', async () => {
+    it('should use default context files when contextFileName is an empty array', async () => {
       writeTree(path.join(userExtensionsDir, 'ext-empty-context'), {
         [EXTENSIONS_CONFIG_FILENAME]: {
           name: 'ext-empty-context',
@@ -2856,6 +2872,7 @@ describe('extension tests', () => {
           contextFileName: [],
         },
         'QWEN.md': 'context content',
+        'AGENTS.md': 'agents context',
       });
 
       const { extensions } = await ready();
@@ -2864,8 +2881,71 @@ describe('extension tests', () => {
       const ext = extensions.find((e) => e.config.name === 'ext-empty-context');
       expect(ext?.contextFiles).toEqual([
         path.join(userExtensionsDir, 'ext-empty-context', 'QWEN.md'),
+        path.join(userExtensionsDir, 'ext-empty-context', 'AGENTS.md'),
       ]);
     });
+
+    it('should use default context files when contextFileName is an empty string', async () => {
+      writeTree(path.join(userExtensionsDir, 'ext-empty-string-context'), {
+        [EXTENSIONS_CONFIG_FILENAME]: {
+          name: 'ext-empty-string-context',
+          version: '1.0.0',
+          contextFileName: '',
+        },
+        'QWEN.md': 'context content',
+        'AGENTS.md': 'agents context',
+      });
+
+      const { extensions } = await ready();
+
+      expect(extensions).toHaveLength(1);
+      const ext = extensions.find(
+        (e) => e.config.name === 'ext-empty-string-context',
+      );
+      expect(ext?.contextFiles).toEqual([
+        path.join(userExtensionsDir, 'ext-empty-string-context', 'QWEN.md'),
+        path.join(userExtensionsDir, 'ext-empty-string-context', 'AGENTS.md'),
+      ]);
+    });
+
+    it('should retain the existing default for converted plugins', async () => {
+      const dir = addExt({
+        name: 'converted',
+        addContextFile: true,
+        installMetadata: {
+          type: 'local',
+          source: '/source',
+          originSource: 'Qoder',
+        },
+      });
+      writeTree(dir, { 'AGENTS.md': 'plugin development instructions' });
+
+      const { extensions } = await ready();
+
+      expect(extensions[0]?.contextFiles).toEqual([path.join(dir, 'QWEN.md')]);
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'should treat implicit AGENTS.md links the same as QWEN.md',
+      async () => {
+        const dir = addExt({ name: 'linked' });
+        const outside = path.join(userExtensionsDir, 'outside.md');
+        fs.writeFileSync(outside, 'context');
+        fs.symlinkSync(outside, path.join(dir, 'QWEN.md'));
+        fs.symlinkSync(outside, path.join(dir, 'AGENTS.md'));
+        const dangling = addExt({ name: 'dangling', addContextFile: true });
+        fs.symlinkSync('missing.md', path.join(dangling, 'AGENTS.md'));
+
+        const { extensions } = await ready();
+
+        expect(
+          extensions.find((e) => e.name === 'linked')?.contextFiles,
+        ).toEqual([path.join(dir, 'QWEN.md'), path.join(dir, 'AGENTS.md')]);
+        expect(
+          extensions.find((e) => e.name === 'dangling')?.contextFiles,
+        ).toEqual([path.join(dangling, 'QWEN.md')]);
+      },
+    );
 
     it.each([
       [
