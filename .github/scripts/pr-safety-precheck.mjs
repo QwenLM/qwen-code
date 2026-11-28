@@ -1,5 +1,11 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import {
+  readFileSync,
+  writeFileSync,
+  appendFileSync,
+  realpathSync,
+} from 'node:fs';
+import { pathToFileURL } from 'node:url';
 
 const SECRET_NAME_PATTERN = String.raw`secrets\.[A-Z0-9_]+|process\.env\.[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|_PAT)|\b(?:GITHUB_TOKEN|GH_TOKEN|OPENAI_API_KEY)\b`;
 const LOGGING_SINK_PATTERN = String.raw`\b(?:console\.\w+|process\.(?:stdout|stderr)\.write)\s*\(`;
@@ -17,6 +23,170 @@ const SENSITIVE_DIFF_PATTERNS = [
   ['sensitive_diff:secret_network', secretSinkPattern(NETWORK_SINK_PATTERN)],
 ];
 
+// Paths that decide what CI executes or what the review agent reads as
+// instructions. An untrusted author changing one is escalating authority, not
+// proposing product code, so "let the full review judge it" is circular here:
+// the reviewer is the target. Gate first, let a maintainer opt in.
+const PROTECTED_DIR_PREFIXES = [
+  '.github/',
+  '.agents/',
+  'scripts/',
+  '.qwen/skills/',
+  '.qwen/commands/',
+  '.qwen/agents/',
+  '.qwen/workflows/',
+  '.qwen/extensions/',
+  '.qwen/scripts/',
+  '.qwen/rules/',
+  '.qwen/hooks/',
+  '.qwen/fork-profiles/',
+  'patches/',
+  'eslint-rules/',
+];
+// Context files load hierarchically, so a nested copy steers the agent too.
+// QWEN.local.md is the project-local slot the memory loader appends; both it
+// and .qwen/rules/ reach the system prompt by default, because the trust flag is
+// opt-in hardening rather than an opt-out of trust (isWorkspaceTrusted returns
+// true when the flag is off). The review job avoids them only because it checks
+// out the default branch, so any lane that runs inside the contributed tree must
+// still meet them held.
+const PROTECTED_FILE_NAMES = new Set([
+  'AGENTS.md',
+  'QWEN.md',
+  'QWEN.local.md',
+  'CLAUDE.md',
+  'package.json',
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  'eslint.config.js',
+  'esbuild.config.js',
+  'vitest.config.ts',
+  '.npmrc',
+  '.pnpmfile.mjs',
+  '.mcp.json',
+  'copilot-instructions.md',
+  'eslint.legacy-filenames.mjs',
+  'eslint.legacy-core-barrel-imports.mjs',
+]);
+// Mirror autoMode's settings variant glob, not just the default filename.
+const PROTECTED_SETTINGS_PATH = /(?:^|\/)\.qwen\/settings(?:\.[^/]+)?\.json$/;
+const PROTECTED_FILE_PATHS = new Set([
+  // Selected independently of the context-file loader: the CLI prefers a
+  // project's output-language file and appends it through
+  // getExtensionContextFilePaths(), so it reaches the system prompt too.
+  '.qwen/output-language.md',
+  '.qwen/review-rules.md',
+  '.qwen/review-context.json',
+]);
+
+const ENV_DUMP_COMMAND = String.raw`(?:env(?:[ \t]{1,64}(?:-0|--null))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)`;
+const ENV_DUMP_TERMINATOR = String.raw`(?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)|["'](?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)))`;
+const BACKTICK_ANCHOR = '(?<!\\w)`';
+// Anchors that cannot open a JS arrow-function parameter list: bare lines,
+// list items, bare separators, backticks and `$(…)` command substitution.
+// None of these share the same-line arrow release below.
+const ENV_DUMP_PLAIN_ANCHOR = String.raw`(?:^[ \t]{0,192}|^[ \t]{0,64}(?:[-*+]|\d{1,3}[.)])[ \t]{1,64}(?:\([ \t]{0,64})?|[;&|][ \t]{0,64}|(?:${BACKTICK_ANCHOR}|\$\()[ \t]{0,64}\(?[ \t]{0,64})`;
+// Anchors that directly open a parenthesized subshell or parameter list
+// (`(env)` at line start or after a separator). These carry the same-line
+// `(?!\)[ \t]*=>)` release so JS/TS arrow parameters stay ungated without
+// releasing newline-split `(env)\n=>` or `$(env) => /tmp/leak`.
+const ENV_DUMP_PAREN_ANCHOR = String.raw`(?:^[ \t]{0,128}|[;&|][ \t]{0,64})\([ \t]{0,64}`;
+const ENV_DUMP_PATTERN = new RegExp(
+  [
+    `${ENV_DUMP_PLAIN_ANCHOR}${ENV_DUMP_COMMAND}${ENV_DUMP_TERMINATOR}`,
+    `${ENV_DUMP_PAREN_ANCHOR}${ENV_DUMP_COMMAND}${ENV_DUMP_TERMINATOR}(?!\\)[ \\t]*=>)`,
+    `(?:${ENV_DUMP_PLAIN_ANCHOR}|${ENV_DUMP_PAREN_ANCHOR})printenv\\b`,
+    String.raw`\b(?:bash|sh|zsh|dash)[ \t]{1,64}(?:--?[A-Za-z][\w-]*(?:=\S+)?[ \t]{1,64})*-[a-z]*c[a-z]*[ \t]{1,64}["']?[ \t]{0,64}(?:printenv\b|${ENV_DUMP_COMMAND}(?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|["']|$)))`,
+  ].join('|'),
+  'm',
+);
+
+// Credentials the runner holds ambiently, reachable without naming a single
+// GitHub secret. #18362 read these from a CI script and #18364 asked the agent
+// to read them; neither payload names `secrets.*`, so the sink pairs above
+// cannot see them. Recognized source forms are warning signals, not a complete
+// inventory of the credentials exposed to a runner.
+const AMBIENT_CREDENTIAL_PATTERNS = [
+  [
+    'ambient_credential:cloud_metadata',
+    /(?<![\w.])(?:100\.100\.100\.200|169\.254\.169\.254|169\.254\.170\.2|fd00:ec2::254|metadata\.google\.internal|metadata\.goog)(?![\w-]|\.\w)/i,
+  ],
+  [
+    'ambient_credential:proc_environ',
+    /\/proc\/(?:self|thread-self|\d+|\$\$|\$\{?\w+\}?)(?:\/task\/(?:\d+|\$\$|\$\{?\w+\}?))?\/environ/,
+  ],
+  // Recognized shell dump forms, not a complete grammar for arbitrary input.
+  // `printenv` has no option grammar, so bare and wrapped calls need no
+  // terminator. The other dump commands keep theirs so `env FOO=bar cmd` and
+  // `set -euo pipefail` remain ordinary work. Broader spellings are review
+  // signals documented in the design, not acceptance claims of this rule.
+  ['ambient_credential:env_dump', ENV_DUMP_PATTERN],
+  // `.credentials` needs a boundary that admits common spellings of a file read
+  // — bare, quoted (including a markdown code span's backtick), or after a
+  // separator — while refusing property access. The allowed set is enumerated
+  // rather than negated: a negated class also admits `?` and `)`, which gated
+  // ordinary TypeScript such as `a?.credentials` and `(await
+  // client).credentials`. A dot is excluded so `{ ...credentials }` stays
+  // ungated. This is not a complete inventory of runner credential files.
+  [
+    'ambient_credential:credential_file',
+    /\.aws\/credentials|\.docker\/config\.json|\.config\/gcloud|\.kube\/config|\.ssh\/id_[a-z0-9]+|\.netrc\b|\.git-credentials|(?:^|[/\\\s"'`])\.credentials(?:_rsaparams)?\b/,
+  ],
+];
+
+// Restores the historical process-substitution regression without restoring a
+// bare-parenthesis anchor that would hold ordinary function calls.
+const CAT_ENV_SUBSTITUTION =
+  /\bcat[ \t]{1,64}(?:<[ \t]{1,8})?[<>]\([ \t]{0,64}env(?:[ \t]{1,64}(?:-0|--null|-u[ \t]{1,64}\S+|--unset[ \t]{1,64}\S+|--))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*(?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$))/;
+
+const METADATA_HOSTNAMES = new Set([
+  '100.100.100.200',
+  '169.254.169.254',
+  '169.254.170.2',
+  '[fd00:ec2::254]',
+  'metadata.google.internal',
+  'metadata.goog',
+]);
+
+// The URL parser already implements inet_aton: integer, hexadecimal and
+// short-form hostnames normalize to their dotted IPv4 form. Comparing the
+// normalized host avoids enumerating spellings separately.
+function normalizedHost(urlString) {
+  const hostname = new URL(urlString).hostname;
+  const mapped = /^\[::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})\]$/i.exec(hostname);
+  if (!mapped) return hostname;
+  const high = Number.parseInt(mapped[1], 16);
+  const low = Number.parseInt(mapped[2], 16);
+  return [high >> 8, high & 255, low >> 8, low & 255].join('.');
+}
+
+function hasCloudMetadataHost(text) {
+  for (const match of text.matchAll(
+    /https?:\/\/(?:\[[a-f\d:.]+\](?::\d+)?|[^\s"'`<>\])}]+)[^\s"'`<>\])}]*/gi,
+  )) {
+    const raw = match[0];
+    const segments = raw.split(/[|;&!]+/);
+    const candidates = new Set([
+      raw,
+      ...segments,
+      ...segments.map((segment) => segment.replace(/,+$/, '')),
+      ...raw.split(/[|;&,!]+/),
+    ]);
+    for (const candidate of candidates) {
+      if (!/^https?:\/\//i.test(candidate)) continue;
+      try {
+        if (METADATA_HOSTNAMES.has(normalizedHost(candidate))) return true;
+      } catch {
+        // A malformed URL is not a usable metadata host match.
+      }
+    }
+  }
+  return false;
+}
+
+// Secret-shaped strings are signals in both PR prose and added diff content.
 const SECRET_VALUE_PATTERNS = [
   ['secret_value:private_key', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
   [
@@ -44,12 +214,91 @@ const SECRET_VALUE_PATTERNS = [
   ],
 ];
 
+const SYSTEM_PROMPT_PHRASE = /\bsystem prompt\b/i;
+const RELEASED_OPTION_STRINGS = new Set([
+  "'override the main session system prompt for this run. can be combined with --append-system-prompt.',",
+  "'override the main session system prompt for this run. can be combined with --append-system-prompt.'",
+  '"override the main session system prompt for this run. can be combined with --append-system-prompt.",',
+  '"override the main session system prompt for this run. can be combined with --append-system-prompt."',
+  "'append instructions to the main session system prompt for this run. can be combined with --system-prompt.',",
+  "'append instructions to the main session system prompt for this run. can be combined with --system-prompt.'",
+  '"append instructions to the main session system prompt for this run. can be combined with --system-prompt.",',
+  '"append instructions to the main session system prompt for this run. can be combined with --system-prompt."',
+]);
+const RELEASED_CACHE_COMMENTS = new Set([
+  'the cross-session-stable prefix of the main-session system prompt —',
+  'the cross-session-stable prefix of the main-session system prompt.',
+  'the cross-session-stable prefix of the main-session system prompt',
+]);
+const RELEASED_SYSTEM_PROMPT_DESC =
+  /^(?:overrides?(?: the)?(?: built-in)?|appends?(?: extra)? instructions to(?: the)?) main session system prompt for this run\.?$/i;
+const RELEASED_SETTINGS_NOTES = new Set([
+  'loaded context files such as `qwen.md` are still appended after this override. can be combined with `--append-system-prompt`.',
+  'applied after the built-in prompt and loaded context files. can be combined with `--system-prompt`. see [headless mode](../features/headless) for examples.',
+]);
+const RELEASED_HEADLESS_EXAMPLES = new Set([
+  '`qwen -p "query" --system-prompt "you are a terse reviewer."`',
+  '`qwen -p "query" --append-system-prompt "focus on concrete findings."`',
+]);
+
+// Exact full-line product prose exceptions for the pre-existing `system prompt`
+// phrase rule, parsed linearly via trim/split (no competing whitespace regex
+// quantifiers) so long whitespace padding stays O(n).
+function isReleasedSystemPromptLine(rawLine) {
+  const trimmed = rawLine.trim();
+  const lower = trimmed.toLowerCase();
+  if (RELEASED_OPTION_STRINGS.has(lower)) return true;
+  const commentText = trimmed.startsWith('*')
+    ? trimmed.slice(1).trimStart().toLowerCase()
+    : lower;
+  if (RELEASED_CACHE_COMMENTS.has(commentText)) return true;
+  if (!trimmed.startsWith('|')) return false;
+
+  const parts = trimmed.split('|');
+  const cells = parts
+    .slice(1, trimmed.endsWith('|') ? -1 : parts.length)
+    .map((cell) => cell.trim());
+  if (cells.length < 2) return false;
+  const flag = cells[0].toLowerCase();
+  if (flag !== '`--system-prompt`' && flag !== '`--append-system-prompt`') {
+    return false;
+  }
+
+  let idx = 1;
+  if (cells.length >= 3 && (cells[1] === '' || /^`-[a-z]`$/i.test(cells[1]))) {
+    idx = 2;
+  }
+  if (!RELEASED_SYSTEM_PROMPT_DESC.test(cells[idx])) return false;
+
+  const rest = cells.slice(idx + 1);
+  if (rest.length === 0) return true;
+  if (rest.length === 1) {
+    return RELEASED_HEADLESS_EXAMPLES.has(rest[0].toLowerCase());
+  }
+  if (rest.length === 2) {
+    return (
+      rest[0].toLowerCase() === 'your prompt text' &&
+      RELEASED_SETTINGS_NOTES.has(rest[1].toLowerCase())
+    );
+  }
+  return false;
+}
+
+function hasSystemPromptMention(text) {
+  for (const rawLine of text.split('\n')) {
+    if (!SYSTEM_PROMPT_PHRASE.test(rawLine)) continue;
+    if (isReleasedSystemPromptLine(rawLine)) continue;
+    return true;
+  }
+  return false;
+}
+
 const PROMPT_INJECTION_PATTERNS = [
   [
     'prompt_injection:ignore_previous',
     /ignore (?:all )?(?:previous|above) instructions/i,
   ],
-  ['prompt_injection:system_prompt', /\bsystem prompt\b/i],
+  ['prompt_injection:system_prompt', { test: hasSystemPromptMention }],
   ['prompt_injection:developer_message', /\bdeveloper message\b/i],
   [
     'prompt_injection:print_secrets',
@@ -73,7 +322,73 @@ function checkPatterns(text, patterns, reasons) {
   }
 }
 
-export function assessPullRequestSafety({ pr, diff, trustedAuthor = false }) {
+// Git quotes a path containing a tab, a newline or (with core.quotePath) a
+// non-ASCII byte. Left quoted, `.github/...` no longer matches a prefix test,
+// so a file added under a protected directory with such a name would walk past
+// the gate. Unquote before testing; the escapes sit after the prefix.
+function diffPath(raw) {
+  const unquoted =
+    raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1) : raw;
+  return unquoted.replace(/^[ab]\//, '');
+}
+
+// A `--git` header is accepted only when comparing every possible split yields
+// two equal halves; the first ` b/` is not necessarily a separator when a path
+// itself contains that sequence. Mode-only and binary changes have no side
+// headers, so this header is their only path source.
+function diffHeaderPath(line) {
+  const header = line.slice('diff --git '.length);
+  for (
+    let i = header.lastIndexOf('b/');
+    i > 0;
+    i = header.lastIndexOf('b/', i - 1)
+  ) {
+    const left = header.slice(0, header[i - 1] === '"' ? i - 2 : i - 1);
+    const right = header.slice(header[i - 1] === '"' ? i - 1 : i);
+    if (diffPath(left) === diffPath(right)) return diffPath(right);
+  }
+  return null;
+}
+
+// `---`/`+++` carry one unambiguous path each, but only outside hunks: a
+// diff-illustrating line inside a hunk can have the same prefix.
+function changedPaths(diffText) {
+  const paths = new Set();
+  let inHunk = false;
+  for (const rawLine of diffText.split('\n')) {
+    const line = rawLine.replace(/\r$/, '');
+    let path = null;
+    if (line.startsWith('diff --git ')) {
+      inHunk = false;
+      path = diffHeaderPath(line);
+    } else if (line.startsWith('@@ ')) {
+      inHunk = true;
+    } else if (!inHunk) {
+      const side = /^(?:---|\+\+\+) (.+)$/.exec(line);
+      const rename = /^(?:rename|copy) (?:from|to) (.+)$/.exec(line);
+      if (side || rename) path = diffPath((side ?? rename)[1]);
+    }
+    if (path && path !== '/dev/null') paths.add(path);
+  }
+  return paths;
+}
+
+function isProtectedPath(path) {
+  return (
+    PROTECTED_DIR_PREFIXES.some((prefix) => path.startsWith(prefix)) ||
+    PROTECTED_SETTINGS_PATH.test(path) ||
+    PROTECTED_FILE_PATHS.has(path) ||
+    PROTECTED_FILE_NAMES.has(path.slice(path.lastIndexOf('/') + 1))
+  );
+}
+
+export function assessPullRequestSafety({
+  pr,
+  diff,
+  trustedAuthor = false,
+  diffTruncated = false,
+  metadataUnavailable = false,
+}) {
   const reasons = [];
   const headSha = typeof pr?.headRefOid === 'string' ? pr.headRefOid : '';
   const diffText = typeof diff === 'string' ? diff : '';
@@ -89,20 +404,44 @@ export function assessPullRequestSafety({ pr, diff, trustedAuthor = false }) {
     };
   }
 
+  // A capped diff hides whatever sits past the cap, so a partial read must not
+  // be reported as a clean one.
+  if (diffTruncated) addReason(reasons, 'input:diff_truncated');
+
+  // Without the title and body the body-only channel is simply not scanned, so
+  // an API failure would silently reopen the exact hole this gate closes.
+  if (metadataUnavailable) addReason(reasons, 'input:metadata_unavailable');
+
   if (!diffText) {
     addReason(reasons, 'input:diff_unavailable');
   } else {
-    addedText = diffText
-      .split('\n')
-      .filter((line) => line.startsWith('+') && !line.startsWith('+++'))
-      .map((line) => line.slice(1))
-      .join('\n');
+    // `++` is possible content, not always a side header. Only outside hunks
+    // does `+++ ` belong to the file headers.
+    const hasHunkHeaders = /^@@ /m.test(diffText);
+    let inHunk = !hasHunkHeaders;
+    const addedLines = [];
+    for (const line of diffText.split('\n')) {
+      if (line.startsWith('diff --git ')) inHunk = !hasHunkHeaders;
+      else if (line.startsWith('@@ ')) inHunk = true;
+      else if (inHunk && line.startsWith('+')) addedLines.push(line.slice(1));
+    }
+    addedText = addedLines.join('\n');
     checkPatterns(addedText, SENSITIVE_DIFF_PATTERNS, reasons);
+    if ([...changedPaths(diffText)].some(isProtectedPath)) {
+      addReason(reasons, 'protected_path:authority_surface');
+    }
   }
 
   const prText = `${pr?.title ?? ''}\n${pr?.body ?? ''}\n${addedText}`;
   checkPatterns(prText, SECRET_VALUE_PATTERNS, reasons);
   checkPatterns(prText, PROMPT_INJECTION_PATTERNS, reasons);
+  checkPatterns(prText, AMBIENT_CREDENTIAL_PATTERNS, reasons);
+  if (CAT_ENV_SUBSTITUTION.test(prText)) {
+    addReason(reasons, 'ambient_credential:env_dump');
+  }
+  if (hasCloudMetadataHost(prText)) {
+    addReason(reasons, 'ambient_credential:cloud_metadata');
+  }
 
   return {
     decision: reasons.length === 0 ? 'allow_triage' : 'manual_required',
@@ -156,7 +495,15 @@ function main() {
   const pr = JSON.parse(readFileSync(args.pr, 'utf8'));
   const diff = readFileSync(args.diff, 'utf8');
   const trustedAuthor = args['trusted-author'] === 'true';
-  const result = assessPullRequestSafety({ pr, diff, trustedAuthor });
+  const diffTruncated = args['diff-truncated'] === 'true';
+  const metadataUnavailable = args['metadata-unavailable'] === 'true';
+  const result = assessPullRequestSafety({
+    pr,
+    diff,
+    trustedAuthor,
+    diffTruncated,
+    metadataUnavailable,
+  });
 
   if (args.comment) {
     writeFileSync(
@@ -170,6 +517,22 @@ function main() {
   console.log(JSON.stringify(result, null, 2));
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Compare resolved URLs: `file://${argv[1]}` never matches when the checkout
+// path contains a space (%20) or goes through a symlink (/tmp -> /private/tmp),
+// and a silent no-output exit 0 is indistinguishable from a clean decision.
+// argv[1] is absent when the module is imported rather than executed, and it
+// can name a stale or non-existent path when a direct probe passes an argument.
+function isEntryPoint() {
+  if (!process.argv[1]) return false;
+  try {
+    return (
+      import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
   main();
 }

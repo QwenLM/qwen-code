@@ -132,6 +132,9 @@ vi.mock('../MessageList', async () => {
   const { ToolFilePreviewButton } = await import(
     '../messages/ToolFilePreviewButton'
   );
+  const { WorkspaceRuntimeContext } = await import(
+    '../../utils/workspace-context.js'
+  );
   const { CompactModeContext } = await import('../../WebShellContexts');
   const { useSubagentDetails } = await import('../../subagentDetailsContext');
   return {
@@ -146,18 +149,29 @@ vi.mock('../MessageList', async () => {
           'data-compact-mode': String(compactMode),
         },
         previewTest.enabled
-          ? React.createElement(ToolFilePreviewButton, {
-              tool: {
-                callId: 'read-1',
-                toolName: 'read_file',
-                status: 'completed',
-                args: { file_path: '/work/project/note.txt' },
+          ? React.createElement(
+              WorkspaceRuntimeContext.Provider,
+              {
+                value: {
+                  client: workspaceClient,
+                  status: 'connected',
+                  capabilities: previewCapabilities,
+                  actions: workspaceActions,
+                } as never,
               },
-              workspaceCwd: props['workspaceCwd'] as string,
-              onOpen: props['onTurnOutputOpen'] as Parameters<
-                typeof ToolFilePreviewButton
-              >[0]['onOpen'],
-            })
+              React.createElement(ToolFilePreviewButton, {
+                tool: {
+                  callId: 'read-1',
+                  toolName: 'read_file',
+                  status: 'completed',
+                  args: { file_path: '/work/project/note.txt' },
+                },
+                workspaceCwd: props['workspaceCwd'] as string,
+                onOpen: props['onTurnOutputOpen'] as Parameters<
+                  typeof ToolFilePreviewButton
+                >[0]['onOpen'],
+              }),
+            )
           : null,
       );
     },

@@ -861,7 +861,12 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       });
 
       expect(response['error']).toBeUndefined();
-      expect(response['result']).toEqual({});
+      expect(response['result']).toMatchObject({
+        sessionId,
+        workspaceCwd: '/ws',
+        attached: false,
+        clientId: expect.any(String),
+      });
       expect(restoreSession).toHaveBeenCalledOnce();
     },
   );

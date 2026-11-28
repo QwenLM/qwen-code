@@ -110,7 +110,6 @@ class ExternalRuntimeConfigurationTest {
                 "--qwen.managed-agent.harness.enabled=false",
                 "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
                 "--qwen.managed-agent.runtime-broker.enabled=" + enabled,
-                "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.workspace-id=scratch",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                 "--qwen.managed-agent.runtime-broker.external-provider-url=http://provider.invalid/api",

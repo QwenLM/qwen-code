@@ -233,6 +233,28 @@ describe('transcript snapshot rejections', () => {
 
 describe('toRpcError', () => {
   it.each(['request', 'wire'] as const)(
+    'preserves repeated-tool-call recovery guidance from a %s error',
+    (transport) => {
+      const message = 'Provider rejected repeated tool calls. Try /compress.';
+      const data = {
+        errorKind: 'repetitive_tool_calls',
+        details: message,
+      };
+      const source = new RequestError(RPC.INTERNAL_ERROR, message, data);
+      const error: unknown =
+        transport === 'request'
+          ? source
+          : JSON.parse(JSON.stringify(source.toErrorResponse()));
+
+      expect(toRpcError(error)).toEqual({
+        code: RPC.INTERNAL_ERROR,
+        message,
+        data,
+      });
+    },
+  );
+
+  it.each(['request', 'wire'] as const)(
     'preserves workflow parameter details from a %s error',
     (transport) => {
       const source = RequestError.invalidParams(
@@ -303,9 +325,13 @@ describe('toRpcError', () => {
     new Error('Unexpected workflow failure'),
     RequestError.invalidParams(undefined, 'Unclassified parameter error'),
     RequestError.internalError(
-      { errorKind: 'unknown_workflow_error' },
+      { errorKind: 'unknown_workflow_error', details: 'Internal details' },
       'Unexpected workflow failure',
     ),
+    new RequestError(RPC.INTERNAL_ERROR, 'Internal error', {
+      errorKind: 'repetitive_tool_calls',
+      details: 'Internal details',
+    }),
   ])('keeps unclassified errors as internal failures: %s', (error) => {
     expect(toRpcError(error)).toEqual({
       code: RPC.INTERNAL_ERROR,

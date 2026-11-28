@@ -75,28 +75,26 @@ jobs:
     strategy:
       matrix:
         # One leg per MACHINE, not per runner process: every runner on a
-        # host shares the same global npm install. The hk legs carry a
-        # dedicated ecs-update-hk-N label on the first runner of each host.
-        # GitHub schedules jobs by runner LABEL, never by runner name, so
-        # the hz legs carry dedicated ecs-update-hz-N labels too (added to
-        # each host's first runner via the labels API — no re-registration,
-        # pool labels intact). The static array keeps every label visible
-        # to actionlint. hz4 and hz5 have only ephemeral container runners
-        # whose image carries the CLI — nothing persistent to update there,
-        # and no runner to hang the per-host label on.
+        # host shares the same global npm install. GitHub schedules jobs by
+        # runner LABEL, never by runner name, so each host carries a
+        # dedicated ecs-update-hz-N label on one of its runners (added via
+        # the labels API — no re-registration, pool labels intact). The
+        # static array keeps every label visible to actionlint. The fleet
+        # is hz7-hz13; the former hk and hz1-hz6 hosts have no registered
+        # runners left. A leg whose label matches no registered runner
+        # never runs and is never reported — every leg of the 0.29.0
+        # dispatch (run 46133058496) stuck queued exactly that way.
         runner:
-          - 'ecs-update-hk-1'
-          - 'ecs-update-hk-2'
-          - 'ecs-update-hk-3'
-          - 'ecs-update-hk-4'
-          - 'ecs-update-hk-5'
-          - 'ecs-update-hz-1'
-          - 'ecs-update-hz-2'
-          - 'ecs-update-hz-3'
-          - 'ecs-update-hz-6'
+          - 'ecs-update-hz-7'
+          - 'ecs-update-hz-8'
+          - 'ecs-update-hz-9'
+          - 'ecs-update-hz-10'
+          - 'ecs-update-hz-11'
+          - 'ecs-update-hz-12'
+          - 'ecs-update-hz-13'
       fail-fast: false
-    # No arch label: hk hosts are x64, hz hosts are arm64; the dedicated
-    # per-host label already pins the machine.
+    # No arch label: the dedicated per-host label already pins the machine
+    # (the hz7-hz13 fleet is arm64).
     runs-on: ['self-hosted', 'linux', '${{ matrix.runner }}']
     concurrency:
       group: 'update-ecs-runner-qwen-${{ matrix.runner }}'

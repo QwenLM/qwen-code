@@ -45,15 +45,22 @@ export async function readSessionToolCalls({
   reader,
   codec,
   hasActivePrompt,
+  signal,
 }: {
   sessionId: string;
   turnId: string;
   reader: Pick<SessionTranscriptReader, 'readPage' | 'readTurnIndexPage'>;
   codec: Pick<SessionTranscriptCursorCodec, 'encode'>;
   hasActivePrompt: () => boolean;
+  signal?: AbortSignal;
 }): Promise<BridgeEvent[]> {
+  signal?.throwIfAborted();
   const activeBeforeRead = hasActivePrompt();
-  const { snapshot } = await reader.readTurnIndexPage(sessionId, { limit: 1 });
+  const { snapshot } = await reader.readTurnIndexPage(sessionId, {
+    limit: 1,
+    ...(signal !== undefined ? { signal } : {}),
+  });
+  signal?.throwIfAborted();
   const records: ChatRecord[] = [];
   const ownedRecordIds = new Set<string>();
   const cursors = new Set<string>();
@@ -67,11 +74,14 @@ export async function readSessionToolCalls({
   let lastPage: SessionTranscriptRecordPage | undefined;
 
   for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+    signal?.throwIfAborted();
     const page = await reader.readPage(sessionId, {
       ...(cursor ? { cursor } : { atRecordId: turnId, snapshot }),
       limit: 250,
       maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+      ...(signal !== undefined ? { signal } : {}),
     });
+    signal?.throwIfAborted();
     lastPage = page;
     if (page.records.some((record) => record.sessionId !== sessionId)) {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);

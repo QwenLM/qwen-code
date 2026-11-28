@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -34,6 +35,11 @@ import { DialogShell } from '../dialogs/DialogShell';
 import { SessionRenameDialog } from '../dialogs/SessionRenameDialog';
 import { Button } from '../ui/button';
 import {
+  compareArchivedSessions,
+  matchesArchivedSearch,
+  type ArchivedSessionSort,
+} from './archived-session-sort';
+import {
   readWorkspaceExpanded,
   writeWorkspaceExpanded,
 } from './workspaceExpansion';
@@ -42,12 +48,16 @@ import workspaceStyles from './WorkspaceSection.module.css';
 
 interface StandaloneRecentsProps {
   sortBy?: 'updatedAt' | 'lastUserPromptAt';
+  clientSort?: ArchivedSessionSort;
   archiveState: DaemonSessionArchiveState;
   currentSessionId?: string;
   currentSessionReady?: boolean;
   refreshKey?: number;
   searchQuery?: string;
+  hideWhenSearchEmpty?: boolean;
+  groupCountLabel?: (count: number, hasMore: boolean) => string;
   onNewSession?: () => void;
+  newSessionDisabled?: boolean;
   renderSession: (
     session: DaemonStandaloneSessionSummary,
     options: {
@@ -70,6 +80,8 @@ interface StandaloneRecentsProps {
   onMutated?: () => void;
   onStatusChange?: (status: {
     count: number;
+    matchedCount?: number;
+    hasMore?: boolean;
     loading: boolean;
     error: boolean;
   }) => void;
@@ -121,12 +133,16 @@ function downloadExport(result: {
 
 export function StandaloneRecents({
   sortBy,
+  clientSort,
   archiveState,
   currentSessionId,
   currentSessionReady = false,
   refreshKey,
   searchQuery = '',
+  hideWhenSearchEmpty = false,
+  groupCountLabel,
   onNewSession,
+  newSessionDisabled = false,
   renderSession,
   onLoadSession,
   onRenameSession,
@@ -267,9 +283,44 @@ export function StandaloneRecents({
     }
   }, [archiveState, connection.sessionContext?.kind, load, streamingState]);
 
+  const query = searchQuery.trim().toLowerCase();
+  const visibleSessions = useMemo(() => {
+    const filtered = query
+      ? sessions.filter((session) =>
+          archiveState === 'archived'
+            ? matchesArchivedSearch(session, query)
+            : sessionLabel(session).toLowerCase().includes(query) ||
+              session.sessionId.toLowerCase().includes(query),
+        )
+      : sessions;
+    if (
+      archiveState === 'archived' &&
+      (clientSort === 'createdAt' || clientSort === 'alphabetical')
+    ) {
+      return [...filtered].sort((a, b) =>
+        compareArchivedSessions(a, b, clientSort),
+      );
+    }
+    return filtered;
+  }, [archiveState, clientSort, query, sessions]);
+
+  const hasMore = Boolean(cursor);
   useEffect(() => {
-    onStatusChange?.({ count: sessions.length, loading, error: !!loadError });
-  }, [loadError, loading, onStatusChange, sessions.length]);
+    onStatusChange?.({
+      count: sessions.length,
+      matchedCount: visibleSessions.length,
+      hasMore,
+      loading,
+      error: !!loadError,
+    });
+  }, [
+    hasMore,
+    loadError,
+    loading,
+    onStatusChange,
+    sessions.length,
+    visibleSessions.length,
+  ]);
 
   useEffect(() => {
     if (!expanded) setVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
@@ -485,18 +536,58 @@ export function StandaloneRecents({
   ) {
     return null;
   }
-  const query = searchQuery.trim().toLowerCase();
-  const visibleSessions = query
-    ? sessions.filter(
-        (session) =>
-          sessionLabel(session).toLowerCase().includes(query) ||
-          session.sessionId.toLowerCase().includes(query),
-      )
-    : sessions;
-  const sessionsLimited = !query && visibleSessions.length > visibleCount;
+  if (
+    hideWhenSearchEmpty &&
+    Boolean(query) &&
+    !loadError &&
+    !sessionError &&
+    !loading &&
+    !hasMore &&
+    visibleSessions.length === 0
+  ) {
+    return null;
+  }
+  const sessionsLimited =
+    archiveState === 'active' &&
+    !query &&
+    visibleSessions.length > visibleCount;
   const displayedSessions = sessionsLimited
     ? visibleSessions.slice(0, visibleCount)
     : visibleSessions;
+
+  const renderRows = () =>
+    displayedSessions.map((session) => {
+      const isCurrent = session.sessionId === currentSessionId;
+      return renderSession(session, {
+        active: isCurrent,
+        busy: busySessionId === session.sessionId,
+        isArchived: archiveState === 'archived',
+        onOpen: () => void openSession(session.sessionId),
+        onRename: () => {
+          setRenameCandidate(session);
+          setRenameValue(sessionLabel(session));
+        },
+        onExport: () => {
+          void run(session.sessionId, async () => {
+            downloadExport(
+              await workspace.client.exportStandaloneSession(
+                session.sessionId,
+                { format: 'html' },
+              ),
+            );
+          });
+        },
+        onArchive:
+          archiveState === 'active'
+            ? () => void archiveSession(session)
+            : undefined,
+        onUnarchive:
+          archiveState === 'archived'
+            ? () => void unarchiveSession(session)
+            : undefined,
+        onDelete: () => setDeleteCandidate(session),
+      });
+    });
 
   return (
     <>
@@ -561,6 +652,11 @@ export function StandaloneRecents({
               </>
             )}
           </button>
+          {archiveState === 'archived' && groupCountLabel && (
+            <span className="ml-auto shrink-0 pr-1 text-xs tabular-nums text-muted-foreground">
+              {groupCountLabel(visibleSessions.length, Boolean(cursor))}
+            </span>
+          )}
           {archiveState === 'active' && onNewSession && (
             <div className={sidebarStyles.projectsHeaderActions}>
               <button
@@ -568,6 +664,7 @@ export function StandaloneRecents({
                 type="button"
                 title={t('sidebar.newTask')}
                 aria-label={t('sidebar.newTask')}
+                disabled={newSessionDisabled}
                 onClick={onNewSession}
               >
                 <SquarePenIcon size={16} strokeWidth={1.2} />
@@ -610,48 +707,26 @@ export function StandaloneRecents({
             className={
               archiveState === 'active'
                 ? sidebarStyles.pinnedSessionList
-                : 'flex flex-col gap-0.5'
+                : 'flex flex-col gap-1.5'
             }
           >
-            {displayedSessions.map((session) => {
-              const isCurrent = session.sessionId === currentSessionId;
-              return renderSession(session, {
-                active: isCurrent,
-                busy: busySessionId === session.sessionId,
-                isArchived: archiveState === 'archived',
-                onOpen: () => void openSession(session.sessionId),
-                onRename: () => {
-                  setRenameCandidate(session);
-                  setRenameValue(sessionLabel(session));
-                },
-                onExport: () => {
-                  void run(session.sessionId, async () => {
-                    downloadExport(
-                      await workspace.client.exportStandaloneSession(
-                        session.sessionId,
-                        { format: 'html' },
-                      ),
-                    );
-                  });
-                },
-                onArchive:
-                  archiveState === 'active'
-                    ? () => void archiveSession(session)
-                    : undefined,
-                onUnarchive:
-                  archiveState === 'archived'
-                    ? () => void unarchiveSession(session)
-                    : undefined,
-                onDelete: () => setDeleteCandidate(session),
-              });
-            })}
-            {!loading && !loadError && visibleSessions.length === 0 && (
-              <div className={workspaceStyles.empty}>
-                {archiveState === 'active'
-                  ? t('sidebar.noSessions')
-                  : t('sidebar.archivedEmpty')}
-              </div>
-            )}
+            {archiveState === 'archived'
+              ? displayedSessions.length > 0 && (
+                  <div className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
+                    {renderRows()}
+                  </div>
+                )
+              : renderRows()}
+            {!loading &&
+              !loadError &&
+              visibleSessions.length === 0 &&
+              (archiveState === 'active' || !hasMore) && (
+                <div className={workspaceStyles.empty}>
+                  {archiveState === 'active'
+                    ? t('sidebar.noSessions')
+                    : t('sidebar.archivedEmpty')}
+                </div>
+              )}
             {sessionsLimited && (
               <button
                 type="button"

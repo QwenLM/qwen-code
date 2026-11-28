@@ -1,0 +1,268 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > isNewFile prop semantics > should NOT use new-file path when isNewFile=false even if all hunks are additions 1`] = `
+" 1 +export const x = 1;
+ 2 +export const y = 2;
+ 3 +export const z = 3;
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > isNewFile prop semantics > should fall back to heuristic when isNewFile is undefined 1`] = `
+" 1 line one
+ 2 line two
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > isNewFile prop semantics > should use new-file path when isNewFile=true 1`] = `
+" 1 const hello = "world";
+ 2 console.log(hello);
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > malformed diff graceful fallback > should not crash and should show fallback for a corrupted diff (invalid hunk line) 1`] = `
+"
+ No changes detected.
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > malformed diff graceful fallback > should not crash for a truncated diff 1`] = `
+"
+ No changes detected.
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = false > should correctly render a diff with a SVN diff format 1`] = `
+" 1 -const oldVar = 1;
+ 1 +const newVar = 1;
+...
+ 20 -const anotherOld = 'test';
+ 20 +const anotherNew = 'test';
+ 21   No newline at end of file
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = false > should correctly render a diff with multiple hunks and a gap indicator > with terminalWidth 30 and height 6 1`] = `
+" 1  console.log('first hunk');
+ 2 -const oldVar = 1;
+ 2 +const newVar = 1;
+ 3  console.log('end of first
+    hunk');
+...
+ 20  console.log('second hunk'
+     );
+ 21 -const anotherOld = 'test'
+    -; 
+ 21 +const anotherNew = 'test'
+    +;
+ 22  console.log('end of secon
+     d hunk');
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = false > should correctly render a diff with multiple hunks and a gap indicator > with terminalWidth 80 and height 6 1`] = `
+" 1  console.log('first hunk');
+ 2 -const oldVar = 1;
+ 2 +const newVar = 1;
+ 3  console.log('end of first hunk');
+...
+ 20  console.log('second hunk');
+ 21 -const anotherOld = 'test';
+ 21 +const anotherNew = 'test';
+ 22  console.log('end of second hunk');
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = false > should correctly render a diff with multiple hunks and a gap indicator > with terminalWidth 80 and height undefined 1`] = `
+" 1  console.log('first hunk');
+ 2 -const oldVar = 1;
+ 2 +const newVar = 1;
+ 3  console.log('end of first hunk');
+...
+ 20  console.log('second hunk');
+ 21 -const anotherOld = 'test';
+ 21 +const anotherNew = 'test';
+ 22  console.log('end of second hunk');
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = false > should correctly render a new file with no file extension correctly 1`] = `
+" 1 FROM node:14
+ 2 RUN npm install
+ 3 RUN npm run build
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = false > should handle diff with only header and no changes 1`] = `
+"
+ No changes detected.
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = false > should handle empty diff content 1`] = `
+"No diff content.
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = false > should render context lines from adjacent hunks 1`] = `
+" 1  context line 1
+ 2  context line 2
+ 3  context line 3
+ 4  context line 4
+ 5  context line 5
+...
+ 11  context line 11
+ 12  context line 12
+ 13  context line 13
+ 14  context line 14
+ 15  context line 15
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = false > should render diff content for existing file with add/del lines 1`] = `
+" 1 -old line
+ 1 +new line
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = false > should render hunk separators for skipped lines 1`] = `
+" 1  context line 1
+ 2 -deleted line 
+ 2 +added line
+...
+ 10  context line 10
+ 11  context line 11
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = false > should render new file with known extension (syntax highlighted) 1`] = `
+" 1 print("hello world")
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = false > should render new file with unknown extension 1`] = `
+" 1 some content
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = false > should render new file without filename provided 1`] = `
+" 1 some text content
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = true > should correctly render a diff with a SVN diff format 1`] = `
+" 1 -const oldVar = 1;
+ 1 +const newVar = 1;
+...
+ 20 -const anotherOld = 'test';
+ 20 +const anotherNew = 'test';
+ 21   No newline at end of file
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = true > should correctly render a diff with multiple hunks and a gap indicator > with terminalWidth 30 and height 6 1`] = `
+" 1  console.log('first hunk');
+ 2 -const oldVar = 1;
+ 2 +const newVar = 1;
+ 3  console.log('end of first
+    hunk');
+...
+ 20  console.log('second hunk'
+     );
+ 21 -const anotherOld = 'test'
+    -; 
+ 21 +const anotherNew = 'test'
+    +;
+ 22  console.log('end of secon
+     d hunk');
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = true > should correctly render a diff with multiple hunks and a gap indicator > with terminalWidth 80 and height 6 1`] = `
+" 1  console.log('first hunk');
+ 2 -const oldVar = 1;
+ 2 +const newVar = 1;
+ 3  console.log('end of first hunk');
+...
+ 20  console.log('second hunk');
+ 21 -const anotherOld = 'test';
+ 21 +const anotherNew = 'test';
+ 22  console.log('end of second hunk');
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = true > should correctly render a diff with multiple hunks and a gap indicator > with terminalWidth 80 and height undefined 1`] = `
+" 1  console.log('first hunk');
+ 2 -const oldVar = 1;
+ 2 +const newVar = 1;
+ 3  console.log('end of first hunk');
+...
+ 20  console.log('second hunk');
+ 21 -const anotherOld = 'test';
+ 21 +const anotherNew = 'test';
+ 22  console.log('end of second hunk');
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = true > should correctly render a new file with no file extension correctly 1`] = `
+" 1 FROM node:14
+ 2 RUN npm install
+ 3 RUN npm run build
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = true > should handle diff with only header and no changes 1`] = `
+"
+ No changes detected.
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = true > should handle empty diff content 1`] = `
+"No diff content.
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = true > should render context lines from adjacent hunks 1`] = `
+" 1  context line 1
+ 2  context line 2
+ 3  context line 3
+ 4  context line 4
+ 5  context line 5
+...
+ 11  context line 11
+ 12  context line 12
+ 13  context line 13
+ 14  context line 14
+ 15  context line 15
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = true > should render diff content for existing file with add/del lines 1`] = `
+" 1 -old line
+ 1 +new line
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = true > should render hunk separators for skipped lines 1`] = `
+" 1  context line 1
+ 2 -deleted line 
+ 2 +added line
+...
+ 10  context line 10
+ 11  context line 11
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = true > should render new file with known extension (syntax highlighted) 1`] = `
+" 1 print("hello world")
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = true > should render new file with unknown extension 1`] = `
+" 1 some content
+"
+`;
+
+exports[`<OverflowProvider><DiffRenderer /></OverflowProvider> > with useAlternateBuffer = true > should render new file without filename provided 1`] = `
+" 1 some text content
+"
+`;

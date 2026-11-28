@@ -76,6 +76,7 @@ vi.mock('./MessageItem', async (importOriginal) => {
         isLocateFlashing,
         assistantTurnFooterInfo,
         sendFailed,
+        sendFailedStatus,
         onRetrySend,
         onEditUserMessage,
         assistantFeedbackPromptId,
@@ -95,6 +96,7 @@ vi.mock('./MessageItem', async (importOriginal) => {
           'data-feedback-prompt': assistantFeedbackPromptId,
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
           'data-send-failed': sendFailed ? 'true' : undefined,
+          'data-send-failed-status': sendFailedStatus,
           'data-timestamp': message.timestamp,
           'data-message-content':
             'content' in message ? message.content : undefined,
@@ -412,6 +414,7 @@ function mount(
     compactMode?: boolean;
     pendingApproval?: PermissionRequest | null;
     failedPromptMessageId?: string;
+    failedPromptStatus?: 'failed' | 'uncertain';
     onRetryFailedPrompt?: () => void;
     onEditUserMessage?: (turnIndex: number, content: string) => void;
   } = {},
@@ -454,6 +457,7 @@ function mount(
                 sourceSessionId={opts.sourceSessionId}
                 onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
                 failedPromptMessageId={opts.failedPromptMessageId}
+                failedPromptStatus={opts.failedPromptStatus}
                 onRetryFailedPrompt={opts.onRetryFailedPrompt}
                 onEditUserMessage={opts.onEditUserMessage}
               />
@@ -639,6 +643,42 @@ const simpleTurns = (count: number): Message[] =>
   }).flat();
 
 describe('MessageList — locate scroll timer lifecycle', () => {
+  it('follows a queued resize when the reader resumes following before locate settles', () => {
+    vi.useFakeTimers();
+    resizeObserversFireOnObserve = false;
+    const ref = createRef<MessageListHandle>();
+    const container = mount(simpleTurns(2), ref);
+    const list = container.querySelector<HTMLElement>(
+      '[data-web-shell-message-list]',
+    )!;
+    let height = 1200;
+    let top = 600;
+    Object.defineProperties(list, {
+      scrollHeight: { get: () => height },
+      clientHeight: { value: 600 },
+      scrollTop: {
+        get: () => top,
+        set: (value: number) => {
+          top = Math.min(value, height - 600);
+        },
+      },
+    });
+    act(() => {
+      expect(ref.current?.scrollToMessage('u2')).toBe(true);
+      list.scrollTop = 400;
+      list.dispatchEvent(new Event('scroll'));
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: 195 }));
+      list.scrollTop = 595;
+      list.dispatchEvent(new Event('scroll'));
+    });
+
+    height = 1800;
+    act(triggerResizeObservers);
+    act(() => vi.advanceTimersByTime(150));
+
+    expect(list.scrollTop).toBe(1200);
+  });
+
   it('does not schedule scroll work after unmounting before locate settles', () => {
     vi.useFakeTimers();
     const ref = createRef<MessageListHandle>();
@@ -720,10 +760,11 @@ describe('MessageList — locate scroll timer lifecycle', () => {
 });
 
 describe('MessageList — failed prompt retry', () => {
-  it('marks only the matching user message and forwards retry', () => {
+  it('marks only the matching user message and forwards retry and status', () => {
     const onRetry = vi.fn();
     const container = mount([userMsg('u1'), userMsg('u2')], undefined, {
       failedPromptMessageId: 'u1',
+      failedPromptStatus: 'uncertain',
       onRetryFailedPrompt: onRetry,
     });
 
@@ -734,8 +775,18 @@ describe('MessageList — failed prompt retry', () => {
     ).toBe('true');
     expect(
       container
+        .querySelector('[data-testid="msg-u1"]')
+        ?.getAttribute('data-send-failed-status'),
+    ).toBe('uncertain');
+    expect(
+      container
         .querySelector('[data-testid="msg-u2"]')
         ?.getAttribute('data-send-failed'),
+    ).toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="msg-u2"]')
+        ?.getAttribute('data-send-failed-status'),
     ).toBeNull();
 
     act(() =>
@@ -6457,6 +6508,46 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(onLoadOlderHistory).toHaveBeenCalledWith({ force: true });
   });
 
+  it('follows a transcript resize once after layout without measuring during the update', async () => {
+    resizeObserversFireOnObserve = false;
+    const user = userMsg('u1');
+    const container = mount([user, asstMsg('a1')], undefined, {
+      isResponding: true,
+    });
+    const list = container.querySelector<HTMLElement>(
+      '[data-web-shell-message-list]',
+    )!;
+    let scrollTop = 600;
+    const readHeight = vi.fn(() => 1500);
+    const writeScrollTop = vi.fn((top: number) => {
+      scrollTop = Math.min(top, 900);
+    });
+    Object.defineProperties(list, {
+      scrollHeight: { get: readHeight },
+      clientHeight: { value: 600 },
+      scrollTop: { get: () => scrollTop, set: writeScrollTop },
+    });
+    await nextFrame();
+    await nextFrame();
+    readHeight.mockClear();
+    writeScrollTop.mockClear();
+
+    rerenderMessages(
+      container,
+      [user, { ...asstMsg('a1'), content: 'a longer reply' }],
+      { isResponding: true },
+    );
+
+    expect(readHeight).not.toHaveBeenCalled();
+    expect(writeScrollTop).not.toHaveBeenCalled();
+
+    act(triggerResizeObservers);
+    await nextFrame();
+
+    expect(scrollTop).toBe(900);
+    expect(writeScrollTop).toHaveBeenCalledTimes(1);
+  });
+
   it.each([false, true])(
     'does not scroll again for a content-only update in a virtual transcript (Mod log=%s)',
     async (withModLog) => {
@@ -6816,6 +6907,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     rerenderMessages(c, [...nextTranscript, asstMsg('a3')], {
       sessionKey: nextSessionKey,
     });
+    act(triggerResizeObservers);
     await nextFrame();
     expect(scrollTop).toBe(1200);
   });
@@ -6875,6 +6967,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       rerenderMessages(c, [...nextTranscript, asstMsg('a3')], {
         sessionKey: nextSessionKey,
       });
+      act(triggerResizeObservers);
       act(() => vi.advanceTimersByTime(500));
       expect(scrollTop).toBe(1800);
     },

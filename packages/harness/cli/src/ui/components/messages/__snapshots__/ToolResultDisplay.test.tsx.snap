@@ -1,0 +1,16 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ToolResultDisplay > does not fall back to plain text if availableHeight is set and not in alternate buffer 1`] = `
+"Some result
+"
+`;
+
+exports[`ToolResultDisplay > keeps markdown if in alternate buffer even with availableHeight 1`] = `
+"Some result
+"
+`;
+
+exports[`ToolResultDisplay > renders compact summary for todos result 1`] = `
+"Updated 1 todo
+"
+`;

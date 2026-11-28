@@ -71,6 +71,10 @@ export interface PendingQuestion {
 export interface QuestionAnswer {
   readonly questionId: string;
   readonly value: string;
+  // Present when the card carries stable backend option ids or separate free
+  // text; `value` remains the rendered, comma-joined legacy representation.
+  readonly optionIds?: readonly string[];
+  readonly text?: string;
 }
 
 export interface ComposerSubmit {

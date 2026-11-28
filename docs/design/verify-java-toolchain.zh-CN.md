@@ -69,9 +69,10 @@ GitHub 和 Actions 凭据。
 ### 工具链
 
 `Install Java toolchain` 以 root 运行，位于 `Install verify runner tools`
-之后、`Checkout PR merge ref` 之前。它下载钉死版本的 Temurin 21 x64 压缩包
-（sha256），以及 `repo.maven.apache.org` 上的 Maven 3.9.11（sha512，与
-`sdk-java.yml` 的 `MAVEN_VERSION`、`MAVEN_SHA512` 相同）。两份归档解压到
+之后、`Checkout PR merge ref` 之前。它按 runner 架构下载钉死版本的 Temurin 21
+压缩包（x64 或 aarch64，每种架构分别固定 sha256），以及
+`repo.maven.apache.org` 上的 Maven 3.9.11（sha512，与 `sdk-java.yml` 的
+`MAVEN_VERSION`、`MAVEN_SHA512` 相同）。两份归档解压到
 `/opt/verify-java/{jdk,maven}`，权限 `a+rX`，属主为 root。只有两份校验和
 `java -version` / `mvn -version` 都成功之后才写 `/opt/verify-java/ready`。
 `mvn -version` 之前会导出 `JAVA_HOME` 和 `PATH`：Maven 启动脚本不会自己去找刚解压的

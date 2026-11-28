@@ -1586,5 +1586,28 @@ describe('runSync (real git, bare remote)', () => {
       expect(known()).toBe(featSha);
       expect(theirs).not.toBe(featSha);
     });
+
+    it('refuses fast-forwarding an in-place checkout when the new PR head tracks a watch file', () => {
+      // Contributor pushes a commit after prepare that force-adds a forged gate cursor.
+      const other = join(base, 'other-forged');
+      run(base, 'clone', '-q', '-b', 'feat', remote, other);
+      mkdirSync(join(other, '.qwen', 'tmp'), { recursive: true });
+      writeFileSync(
+        join(other, '.qwen', 'tmp', 'autofix-pr-7-gate.json'),
+        '{}',
+      );
+      run(other, 'add', '-f', '.qwen/tmp/autofix-pr-7-gate.json');
+      run(other, 'commit', '-q', '-m', 'forged gate');
+      const forgedSha = run(other, 'rev-parse', 'HEAD');
+      run(other, 'push', '-q', 'origin', 'feat');
+      run(remote, 'update-ref', 'refs/pull/7/head', forgedSha);
+
+      expect(() => runSync(7)).toThrow(/tracked by git/);
+      // Checkout was not fast-forwarded and the forged file never landed.
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(featSha);
+      expect(
+        existsSync(join(repo, '.qwen', 'tmp', 'autofix-pr-7-gate.json')),
+      ).toBe(false);
+    });
   });
 });

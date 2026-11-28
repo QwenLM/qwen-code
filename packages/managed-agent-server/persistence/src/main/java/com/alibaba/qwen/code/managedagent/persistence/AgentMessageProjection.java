@@ -14,16 +14,23 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRef;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.jdbc.core.RowMapper;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -64,7 +71,7 @@ final class AgentMessageProjection {
                                 result.getLong("revision"),
                                 readParts(
                                         result.getString("parts_json"),
-                                        result.getString("body_resource_key"),
+                                        result.getString("body_resource_ref"),
                                         result.getString("tenant_id"),
                                         result.getString("session_id")));
     }
@@ -87,12 +94,12 @@ final class AgentMessageProjection {
                     "Item sequence must be non-negative.");
         }
         var progress = jdbc.queryForMap("SELECT covered_sequence, projection_version, last_sequence, replay_floor_sequence FROM ma_event_stream"
-                        + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
+                        + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''",
                 tenantId, sessionId);
         long covered = ((Number) progress.get("covered_sequence")).longValue();
         int projection = ((Number) progress.get("projection_version")).intValue();
         if (covered < ((Number) progress.get("replay_floor_sequence")).longValue()
-                || (!backward && org.apache.commons.lang3.StringUtils.isBlank(cursor)
+                || (!backward && StringUtils.isBlank(cursor)
                 && covered < ((Number) progress.get("last_sequence")).longValue())) {
             throw new ManagedAgentException(503, "message_projection_pending",
                     "Retry after pending messages have been projected.");
@@ -100,30 +107,12 @@ final class AgentMessageProjection {
         String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         MessagePosition position = new MessagePosition(1, scope, backward, projection, covered,
                 backward ? covered + 1 : -1, "");
-        if (org.apache.commons.lang3.StringUtils.isNotBlank(cursor)) {
+        if (StringUtils.isNotBlank(cursor)) {
             position = messagePosition(cursor, scope, backward, covered, projection);
         }
-        String comparison = backward ? "<" : ">";
-        String order = backward ? " DESC" : " ASC";
-        boolean numericBoundary = afterSequence > 0 && org.apache.commons.lang3.StringUtils.isBlank(cursor);
-        List<Object> pageArguments = new ArrayList<>(List.of(tenantId, sessionId, position.through()));
-        if (numericBoundary) {
-            pageArguments.add(afterSequence);
-        }
-        pageArguments.addAll(List.of(position.sequence(), position.sequence(),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(position.item()), limit + 1));
-        List<MessageSize> candidates = jdbc.query(
-                "SELECT m.item_id, m.first_sequence, OCTET_LENGTH(m.attributes_json) +"
-                        + " OCTET_LENGTH(m.parts_json) + COALESCE(OCTET_LENGTH(r.inline_bytes), 0) AS byte_length"
-                        + " FROM ma_message m LEFT JOIN ma_resource r ON r.resource_key = m.body_resource_key"
-                        + " AND r.tenant_id = m.tenant_id AND r.session_id = m.session_id"
-                        + " WHERE m.tenant_id = ? AND m.session_id = ? AND m.first_sequence <= ?"
-                        + (numericBoundary ? " AND m.first_sequence > ?" : "")
-                        + " AND (m.first_sequence " + comparison + " ? OR (m.first_sequence = ? AND m.item_id "
-                        + comparison + " ?)) ORDER BY m.first_sequence" + order + ", m.item_id" + order + " LIMIT ?",
-                (row, index) -> new MessageSize(row.getString("item_id"), row.getLong("first_sequence"),
-                        row.getLong("byte_length")),
-                pageArguments.toArray());
+        boolean numericBoundary = afterSequence > 0 && StringUtils.isBlank(cursor);
+        List<MessageSize> candidates = MessagePageCandidates.find(jdbc, tenantId, sessionId,
+                position, numericBoundary, afterSequence, limit);
         long bytes = 0;
         List<MessageSize> selected = new ArrayList<>();
         for (MessageSize candidate : candidates) {
@@ -143,8 +132,7 @@ final class AgentMessageProjection {
             return new StoreModels.MessagePage(List.of(), List.of(), false, null, covered, position.through());
         }
         List<Object> arguments = new ArrayList<>(List.of(tenantId, sessionId));
-        selected.forEach(item -> arguments.add(
-                ManagedSchemaKeys.identity(item.id())));
+        selected.forEach(item -> arguments.add(item.id()));
         // Bodies are fetched only after the metadata-only lookahead has selected a bounded page.
         List<ItemRecord> rows = List.copyOf(jdbc.query(
                 "SELECT " + ManagedSchemaProjection.MESSAGE.columns() + " FROM ma_message WHERE tenant_id = ?"
@@ -165,19 +153,18 @@ final class AgentMessageProjection {
             List<ItemRecord> items, long covered, long itemBytes) {
         List<String> turns = items.stream().map(ItemRecord::turnId).distinct().toList();
         List<Object> arguments = new ArrayList<>(List.of(tenantId, sessionId, covered));
-        turns.forEach(turn -> arguments.add(
-                ManagedSchemaKeys.identity(turn)));
+        arguments.addAll(turns);
         arguments.add(tenantId);
         arguments.add(sessionId);
         var sizes = jdbc.query("SELECT e.sequence_id, OCTET_LENGTH(e.data_json) AS byte_length FROM ma_public_event e"
                         + " JOIN (SELECT turn_id, event_type, MAX(sequence_id) AS seq FROM ma_public_event"
                         + " WHERE tenant_id = ? AND session_id = ? AND sequence_id <= ?"
-                        + " AND stream_kind = 'SESSION' AND stream_id = X'' AND turn_id IN ("
+                        + " AND stream_kind = 'SESSION' AND stream_id = '' AND turn_id IN ("
                         + AgentStoreRows.placeholders(turns.size()) + ") AND event_type IN ('turn.started', 'turn.completed',"
                         + " 'turn.failed', 'turn.cancelled', 'turn.cancel.requested', 'environment.provisioning',"
                         + " 'environment.ready', 'environment.failed') GROUP BY turn_id, event_type) latest"
                         + " ON e.turn_id = latest.turn_id AND e.event_type = latest.event_type AND e.sequence_id = latest.seq"
-                        + " WHERE e.tenant_id = ? AND e.session_id = ? AND e.stream_kind = 'SESSION' AND e.stream_id = X''",
+                        + " WHERE e.tenant_id = ? AND e.session_id = ? AND e.stream_kind = 'SESSION' AND e.stream_id = ''",
                 (row, index) -> new EventSize(row.getLong("sequence_id"), row.getLong("byte_length")), arguments.toArray());
         if (sizes.stream().mapToLong(EventSize::bytes).sum() + itemBytes > MESSAGE_PAGE_BYTES) {
             throw messagePageTooLarge();
@@ -188,7 +175,7 @@ final class AgentMessageProjection {
         List<Object> eventArguments = new ArrayList<>(List.of(tenantId, sessionId));
         sizes.forEach(event -> eventArguments.add(event.sequence()));
         return jdbc.query("SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event"
-                        + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''"
+                        + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''"
                         + " AND sequence_id IN (" + AgentStoreRows.placeholders(sizes.size()) + ") ORDER BY sequence_id ASC",
                 eventJournal.eventMapper, eventArguments.toArray());
     }
@@ -200,7 +187,7 @@ final class AgentMessageProjection {
                 throw new IllegalArgumentException();
             }
             MessagePosition position = objectMapper.readValue(
-                    java.util.Base64.getUrlDecoder().decode(cursor), MessagePosition.class);
+                    Base64.getUrlDecoder().decode(cursor), MessagePosition.class);
             if (position.version() != 1 || !scope.equals(position.scope()) || position.backward() != backward
                     || position.projection() < 1 || position.through() < 0 || position.sequence() < 0
                     || position.sequence() > position.through() || position.item() == null
@@ -215,7 +202,7 @@ final class AgentMessageProjection {
                 throw new IllegalArgumentException();
             }
             return position;
-        } catch (java.io.IOException | IllegalArgumentException invalid) {
+        } catch (IOException | IllegalArgumentException invalid) {
             throw new ManagedAgentException(400, "invalid_message_cursor",
                     "The message cursor is invalid for this Session and direction.");
         }
@@ -223,9 +210,9 @@ final class AgentMessageProjection {
 
     String messageCursor(MessagePosition position) {
         try {
-            return java.util.Base64.getUrlEncoder().withoutPadding()
+            return Base64.getUrlEncoder().withoutPadding()
                     .encodeToString(objectMapper.writeValueAsBytes(position));
-        } catch (java.io.IOException failure) {
+        } catch (IOException failure) {
             throw new IllegalStateException("Message cursor serialization failed.", failure);
         }
     }
@@ -257,7 +244,7 @@ final class AgentMessageProjection {
         jdbc.query(
                 "SELECT s.session_id, s.covered_sequence FROM ma_event_stream s"
                     + " WHERE s.stream_kind = 'SESSION' AND"
-                    + " s.stream_id = X'' AND s.tenant_id = ? AND s.session_id IN ("
+                    + " s.stream_id = '' AND s.tenant_id = ? AND s.session_id IN ("
                         + AgentStoreRows.placeholders(sessionIds.size())
                         + ")",
                 reader,
@@ -270,7 +257,7 @@ final class AgentMessageProjection {
                 jdbc.query(
                         "SELECT s.replay_floor_sequence, s.covered_sequence FROM ma_event_stream s"
                             + " WHERE s.tenant_id = ? AND s.session_id = ?"
-                            + " AND s.stream_kind = 'SESSION' AND s.stream_id = X''",
+                            + " AND s.stream_kind = 'SESSION' AND s.stream_id = ''",
                         (result, row) ->
                                 new ReplayWindow(
                                         result.getLong("replay_floor_sequence"),
@@ -287,13 +274,13 @@ final class AgentMessageProjection {
     List<ReplayFloorTarget> findReplayFloorTargets(int limit) {
         return jdbc.query(
                 "SELECT s.tenant_id, s.session_id FROM ma_event_stream s"
-                    + " WHERE s.stream_kind = 'SESSION' AND s.stream_id = X''"
-                    + " AND s.covered_sequence > s.replay_floor_sequence"
+                    + " WHERE s.stream_kind = 'SESSION' AND s.stream_id = ''"
+                    + " AND s.is_replay_floor_pending = TRUE"
                     + " AND NOT EXISTS (SELECT 1 FROM ma_turn t JOIN ma_public_event e ON"
                     + " e.tenant_id = t.tenant_id AND e.session_id = t.session_id AND e.turn_id = t.turn_id"
                     + " WHERE t.tenant_id = s.tenant_id AND t.session_id = s.session_id"
                     + " AND t.status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')"
-                    + " AND e.stream_kind = 'SESSION' AND e.stream_id = X''"
+                    + " AND e.stream_kind = 'SESSION' AND e.stream_id = ''"
                     + " AND e.event_type = 'turn.accepted' AND e.sequence_id <= s.replay_floor_sequence + 1)"
                     + " ORDER BY s.gmt_modified ASC LIMIT ?",
                 (row, index) -> new ReplayFloorTarget(row.getString("tenant_id"), row.getString("session_id")),
@@ -311,7 +298,7 @@ final class AgentMessageProjection {
                         "SELECT MIN(e.sequence_id) FROM ma_public_event e JOIN ma_turn t ON"
                             + " t.tenant_id = e.tenant_id AND t.session_id = e.session_id AND"
                             + " t.turn_id = e.turn_id WHERE e.tenant_id = ? AND e.session_id = ?"
-                            + " AND e.stream_kind = 'SESSION' AND e.stream_id = X'' AND"
+                            + " AND e.stream_kind = 'SESSION' AND e.stream_id = '' AND"
                             + " e.event_type = 'turn.accepted' AND t.status IN ('ACCEPTED',"
                             + " 'RUNNING', 'CANCELLING')",
                         Long.class,
@@ -325,7 +312,7 @@ final class AgentMessageProjection {
         }
         jdbc.update(
                 "UPDATE ma_event_stream SET replay_floor_sequence = ? WHERE tenant_id = ? AND"
-                    + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
+                    + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''",
                 floor,
                 tenantId,
                 sessionId);
@@ -334,7 +321,7 @@ final class AgentMessageProjection {
 
     List<MaterializationTarget> findMaterializationTargets(int limit) {
         return jdbc.query(
-                "SELECT s.tenant_id, s.session_id FROM ma_session s JOIN ma_event_stream p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.stream_kind = 'SESSION' AND p.stream_id = X'' WHERE s.session_kind = 'PUBLIC' AND s.retired_at IS NULL AND s.status <> 'DELETED' AND p.is_projection_pending = TRUE ORDER BY p.gmt_modified ASC LIMIT ?",
+                "SELECT s.tenant_id, s.session_id FROM ma_session s JOIN ma_event_stream p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.stream_kind = 'SESSION' AND p.stream_id = '' WHERE s.session_kind = 'PUBLIC' AND s.retired_at IS NULL AND s.status <> 'DELETED' AND p.is_projection_pending = TRUE ORDER BY p.gmt_modified ASC LIMIT ?",
                 (result, row) ->
                         new MaterializationTarget(
                                 result.getString("tenant_id"), result.getString("session_id")),
@@ -346,7 +333,7 @@ final class AgentMessageProjection {
         SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         Long covered = jdbc.queryForObject(
                         "SELECT covered_sequence FROM ma_event_stream WHERE tenant_id = ? AND"
-                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X'' FOR"
+                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = '' FOR"
                             + " UPDATE",
                 Long.class, tenantId, sessionId);
         if (covered == null) {
@@ -356,7 +343,7 @@ final class AgentMessageProjection {
         List<EventRecord> events =
                 jdbc.query(
                         "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id"
-                            + " = X'' AND tenant_id = ? AND session_id = ? AND sequence_id > ?"
+                            + " = '' AND tenant_id = ? AND session_id = ? AND sequence_id > ?"
                             + " ORDER BY sequence_id ASC LIMIT ?",
                         eventJournal.eventMapper,
                         tenantId,
@@ -403,7 +390,7 @@ final class AgentMessageProjection {
                                 + " AND NOT EXISTS (SELECT 1 FROM"
                                 + " ma_public_event terminal WHERE"
                                 + " terminal.stream_kind = 'SESSION' AND"
-                                + " terminal.stream_id = X'' AND"
+                                + " terminal.stream_id = '' AND"
                                 + " terminal.tenant_id ="
                                 + " ma_message.tenant_id AND"
                                 + " terminal.session_id ="
@@ -435,7 +422,7 @@ final class AgentMessageProjection {
         long now = clock.millis();
         jdbc.update(
                 "UPDATE ma_event_stream SET covered_sequence = ?, gmt_modified = ?"
-                    + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
+                    + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''",
                 nextCovered,
                 now,
                 tenantId,
@@ -445,7 +432,7 @@ final class AgentMessageProjection {
 
     void deferMaterializationTarget(String tenantId,
             String sessionId) {
-        jdbc.update("UPDATE ma_event_stream SET gmt_modified = ? WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
+        jdbc.update("UPDATE ma_event_stream SET gmt_modified = ? WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''",
                 clock.millis(), tenantId, sessionId);
     }
 
@@ -453,23 +440,23 @@ final class AgentMessageProjection {
         Long covered =
                 jdbc.queryForObject(
                         "SELECT covered_sequence FROM ma_event_stream WHERE tenant_id = ? AND"
-                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X'' FOR"
+                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = '' FOR"
                             + " UPDATE",
                         Long.class,
                         tenantId,
                         sessionId);
         Map<String, List<ItemPartRecord>> parts = new LinkedHashMap<>();
         jdbc.query(
-                "SELECT item_id, parts_json, body_resource_key FROM ma_message WHERE tenant_id = ?"
+                "SELECT item_id, parts_json, body_resource_ref FROM ma_message WHERE tenant_id = ?"
                         + " AND session_id = ? AND turn_id = ? AND item_role = 'assistant' AND"
                         + " item_type = 'message' FOR UPDATE",
-                (org.springframework.jdbc.core.RowCallbackHandler)
+                (RowCallbackHandler)
                         row -> {
                             var retained =
                                     new ArrayList<>(
                                             readParts(
                                                     row.getString("parts_json"),
-                                                    row.getString("body_resource_key"),
+                                                    row.getString("body_resource_ref"),
                                                     tenantId,
                                                     sessionId));
                             retained.removeIf(
@@ -484,7 +471,7 @@ final class AgentMessageProjection {
         List<EventRecord> events =
                 jdbc.query(
                         "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE tenant_id = ? AND session_id = ? AND"
-                                + " stream_kind = 'SESSION' AND stream_id = X'' AND turn_id = ? AND"
+                                + " stream_kind = 'SESSION' AND stream_id = '' AND turn_id = ? AND"
                                 + " sequence_id <= ? AND event_type IN ('item.output_text.delta',"
                                 + " 'item.reasoning.delta', 'turn.completed', 'turn.failed',"
                                 + " 'turn.cancelled') ORDER BY sequence_id",
@@ -504,21 +491,21 @@ final class AgentMessageProjection {
                         parts);
             }
         }
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         var iterator = parts.entrySet().iterator();
         while (iterator.hasNext()) {
             var entry = iterator.next();
             List<ItemPartRecord> retained = entry.getValue();
             if (retained.isEmpty()) {
-                ManagedProjectionResourceCollector.release(jdbc, tenantId, sessionId, "MESSAGE",
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, entry.getKey()));
+                String ownerRef = ManagedIdentityRefs.ref(
+                        ManagedIdentityRefs.OWNER_REF_BYTES,
+                        tenantId, sessionId, entry.getKey());
+                ManagedProjectionResourceCollector.release(jdbc, tenantId, sessionId, "MESSAGE", ownerRef);
                 jdbc.update(
                         "DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind ="
-                                + " 'MESSAGE' AND owner_key = ?",
+                                + " 'MESSAGE' AND owner_ref = ?",
                         tenantId,
                         sessionId,
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
-                                scope, entry.getKey()));
+                        ManagedSchemaKeys.identity(ownerRef));
                 jdbc.update(
                         "DELETE FROM ma_message WHERE tenant_id = ? AND session_id = ? AND item_id"
                                 + " = ?",
@@ -563,7 +550,7 @@ final class AgentMessageProjection {
         jdbc.update(
                 "UPDATE ma_event_stream SET projection_version = projection_version + 1,"
                     + " gmt_modified = ? WHERE tenant_id = ? AND session_id = ?"
-                    + " AND stream_kind = 'SESSION' AND stream_id = X''",
+                    + " AND stream_kind = 'SESSION' AND stream_id = ''",
                 now,
                 tenantId,
                 sessionId);
@@ -778,40 +765,42 @@ final class AgentMessageProjection {
 
     void flushParts(
             String tenantId, String sessionId, Map<String, List<ItemPartRecord>> projectedParts) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         for (var entry : projectedParts.entrySet()) {
             String item = entry.getKey();
             byte[] bytes =
-                    storeRows.writeJson(entry.getValue()).getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            String owner =
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
-                            scope, item);
+                    storeRows.writeJson(entry.getValue()).getBytes(StandardCharsets.UTF_8);
+            String ownerRef = ManagedIdentityRefs.ref(
+                    ManagedIdentityRefs.OWNER_REF_BYTES,
+                    tenantId, sessionId, item);
             Map<String, Object> previous =
                     jdbc.queryForMap(
-                            "SELECT revision, body_resource_key FROM ma_message WHERE tenant_id = ?"
+                            "SELECT revision, body_resource_ref FROM ma_message WHERE tenant_id = ?"
                                     + " AND session_id = ? AND item_id = ? FOR UPDATE",
                             tenantId,
                             sessionId,
                             item);
             long revision = ((Number) previous.get("revision")).longValue();
-            if (previous.get("body_resource_key") != null) {
-                ManagedProjectionResourceCollector.release(jdbc, tenantId, sessionId, "MESSAGE", owner);
+            if (previous.get("body_resource_ref") != null) {
+                ManagedProjectionResourceCollector.release(jdbc, tenantId, sessionId, "MESSAGE", ownerRef);
             }
             jdbc.update(
                     "DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind ="
-                            + " 'MESSAGE' AND owner_key = ?",
+                            + " 'MESSAGE' AND owner_ref = ?",
                     tenantId,
                     sessionId,
-                    owner);
+                    ManagedSchemaKeys.identity(ownerRef));
             String resource = null;
             if (bytes.length > 64 * 1024) {
                 String digest = WorkspaceEvidenceResources.digest(bytes);
-                String id = "message:" + owner + ":" + revision + ":" + digest;
-                resource = ManagedSessionStore.resourceKey(scope, id);
+                // The body resource id keeps its minted hash component: it is a
+                // bounded content identity, not an index key.
+                String ownerHash = ManagedSchemaKeys.key(
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId), item);
+                String id = "message:" + ownerHash + ":" + revision + ":" + digest;
+                resource = ManagedIdentityRefs.resourceRef(tenantId, sessionId, id);
                 try {
                     jdbc.update(
-                            "INSERT INTO ma_resource (resource_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, 'managed-message-parts', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                            resource,
+                            "INSERT INTO ma_resource (tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create, last_verified_at) VALUES (?, ?, ?, 'managed-message-parts', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                             tenantId,
                             sessionId,
                             id,
@@ -821,7 +810,7 @@ final class AgentMessageProjection {
                 } catch (DuplicateKeyException duplicate) {
                     List<Boolean> matching =
                             jdbc.query(
-                                    "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? FOR UPDATE",
+                                    "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ? FOR UPDATE",
                                     (row, index) ->
                                             tenantId.equals(row.getString("tenant_id"))
                                                     && sessionId.equals(row.getString("session_id"))
@@ -831,40 +820,51 @@ final class AgentMessageProjection {
                                                     && row.getInt("schema_version") == 1
                                                     && row.getLong("byte_length") == bytes.length
                                                     && digest.equals(row.getString("sha256"))
-                                                    && java.util.Arrays.equals(
+                                                    && Arrays.equals(
                                                             bytes, row.getBytes("inline_bytes"))
                                                     && "MYSQL_INLINE"
                                                             .equals(row.getString("storage_kind"))
                                                     && "REFERENCED".equals(row.getString("state"))
-                                                    && row.getString("deletion_operation_key")
+                                                    && row.getString("deletion_operation_ref")
                                                             == null
                                                     && row.getString("publication_id") == null
                                                     && row.getString("object_key") == null
                                                     && row.getString("object_version_id") == null
                                                     && row.getString("encryption_key_id") == null,
-                                    resource);
+                                    tenantId,
+                                    sessionId,
+                                    id);
                     if (matching.size() != 1 || !matching.getFirst()) {
                         throw new IllegalStateException(
                                 "Immutable message body identity differs.", duplicate);
                     }
                 }
+                // The minted id embeds this Session's scope hash, so the same id
+                // under another scope means the immutable row was moved: the raw
+                // unique key no longer conflicts, but the identity still differs.
+                Integer foreign = jdbc.queryForObject(
+                        "SELECT COUNT(*) FROM ma_resource WHERE resource_id = ?"
+                                + " AND (tenant_id <> ? OR session_id <> ?)",
+                        Integer.class, id, tenantId, sessionId);
+                if (foreign != null && foreign > 0) {
+                    throw new IllegalStateException("Immutable message body identity differs.");
+                }
                 jdbc.update(
-                        "INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create) VALUES ('MESSAGE', ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                        owner,
+                        "INSERT INTO ma_resource_ref (owner_kind, owner_ref, owner_revision, tenant_id, session_id, resource_id, gmt_create) VALUES ('MESSAGE', ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
+                        ManagedSchemaKeys.identity(ownerRef),
                         revision,
-                        resource,
                         tenantId,
                         sessionId,
                         id);
             }
             int changed =
                     jdbc.update(
-                            "UPDATE ma_message SET parts_json = ?, body_resource_key = ?"
+                            "UPDATE ma_message SET parts_json = ?, body_resource_ref = ?"
                                     + " WHERE tenant_id = ? AND session_id = ? AND item_id = ?",
                             resource == null
-                                    ? new String(bytes, java.nio.charset.StandardCharsets.UTF_8)
+                                    ? new String(bytes, StandardCharsets.UTF_8)
                                     : "[]",
-                            resource,
+                            resource == null ? null : ManagedSchemaKeys.identity(resource),
                             tenantId,
                             sessionId,
                             item);
@@ -877,7 +877,7 @@ final class AgentMessageProjection {
     List<ItemPartRecord> partsForItem(String tenantId, String sessionId, String itemId) {
         List<List<ItemPartRecord>> rows =
                 jdbc.query(
-                        "SELECT parts_json, body_resource_key FROM ma_message WHERE tenant_id = ?"
+                        "SELECT parts_json, body_resource_ref FROM ma_message WHERE tenant_id = ?"
                                 + " AND session_id = ? AND item_id = ? FOR UPDATE",
                         (row, index) -> readParts(row.getString(1), row.getString(2), tenantId, sessionId),
                         tenantId,
@@ -886,16 +886,17 @@ final class AgentMessageProjection {
         return rows.isEmpty() ? List.of() : rows.getFirst();
     }
 
-    List<ItemPartRecord> readParts(String value, String resourceKey, String tenantId, String sessionId) {
-        if (resourceKey == null) {
+    List<ItemPartRecord> readParts(String value, String resourceRef, String tenantId, String sessionId) {
+        if (resourceRef == null) {
             return readParts(value);
         }
+        String resourceId = ManagedIdentityRef.decode(
+                resourceRef.getBytes(StandardCharsets.US_ASCII)).get(2);
         List<byte[]> rows =
                 jdbc.query(
                         "SELECT inline_bytes, byte_length, sha256 FROM ma_resource WHERE"
-                            + " resource_key = ? AND tenant_id = ? AND"
-                            + " session_id = ? AND kind = ? AND schema_version = 1 AND state ="
-                            + " 'REFERENCED' AND deletion_operation_key IS NULL",
+                            + " tenant_id = ? AND session_id = ? AND resource_id = ? AND kind = ? AND schema_version = 1 AND state ="
+                            + " 'REFERENCED' AND deletion_operation_ref IS NULL",
                         (row, i) -> {
                             byte[] bytes = row.getBytes("inline_bytes");
                             if (bytes == null
@@ -907,20 +908,20 @@ final class AgentMessageProjection {
                             }
                             return bytes;
                         },
-                        resourceKey,
                         tenantId,
                         sessionId,
+                        resourceId,
                         "managed-message-parts");
         if (rows.size() != 1) {
             throw new IllegalStateException("Message body resource is unavailable.");
         }
-        return readParts(new String(rows.getFirst(), java.nio.charset.StandardCharsets.UTF_8));
+        return readParts(new String(rows.getFirst(), StandardCharsets.UTF_8));
     }
 
     List<ItemPartRecord> readParts(String value) {
         try {
             return value == null ? List.of() : objectMapper.readValue(value, PARTS_TYPE);
-        } catch (java.io.IOException failure) {
+        } catch (IOException failure) {
             throw new IllegalStateException("Stored message parts are invalid.", failure);
         }
     }

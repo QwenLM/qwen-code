@@ -320,7 +320,18 @@ interface GithubComment {
   body?: string;
   created_at?: string | null;
   updated_at?: string | null;
-  user?: { login?: string } | null;
+  user?: { login?: string; type?: string } | null;
+}
+
+/**
+ * An account no human posts from: a GitHub App bot, or an integration account
+ * whose login ends in `[bot]`.
+ */
+function isMachineAuthor(
+  user?: { login?: string; type?: string } | null,
+): boolean {
+  if (!user) return false;
+  return user.type === 'Bot' || (user.login ?? '').endsWith('[bot]');
 }
 
 /** An inline pull-request review comment (pulls.listReviewComments). */
@@ -3457,6 +3468,44 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return true;
   }
 
+  /**
+   * A comment a machine wrote that does not name the bot. Such a comment can
+   * only be a request when it mentions the bot, so an unmentioned one is
+   * ambient traffic: a CI failure notice, a dependabot bump.
+   */
+  private isAmbientMachineComment(comment: GithubComment): boolean {
+    if (!isMachineAuthor(comment.user)) return false;
+    const botUsername = this.botUsername;
+    return !(
+      typeof botUsername === 'string' &&
+      testBotMention(comment.body || '', botUsername)
+    );
+  }
+
+  /**
+   * Record one skipped machine-authored comment, once per window. The comment
+   * is never dispatched, so it is re-listed and re-skipped by later windows;
+   * the per-window key keeps that to one row each.
+   */
+  private journalMachineAuthorSkip(
+    ctx: NotificationContext,
+    key: string,
+    actor: string,
+  ): void {
+    if (!this.journalOncePerWindow(`machine_author\0${key}`)) return;
+    this.recordChannelEvent({
+      type: 'inbound',
+      outcome: 'skipped',
+      reason: 'machine_author',
+      triggerKind: ctx.reason,
+      repository: ctx.chatId,
+      thread: ctx.threadId,
+      number: ctx.issueNumber,
+      messageId: key,
+      actor,
+    });
+  }
+
   private async processCommentLane(
     ctx: NotificationContext,
     onlyMentioned: boolean,
@@ -3542,6 +3591,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         continue;
       }
 
+      // A machine author that does not name the bot is ambient traffic (a CI
+      // failure notice, a dependabot bump). Running it spends three model
+      // attempts on an event nobody is waiting for and, when they fail,
+      // publishes a receipt that reads as the channel account talking to
+      // itself. Skip it before the claim, and journal the skip so the dropped
+      // event stays visible.
+      if (this.isAmbientMachineComment(comment)) {
+        this.journalMachineAuthorSkip(ctx, key, senderId);
+        continue;
+      }
+
       // The same per-conversation gate preflight applies, so an approved
       // paired group admits its members here too.
       const allowed = this.senderGateFor({
@@ -3566,6 +3626,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             allowed &&
             (this.config.groupPolicy !== 'pairing' ||
               this.groupGate.isGroupApproved(ctx.chatId))),
+        isExplicitMention: hasMention,
         isReplyToBot: false,
         metadata: this.buildRouteMetadata(
           mentionWaived ? { ...ctx, reason: 'comment' } : ctx,
@@ -3670,6 +3731,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           : BOUND_DELIVERY_COPY.en.assignInstruction,
       isGroup: true,
       isMentioned: true,
+      isExplicitMention: true,
       isReplyToBot: false,
       metadata: `${this.buildMetadata(ctx.chatId, ctx.threadId, title)}\n${GITHUB_PUBLICATION_INSTRUCTIONS}\nTrigger: ${reason}.\n${buildTriggerGuidance(reason)}\n${details}`,
     };
@@ -3693,12 +3755,22 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       isGroup: true,
       chatId: ctx.chatId,
     });
-    const newComments = (await this.fetchNewComments(ctx)).filter((comment) => {
+    const listed = await this.fetchNewComments(ctx);
+    for (const comment of listed) {
+      if (!this.isAmbientMachineComment(comment)) continue;
+      this.journalMachineAuthorSkip(
+        ctx,
+        comment.node_id || String(comment.id),
+        (comment.user?.login || 'unknown').toLowerCase(),
+      );
+    }
+    const newComments = listed.filter((comment) => {
       const key = comment.node_id || String(comment.id);
       const sender = (comment.user?.login || 'unknown').toLowerCase();
       return (
         !this.cursor.dispatchedComments?.includes(key) &&
-        senderGate.isAllowed(sender)
+        senderGate.isAllowed(sender) &&
+        !this.isAmbientMachineComment(comment)
       );
     });
     // The dedupe keys are recorded by applyTaskDedupe AFTER the task write
@@ -3713,6 +3785,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     if (comments.length === 0) return;
 
     const first = comments[0]!.comment;
+    const botUsername = this.botUsername;
     // Comments dropped by the batch cap are recorded as dispatched once the
     // task is claimed, so they would vanish from every surface; the omission
     // must be visible in the prompt itself. It rides at the FRONT: a tail
@@ -3782,6 +3855,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       text: `${AGGREGATE_COMMENTS_PROMPT_PREFIX}${summary}`,
       isGroup: true,
       isMentioned: true,
+      isExplicitMention:
+        typeof botUsername === 'string' &&
+        comments.some(({ comment }) =>
+          testBotMention(comment.body || '', botUsername),
+        ),
       isReplyToBot: false,
       metadata: this.buildRouteMetadata(ctx),
     };
@@ -4039,6 +4117,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       text,
       isGroup: true,
       isMentioned,
+      isExplicitMention: isMentioned,
       isReplyToBot: false,
       metadata: this.buildRouteMetadata(ctx),
     };
@@ -4631,10 +4710,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // A failed public attempt is run again on a later poll until the
         // budget is spent (see isRecoverableInboundTask), so the comment,
         // which asks the user to mention the bot again, waits for the last.
+        // Only an explicit mention earns that comment: an event the account
+        // merely overheard (an ambient comment, a digest) has no sender
+        // waiting for an answer, and a receipt there reads as the account
+        // reporting a failure nobody asked about. Its attempts still land in
+        // the task row and the event timeline.
         if (
           !posted &&
           !stillBound &&
           task.privateOnly !== true &&
+          envelope.isExplicitMention === true &&
           attempts >= MAX_INBOUND_TASK_ATTEMPTS
         ) {
           posted = await this.postErrorComment(

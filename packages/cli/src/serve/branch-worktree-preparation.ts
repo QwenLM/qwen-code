@@ -707,6 +707,12 @@ export async function resolveBranchWorktreeBaseCheckout(args: {
       ? await fs.realpath(args.snapshot.worktree.path).catch(() => null)
       : null;
     const managedRoot = path.join(canonicalRepoTop, '.qwen', 'worktrees');
+    const workspaceManagedRoot = path.join(workspaceCwd, '.qwen', 'worktrees');
+    const workspaceOwnsCheckout =
+      isWithinRoot(canonicalCheckoutTop, workspaceManagedRoot) &&
+      sidecar?.workspaceCwd !== undefined &&
+      (await fs.realpath(sidecar.workspaceCwd).catch(() => null)) ===
+        workspaceCwd;
     const markerOwner = await readWorktreeSessionMarker(canonicalCheckoutTop);
     if (
       workspaceCommonDir === null ||
@@ -715,7 +721,8 @@ export async function resolveBranchWorktreeBaseCheckout(args: {
       sidecarPath !== canonicalCheckoutTop ||
       snapshotPath !== canonicalCheckoutTop ||
       markerOwner !== args.sessionId ||
-      !isWithinRoot(canonicalCheckoutTop, managedRoot)
+      (!workspaceOwnsCheckout &&
+        !isWithinRoot(canonicalCheckoutTop, managedRoot))
     ) {
       return null;
     }
