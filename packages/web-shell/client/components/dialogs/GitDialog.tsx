@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
+import { sanitizeControlChars } from '../messages/toolFormatting';
 import { Markdown } from '../messages/Markdown';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { DialogShell } from './DialogShell';
@@ -93,6 +94,27 @@ export function GitDialog({
   const [view, setView] = useState(initialView);
   const [subtitle, setSubtitle] = useState<string>();
   const [commitMsg, setCommitMsg] = useState('');
+  // Uncommitted files offered for selective commit; `null` until the diff
+  // loads, and kept as the last known list so a failed reload does not drop
+  // the user's selection.
+  const [commitFiles, setCommitFiles] = useState<
+    DaemonWorkspaceGitDiffFile[] | null
+  >(null);
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  // `null` until the first list lands, which is what separates "first load"
+  // (preselect everything) from "every row was deliberately unchecked".
+  const commitFilesRef = useRef<DaemonWorkspaceGitDiffFile[] | null>(null);
+  // Whether the list above is the whole dirty tree: the daemon caps the
+  // per-file rows (`hiddenCount`) and returns `available: false` for a
+  // transient state, and either way a paths-only commit would cover a subset.
+  const [commitListComplete, setCommitListComplete] = useState(true);
+  const commitListUnavailable =
+    !commitListComplete && commitFiles?.length === 0;
+  const loadedPathsRef = useRef<Set<string>>(new Set());
+  // A commit consumes the selection: the listing that follows reports the
+  // tree the commit produced, and an empty one shows no rows at all, so the
+  // next listing is a fresh starting point rather than a set the user cleared.
+  const selectionSpentRef = useRef(false);
   const [commitBusy, setCommitBusy] = useState<'commit' | 'push' | null>(null);
   const [generating, setGenerating] = useState(false);
   const [genFailed, setGenFailed] = useState(false);
@@ -161,6 +183,98 @@ export function GitDialog({
   const startedInCommit = useRef(initialView === 'commit').current;
   const isCommit = view === 'commit';
   const effectiveTab = isCommit ? 'diff' : view;
+
+  // Keep the previous selection for files that are still dirty, and preselect
+  // files that appear for the first time, so reopening the commit view does
+  // not silently drop a deliberate unselection.
+  const applyCommitFiles = useCallback(
+    (files: DaemonWorkspaceGitDiffFile[], complete = true) => {
+      setCommitListComplete(complete);
+      setCommitFiles(files);
+      const firstLoad = commitFilesRef.current === null;
+      // The listing that follows a commit reports the tree the commit left
+      // behind — often empty — so the first non-empty one after it is a fresh
+      // starting point, and holding the flag across the empty refreshes keeps
+      // it that way.
+      const freshAfterCommit = selectionSpentRef.current && files.length > 0;
+      if (freshAfterCommit) selectionSpentRef.current = false;
+      commitFilesRef.current = files;
+      // The record of paths already shown accumulates: a refresh that comes
+      // back empty (a merge or index lock in progress) must not erase it, or
+      // the next complete listing would treat every cleared row as new and
+      // re-select what the user just excluded. The write sits outside the
+      // `setSelectedPaths` updater so a StrictMode double-invoke cannot
+      // replay it against an already-mutated set.
+      const seen = loadedPathsRef.current;
+      loadedPathsRef.current = new Set([
+        ...seen,
+        ...files.map((file) => file.path),
+      ]);
+      setSelectedPaths((prev) => {
+        // `prev.size === 0` cannot stand in for "first load": unchecking every
+        // row is a deliberate state, and the next refresh must not re-add them.
+        // Once loaded, keep what is still selected and preselect only paths
+        // that appear for the first time.
+        const next = new Set<string>();
+        for (const file of files) {
+          if (
+            firstLoad ||
+            freshAfterCommit ||
+            prev.has(file.path) ||
+            !seen.has(file.path)
+          ) {
+            next.add(file.path);
+          }
+        }
+        return next;
+      });
+    },
+    [],
+  );
+
+  // Refresh the file list when the selection could have gone stale. Failures
+  // are silent: the previous list and selection stay usable, and the commit
+  // itself reports the real error.
+  const refreshCommitFiles = useCallback(() => {
+    const ws = client.workspaceByCwd(workspaceCwd);
+    return ws
+      .workspaceGitDiff(gitCwd, gitSessionId)
+      .then((diff) =>
+        applyCommitFiles(diff.files, diff.available && diff.hiddenCount === 0),
+      )
+      .catch(() => {});
+  }, [client, workspaceCwd, gitCwd, gitSessionId, applyCommitFiles]);
+
+  const toggleCommitPath = useCallback((path: string) => {
+    setSelectedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+
+  // The file checklist only needs git, so it loads even when no session is
+  // available for message generation.
+  useEffect(() => {
+    if (!isCommit) return;
+    const abort = new AbortController();
+    void (async () => {
+      const ws = client.workspaceByCwd(workspaceCwd);
+      try {
+        const diff = await ws.workspaceGitDiff(gitCwd, gitSessionId);
+        if (!abort.signal.aborted)
+          applyCommitFiles(
+            diff.files,
+            diff.available && diff.hiddenCount === 0,
+          );
+      } catch {
+        // Keep whatever list is already shown; the commit itself reports the
+        // real error if the tree really is unreadable.
+      }
+    })();
+    return () => abort.abort();
+  }, [isCommit, client, workspaceCwd, gitCwd, gitSessionId, applyCommitFiles]);
 
   // Auto-generate commit message via session side-query when commit view opens.
   useEffect(() => {
@@ -294,16 +408,99 @@ export function GitDialog({
   const doCommit = useCallback(
     async (andPush: boolean) => {
       if (commitBusy || prBusy || !commitMsg.trim()) return;
+      if (!commitFiles) {
+        setCommitStatus({ msg: t('gitCommit.listLoading'), type: 'error' });
+        return;
+      }
+      if (commitListUnavailable) return;
+      // A capped list with visible rows discloses that the action commits
+      // every change. If every file fits, commit only the checked rows.
+      const commitAll = !commitListComplete;
       setCommitBusy(andPush ? 'push' : 'commit');
       setCommitStatus(null);
       try {
         const ws = client.workspaceByCwd(workspaceCwd);
+        let request: Parameters<typeof ws.workspaceGitCommit>[1] = {
+          all: true,
+        };
+        if (!commitAll) {
+          const selected = commitFiles.filter((file) =>
+            selectedPaths.has(file.path),
+          );
+          let kept = selected;
+          let pairing: typeof commitFiles | undefined;
+          try {
+            const diff = await ws.workspaceGitDiff(gitCwd, gitSessionId);
+            if (diff.available && diff.hiddenCount === 0) {
+              if (diff.files.length === 0) {
+                setCommitStatus({
+                  msg: t('gitCommit.nothingToCommit'),
+                  type: 'success',
+                });
+                return;
+              }
+              pairing = diff.files;
+              const live = new Map(diff.files.map((file) => [file.path, file]));
+              kept = selected.filter((file) => live.has(file.path));
+              const changedDeletion = kept.some(
+                (file) => file.isDeleted && !live.get(file.path)?.isDeleted,
+              );
+              if (kept.length === 0 || changedDeletion) {
+                applyCommitFiles(diff.files);
+                setCommitStatus({
+                  msg: t('gitCommit.listRefreshed'),
+                  type: 'success',
+                });
+                return;
+              }
+              if (kept.length < diff.files.length) {
+                applyCommitFiles(diff.files);
+              }
+            }
+          } catch {
+            // Use the selected rows, without implicit rename sources.
+          }
+          if (kept.length === 0) {
+            setCommitStatus({
+              msg: t('gitCommit.selectFiles'),
+              type: 'error',
+            });
+            return;
+          }
+
+          const paths = new Set(kept.map((file) => file.path));
+          const deletedPaths = kept
+            .filter((file) => file.isDeleted)
+            .map((file) => file.path);
+          const renameSources = new Set(
+            commitFiles.map((file) => file.oldPath),
+          );
+          const recreatedPaths = kept
+            .filter((file) => file.isUntracked && renameSources.has(file.path))
+            .map((file) => file.path);
+          const live = new Set(pairing?.map((file) => file.path));
+          for (const file of pairing ?? []) {
+            if (
+              file.oldPath &&
+              paths.has(file.path) &&
+              !live.has(file.oldPath)
+            ) {
+              paths.add(file.oldPath);
+            }
+          }
+          request = {
+            paths: [...paths],
+            ...(deletedPaths.length > 0 && { deletedPaths }),
+            ...(recreatedPaths.length > 0 && { recreatedPaths }),
+          };
+        }
         const result = await ws.workspaceGitCommit(
           commitMsg.trim(),
-          { all: true },
+          request,
           gitCwd,
           gitSessionId,
         );
+        selectionSpentRef.current = true;
         if (andPush) {
           try {
             await ws.workspaceGitPush(
@@ -312,6 +509,7 @@ export function GitDialog({
               gitSessionId,
             );
             setCommitMsg('');
+            void refreshCommitFiles();
             setCommitStatus({
               msg: t('gitCommit.commitPushSuccess', { sha: result.sha }),
               type: 'success',
@@ -328,6 +526,7 @@ export function GitDialog({
           }
         } else {
           setCommitMsg('');
+          void refreshCommitFiles();
           setCommitStatus({
             msg: t('gitCommit.commitSuccess', { sha: result.sha }),
             type: 'success',
@@ -350,6 +549,12 @@ export function GitDialog({
       commitMsg,
       commitBusy,
       prBusy,
+      commitListComplete,
+      commitListUnavailable,
+      commitFiles,
+      selectedPaths,
+      refreshCommitFiles,
+      applyCommitFiles,
       t,
     ],
   );
@@ -710,6 +915,66 @@ export function GitDialog({
         </div>
         {isCommit && (
           <div className={styles.commitPanel}>
+            {commitListUnavailable && (
+              <div role="status" className={styles.commitStatus}>
+                {t('gitCommit.listUnavailable')}
+              </div>
+            )}
+            {commitFiles !== null && commitFiles.length > 0 && (
+              <fieldset className={styles.commitFiles}>
+                <legend className={styles.commitFilesLegend}>
+                  {t('gitCommit.filesSelected', {
+                    selected: commitFiles.filter((f) =>
+                      selectedPaths.has(f.path),
+                    ).length,
+                    total: commitFiles.length,
+                  })}
+                  {!commitListComplete && (
+                    <span className={styles.commitFilesCapped}>
+                      {t('gitCommit.listCapped')}
+                    </span>
+                  )}
+                </legend>
+                <div className={styles.commitFileList}>
+                  {commitFiles.map((file) => (
+                    <label key={file.path} className={styles.commitFile}>
+                      <input
+                        type="checkbox"
+                        checked={selectedPaths.has(file.path)}
+                        disabled={!commitListComplete}
+                        onChange={() => toggleCommitPath(file.path)}
+                      />
+                      <span
+                        className={styles.commitFileStatus}
+                        aria-hidden="true"
+                      >
+                        {file.isUntracked
+                          ? 'A'
+                          : file.isDeleted
+                            ? 'D'
+                            : file.oldPath
+                              ? 'R'
+                              : 'M'}
+                      </span>
+                      <span className="sr-only">
+                        {file.isUntracked
+                          ? t('gitCommit.fileAdded')
+                          : file.isDeleted
+                            ? t('gitCommit.fileDeleted')
+                            : file.oldPath
+                              ? t('gitCommit.fileRenamed')
+                              : t('gitCommit.fileModified')}
+                      </span>
+                      <span className={styles.commitFilePath}>
+                        {file.oldPath
+                          ? `${sanitizeControlChars(file.oldPath)} → ${sanitizeControlChars(file.path)}`
+                          : sanitizeControlChars(file.path)}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+            )}
             <textarea
               ref={textareaRef}
               className={styles.commitMessage}
@@ -745,7 +1010,12 @@ export function GitDialog({
               <button
                 type="button"
                 className={`${styles.commitBtn} ${styles.commitBtnPrimary}`}
-                disabled={!commitMsg.trim() || !!commitBusy || prBusy}
+                disabled={
+                  !commitMsg.trim() ||
+                  !!commitBusy ||
+                  prBusy ||
+                  commitListUnavailable
+                }
                 onClick={() => void doCommit(false)}
               >
                 {commitBusy === 'commit' && (
@@ -756,7 +1026,12 @@ export function GitDialog({
               <button
                 type="button"
                 className={`${styles.commitBtn} ${styles.commitBtnSecondary}`}
-                disabled={!commitMsg.trim() || !!commitBusy || prBusy}
+                disabled={
+                  !commitMsg.trim() ||
+                  !!commitBusy ||
+                  prBusy ||
+                  commitListUnavailable
+                }
                 onClick={() => void doCommit(true)}
               >
                 {commitBusy === 'push' && (

@@ -626,6 +626,18 @@ export const ZH: Messages = {
   'gitCommit.commitPushSuccess': (v) => `已提交并推送 ${v?.sha ?? ''}`,
   'gitCommit.commitSuccessPushFailed': (v) =>
     `已提交 ${v?.sha ?? ''} — 推送失败：${v?.error ?? '未知错误'}`,
+  'gitCommit.filesSelected': (v) =>
+    `要提交的文件（${v?.selected ?? 0}/${v?.total ?? 0}）`,
+  'gitCommit.nothingToCommit': '没有可提交的改动——工作区是干净的',
+  'gitCommit.listRefreshed': '文件列表已变化——请确认后再次提交',
+  'gitCommit.listCapped': '列表已截断——将提交全部变更',
+  'gitCommit.listLoading': '文件列表仍在加载——请稍后重试',
+  'gitCommit.listUnavailable': '文件列表不可用。请刷新提交视图后再提交。',
+  'gitCommit.selectFiles': '请至少选择一个要提交的文件。',
+  'gitCommit.fileAdded': '已新增',
+  'gitCommit.fileDeleted': '已删除',
+  'gitCommit.fileRenamed': '已重命名',
+  'gitCommit.fileModified': '已修改',
   'branchSelect.baseBranch': '目标分支',
   'branchSelect.search': '搜索分支…',
   'branchSelect.loading': '加载中…',

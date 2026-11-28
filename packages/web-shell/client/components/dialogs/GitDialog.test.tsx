@@ -156,6 +156,16 @@ afterEach(() => {
   mockState.capabilities = undefined;
 });
 
+const DIRTY_FILE = {
+  path: 'a.ts',
+  added: 1,
+  removed: 0,
+  isBinary: false,
+  isUntracked: false,
+  isDeleted: false,
+  truncated: false,
+};
+
 describe('GitDialog', () => {
   it('switches views inside one dialog with complete tab semantics', async () => {
     workspaceGitDiff.mockResolvedValue({
@@ -470,7 +480,7 @@ describe('GitDialog', () => {
     ).toBe('true');
   });
 
-  it('passes gitCwd to commit and push SDK calls in the commit view', async () => {
+  it('refuses to commit when the diff lists no uncommitted files', async () => {
     workspaceGitDiff.mockResolvedValue({
       v: 1,
       workspaceCwd: '/repo',
@@ -538,18 +548,657 @@ describe('GitDialog', () => {
     });
     await flush();
 
-    expect(workspaceGitCommit).toHaveBeenCalledWith(
-      'fix: test commit',
-      { all: true },
-      '/worktrees/wt',
-      'session-worktree',
-    );
-    expect(workspaceGitPush).toHaveBeenCalledWith(
-      { setUpstream: true },
-      '/worktrees/wt',
-      'session-worktree',
+    // Nothing is selected, so the dialog must not reach the daemon with an
+    // empty pathspec (git rejects it) and must tell the user why.
+    expect(workspaceGitCommit).not.toHaveBeenCalled();
+    expect(workspaceGitPush).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'Nothing to commit — the working tree is clean',
     );
   });
+
+  it('commits only the selected files and leaves the rest dirty', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 3,
+      linesAdded: 2,
+      linesRemoved: 0,
+      files: [
+        {
+          path: 'a.ts',
+          added: 1,
+          removed: 0,
+          isBinary: false,
+          isUntracked: false,
+          isDeleted: false,
+          truncated: false,
+        },
+        {
+          path: 'b.ts',
+          added: 1,
+          removed: 0,
+          isBinary: false,
+          isUntracked: false,
+          isDeleted: false,
+          truncated: false,
+        },
+        {
+          path: 'c.ts',
+          added: 0,
+          removed: 0,
+          isBinary: false,
+          isUntracked: true,
+          isDeleted: false,
+          truncated: false,
+        },
+      ],
+      hiddenCount: 0,
+    });
+    workspaceGitCommit.mockResolvedValue({
+      sha: 'abc1234',
+      subject: 'fix: a only',
+    });
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            gitCwd="/worktrees/wt"
+            sessionId="session-worktree"
+            initialView="commit"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const checkboxes = Array.from(
+      document.body.querySelectorAll<HTMLInputElement>(
+        '[data-web-shell-dialog] input[type="checkbox"]',
+      ),
+    );
+    // Every dirty file starts selected.
+    expect(checkboxes.map((box) => box.checked)).toEqual([true, true, true]);
+
+    // Uncheck b.ts so it stays out of this commit.
+    await act(async () => {
+      checkboxes[1].click();
+    });
+
+    const textarea = document.body.querySelector(
+      '[data-web-shell-dialog] textarea',
+    );
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      nativeSetter?.call(textarea, 'fix: a only');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const commitBtn = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-dialog] button',
+      ),
+    ).find(
+      (b) =>
+        b.textContent?.trim() === 'Commit' && b.getAttribute('role') !== 'tab',
+    );
+    expect(commitBtn).toBeTruthy();
+    await act(async () => {
+      commitBtn!.click();
+    });
+    await flush();
+
+    expect(workspaceGitCommit).toHaveBeenCalledWith(
+      'fix: a only',
+      { paths: ['a.ts', 'c.ts'] },
+      '/worktrees/wt',
+      'session-worktree',
+    );
+    // The diff is re-read after a successful commit so the checklist matches
+    // what is still dirty.
+    expect(workspaceGitDiff.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it.each(['complete', 'failed', 'capped'])(
+    'leaves a stale rename source out when the fresh listing is %s',
+    async (refresh) => {
+      const file = (path: string, oldPath?: string) => ({
+        path,
+        oldPath,
+        added: 1,
+        removed: 0,
+        isBinary: false,
+        isUntracked: false,
+        isDeleted: false,
+        truncated: false,
+      });
+      const listing = (files: ReturnType<typeof file>[]) => ({
+        v: 1,
+        workspaceCwd: '/repo',
+        available: true,
+        filesCount: files.length,
+        linesAdded: 1,
+        linesRemoved: 0,
+        files,
+        hiddenCount: 0,
+      });
+      // The snapshot shows `b.ts` renamed from `old.ts`. By the click the old
+      // name carries a different file, so the commit-time read no longer pairs
+      // the two and `old.ts` is a row of its own that the user left unchecked.
+      workspaceGitDiff.mockResolvedValue(listing([file('b.ts', 'old.ts')]));
+      workspaceGitCommit.mockResolvedValue({ sha: 'abc1234', subject: 'x' });
+
+      mount('commit');
+      await flush();
+
+      // The snapshot holds one row, the rename's post-image.
+      expect(
+        document.body.querySelectorAll(
+          '[data-web-shell-dialog] input[type="checkbox"]',
+        ),
+      ).toHaveLength(1);
+      if (refresh === 'failed') {
+        workspaceGitDiff.mockRejectedValue(new Error('diff unavailable'));
+      } else {
+        workspaceGitDiff.mockResolvedValue({
+          ...listing([file('old.ts'), file('b.ts')]),
+          hiddenCount: refresh === 'capped' ? 1 : 0,
+        });
+      }
+
+      const textarea = document.body.querySelector(
+        '[data-web-shell-dialog] textarea',
+      )!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )?.set?.call(textarea, 'feat: b only');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await flush();
+
+      const commitBtn = Array.from(
+        document.body.querySelectorAll<HTMLButtonElement>(
+          '[data-web-shell-dialog] button',
+        ),
+      ).find(
+        (b) =>
+          b.textContent?.trim() === 'Commit' &&
+          b.getAttribute('role') !== 'tab',
+      )!;
+      await act(async () => {
+        commitBtn.click();
+      });
+      await flush();
+
+      // The old name is not one of the rows the user ticked; naming it would
+      // publish whatever now sits there in place of a deletion they never
+      // selected.
+      expect(workspaceGitCommit).toHaveBeenCalledWith(
+        'feat: b only',
+        { paths: ['b.ts'] },
+        undefined,
+        undefined,
+      );
+    },
+  );
+
+  it('keeps a deliberate unselect-all across a refresh', async () => {
+    const file = (path: string) => ({
+      path,
+      added: 1,
+      removed: 0,
+      isBinary: false,
+      isUntracked: false,
+      isDeleted: false,
+      truncated: false,
+    });
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 2,
+      linesAdded: 2,
+      linesRemoved: 0,
+      files: [file('a.ts'), file('b.ts')],
+      hiddenCount: 0,
+    });
+    workspaceGitCommit.mockResolvedValue({ sha: 'abc1234', subject: 'x' });
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            initialView="commit"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const checkboxes = () =>
+      Array.from(
+        document.body.querySelectorAll<HTMLInputElement>(
+          '[data-web-shell-dialog] input[type="checkbox"]',
+        ),
+      );
+    expect(checkboxes().map((box) => box.checked)).toEqual([true, true]);
+
+    // Uncheck everything, then leave and re-enter the commit view.
+    await act(async () => {
+      for (const box of checkboxes()) box.click();
+    });
+    // Switch tabs inside the SAME tree, so the refresh runs through
+    // `applyCommitFiles` and the component keeps its selection state.
+    await act(async () => {
+      document.getElementById('git-dialog-tab-diff')!.click();
+    });
+    await flush();
+    await act(async () => {
+      document.getElementById('git-dialog-tab-commit')!.click();
+    });
+    await flush();
+
+    // The refresh must not resurrect rows the user cleared: the next Commit
+    // click has to stay empty rather than commit both files.
+    expect(checkboxes().map((box) => box.checked)).toEqual([false, false]);
+    expect(workspaceGitCommit).not.toHaveBeenCalled();
+  });
+
+  it('re-reads the diff so a second commit in the same dialog still commits', async () => {
+    // The checklist is a snapshot, and the refresh after a successful commit
+    // empties it. A Commit click then carries `paths: []` and is refused while
+    // the tree is dirty again, so the request is built from a fresh listing.
+    const file = (path: string) => ({
+      path,
+      added: 1,
+      removed: 0,
+      isBinary: false,
+      isUntracked: false,
+      isDeleted: false,
+      truncated: false,
+    });
+    const oneFile = (path: string) => ({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 1,
+      linesAdded: 1,
+      linesRemoved: 0,
+      files: [file(path)],
+      hiddenCount: 0,
+    });
+    // The refresh that follows a successful commit empties the checklist; the
+    // agent's next edit does not re-open the view, so the snapshot stays empty
+    // while the tree is dirty again.
+    let commitResolved = false;
+    let emptyServed = false;
+    workspaceGitDiff.mockImplementation(async () => {
+      if (commitResolved && !emptyServed) {
+        emptyServed = true;
+        return { ...oneFile('a.ts'), filesCount: 0, files: [] };
+      }
+      return oneFile('a.ts');
+    });
+    let sha = 0;
+    workspaceGitCommit.mockImplementation(async () => {
+      commitResolved = true;
+      return { sha: `abc123${++sha}`, subject: 'committed' };
+    });
+    mount('commit');
+    await flush();
+
+    const textarea = document.body.querySelector(
+      '[data-web-shell-dialog] textarea',
+    )!;
+    const typeMessage = async (value: string) => {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )?.set?.call(textarea, value);
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await flush();
+    };
+    const commitButton = () =>
+      Array.from(
+        document.body.querySelectorAll<HTMLButtonElement>(
+          '[data-web-shell-dialog] button',
+        ),
+      ).find(
+        (b) =>
+          b.textContent?.trim() === 'Commit' &&
+          b.getAttribute('role') !== 'tab',
+      )!;
+
+    await typeMessage('fix: a');
+    await act(async () => {
+      commitButton().click();
+    });
+    await flush();
+    // Wait until the post-commit refresh has landed: the checklist is empty
+    // while the tree is dirty again.
+    for (let i = 0; i < 20; i++) {
+      if (
+        document.body.querySelectorAll(
+          '[data-web-shell-dialog] input[type="checkbox"]',
+        ).length === 0
+      )
+        break;
+      await flush();
+    }
+    expect(
+      document.body.querySelectorAll(
+        '[data-web-shell-dialog] input[type="checkbox"]',
+      ).length,
+    ).toBe(0);
+    await typeMessage('fix: a again');
+    console.log(
+      'CHK',
+      document.body.querySelectorAll(
+        '[data-web-shell-dialog] input[type="checkbox"]',
+      ).length,
+    );
+    // The stale listing is shown again rather than committed blind; the row
+    // comes back selected, so the next click commits it.
+    await act(async () => {
+      commitButton().click();
+    });
+    await flush();
+    console.log(
+      'CHK2',
+      document.body.querySelectorAll(
+        '[data-web-shell-dialog] input[type="checkbox"]',
+      ).length,
+      'MSG',
+      (document.body.querySelector('[data-web-shell-dialog] textarea') || {})
+        .value,
+    );
+    expect(workspaceGitCommit).toHaveBeenCalledTimes(1);
+    expect(
+      document.body.querySelectorAll(
+        '[data-web-shell-dialog] input[type="checkbox"]',
+      ).length,
+    ).toBe(1);
+    await act(async () => {
+      commitButton().click();
+    });
+    await flush();
+    console.log('CALLS', JSON.stringify(workspaceGitCommit.mock.calls));
+
+    expect(workspaceGitCommit).toHaveBeenCalledTimes(2);
+    expect(workspaceGitCommit).toHaveBeenLastCalledWith(
+      'fix: a again',
+      { paths: ['a.ts'] },
+      undefined,
+      undefined,
+    );
+  });
+
+  it('keeps a deliberate unselect-all across an empty refresh', async () => {
+    const file = (path: string) => ({
+      path,
+      added: 1,
+      removed: 0,
+      isBinary: false,
+      isUntracked: false,
+      isDeleted: false,
+      truncated: false,
+    });
+    const twoFiles = {
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 2,
+      linesAdded: 2,
+      linesRemoved: 0,
+      files: [file('a.ts'), file('b.ts')],
+      hiddenCount: 0,
+    };
+    workspaceGitDiff
+      .mockResolvedValueOnce(twoFiles)
+      // The daemon's empty listing — returned while a merge, rebase or index
+      // lock is in progress — must not erase the record of what the user
+      // already saw, or the next complete listing re-selects every cleared row.
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/repo',
+        available: false,
+        filesCount: 0,
+        linesAdded: 0,
+        linesRemoved: 0,
+        files: [],
+        hiddenCount: 0,
+      })
+      .mockResolvedValue(twoFiles);
+    mount('commit');
+    await flush();
+
+    const checkboxes = () =>
+      Array.from(
+        document.body.querySelectorAll<HTMLInputElement>(
+          '[data-web-shell-dialog] input[type="checkbox"]',
+        ),
+      );
+    expect(checkboxes().map((box) => box.checked)).toEqual([true, true]);
+
+    await act(async () => {
+      for (const box of checkboxes()) box.click();
+    });
+    // Leave and re-enter the commit view: the re-entry runs the empty
+    // listing through `applyCommitFiles`, then the next refresh returns the
+    // full one.
+    await act(async () => {
+      document.getElementById('git-dialog-tab-diff')!.click();
+    });
+    await flush();
+    await act(async () => {
+      document.getElementById('git-dialog-tab-commit')!.click();
+    });
+    await flush();
+
+    expect(checkboxes().map((box) => box.checked)).toEqual([false, false]);
+    expect(workspaceGitCommit).not.toHaveBeenCalled();
+  });
+
+  it('commits everything when the daemon caps the file list', async () => {
+    const file = (path: string) => ({
+      path,
+      added: 1,
+      removed: 0,
+      isBinary: false,
+      isUntracked: false,
+      isDeleted: false,
+      truncated: false,
+    });
+    // 60 dirty files, 50 rows: a paths-only commit would silently leave 10.
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 60,
+      linesAdded: 60,
+      linesRemoved: 0,
+      files: Array.from({ length: 50 }, (_, i) => file(`f${i}.ts`)),
+      hiddenCount: 10,
+    });
+    workspaceGitCommit.mockResolvedValue({ sha: 'abc1234', subject: 'x' });
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            initialView="commit"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const textarea = document.body.querySelector(
+      '[data-web-shell-dialog] textarea',
+    );
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      nativeSetter?.call(textarea, 'feat: everything');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const commitBtn = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-dialog] button',
+      ),
+    ).find(
+      (b) =>
+        b.textContent?.trim() === 'Commit' && b.getAttribute('role') !== 'tab',
+    );
+    await act(async () => {
+      commitBtn!.click();
+    });
+    await flush();
+
+    // `all` and `paths` are mutually exclusive on the route, so the request
+    // must carry `all` alone.
+    expect(workspaceGitCommit).toHaveBeenCalledWith(
+      'feat: everything',
+      { all: true },
+      undefined,
+      undefined,
+    );
+    // A capped listing cannot honor a per-row selection: the rows it dropped
+    // would silently stay uncommitted. The rendered rows are disabled and a
+    // notice says the whole tree will be committed, so an unchecked row can
+    // never promise an exclusion the request cannot carry.
+    const cappedCheckboxes = Array.from(
+      document.body.querySelectorAll<HTMLInputElement>(
+        '[data-web-shell-dialog] input[type="checkbox"]',
+      ),
+    );
+    expect(cappedCheckboxes.length).toBeGreaterThan(0);
+    expect(cappedCheckboxes.every((box) => box.disabled)).toBe(true);
+    expect(document.body.textContent).toContain(
+      'The list is truncated — committing every change',
+    );
+  });
+
+  it('refuses to commit everything when the listing never loaded', async () => {
+    // A rejected listing leaves `commitFiles` null while `commitListComplete`
+    // keeps its initial `true`. Falling through to `all` would commit the
+    // whole tree with no checklist and nothing disclosing it, so the click is
+    // refused and the dialog says why while the list is still absent.
+    workspaceGitDiff.mockRejectedValue(new Error('daemon 5xx'));
+    workspaceGitCommit.mockResolvedValue({ sha: 'abc1234', subject: 'x' });
+    mount('commit');
+    await flush();
+
+    const textarea = document.body.querySelector(
+      '[data-web-shell-dialog] textarea',
+    );
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      nativeSetter?.call(textarea, 'feat: everything');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const commitBtn = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-dialog] button',
+      ),
+    ).find(
+      (b) =>
+        b.textContent?.trim() === 'Commit' && b.getAttribute('role') !== 'tab',
+    );
+    await act(async () => {
+      commitBtn!.click();
+    });
+    await flush();
+
+    expect(workspaceGitCommit).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'The file list is still loading — try again shortly',
+    );
+  });
+
+  it.each([false, true])(
+    'disables both commit actions if an incomplete listing has zero rows (available: %s)',
+    async (available) => {
+      workspaceGitDiff.mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/repo',
+        available,
+        filesCount: available ? 501 : 0,
+        linesAdded: 0,
+        linesRemoved: 0,
+        files: [],
+        hiddenCount: available ? 501 : 0,
+      });
+      mount('commit');
+      await flush();
+
+      const textarea = document.body.querySelector(
+        '[data-web-shell-dialog] textarea',
+      )!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )?.set?.call(textarea, 'fix: everything');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      const buttons = Array.from(
+        document.querySelectorAll<HTMLButtonElement>(
+          '[data-web-shell-dialog] button:not([role="tab"])',
+        ),
+      ).filter((button) =>
+        ['Commit', 'Commit and Push'].includes(
+          button.textContent?.trim() ?? '',
+        ),
+      );
+      expect(buttons.map((button) => button.disabled)).toEqual([true, true]);
+      expect(document.body.textContent).toContain('No file list is available.');
+      await act(async () => {
+        textarea.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Enter',
+            ctrlKey: true,
+            bubbles: true,
+          }),
+        );
+      });
+      expect(workspaceGitCommit).not.toHaveBeenCalled();
+    },
+  );
 
   it('clamps to the diff view when the capability is withdrawn mid-session', async () => {
     workspaceGitDiff.mockResolvedValue({
@@ -728,10 +1377,10 @@ describe('GitDialog', () => {
       v: 1,
       workspaceCwd: '/repo',
       available: true,
-      filesCount: 0,
-      linesAdded: 0,
+      filesCount: 1,
+      linesAdded: 1,
       linesRemoved: 0,
-      files: [],
+      files: [DIRTY_FILE],
       hiddenCount: 0,
     });
     workspaceGitCommit.mockResolvedValue({
@@ -790,7 +1439,7 @@ describe('GitDialog', () => {
 
     expect(workspaceGitCommit).toHaveBeenCalledWith(
       'fix: commit only',
-      { all: true },
+      { paths: ['a.ts'] },
       undefined,
       undefined,
     );
@@ -799,6 +1448,16 @@ describe('GitDialog', () => {
   });
 
   it('reports commit-success-push-failed when the push rejects', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 1,
+      linesAdded: 1,
+      linesRemoved: 0,
+      files: [DIRTY_FILE],
+      hiddenCount: 0,
+    });
     workspaceGitCommit.mockResolvedValue({
       sha: 'def5678',
       subject: 'test commit',

@@ -10,6 +10,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { isValidGitSha, isValidRefName } from './gitDirect.js';
+import { hasVerifiableInode } from './file-identity.js';
 import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('GIT_BRANCHES');
@@ -1817,22 +1818,465 @@ export interface GitCommitResult {
   subject: string;
 }
 
+export interface GitCommitOptions {
+  /** Stage every working-tree change (including untracked files) first. */
+  all?: boolean;
+  /**
+   * Repo-root-relative paths to stage and commit, leaving every other change
+   * (staged or not) untouched. Either side of a rename selects the pair, so
+   * the deletion and the addition always land in the same commit.
+   */
+  paths?: readonly string[];
+  /** Checked deletion rows whose paths must still be deleted. */
+  deletedPaths?: readonly string[];
+  /** Checked untracked rows at the source of a rename. */
+  recreatedPaths?: readonly string[];
+}
+
+/**
+ * Git reads `*`, `?` and `[]` in a pathspec as glob wildcards, so a selection
+ * naming a file that literally contains one would also match its neighbours.
+ * `:(literal)` turns that off. `top` anchors the path at the repository root,
+ * which is where the caller's selection comes from: `fetchGitDiff` pins its
+ * keys to `findGitRoot(cwd)`, while git otherwise resolves a pathspec against
+ * the current directory. Without it a workspace bound below the root sends a
+ * root-relative path that matches nothing.
+ */
+function literalPathspec(path: string): string {
+  return `:(top,literal)${path}`;
+}
+
+function literalPathspecs(paths: readonly string[]): string[] {
+  return paths.map(literalPathspec);
+}
+
+async function hasHead(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  try {
+    await runGit(cwd, ['rev-parse', '--verify', '-q', 'HEAD'], env);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeCommitPaths(paths: readonly string[]): string[] {
+  const normalized: string[] = [];
+  for (const raw of paths) {
+    if (typeof raw !== 'string') {
+      throw new Error('invalid commit path: expected a string');
+    }
+    if (
+      !raw ||
+      // A newline is legal in a POSIX filename and the diff listing offers
+      // such files preselected; the pathspec is passed as one argv element, so
+      // it survives. `\0` cannot, because argv is NUL-terminated.
+      raw.includes('\0') ||
+      raw.startsWith('/') ||
+      // A Windows absolute path is a drive letter followed by a separator.
+      // Requiring it keeps git-legal root-level POSIX names like `a:b.txt`
+      // — which the diff listing offers preselected — committable.
+      /^[a-zA-Z]:[/\\]/.test(raw)
+    ) {
+      throw new Error(`invalid commit path: "${raw}"`);
+    }
+    const parts = raw.split('/');
+    if (parts.some((part) => part === '..' || part === '.git')) {
+      throw new Error(`invalid commit path: "${raw}"`);
+    }
+    const cleaned = parts
+      .filter((part) => part !== '' && part !== '.')
+      .join('/');
+    if (!cleaned) {
+      throw new Error(`invalid commit path: "${raw}"`);
+    }
+    if (!normalized.includes(cleaned)) normalized.push(cleaned);
+  }
+  return normalized;
+}
+
+/** Split `git status --porcelain -z` output into entries, pairing rename halves. */
+function parseStatusEntries(output: string): Array<{
+  path: string;
+  oldPath?: string;
+  copied?: boolean;
+  untracked?: boolean;
+}> {
+  const tokens = output.split('\0');
+  const entries: ReturnType<typeof parseStatusEntries> = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.length < 4) continue;
+    const xy = token.slice(0, 2);
+    if (xy.includes('R') || xy.includes('C')) {
+      // A rename or copy entry is `XY newpath\0oldpath\0`.
+      const oldPath = tokens[i + 1];
+      i++;
+      // A copy leaves its source in place, so it carries no pre-image to
+      // guard: the old path is not a deletion this commit publishes.
+      entries.push({ path: token.slice(3), oldPath, copied: xy.includes('C') });
+    } else {
+      entries.push({ path: token.slice(3), untracked: xy === '??' });
+    }
+  }
+  return entries;
+}
+
+/**
+ * Whether anything occupies `relPath` under `root` — a regular file, a
+ * symlink, or a symlink whose target is gone (which `existsSync` would wave
+ * through by following the dead link). `relPath` is repo-root-relative and
+ * `/`-separated, matching every other path this module reads from git.
+ */
+function lstatOrNull(root: string, relPath: string): fs.Stats | null {
+  try {
+    return fs.lstatSync(path.join(root, ...relPath.split('/')));
+  } catch {
+    return null;
+  }
+}
+
+function assertRecreatedPath(root: string, file: string): void {
+  const stats = lstatOrNull(root, file);
+  if (!stats?.isFile() || stats.nlink !== 1) {
+    throw new Error(`cannot commit: recreated file ${file} has changed`);
+  }
+}
+
+function refuseOccupiedDeletion(root: string, deleted: string): void {
+  if (lstatOrNull(root, deleted) !== null) {
+    throw new Error(
+      `cannot commit: ${deleted} is staged for deletion, but a file now sits at that path`,
+    );
+  }
+}
+
+/**
+ * Resolve the caller's selection against what git actually sees. A selection
+ * can name a path that is already committed as-is (toggled on, then reverted),
+ * which `git add -- <path>` rejects with "did not match any files". Rename
+ * halves are paired here so the caller only has to send one side.
+ *
+ * Pairing reads `git diff HEAD`, the same view the checklist renders. The index
+ * alone can still report a rename for two rows the checklist listed separately
+ * (a staged rename whose worktree copy was rewritten below git's rename
+ * threshold), and pairing those would record a deletion the user never
+ * selected.
+ */
+async function resolveCommitPaths(
+  cwd: string,
+  paths: string[],
+  env: Readonly<Record<string, string | undefined>> | undefined,
+  staged: Readonly<StagedIndexChanges>,
+  recreated: ReadonlySet<string>,
+): Promise<string[]> {
+  const output = await runGit(
+    cwd,
+    [
+      'status',
+      '--porcelain',
+      '-z',
+      // The checklist enumerates untracked files, so the resolver must too:
+      // `status.showUntrackedFiles=no` would hide a selected new file and turn
+      // a valid selection into "none of the selected paths have changes".
+      '-uall',
+      '--',
+      ...literalPathspecs(paths),
+    ],
+    env,
+  );
+  const entries = parseStatusEntries(output);
+  const untracked = new Set(
+    entries.filter((entry) => entry.untracked).map((entry) => entry.path),
+  );
+  for (const file of recreated) {
+    if (!untracked.has(file)) {
+      throw new Error(`cannot commit: recreated file ${file} has changed`);
+    }
+  }
+  if (entries.length === 0) {
+    throw new Error('cannot commit: none of the selected paths have changes');
+  }
+  const selected = new Set(paths);
+  // The selection can name a directory prefix, and a rename only exists when
+  // its two halves are recorded in one commit, so a pair is reached when the
+  // selection names either half directly or through such a prefix.
+  const selectedOrPrefix = (p: string) =>
+    selected.has(p) ||
+    [...selected].some((s) => p.startsWith(s.endsWith('/') ? s : s + '/'));
+  const seen = new Set<string>();
+  const resolved: string[] = [];
+  const push = (p: string) => {
+    if (!seen.has(p)) {
+      seen.add(p);
+      resolved.push(p);
+    }
+  };
+  const preImageCandidates: Array<{ path: string; oldPath: string }> = [];
+  for (const entry of entries) {
+    if (entry.oldPath) {
+      if (recreated.has(entry.oldPath) && !selectedOrPrefix(entry.path)) {
+        continue;
+      }
+      if (!selectedOrPrefix(entry.path) && !selectedOrPrefix(entry.oldPath)) {
+        continue;
+      }
+      push(entry.path);
+      // A copy's source is still in the tree and the checklist lists it as its
+      // own row, so it is named here only when the selection reaches it — never
+      // as a pre-image, since nothing about the copy deletes it.
+      if (entry.copied) {
+        if (selectedOrPrefix(entry.oldPath)) push(entry.oldPath);
+        continue;
+      }
+      // The status pair's `oldPath` is only named when the selection reaches
+      // it too: `status` pairs a staged rename even when the worktree copy was
+      // rewritten past git's rename threshold — the checklist then shows two
+      // independent rows, and naming the pre-image from the index pair alone
+      // would record a deletion the user never selected.
+      if (selectedOrPrefix(entry.oldPath)) {
+        push(entry.oldPath);
+        preImageCandidates.push({ path: entry.path, oldPath: entry.oldPath });
+      }
+      continue;
+    }
+    push(entry.path);
+  }
+  // A directory prefix can match entries whose paths are not themselves in the
+  // selection, and a rename whose halves are both outside it is dropped above,
+  // so the loop can leave nothing behind. `[]` is truthy, so returning it would
+  // send `git commit --` an empty pathspec and commit the whole index.
+  if (resolved.length === 0) {
+    throw new Error('cannot commit: none of the selected paths have changes');
+  }
+  // A rename only exists when its two halves are recorded in one commit, so
+  // the pre-image is named too. The pairing view is the checklist's own —
+  // `git diff HEAD` without a forced `-M`, so a repo with `diff.renames=false`
+  // keeps its two independent rows un-paired — and `--no-relative` keeps the
+  // paths repo-root-relative under `diff.relative`.
+  // `commit -- <old path>` takes the working-tree content of every path it
+  // names, so refuse rather than publish whatever now sits at the old path.
+  // An unborn HEAD has nothing to rename against and `HEAD` does not resolve.
+  if (!(await hasHead(cwd, env))) return resolved;
+  const diffOutput = await runGit(
+    cwd,
+    ['diff', '--name-status', '-z', '--no-relative', '--diff-filter=R', 'HEAD'],
+    env,
+  );
+  const root = (
+    await runGit(cwd, ['rev-parse', '--show-toplevel'], env).catch(() => '')
+  ).trim();
+  for (const file of recreated) assertRecreatedPath(root || cwd, file);
+  const tokens = diffOutput.split('\0');
+  for (let i = 0; i + 2 < tokens.length; i += 3) {
+    if (!tokens[i].startsWith('R')) continue;
+    const oldPath = tokens[i + 1];
+    const newPath = tokens[i + 2];
+    if (!selectedOrPrefix(newPath) && !selectedOrPrefix(oldPath)) continue;
+    if (recreated.has(oldPath) && !selectedOrPrefix(newPath)) continue;
+    for (const p of [newPath, oldPath]) push(p);
+    if (!recreated.has(oldPath)) {
+      refuseOccupiedPreImage(root || cwd, oldPath, newPath);
+    }
+  }
+  // A staged rename this view no longer pairs — its post-image was rewritten
+  // past the similarity threshold, or the repo sets `diff.renames=false` —
+  // still carries its pre-image in `git status`, whose pair names the deletion
+  // the user selected. Skipping the guard there would stage and publish
+  // whatever recreated the old path in place of that deletion.
+  for (const pair of preImageCandidates) {
+    if (!recreated.has(pair.oldPath)) {
+      refuseOccupiedPreImage(root || cwd, pair.oldPath, pair.path);
+    }
+  }
+  // Neither leg above sees a rename in a repo that sets `status.renames=false`:
+  // `status` reports the two halves unpaired, so there is no `oldPath` to
+  // carry, and `git diff HEAD` cannot pair them either. The index still records
+  // the rename, so guard its pre-image here — independently of both configs.
+  // Like the status leg above, this only guards; it adds no paths, so a
+  // selection that does not reach the old path commits exactly what it did
+  // before, and the deletion it never selected stays uncommitted.
+  for (const pair of staged.renamed) {
+    if (!selectedOrPrefix(pair.oldPath) || recreated.has(pair.oldPath))
+      continue;
+    refuseOccupiedPreImage(root || cwd, pair.oldPath, pair.newPath);
+  }
+  // A plain staged deletion has no rename entry to pair, so the loops above
+  // never see it — yet `commit -- <path>` reads the deletion from the index
+  // and takes whatever now sits at that path from the worktree, publishing an
+  // occupant in place of the deletion the user selected.
+  for (const deleted of staged.deleted) {
+    if (selectedOrPrefix(deleted) && !recreated.has(deleted)) {
+      refuseOccupiedDeletion(root || cwd, deleted);
+    }
+  }
+  return resolved;
+}
+
+/**
+ * What the index records for the caller's selection beyond a plain edit: the
+ * paths it has deleted, and the renames it has paired.
+ */
+interface StagedIndexChanges {
+  /** Paths the index has deleted (status `D`). */
+  deleted: Set<string>;
+  /** Renames the index has recorded (status `R`), pre-image first. */
+  renamed: Array<{ oldPath: string; newPath: string }>;
+}
+
+/**
+ * The index's own view of the caller's selection. A staged deletion is absent
+ * from both `ls-files --cached` and `--others`, so it is invisible to the
+ * status listing `resolveCommitPaths` works from — and its rename pairs do not
+ * depend on `status.renames` or on `git diff HEAD` being able to pair them.
+ */
+async function readStagedIndexChanges(
+  cwd: string,
+  paths: string[],
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<StagedIndexChanges> {
+  const changes: StagedIndexChanges = { deleted: new Set(), renamed: [] };
+  if (!(await hasHead(cwd, env))) return changes;
+  const indexChanges = await runGit(
+    cwd,
+    [
+      'diff',
+      '--cached',
+      '--name-status',
+      '-z',
+      // Under `diff.relative` and a workspace bound below the repository root
+      // this prints cwd-relative names, which match no root-relative selection
+      // — the pathspec does not change that. `status` and `ls-files` are
+      // pinned to the root elsewhere; this read has to be too.
+      '--no-relative',
+      '--',
+      ...literalPathspecs(paths),
+    ],
+    env,
+  );
+  const tokens = indexChanges.split('\0');
+  for (let i = 0; i < tokens.length; i++) {
+    const status = tokens[i];
+    if (!/^[A-Z](?:\d+)?$/.test(status)) continue;
+    if (status.startsWith('R')) {
+      changes.renamed.push({
+        oldPath: tokens[i + 1] ?? '',
+        newPath: tokens[i + 2] ?? '',
+      });
+      i += 2;
+    } else if (status.startsWith('C')) {
+      // A copy leaves its source in place, so there is no pre-image to guard.
+      i += 2;
+    } else if (status.startsWith('D')) {
+      changes.deleted.add(tokens[i + 1] ?? '');
+      i++;
+    } else if (i + 1 < tokens.length) {
+      i++;
+    }
+  }
+  return changes;
+}
+
+/**
+ * Refuse to commit when a path the commit will name as a deletion holds a file
+ * instead. `commit -- <old path>` takes the working-tree content of every path
+ * it names, so an occupant would be published in place of the deletion.
+ */
+function refuseOccupiedPreImage(
+  root: string,
+  oldPath: string,
+  newPath: string,
+): void {
+  // `oldPath` is repo-root-relative, so the pre-image check resolves it
+  // against the repository root — a workspace bound below the root would never
+  // see the occupant through `cwd`. A case-only rename reads as occupied on a
+  // case-folding filesystem even though nothing sits at the old path — the
+  // occupant is the rename's own post-image. Decide that by file identity
+  // rather than by folding the names: on a case-sensitive filesystem a
+  // squatter at the old spelling is a different file and must still be
+  // refused. `lstat` over `existsSync` keeps a dangling symlink at the old path
+  // a squatter too.
+  const oldStat = lstatOrNull(root, oldPath);
+  if (oldStat === null) return;
+  const newStat = lstatOrNull(root, newPath);
+  // On FAT/exFAT/SMB every file reports `ino === 0`, so two unrelated files on
+  // one device compare equal and the exemption would wave an occupant through.
+  // Treat a zero inode as unverifiable and refuse.
+  const sameIdentity =
+    newStat !== null &&
+    hasVerifiableInode(oldStat.ino) &&
+    oldStat.dev === newStat.dev &&
+    oldStat.ino === newStat.ino;
+  // A case-folding filesystem resolves the old spelling to the post-image
+  // through one directory entry, so it carries one link. A second link means
+  // the same inode was published at the old name too (`cp -al`, `rsync -H`, a
+  // package store), and `commit -- <oldPath>` would take its bytes from the
+  // worktree as a modification — publishing the occupant and dropping the
+  // deletion the user selected.
+  if (sameIdentity && oldStat.nlink <= 1) return;
+  throw new Error(
+    `cannot commit: ${oldPath} was renamed to ${newPath}, but a file now sits at the old path`,
+  );
+}
+
 /**
  * Commit changes. With `all: true`, stages every change in the working tree
  * (including untracked files) via `git add -A` before committing, so the
- * commit matches what the UI displays.
+ * commit matches what the UI displays. With `paths`, stages and commits only
+ * those files; anything else that was staged stays staged.
  */
 export async function gitCommit(
   cwd: string,
   message: string,
-  opts?: { all?: boolean },
+  opts?: GitCommitOptions,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<GitCommitResult> {
-  // Snapshot the index before `git add -A` so a failed commit (e.g. a
-  // rejecting pre-commit hook) can restore the user's original staging
-  // instead of leaving the whole working tree staged.
+  if (opts?.all && opts.paths) {
+    throw new Error('all and paths are mutually exclusive');
+  }
+  const paths = opts?.paths ? normalizeCommitPaths(opts.paths) : undefined;
+  if (paths && paths.length === 0) {
+    throw new Error('cannot commit: no paths selected');
+  }
+  const deletedPaths = normalizeCommitPaths(opts?.deletedPaths ?? []);
+  const recreated = new Set(normalizeCommitPaths(opts?.recreatedPaths ?? []));
+  if (
+    [...deletedPaths, ...recreated].some((file) => !paths?.includes(file)) ||
+    deletedPaths.some((file) => recreated.has(file))
+  ) {
+    throw new Error('commit path states must describe distinct selected paths');
+  }
+  // `git commit -- <paths>` is a partial commit, which git refuses outright
+  // while a merge, cherry-pick, revert or rebase is parked. Say so here
+  // instead of surfacing git's raw fatal, and point at the whole-index commit
+  // that does work in that state.
+  if (paths) {
+    const operation = await operationInProgress(cwd, env);
+    if (operation) {
+      throw new Error(
+        `cannot commit selected paths: a ${operation} is in progress; commit everything to finish it`,
+      );
+    }
+  }
+  // `resolveCommitPaths` can reach a staged deletion only through a rename
+  // pair; a plain one (`git rm`, no rename involved) appears there as a
+  // status `D` and is dropped. `commit -- <path>` then takes whatever content
+  // now sits at that path from the worktree and publishes it as a rewrite,
+  // silently replacing the deletion the user selected. Ask the index instead.
+  const staged = paths
+    ? await readStagedIndexChanges(cwd, paths, env)
+    : { deleted: new Set<string>(), renamed: [] };
+  const selection = paths
+    ? await resolveCommitPaths(cwd, paths, env, staged, recreated)
+    : undefined;
+  const stagesEverything = opts?.all === true;
+  // Snapshot the index before staging so a failed commit (e.g. a rejecting
+  // pre-commit hook) can restore the user's original staging instead of
+  // leaving the staged changes behind.
   let savedIndex: string | null = null;
-  if (opts?.all) {
+  if (stagesEverything || selection) {
     const tree = (
       await runGit(cwd, ['write-tree'], env).catch(() => '')
     ).trim();
@@ -1846,24 +2290,142 @@ export async function gitCommit(
       ).trim();
       if (unmerged) {
         throw new Error(
-          'cannot stage all changes: unresolved merge conflicts in the index',
+          'cannot stage changes: unresolved merge conflicts in the index',
         );
       }
       throw new Error(
-        'cannot stage all changes: failed to snapshot index (write-tree failed)',
+        'cannot stage changes: failed to snapshot index (write-tree failed)',
       );
     }
   }
   try {
-    if (opts?.all) {
+    if (stagesEverything) {
       await runGit(cwd, ['add', '-A'], env);
+      await runGit(cwd, ['commit', '-m', message], env);
+    } else if (selection) {
+      // `add -A` is scoped by the pathspec so it also records deletions
+      // (a plain `add` refuses a path that no longer exists) while leaving
+      // everything else the caller staged untouched. The pathspec on `commit`
+      // then keeps work staged outside the selection out of this commit. A
+      // rename's pre-image is already in the index, so only the new path is
+      // staged; `commit` still records the deletion from the index diff.
+      const stageable = await runGit(
+        cwd,
+        [
+          'ls-files',
+          '--full-name',
+          '--cached',
+          '--others',
+          '-z',
+          '--',
+          ...literalPathspecs(selection),
+        ],
+        env,
+      );
+      const known = new Set(
+        stageable.split('\0').filter((line) => line !== ''),
+      );
+      // A staged deletion sits in neither listing — removed from the index,
+      // absent from the worktree — yet `commit -- <path>` records it from the
+      // index, so a selection of staged removals must not read as empty. The
+      // same index view names a staged rename's pre-image, which the commit
+      // below has to keep naming even when a case-folding filesystem resolves
+      // the old path to the post-image on disk. It is re-read here rather than
+      // reused from `resolveCommitPaths` because the resolver's view predates
+      // staging and this lists `selection`, which the resolver may have widened
+      // with rename halves.
+      const stagedNow = await readStagedIndexChanges(cwd, selection, env);
+      const indexDeleted = stagedNow.deleted;
+      const indexRenamedOld = new Set(
+        stagedNow.renamed.map((pair) => pair.oldPath),
+      );
+      const worktreeDeleted = await runGit(
+        cwd,
+        [
+          'ls-files',
+          '--full-name',
+          '--deleted',
+          '-z',
+          '--',
+          ...literalPathspecs(selection),
+        ],
+        env,
+      );
+      const selectedDeletions = new Set([
+        ...deletedPaths,
+        ...indexDeleted,
+        ...worktreeDeleted.split('\0').filter(Boolean),
+      ]);
+      const existing = selection.filter((p) => known.has(p));
+      // `resolveCommitPaths` ran before staging, and staging is what can empty
+      // the selection — a rename whose halves the resolver dropped, or a path
+      // that only differs by case on a case-insensitive filesystem. Committing
+      // with nothing stageable and no staged index change would hand git a
+      // path with nothing to commit.
+      if (
+        existing.length === 0 &&
+        indexDeleted.size === 0 &&
+        indexRenamedOld.size === 0
+      ) {
+        throw new Error(
+          'cannot commit: none of the selected paths have changes',
+        );
+      }
+      // A path the index has already deleted cannot be handed to `add -A` —
+      // its pathspec matches nothing — and needs no staging anyway.
+      if (existing.length > 0) {
+        await runGit(
+          cwd,
+          ['add', '-A', '--', ...literalPathspecs(existing)],
+          env,
+        );
+      }
+      // `commit -- <path>` takes the working-tree content of every path it
+      // names, so none of these may be named: a rename's pre-image and a
+      // staged deletion are already in the index and `commit` records them
+      // from there — naming them would also fetch whatever now sits at that
+      // path. Only paths that still exist in the worktree are named, and a
+      // path that exists nowhere is dropped, since the commit would have
+      // nothing to read.
+      const root = (
+        await runGit(cwd, ['rev-parse', '--show-toplevel'], env)
+      ).trim();
+      const commitPaths = selection.filter(
+        (p) =>
+          known.has(p) ||
+          indexDeleted.has(p) ||
+          indexRenamedOld.has(p) ||
+          !fs.existsSync(path.join(root || cwd, ...p.split('/'))),
+      );
+      // The guards in `resolveCommitPaths` read the worktree before staging,
+      // and `commit --` reads it again below. Anything written in between — the
+      // agent shell and a build both write here — would be published in place
+      // of the deletion the user selected. Re-assert the same guards against
+      // the `stagedNow` view, last thing before the commit, to narrow that
+      // window to the few operations below.
+      for (const file of recreated) assertRecreatedPath(root || cwd, file);
+      for (const pair of stagedNow.renamed) {
+        if (!recreated.has(pair.oldPath)) {
+          refuseOccupiedPreImage(root || cwd, pair.oldPath, pair.newPath);
+        }
+      }
+      for (const deleted of selectedDeletions) {
+        if (!recreated.has(deleted))
+          refuseOccupiedDeletion(root || cwd, deleted);
+      }
+      await runGit(
+        cwd,
+        ['commit', '-m', message, '--', ...literalPathspecs(commitPaths)],
+        env,
+      );
+    } else {
+      await runGit(cwd, ['commit', '-m', message], env);
     }
-    await runGit(cwd, ['commit', '-m', message], env);
   } catch (err) {
     if (savedIndex) {
       await runGit(cwd, ['read-tree', savedIndex], env).catch((rollbackErr) => {
-        // A failed rollback leaves the whole `add -A` result staged; surface
-        // it so the stale index can be diagnosed instead of failing silently.
+        // A failed rollback leaves the staged result in place; surface it so
+        // the stale index can be diagnosed instead of failing silently.
         // eslint-disable-next-line no-console
         console.error('git index rollback failed:', rollbackErr);
       });
