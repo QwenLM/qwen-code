@@ -194,6 +194,32 @@ describe('Legacy refusal of Managed-owned transcripts', () => {
     ).resolves.toBe(true);
   });
 
+  it('does not treat a salvaged record from a torn string as Managed evidence, but recognizes a glued header', async () => {
+    const headerObject = {
+      type: 'system',
+      subtype: 'managed_session_header_v1',
+      managedSession: { engine: 'managed' },
+    };
+    const tornLineEmbeddingHeader =
+      '{"type":"user","message":{"role":"user","parts":[{"text":"unclosed text ' +
+      JSON.stringify(headerObject);
+    const tornTranscriptPath = await writeTranscript(
+      `${owner('legacy')}\n${tornLineEmbeddingHeader}\n`,
+    );
+
+    expect(isManagedSessionTranscriptSync(tornTranscriptPath)).toBe(false);
+    expect(isManagedExecutionTranscriptSync(tornTranscriptPath)).toBe(false);
+    expect(() =>
+      config.getSessionService().assertLegacySessionExecution(SESSION_ID),
+    ).not.toThrow();
+
+    const gluedTranscriptPath = await writeTranscript(
+      `${owner('legacy')}\n${userMessage('hello')}${JSON.stringify(headerObject)}\n`,
+    );
+    expect(isManagedSessionTranscriptSync(gluedTranscriptPath)).toBe(true);
+    expect(isManagedExecutionTranscriptSync(gluedTranscriptPath)).toBe(true);
+  });
+
   it('detects a Managed header whose subtype is written with JSON escapes', async () => {
     const header = line({
       type: 'system',

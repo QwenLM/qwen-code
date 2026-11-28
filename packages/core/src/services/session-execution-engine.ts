@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { parseLineTolerantWithIntegrity } from '../utils/jsonl-utils.js';
+import {
+  filterTranscriptSalvageRecords,
+  parseLineTolerantWithIntegrity,
+} from '../utils/jsonl-utils.js';
 import {
   validateTranscriptRecord,
   type TranscriptRecordInput,
@@ -84,6 +87,7 @@ export class SessionExecutionEngineAccumulator {
   private reason: string | undefined;
   private hasRecords = false;
   private complete = true;
+  private readonly knownUuids = new Set<string>();
 
   constructor(private readonly sessionId: string) {}
 
@@ -93,7 +97,12 @@ export class SessionExecutionEngineAccumulator {
     if (!parsed.complete) this.reason ??= 'incomplete transcript';
     this.complete &&= parsed.complete;
     const validated: ValidatedTranscriptLineRecord[] = [];
-    for (const value of parsed.records) {
+    const records = filterTranscriptSalvageRecords(
+      parsed,
+      this.knownUuids,
+      this.hasRecords,
+    );
+    for (const value of records) {
       this.hasRecords = true;
       const { record, diagnostics } = validateTranscriptRecord(value);
       validated.push({ value, record });

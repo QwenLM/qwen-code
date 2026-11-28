@@ -45,7 +45,7 @@ type JsonlReadLinesOptions = {
   signal?: AbortSignal;
 };
 
-interface ParsedJsonlLine<T> {
+export interface ParsedJsonlLine<T> {
   records: T[];
   complete: boolean;
   salvagedCount?: number;
@@ -317,7 +317,7 @@ export function parseLineTolerant<T>(line: string, filePath: string): T[] {
   return parseLineTolerantWithIntegrity<T>(line, filePath).records;
 }
 
-function isOrphanTranscriptSalvage(
+export function isOrphanTranscriptSalvage(
   obj: unknown,
   knownUuids: Set<string>,
   hasPriorRecords: boolean,
@@ -337,6 +337,45 @@ function isOrphanTranscriptSalvage(
     }
   }
   return false;
+}
+
+/**
+ * Drops trailing salvaged records whose parentUuid is missing from knownUuids.
+ * Preserves clean forward-scanned records untouched, and updates knownUuids with
+ * every accepted record's UUID.
+ */
+export function filterTranscriptSalvageRecords<T>(
+  parsed: ParsedJsonlLine<T>,
+  knownUuids: Set<string>,
+  hasPriorRecords: boolean,
+): T[] {
+  const salvagedCount = parsed.salvagedCount ?? 0;
+  const cleanCount = parsed.records.length - salvagedCount;
+  const retained: T[] = [];
+  for (let idx = 0; idx < parsed.records.length; idx++) {
+    const obj = parsed.records[idx]!;
+    const isSalvaged = idx >= cleanCount;
+    if (
+      isSalvaged &&
+      isOrphanTranscriptSalvage(
+        obj,
+        knownUuids,
+        hasPriorRecords || retained.length > 0,
+      )
+    ) {
+      continue;
+    }
+    if (
+      typeof obj === 'object' &&
+      obj !== null &&
+      'uuid' in obj &&
+      typeof (obj as { uuid: unknown }).uuid === 'string'
+    ) {
+      knownUuids.add((obj as { uuid: string }).uuid);
+    }
+    retained.push(obj);
+  }
+  return retained;
 }
 
 async function closeLineReader(
@@ -389,26 +428,13 @@ async function readLinesWithIntegrityInternal<T = unknown>(
       scannedLines++;
       const parsed = parseLineTolerantWithIntegrity<T>(trimmed, filePath);
       complete &&= parsed.complete;
-      const salvagedCount = parsed.salvagedCount ?? 0;
-      const cleanCount = parsed.records.length - salvagedCount;
-      for (let idx = 0; idx < parsed.records.length; idx++) {
-        const obj = parsed.records[idx]!;
+      const records = filterTranscriptSalvageRecords(
+        parsed,
+        knownUuids,
+        results.length > 0,
+      );
+      for (const obj of records) {
         if (budget === 'records' && results.length >= count) break;
-        const isSalvaged = idx >= cleanCount;
-        if (
-          isSalvaged &&
-          isOrphanTranscriptSalvage(obj, knownUuids, results.length > 0)
-        ) {
-          continue;
-        }
-        if (
-          typeof obj === 'object' &&
-          obj !== null &&
-          'uuid' in obj &&
-          typeof (obj as { uuid: unknown }).uuid === 'string'
-        ) {
-          knownUuids.add((obj as { uuid: string }).uuid);
-        }
         results.push(obj);
       }
       if (
@@ -486,27 +512,12 @@ export async function read<T = unknown>(
       if (trimmed.length === 0) continue;
       const parsed = parseLineTolerantWithIntegrity<T>(trimmed, filePath);
       if (!parsed.complete) options.onIncompleteRead?.();
-      const salvagedCount = parsed.salvagedCount ?? 0;
-      const cleanCount = parsed.records.length - salvagedCount;
-      for (let idx = 0; idx < parsed.records.length; idx++) {
-        const obj = parsed.records[idx]!;
-        const isSalvaged = idx >= cleanCount;
-        if (
-          isSalvaged &&
-          isOrphanTranscriptSalvage(obj, knownUuids, results.length > 0)
-        ) {
-          continue;
-        }
-        if (
-          typeof obj === 'object' &&
-          obj !== null &&
-          'uuid' in obj &&
-          typeof (obj as { uuid: unknown }).uuid === 'string'
-        ) {
-          knownUuids.add((obj as { uuid: string }).uuid);
-        }
-        results.push(obj);
-      }
+      const records = filterTranscriptSalvageRecords(
+        parsed,
+        knownUuids,
+        results.length > 0,
+      );
+      results.push(...records);
     }
 
     return results;

@@ -2952,6 +2952,20 @@ describe('SessionTranscriptReader', () => {
     expect(second.hasMore).toBe(false);
   });
 
+  it('drops a salvaged orphan record from the transcript index and resolves the previous real leaf', async () => {
+    const u1 = record('u1', null, 'first prompt');
+    const a1 = record('a1', 'u1', 'first answer');
+    const a2 = record('a2', 'u2', 'second answer');
+    const tornLine =
+      '{"type":"user","message":{"role":"user","parts":[{"text":"torn prompt u2 ' +
+      jsonLine(a2);
+    await writeRawTranscript(`${jsonLine(u1)}${jsonLine(a1)}${tornLine}`);
+
+    const page = await readPage();
+    expect(uuids(page.records)).toEqual(['u1', 'a1']);
+    expect(page.gaps).toEqual([]);
+  });
+
   it('keeps cursors valid after the in-memory key cache is reset', async () => {
     const { state } = await firstPage('hello', 'reply', 'next');
     const cursor = encodeCursor(state);

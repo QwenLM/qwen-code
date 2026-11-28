@@ -904,9 +904,11 @@ function findManagedHeaderRecord(
     if (!line.includes(MANAGED_HEADER_MARKER) && !line.includes('\\u')) {
       continue;
     }
-    const record = parseLineTolerantWithIntegrity(line, filePath).records.find(
-      isManagedHeaderRecord,
-    );
+    const parsed = parseLineTolerantWithIntegrity(line, filePath);
+    const cleanCount = parsed.records.length - (parsed.salvagedCount ?? 0);
+    const record = parsed.records
+      .slice(0, cleanCount)
+      .find(isManagedHeaderRecord);
     if (record !== undefined) return record as Record<string, unknown>;
   }
   return undefined;
@@ -963,18 +965,24 @@ export function readManagedExecutionEvidenceSync(
     ) {
       return false;
     }
-    const { records } = parseLineTolerantWithIntegrity(line, filePath);
+    const parsed = parseLineTolerantWithIntegrity(line, filePath);
+    const cleanCount = parsed.records.length - (parsed.salvagedCount ?? 0);
+    const cleanRecords = parsed.records.slice(0, cleanCount);
     return (
-      records.some(isManagedHeaderRecord) || records.some(isManagedOwnerRecord)
+      cleanRecords.some(isManagedHeaderRecord) ||
+      cleanRecords.some(isManagedOwnerRecord)
     );
   });
   if (found) return true;
   try {
     const first = readLocalJournalFirstLine(filePath);
     if (first === undefined) return false;
-    const { records } = parseLineTolerantWithIntegrity(first, filePath);
+    const parsed = parseLineTolerantWithIntegrity(first, filePath);
+    const cleanCount = parsed.records.length - (parsed.salvagedCount ?? 0);
+    const cleanRecords = parsed.records.slice(0, cleanCount);
     return (
-      records.some(isManagedHeaderRecord) || records.some(isManagedOwnerRecord)
+      cleanRecords.some(isManagedHeaderRecord) ||
+      cleanRecords.some(isManagedOwnerRecord)
     );
   } catch (error) {
     return error instanceof ManagedSessionRecordError ||

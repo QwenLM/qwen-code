@@ -3543,6 +3543,7 @@ export class SessionService {
       });
       try {
         const lines = readline.createInterface({ input, crlfDelay: Infinity });
+        const knownUuids = new Set<string>();
         try {
           for await (const line of lines) {
             if (!line.trim()) continue;
@@ -3551,22 +3552,12 @@ export class SessionService {
               identity.filePath,
             );
             complete &&= parsed.complete;
-            const salvagedCount = parsed.salvagedCount ?? 0;
-            const cleanCount = parsed.records.length - salvagedCount;
-            for (let idx = 0; idx < parsed.records.length; idx++) {
-              const record = parsed.records[idx]!;
-              const isSalvaged = idx >= cleanCount;
-              if (
-                isSalvaged &&
-                record?.uuid &&
-                (record.parentUuid
-                  ? !records.some((r) => r.uuid === record.parentUuid)
-                  : records.length > 0)
-              ) {
-                continue;
-              }
-              records.push(record);
-            }
+            const lineRecords = jsonl.filterTranscriptSalvageRecords(
+              parsed,
+              knownUuids,
+              records.length > 0,
+            );
+            records.push(...lineRecords);
           }
         } finally {
           lines.close();
