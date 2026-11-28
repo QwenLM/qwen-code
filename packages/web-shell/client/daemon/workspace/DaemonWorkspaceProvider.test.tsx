@@ -20,6 +20,7 @@ import {
 } from './DaemonWorkspaceProvider.js';
 import { useDaemonSessions } from './hooks/useDaemonSessions.js';
 import { useOptionalComposerWorkspace } from '../../hooks/useComposerWorkspace.js';
+import { useOptionalWorkspaceRuntime } from '../../utils/workspace-context.js';
 
 const sdkMocks = vi.hoisted(() => {
   const capabilities = vi.fn();
@@ -2054,5 +2055,20 @@ describe('DaemonWorkspaceProvider', () => {
 
     expect(result).toEqual(report);
     expect(sdkMocks.daemonStatus).toHaveBeenCalledWith('full');
+  });
+
+  it('publishes the same workspace context instance to neutral useOptionalWorkspaceRuntime consumers', async () => {
+    let daemonWorkspace: DaemonWorkspaceContextValue | undefined;
+    let neutralWorkspace: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      daemonWorkspace = useOptionalDaemonWorkspace();
+      neutralWorkspace = useOptionalWorkspaceRuntime();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    expect(daemonWorkspace).toBeDefined();
+    expect(neutralWorkspace).toBe(daemonWorkspace);
   });
 });
