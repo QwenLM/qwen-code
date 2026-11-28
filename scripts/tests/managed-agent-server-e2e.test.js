@@ -536,6 +536,10 @@ const classifierDelegation = (text) => {
       const arg = node.arguments[0];
       calls.push({
         callId: literalText(node.arguments[1]),
+        // The placement clauses judge these call sites, so a red on them must
+        // name a location too rather than print an empty message.
+        line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1,
+        text: node.getText(file).slice(0, 80),
         fn: fake === undefined ? -1 : fake.pos,
         fake: fake !== undefined,
         arm: fake === undefined ? undefined : fakeArm.get(fake),
@@ -572,7 +576,10 @@ const classifierDelegation = (text) => {
         isCallExpression(node) &&
         isPropertyAccessExpression(node.expression) &&
         MUTATORS.has(node.expression.name.text) &&
-        mentionsToolCallsMember(node.expression.expression)
+        (mentionsToolCallsMember(node.expression.expression) ||
+          // `answer[KEY].push(...)` reaches the member through a key the
+          // inventory cannot read, so it fails closed like an assignment does.
+          unreadableMemberKey(node.expression.expression))
       ) {
         record('no-loop-hand-built', node, fake);
       }
@@ -709,6 +716,12 @@ const classifierDelegation = (text) => {
     // The diagnostic names only what the pin judges: a hit in a fake outside
     // the arm set is not a violation, so it must not appear in the message.
     sites: sites.filter(inArm),
+    // Where the delegations sit, so a placement-clause red names a location.
+    placementSites: calls.map((c) => ({
+      clause: 'delegation',
+      line: c.line,
+      text: c.text,
+    })),
   };
 };
 
@@ -4228,7 +4241,7 @@ describe('managed-agent-server e2e runner', () => {
     const delegation = classifierDelegation(source);
     expect(
       delegationViolations(delegation),
-      delegation.sites
+      [...delegation.sites, ...delegation.placementSites]
         .map((s) => `${s.clause} @ runner:${s.line} — ${s.text}`)
         .join('\n'),
     ).toEqual([]);
@@ -4757,6 +4770,44 @@ describe('managed-agent-server e2e runner', () => {
             "\nconst calls = [];\nconst TOOL = 'respond_in_schema';\ncalls.push(fakeToolCall(TOOL, { shouldBlock: false }, 'x'));\nif (body['x']) return { toolCalls: calls };",
         ),
       ],
+      // A mutator reached through an unreadable element key: the receiver names
+      // the member only at runtime, so it fails closed.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst answer = { toolCalls: [fakeToolCall('cron_list', {}, 'c')] };\nconst KEY = 'toolCalls';\nanswer[KEY].push(" +
+            HAND +
+            ");\nif (body['x']) return answer;",
+        ),
+      ],
+      // Every mutator in the set is pinned, not just push: each of these
+      // replaces or inserts an element the declaration never enumerated.
+      ...[
+        ['unshift', HAND],
+        ['splice', '0, 1, ' + HAND],
+        ['fill', HAND + ', 0, 1'],
+        ['copyWithin', HAND + ', 0'],
+      ].map(([method, args]) => [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst calls = [fakeToolCall('cron_list', {}, 'c')];\ncalls." +
+            method +
+            '(' +
+            args +
+            ");\nif (body['x']) return { toolCalls: calls };",
+        ),
+      ]),
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst calls = [fakeToolCall('cron_list', {}, 'c')];\nObject.defineProperties(calls, { '0': { value: " +
+            HAND +
+            ", writable: true, configurable: true } });\nif (body['x']) return { toolCalls: calls };",
+        ),
+      ],
       // A destructuring declaration shadows the hoisted array with a source
       // the pin never enumerated, so the shorthand must not resolve to it.
       [
@@ -4960,6 +5011,17 @@ describe('managed-agent-server e2e runner', () => {
     }
     expect(nonArray[0].line).not.toBe(computedKey[0].line);
     expect(nonArray[0].text).not.toBe(computedKey[0].text);
+    // A placement-clause red must name a location too: with one delegation
+    // removed the inventory records nothing, so the message would be empty
+    // without the delegation sites.
+    const placementOnly = classifierDelegation(withSkill('void body;'));
+    expect(delegationViolations(placementOnly)).not.toEqual([]);
+    expect(placementOnly.sites).toEqual([]);
+    expect(placementOnly.placementSites.length).toBeGreaterThan(0);
+    for (const site of placementOnly.placementSites) {
+      expect(site.line).toBeGreaterThan(0);
+      expect(site.text).toContain('loopClassifierResponse');
+    }
     // The diagnostic names only what the pin judges. A fake outside the arm
     // set answers legitimately, so its hit is recorded during the walk but
     // must not survive into the message.
