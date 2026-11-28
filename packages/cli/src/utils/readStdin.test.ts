@@ -17,6 +17,9 @@ const mockStdin = {
 };
 
 describe('readStdin', () => {
+  const baselineStderrErrorListeners = new Set(
+    process.stderr.listeners('error'),
+  );
   let originalStdin: typeof process.stdin;
   let onReadableHandler: () => void;
   let onEndHandler: () => void;
@@ -40,6 +43,14 @@ describe('readStdin', () => {
   });
 
   afterEach(() => {
+    for (const listener of process.stderr.listeners('error')) {
+      if (!baselineStderrErrorListeners.has(listener)) {
+        process.stderr.removeListener(
+          'error',
+          listener as (...args: unknown[]) => void,
+        );
+      }
+    }
     vi.restoreAllMocks();
     Object.defineProperty(process, 'stdin', {
       value: originalStdin,
@@ -88,6 +99,149 @@ describe('readStdin', () => {
     await expect(promise).resolves.toBe('');
 
     vi.useRealTimers();
+  });
+
+  it('should warn on stderr when warnOnTimeout is set and no input arrives before timeout', async () => {
+    vi.useFakeTimers();
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    const stderrSpy = vi.fn(() => true);
+    (process.stderr as { write: unknown }).write = stderrSpy;
+
+    try {
+      const promise = readStdin({ warnOnTimeout: true });
+      vi.advanceTimersByTime(500);
+
+      await expect(promise).resolves.toBe('');
+      expect(stderrSpy).toHaveBeenCalledTimes(1);
+      expect(stderrSpy).toHaveBeenCalledWith(
+        'Warning: no stdin input received within 500ms; proceeding without stdin.\n',
+      );
+    } finally {
+      (process.stderr as { write: typeof originalWrite }).write = originalWrite;
+      vi.useRealTimers();
+    }
+  });
+
+  it('should stay silent on timeout when warnOnTimeout is false or omitted', async () => {
+    vi.useFakeTimers();
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    const stderrSpy = vi.fn(() => true);
+    (process.stderr as { write: unknown }).write = stderrSpy;
+
+    try {
+      const pDefault = readStdin();
+      vi.advanceTimersByTime(500);
+      await expect(pDefault).resolves.toBe('');
+
+      const pFalse = readStdin({ warnOnTimeout: false });
+      vi.advanceTimersByTime(500);
+      await expect(pFalse).resolves.toBe('');
+
+      expect(stderrSpy).not.toHaveBeenCalled();
+    } finally {
+      (process.stderr as { write: typeof originalWrite }).write = originalWrite;
+      vi.useRealTimers();
+    }
+  });
+
+  it('should stay silent when data arrives before timeout with warnOnTimeout set', async () => {
+    vi.useFakeTimers();
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    const stderrSpy = vi.fn(() => true);
+    (process.stderr as { write: unknown }).write = stderrSpy;
+
+    mockStdin.read.mockReturnValueOnce('chunk').mockReturnValueOnce(null);
+
+    try {
+      const promise = readStdin({ warnOnTimeout: true });
+      onReadableHandler();
+      vi.advanceTimersByTime(500);
+      onEndHandler();
+
+      await expect(promise).resolves.toBe('chunk');
+      expect(stderrSpy).not.toHaveBeenCalled();
+    } finally {
+      (process.stderr as { write: typeof originalWrite }).write = originalWrite;
+      vi.useRealTimers();
+    }
+  });
+
+  it('should ignore EPIPE errors when writing timeout warning', async () => {
+    vi.useFakeTimers();
+    const beforeListeners = new Set(process.stderr.listeners('error'));
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    const destroySpy = vi
+      .spyOn(process.stderr, 'destroy')
+      .mockReturnValue(process.stderr);
+
+    const epipe = () =>
+      Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+
+    const stderrSpy = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw epipe();
+      })
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => process.stderr.emit('error', epipe()));
+        return false;
+      });
+    (process.stderr as { write: unknown }).write = stderrSpy;
+
+    try {
+      const syncPromise = readStdin({ warnOnTimeout: true });
+      vi.advanceTimersByTime(500);
+      await expect(syncPromise).resolves.toBe('');
+
+      const asyncPromise = readStdin({ warnOnTimeout: true });
+      vi.advanceTimersByTime(500);
+      await expect(asyncPromise).resolves.toBe('');
+
+      expect(destroySpy).toHaveBeenCalledTimes(1);
+      expect(stderrSpy).toHaveBeenCalledTimes(2);
+      const addedListeners = process.stderr
+        .listeners('error')
+        .filter((listener) => !beforeListeners.has(listener));
+      expect(addedListeners).toHaveLength(1);
+    } finally {
+      (process.stderr as { write: typeof originalWrite }).write = originalWrite;
+      for (const listener of process.stderr.listeners('error')) {
+        if (!beforeListeners.has(listener)) {
+          process.stderr.removeListener(
+            'error',
+            listener as (...args: unknown[]) => void,
+          );
+        }
+      }
+      destroySpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('should resolve with truncated input when stderr throws EPIPE during truncation warning', async () => {
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    const stderrSpy = vi.fn(() => {
+      throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    });
+    (process.stderr as { write: unknown }).write = stderrSpy;
+
+    const maxStdinSize = 8 * 1024 * 1024;
+    const input = 'a'.repeat(maxStdinSize + 1024);
+    mockStdin.read.mockReturnValueOnce(input).mockReturnValueOnce(null);
+
+    try {
+      const promise = readStdin();
+      onReadableHandler();
+
+      const result = await promise;
+      expect(Buffer.byteLength(result, 'utf8')).toBe(maxStdinSize);
+      expect(mockStdin.destroy).toHaveBeenCalledOnce();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        `Warning: stdin input truncated to ${maxStdinSize} bytes.\n`,
+      );
+    } finally {
+      (process.stderr as { write: typeof originalWrite }).write = originalWrite;
+    }
   });
 
   it('should clear timeout once when data is received and resolve with data', async () => {

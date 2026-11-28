@@ -62,6 +62,7 @@ vi.mock(
 );
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockReadStdin = vi.hoisted(() => vi.fn(async () => ''));
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockConsumeLastRenderError = vi.hoisted(() => vi.fn());
 const mockHandleListExtensions = vi.hoisted(() => vi.fn());
@@ -247,6 +248,10 @@ vi.mock('./utils/stdioHelpers.js', () => ({
   clearScreen: vi.fn(),
 }));
 
+vi.mock('./utils/readStdin.js', () => ({
+  readStdin: mockReadStdin,
+}));
+
 vi.mock('./utils/relaunch.js', () => ({
   exitWhenSupervisorExits: vi.fn(),
   relaunchAppInChildProcess: vi.fn(),
@@ -401,6 +406,186 @@ function withLspDisabledConfig<T extends object>(
   };
 }
 
+function stubIsTTY(
+  stream: { isTTY?: unknown },
+  value: boolean | undefined,
+): () => void {
+  const original = Object.getOwnPropertyDescriptor(stream, 'isTTY');
+  Object.defineProperty(stream, 'isTTY', { value, configurable: true });
+  return () => {
+    if (original) {
+      Object.defineProperty(stream, 'isTTY', original);
+    } else {
+      delete stream.isTTY;
+    }
+  };
+}
+
+async function withStdinIsTTY<T>(
+  isTTY: boolean,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const restore = stubIsTTY(process.stdin, isTTY);
+  try {
+    return await fn();
+  } finally {
+    restore();
+  }
+}
+
+interface RunMainOptions {
+  stdinIsTTY?: boolean;
+  question?: string;
+  resumedSessionData?: unknown;
+  onInitialize?: () => Promise<void> | void;
+  getWarnings?: () => string[];
+  runNonInteractiveImpl?: () => Promise<number>;
+}
+
+interface RunMainResult {
+  calls: number;
+  runNonInteractiveCalls: unknown[][];
+  initializeAppCalls: unknown[][];
+  configStub: Config;
+}
+
+async function runMain({
+  stdinIsTTY = false,
+  question = 'hello',
+  resumedSessionData,
+  onInitialize,
+  getWarnings,
+  runNonInteractiveImpl,
+}: RunMainOptions = {}): Promise<RunMainResult> {
+  const originalNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
+  process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+
+  const processExitSpy = vi
+    .spyOn(process, 'exit')
+    .mockImplementation((code) => {
+      throw new MockProcessExitError(code);
+    });
+  const { loadCliConfig, parseArguments } = await import('./config/config.js');
+  const { loadSettings } = await import('./config/settings.js');
+  const cleanupModule = await import('./utils/cleanup.js');
+  const validatorModule = await import('./validateNonInterActiveAuth.js');
+  const nonInteractiveModule = await import('./nonInteractiveCli.js');
+  const initializerModule = await import('./core/initializer.js');
+  const startupWarningsModule = await import('./utils/startupWarnings.js');
+  const userStartupWarningsModule = await import(
+    './utils/userStartupWarnings.js'
+  );
+
+  vi.mocked(cleanupModule.runExitCleanup).mockResolvedValue(undefined);
+  const initSpy = vi
+    .spyOn(initializerModule, 'initializeApp')
+    .mockResolvedValue({
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      memoryFileCount: 0,
+    });
+  const startupSpy = vi
+    .spyOn(startupWarningsModule, 'getStartupWarnings')
+    .mockResolvedValue([]);
+  const userStartupSpy = vi
+    .spyOn(userStartupWarningsModule, 'getUserStartupWarnings')
+    .mockResolvedValue([]);
+  const runNonInteractiveSpy = vi
+    .spyOn(nonInteractiveModule, 'runNonInteractive')
+    .mockImplementation(runNonInteractiveImpl ?? (async () => 0));
+
+  const configStub = {
+    isInteractive: () => false,
+    isProjectHooksPendingApproval: () => false,
+    getQuestion: () => question,
+    getSandbox: () => false,
+    getApprovalMode: () => ApprovalMode.DEFAULT,
+    getDebugMode: () => false,
+    getListExtensions: () => false,
+    getMcpServers: () => ({}),
+    getTopTierMcpServers: () => undefined,
+    getModelProvidersConfig: () => undefined,
+    initialize: vi.fn().mockImplementation(async () => {
+      await onInitialize?.();
+    }),
+    waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+    getFailedMcpServerNames: () => [],
+    getIdeMode: () => false,
+    getExperimentalZedIntegration: () => false,
+    getScreenReader: () => false,
+    getMemoryFileCount: () => 0,
+    getProjectRoot: () => '/',
+    getOutputFormat: () => OutputFormat.TEXT,
+    getWarnings: () => getWarnings?.() ?? [],
+    isSafeMode: () => false,
+    getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+    getContentGeneratorConfig: () => undefined,
+    getUsageStatisticsEnabled: () => true,
+    getSessionId: () => 'test-session-id',
+    getProxy: () => undefined,
+    getResumedSessionData: () => resumedSessionData,
+  } as unknown as Config;
+
+  vi.mocked(parseArguments).mockResolvedValue({
+    extensions: [],
+    ...(question ? { prompt: question } : {}),
+  } as unknown as CliArgs);
+  vi.mocked(loadSettings).mockReturnValue({
+    errors: [],
+    merged: {
+      advanced: {},
+      security: { auth: {} },
+      ui: {},
+    },
+    setValue: vi.fn(),
+    forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+    migrationWarnings: [],
+    getSystemHooks: () => undefined,
+    getUserHooks: () => undefined,
+    getProjectHooks: () => undefined,
+  } as never);
+  vi.mocked(loadCliConfig).mockResolvedValue(configStub);
+  const validateAuthSpy = vi
+    .spyOn(validatorModule, 'validateNonInteractiveAuth')
+    .mockResolvedValue(configStub);
+
+  let runNonInteractiveCalls: unknown[][] = [];
+  let initializeAppCalls: unknown[][] = [];
+  try {
+    await withStdinIsTTY(stdinIsTTY, async () => {
+      try {
+        await main();
+      } catch (error) {
+        if (!(error instanceof MockProcessExitError)) {
+          throw error;
+        }
+      }
+    });
+    runNonInteractiveCalls = runNonInteractiveSpy.mock.calls.slice();
+    initializeAppCalls = initSpy.mock.calls.slice();
+  } finally {
+    processExitSpy.mockRestore();
+    initSpy.mockRestore();
+    startupSpy.mockRestore();
+    userStartupSpy.mockRestore();
+    runNonInteractiveSpy.mockRestore();
+    validateAuthSpy.mockRestore();
+    if (originalNoRelaunch !== undefined) {
+      process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
+    } else {
+      delete process.env['QWEN_CODE_NO_RELAUNCH'];
+    }
+  }
+
+  return {
+    calls: runNonInteractiveCalls.length,
+    runNonInteractiveCalls,
+    initializeAppCalls,
+    configStub,
+  };
+}
+
 describe('llm.tsx main function', () => {
   let originalEnvGeminiSandbox: string | undefined;
   let originalEnvSandbox: string | undefined;
@@ -410,6 +595,7 @@ describe('llm.tsx main function', () => {
     [];
 
   beforeEach(() => {
+    mockReadStdin.mockReset().mockResolvedValue('');
     mockStartNonInteractiveOpenAILogHousekeeping.mockClear();
     mockStopNonInteractiveOpenAILogHousekeeping.mockClear();
     lspConfigWatcherMock.instances.length = 0;
@@ -1774,20 +1960,6 @@ describe('llm.tsx main function', () => {
   ])(
     'resolves the auto theme baseline only when the run can render it (stdoutIsTTY=$stdoutIsTTY, promptInteractive=$promptInteractive)',
     async ({ stdoutIsTTY, promptInteractive, expectAuto }) => {
-      const stubIsTTY = (
-        stream: { isTTY?: unknown },
-        value: boolean | undefined,
-      ): (() => void) => {
-        const original = Object.getOwnPropertyDescriptor(stream, 'isTTY');
-        Object.defineProperty(stream, 'isTTY', { value, configurable: true });
-        return () => {
-          if (original) {
-            Object.defineProperty(stream, 'isTTY', original);
-          } else {
-            delete stream.isTTY;
-          }
-        };
-      };
       const restoreStdoutIsTTY = stubIsTTY(process.stdout, stdoutIsTTY);
       // `-i` exits early unless stdin is a terminal.
       const restoreStdinIsTTY = stubIsTTY(process.stdin, true);
@@ -2189,139 +2361,33 @@ describe('llm.tsx main function', () => {
   });
 
   it('writes non-interactive warnings discovered during config initialization', async () => {
-    const originalNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
-    const originalIsTTY = Object.getOwnPropertyDescriptor(
-      process.stdin,
-      'isTTY',
-    );
-    process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
-    Object.defineProperty(process.stdin, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-
-    const processExitSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((code) => {
-        throw new MockProcessExitError(code);
-      });
-    const { loadCliConfig, parseArguments } = await import(
-      './config/config.js'
-    );
-    const { loadSettings } = await import('./config/settings.js');
     const cleanupModule = await import('./utils/cleanup.js');
-    const validatorModule = await import('./validateNonInterActiveAuth.js');
-    const nonInteractiveModule = await import('./nonInteractiveCli.js');
-    const initializerModule = await import('./core/initializer.js');
-    const startupWarningsModule = await import('./utils/startupWarnings.js');
-    const userStartupWarningsModule = await import(
-      './utils/userStartupWarnings.js'
-    );
-
     mockWriteStderrLine.mockClear();
-    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
-    runExitCleanupMock.mockResolvedValue(undefined);
     const cleanupRegistrationStart = vi.mocked(cleanupModule.registerCleanup)
       .mock.calls.length;
-    vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
-      authError: null,
-      themeError: null,
-      shouldOpenAuthDialog: false,
-      memoryFileCount: 0,
-    });
-    vi.spyOn(startupWarningsModule, 'getStartupWarnings').mockResolvedValue([]);
-    vi.spyOn(
-      userStartupWarningsModule,
-      'getUserStartupWarnings',
-    ).mockResolvedValue([]);
-    const runNonInteractiveSpy = vi
-      .spyOn(nonInteractiveModule, 'runNonInteractive')
-      .mockResolvedValue(0);
 
     let initialized = false;
-    const configStub = {
-      isInteractive: () => false,
-      isProjectHooksPendingApproval: () => false,
-      getQuestion: () => 'hello',
-      getSandbox: () => false,
-      getApprovalMode: () => ApprovalMode.DEFAULT,
-      getDebugMode: () => false,
-      getListExtensions: () => false,
-      getMcpServers: () => ({}),
-      getTopTierMcpServers: () => undefined,
-      getModelProvidersConfig: () => undefined,
-      initialize: vi.fn().mockImplementation(async () => {
+    const { configStub, initializeAppCalls } = await runMain({
+      stdinIsTTY: true,
+      question: 'hello',
+      onInitialize: () => {
         initialized = true;
-      }),
-      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
-      getFailedMcpServerNames: () => [],
-      getIdeMode: () => false,
-      getExperimentalZedIntegration: () => false,
-      getScreenReader: () => false,
-      getMemoryFileCount: () => 0,
-      getProjectRoot: () => '/',
-      getOutputFormat: () => OutputFormat.TEXT,
-      getWarnings: () => (initialized ? ['late memory warning'] : []),
-      isSafeMode: () => false,
-      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
-      getContentGeneratorConfig: () => undefined,
-      getUsageStatisticsEnabled: () => true,
-      getSessionId: () => 'test-session-id',
-      getProxy: () => undefined,
-    } as unknown as Config;
-
-    vi.mocked(parseArguments).mockResolvedValue({
-      extensions: [],
-    } as unknown as CliArgs);
-    vi.mocked(loadSettings).mockReturnValue({
-      errors: [],
-      merged: {
-        advanced: {},
-        security: { auth: {} },
-        ui: {},
       },
-      setValue: vi.fn(),
-      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
-      migrationWarnings: [],
-      getSystemHooks: () => undefined,
-      getUserHooks: () => undefined,
-      getProjectHooks: () => undefined,
-    } as never);
-    vi.mocked(loadCliConfig).mockResolvedValue(configStub);
-    vi.spyOn(validatorModule, 'validateNonInteractiveAuth').mockResolvedValue(
-      configStub,
-    );
-
-    try {
-      await main();
-    } catch (error) {
-      if (!(error instanceof MockProcessExitError)) {
-        throw error;
-      }
-    } finally {
-      processExitSpy.mockRestore();
-      if (originalIsTTY) {
-        Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
-      } else {
-        delete (process.stdin as { isTTY?: unknown }).isTTY;
-      }
-      if (originalNoRelaunch !== undefined) {
-        process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
-      } else {
-        delete process.env['QWEN_CODE_NO_RELAUNCH'];
-      }
-    }
+      getWarnings: () => (initialized ? ['late memory warning'] : []),
+    });
 
     expect(mockWriteStderrLine).toHaveBeenCalledWith('late memory warning');
-    expect(initializerModule.initializeApp).toHaveBeenCalledWith(
-      configStub,
-      expect.any(Object),
-      {
-        deferIdeConnection: false,
-        allowSubscriptionStartupFallback: true,
-        allowUnlistedSubscriptionModel: false,
-      },
-    );
+    expect(initializeAppCalls).toEqual([
+      [
+        configStub,
+        expect.any(Object),
+        {
+          deferIdeConnection: false,
+          allowSubscriptionStartupFallback: true,
+          allowUnlistedSubscriptionModel: false,
+        },
+      ],
+    ]);
     expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
       configStub,
       expect.any(Object),
@@ -2333,34 +2399,17 @@ describe('llm.tsx main function', () => {
     expect(mockStopNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledOnce();
 
     const runFailure = new Error('headless run failed');
-    runNonInteractiveSpy.mockRejectedValueOnce(runFailure);
-    process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
-    Object.defineProperty(process.stdin, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    const secondProcessExitSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((code) => {
-        throw new MockProcessExitError(code);
-      });
-    try {
-      await expect(main()).rejects.toBe(runFailure);
-    } finally {
-      secondProcessExitSpy.mockRestore();
-      if (originalIsTTY) {
-        Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
-      } else {
-        delete (process.stdin as { isTTY?: unknown }).isTTY;
-      }
-      if (originalNoRelaunch !== undefined) {
-        process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
-      } else {
-        delete process.env['QWEN_CODE_NO_RELAUNCH'];
-      }
-    }
+    await expect(
+      runMain({
+        stdinIsTTY: true,
+        question: 'hello',
+        runNonInteractiveImpl: async () => {
+          throw runFailure;
+        },
+      }),
+    ).rejects.toBe(runFailure);
 
-    expect(runExitCleanupMock).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(cleanupModule.runExitCleanup)).toHaveBeenCalledTimes(2);
     expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledTimes(
       2,
     );
@@ -2587,79 +2636,10 @@ describe('llm.tsx main function', () => {
     // `getResumedSessionData()` argument in main(), the shipped `-p` path
     // reverts to `########0` on every resume while the unit tests above stay
     // green.
-    const originalNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
-    const originalIsTTY = Object.getOwnPropertyDescriptor(
-      process.stdin,
-      'isTTY',
-    );
-    process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
-    Object.defineProperty(process.stdin, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-
-    const processExitSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((code) => {
-        throw new MockProcessExitError(code);
-      });
-    const { loadCliConfig, parseArguments } = await import(
-      './config/config.js'
-    );
-    const { loadSettings } = await import('./config/settings.js');
-    const cleanupModule = await import('./utils/cleanup.js');
-    const validatorModule = await import('./validateNonInterActiveAuth.js');
-    const nonInteractiveModule = await import('./nonInteractiveCli.js');
-    const initializerModule = await import('./core/initializer.js');
-    const startupWarningsModule = await import('./utils/startupWarnings.js');
-    const userStartupWarningsModule = await import(
-      './utils/userStartupWarnings.js'
-    );
-
-    vi.mocked(cleanupModule.runExitCleanup).mockResolvedValue(undefined);
-    vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
-      authError: null,
-      themeError: null,
-      shouldOpenAuthDialog: false,
-      memoryFileCount: 0,
-    });
-    vi.spyOn(startupWarningsModule, 'getStartupWarnings').mockResolvedValue([]);
-    vi.spyOn(
-      userStartupWarningsModule,
-      'getUserStartupWarnings',
-    ).mockResolvedValue([]);
-    const runNonInteractiveSpy = vi
-      .spyOn(nonInteractiveModule, 'runNonInteractive')
-      .mockResolvedValue(0);
-
-    const configStub = {
-      isInteractive: () => false,
-      isProjectHooksPendingApproval: () => false,
-      getQuestion: () => 'hello',
-      getSandbox: () => false,
-      getApprovalMode: () => ApprovalMode.DEFAULT,
-      getDebugMode: () => false,
-      getListExtensions: () => false,
-      getMcpServers: () => ({}),
-      getTopTierMcpServers: () => undefined,
-      getModelProvidersConfig: () => undefined,
-      initialize: vi.fn().mockResolvedValue(undefined),
-      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
-      getFailedMcpServerNames: () => [],
-      getIdeMode: () => false,
-      getExperimentalZedIntegration: () => false,
-      getScreenReader: () => false,
-      getMemoryFileCount: () => 0,
-      getProjectRoot: () => '/',
-      getOutputFormat: () => OutputFormat.TEXT,
-      getWarnings: () => [],
-      isSafeMode: () => false,
-      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
-      getContentGeneratorConfig: () => undefined,
-      getUsageStatisticsEnabled: () => true,
-      getSessionId: () => 'test-session-id',
-      getProxy: () => undefined,
-      getResumedSessionData: () => ({
+    const { runNonInteractiveCalls } = await runMain({
+      stdinIsTTY: true,
+      question: 'hello',
+      resumedSessionData: {
         conversation: {
           sessionId: 'test-session-id',
           messages: [
@@ -2678,55 +2658,33 @@ describe('llm.tsx main function', () => {
             },
           ],
         },
-      }),
-    } as unknown as Config;
-
-    vi.mocked(parseArguments).mockResolvedValue({
-      extensions: [],
-    } as unknown as CliArgs);
-    vi.mocked(loadSettings).mockReturnValue({
-      errors: [],
-      merged: {
-        advanced: {},
-        security: { auth: {} },
-        ui: {},
       },
-      setValue: vi.fn(),
-      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
-      migrationWarnings: [],
-      getSystemHooks: () => undefined,
-      getUserHooks: () => undefined,
-      getProjectHooks: () => undefined,
-    } as never);
-    vi.mocked(loadCliConfig).mockResolvedValue(configStub);
-    vi.spyOn(validatorModule, 'validateNonInteractiveAuth').mockResolvedValue(
-      configStub,
-    );
+    });
 
-    try {
-      await main();
-    } catch (error) {
-      if (!(error instanceof MockProcessExitError)) {
-        throw error;
-      }
-    } finally {
-      processExitSpy.mockRestore();
-      if (originalIsTTY) {
-        Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
-      } else {
-        delete (process.stdin as { isTTY?: unknown }).isTTY;
-      }
-      if (originalNoRelaunch !== undefined) {
-        process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
-      } else {
-        delete process.env['QWEN_CODE_NO_RELAUNCH'];
-      }
-    }
+    expect(runNonInteractiveCalls).toHaveLength(1);
+    expect(runNonInteractiveCalls[0]?.[3]).toBe('test-session-id########4');
+  });
 
-    expect(runNonInteractiveSpy).toHaveBeenCalledTimes(1);
-    expect(runNonInteractiveSpy.mock.calls[0]?.[3]).toBe(
-      'test-session-id########4',
-    );
+  it('enables stdin timeout warning in non-interactive mode when prompt is set', async () => {
+    const { calls } = await runMain({
+      stdinIsTTY: false,
+      question: 'hello',
+    });
+
+    expect(mockReadStdin).toHaveBeenCalledTimes(1);
+    expect(mockReadStdin).toHaveBeenCalledWith({ warnOnTimeout: true });
+    expect(calls).toBe(1);
+  });
+
+  it('disables stdin timeout warning in non-interactive mode when prompt is empty', async () => {
+    const { calls } = await runMain({
+      stdinIsTTY: false,
+      question: '',
+    });
+
+    expect(mockReadStdin).toHaveBeenCalledTimes(1);
+    expect(mockReadStdin).toHaveBeenCalledWith({ warnOnTimeout: false });
+    expect(calls).toBe(0);
   });
 
   const runSandboxRelaunch = async (
@@ -2847,6 +2805,15 @@ describe('llm.tsx main function', () => {
         process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'] = originalCapability;
       }
     }
+  });
+
+  it('suppresses timeout warning on outer stdin read when relaunching into sandbox', async () => {
+    await withStdinIsTTY(false, () =>
+      runSandboxRelaunch(['node', 'script.js', '--debug', '-p', 'hello']),
+    );
+
+    expect(mockReadStdin).toHaveBeenCalledTimes(1);
+    expect(mockReadStdin).toHaveBeenCalledWith();
   });
 
   it('does not pass an empty session ID into the sandbox child process', async () => {

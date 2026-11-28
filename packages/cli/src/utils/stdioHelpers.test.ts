@@ -6,6 +6,8 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  ignoreBrokenPipe,
+  ignoreBrokenStderr,
   writeStderrLine,
   writeStderrLineSafe,
   writeStdoutLineSafe,
@@ -70,5 +72,91 @@ describe('writeStdoutLineSafe', () => {
     });
 
     expect(() => writeStdoutLineSafe('boom')).not.toThrow();
+  });
+});
+
+describe('ignoreBrokenStderr', () => {
+  it('destroys stderr once on async EPIPE and ignores repeat calls', () => {
+    const beforeListeners = new Set(process.stderr.listeners('error'));
+    const destroySpy = vi
+      .spyOn(process.stderr, 'destroy')
+      .mockReturnValue(process.stderr);
+
+    try {
+      ignoreBrokenStderr();
+      ignoreBrokenStderr();
+
+      const addedListeners = process.stderr
+        .listeners('error')
+        .filter((listener) => !beforeListeners.has(listener));
+      expect(addedListeners).toHaveLength(1);
+
+      process.stderr.emit(
+        'error',
+        Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }),
+      );
+      expect(destroySpy).toHaveBeenCalledTimes(1);
+    } finally {
+      for (const listener of process.stderr.listeners('error')) {
+        if (!beforeListeners.has(listener)) {
+          process.stderr.removeListener(
+            'error',
+            listener as (...args: unknown[]) => void,
+          );
+        }
+      }
+    }
+  });
+});
+
+describe('ignoreBrokenPipe', () => {
+  it('destroys stdout and stderr once on async EPIPE and ignores repeat calls', () => {
+    const beforeStdout = new Set(process.stdout.listeners('error'));
+    const beforeStderr = new Set(process.stderr.listeners('error'));
+    const stdoutDestroySpy = vi
+      .spyOn(process.stdout, 'destroy')
+      .mockReturnValue(process.stdout);
+    const stderrDestroySpy = vi
+      .spyOn(process.stderr, 'destroy')
+      .mockReturnValue(process.stderr);
+
+    try {
+      ignoreBrokenPipe();
+      ignoreBrokenPipe();
+
+      const addedStdout = process.stdout
+        .listeners('error')
+        .filter((listener) => !beforeStdout.has(listener));
+      const addedStderr = process.stderr
+        .listeners('error')
+        .filter((listener) => !beforeStderr.has(listener));
+      expect(addedStdout).toHaveLength(1);
+      expect(addedStderr).toHaveLength(1);
+
+      const epipe = Object.assign(new Error('write EPIPE'), {
+        code: 'EPIPE',
+      });
+      process.stdout.emit('error', epipe);
+      process.stderr.emit('error', epipe);
+      expect(stdoutDestroySpy).toHaveBeenCalledTimes(1);
+      expect(stderrDestroySpy).toHaveBeenCalledTimes(1);
+    } finally {
+      for (const listener of process.stdout.listeners('error')) {
+        if (!beforeStdout.has(listener)) {
+          process.stdout.removeListener(
+            'error',
+            listener as (...args: unknown[]) => void,
+          );
+        }
+      }
+      for (const listener of process.stderr.listeners('error')) {
+        if (!beforeStderr.has(listener)) {
+          process.stderr.removeListener(
+            'error',
+            listener as (...args: unknown[]) => void,
+          );
+        }
+      }
+    }
   });
 });
