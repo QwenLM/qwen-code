@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
@@ -134,14 +135,11 @@ class JdbcRuntimeRetentionTest {
         fixture.execution(binding, "session", "settled", "SETTLED", OLD);
         fixture.execution(binding, "session", "abandoned", "ABANDONED", OLD);
         fixture.execute("INSERT INTO ma_session_head"
-                + " (tenant_key, harness_key, tenant_id, session_id, harness_session_id, head_kind, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, ?, ?, ?, 'HARNESS', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                JdbcRepositorySupport.valueKey("other-tenant"), JdbcRepositorySupport.valueKey("other-harness"),
+                + " (tenant_id, session_id, harness_session_id, head_kind, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, ?, 'HARNESS', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 "other-tenant", "other-harness", "other-harness");
-        fixture.execute("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id)"
-                + " VALUES (?, ?, ?, ?, ?, ?)",
-                RuntimeAdmissionFences.storageAliasKey("other-tenant", "other-storage"),
-                JdbcRepositorySupport.valueKey("other-tenant"), JdbcRepositorySupport.valueKey("other-storage"),
+        fixture.execute("INSERT INTO ma_storage (tenant_id, storage_id, fence_operation_id)"
+                + " VALUES (?, ?, ?)",
                 "other-tenant", "other-storage", UUID.randomUUID().toString());
 
         var total = fixture.complete(1, NO_REFERENCES);
@@ -363,12 +361,14 @@ class JdbcRuntimeRetentionTest {
             fixture.session(binding, binding.getBindingId(), "RELEASED", OLD);
             fixture.execution(binding, binding.getBindingId(), binding.getBindingId(), "SETTLED", OLD);
         }
-        fixture.execute("INSERT INTO ma_operation (operation_key, operation_id, scope_key, operation_kind, tenant_id,"
-                + " target_kind, target_key, target_id, target_revision, state, phase, request_digest, request_json,"
-                + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'WORKSPACE_OPERATOR_RECOVERY', ?, 'RUNTIME_BINDING',"
-                + " ?, ?, 1, 'COMPLETED', 'COMPLETED', ?, '{}', 1, 1)",
-                "a".repeat(64), UUID.randomUUID().toString(), "b".repeat(64),
-                recovery.getRequest().getScope().getTenantId(), "c".repeat(64), recovery.getBindingId(), "d".repeat(64));
+        String operationId = UUID.randomUUID().toString();
+        String tenant = recovery.getRequest().getScope().getTenantId();
+        fixture.execute("INSERT INTO ma_operation (operation_ref, operation_id, scope_kind, scope_id, operation_kind, tenant_id,"
+                + " target_kind, target_id, target_revision, state, phase, request_digest, request_json,"
+                + " gmt_create, gmt_modified) VALUES (?, ?, 'TENANT', ?, 'WORKSPACE_OPERATOR_RECOVERY', ?, 'RUNTIME_BINDING',"
+                + " ?, 1, 'COMPLETED', 'COMPLETED', ?, '{}', 1, 1)",
+                ManagedIdentityRefs.tenantOperationRef("WORKSPACE_OPERATOR_RECOVERY", tenant, operationId), operationId, tenant,
+                tenant, recovery.getBindingId(), "d".repeat(64));
 
         assertEquals(List.of(0, 0, 0), fixture.complete(100, guard(Set.of("holder"), Set.of())));
         assertEquals(2, fixture.count("ma_runtime_binding"));
@@ -442,7 +442,7 @@ class JdbcRuntimeRetentionTest {
             ids.add(id);
             fixture.execution(binding, "session", id, "SETTLED", OLD);
         }
-        ids.sort(Comparator.comparing(JdbcRepositorySupport::valueKey));
+        ids.sort(Comparator.naturalOrder());
         String deletable = ids.getLast();
         Set<String> protectedIds = new HashSet<>(ids.subList(0, 100));
 
@@ -627,7 +627,7 @@ class JdbcRuntimeRetentionTest {
             nextId = id + "-next";
             execute("UPDATE ma_runtime_binding SET binding_state = ?, last_active_at = ? "
                             + "WHERE binding_id = ?", state, Timestamp.from(OLD), created.getBindingId());
-            execute("UPDATE ma_runtime_slot SET active_binding_id = NULL WHERE request_key = ?",
+            execute("UPDATE ma_runtime_slot SET active_binding_id = NULL WHERE request_id = ?",
                     JdbcRepositorySupport.requestKey(request));
             return bindings.findById(id);
         }

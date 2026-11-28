@@ -227,7 +227,7 @@ parseArgs refuses (R3-4).
   the gate's plaintext, so — per the skill's step 5 — it declares
   `mode:"waived"` with the maintainer's approval; a gate-container attestation
   is not a substitute. That recipe records the constraint in step 1 (nonce
-  binding) and step 4 (the `mode:"waived"` declaration example), in both
+  binding) and step 5 (the `mode:"waived"` declaration example), in both
   languages; it is a proposal, not shipped code.
 
 ## Open questions

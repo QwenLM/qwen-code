@@ -53,7 +53,7 @@ export async function hostedPublicPlanActive(
     if (
       options.turnId !== promptId ||
       options.toolName !== 'exit_plan_mode' ||
-      options.v !== 3 ||
+      !options.continuationRef ||
       !hostedActionAllowed(action, options.policyRevision)
     )
       continue;

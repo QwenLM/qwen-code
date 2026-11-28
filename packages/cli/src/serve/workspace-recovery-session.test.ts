@@ -104,7 +104,6 @@ function fixture(
     head: {
       ...KEY,
       state: 'SEALED',
-      storageVersion: 1,
       writerId: 'writer',
       writerGeneration: 1,
       writerLeaseUntil: null,
@@ -383,8 +382,6 @@ async function hostedModelFixture(
   } finally {
     await session.close();
   }
-  if (options.diagnostics)
-    f.source.head = { ...f.source.head, storageVersion: 3 };
   const attempts = session.authority
     .eventsInSequenceRange(1, session.authority.committedSequence)
     .filter((event) => event.kind === 'model.attempt');
@@ -442,7 +439,6 @@ async function diagnosticResourceFixture(kind: string) {
       },
     });
   });
-  f.source.head = { ...f.source.head, storageVersion: 3 };
   return { ...f, diagnosticRef: diagnosticRef! };
 }
 
@@ -997,6 +993,11 @@ function hostedHistoryFixture(
   return { ...f, historyRef };
 }
 
+const HOSTED_PROFILES = [
+  'hosted-workspace-files/1',
+  'hosted-workspace-external-files/1',
+];
+
 describe('migration profile evidence', () => {
   it('refuses absolute Hosted history during migration', async () => {
     const f = hostedHistoryFixture({}, '/original/cwd/absent.txt');
@@ -1391,10 +1392,9 @@ describe('verifyRecoverySession', () => {
   });
 
   it.each(Object.values(MANAGED_MODEL_STATISTICS_KINDS))(
-    'verifies committed diagnostic resource %s at storage version 3',
+    'verifies committed diagnostic resource %s',
     async (kind) => {
       const f = await diagnosticResourceFixture(kind);
-      expect(f.source.head.storageVersion).toBe(3);
       expect(f.diagnosticRef.kind).toBe(kind);
       await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
         fileHistory: 'not_captured',
@@ -1954,7 +1954,6 @@ describe('verifyRecoverySession', () => {
   it.each([
     { hookCatalog: {} },
     { agentDefinition: {} },
-    { sessionSkillsRef: {} },
     { initialSelection: {} },
     { lineage: {} },
     { childWorkspaces: true },
@@ -1968,6 +1967,44 @@ describe('verifyRecoverySession', () => {
       'unsupported Hosted profile',
     );
   });
+
+  it.each(HOSTED_PROFILES)(
+    'admits a well-formed Session Skills ref on a %s definition',
+    async (toolProfile) => {
+      const bytes = Buffer.from(
+        JSON.stringify([{ name: 'added', description: 'Added', body: 'BODY' }]),
+      );
+      const sessionSkillsRef: ManagedSessionDurableRef = {
+        resourceId: 'session-skills',
+        kind: 'managed-agent-skills',
+        schemaVersion: 1,
+        byteLength: bytes.length,
+        digest: hash(bytes),
+      };
+      const f = fixture({ toolProfile, sessionSkillsRef });
+      f.resources.set(sessionSkillsRef.resourceId, bytes);
+      await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+        fileHistory: 'not_captured',
+      });
+      expect(f.complete.has(sessionSkillsRef.resourceId)).toBe(true);
+    },
+  );
+
+  it.each(
+    HOSTED_PROFILES.flatMap((toolProfile) =>
+      [{}, { resourceId: 'session-skills', kind: 'managed-agent-skills' }].map(
+        (sessionSkillsRef) => ({ toolProfile, sessionSkillsRef }),
+      ),
+    ),
+  )(
+    'refuses a malformed Session Skills ref on a %j definition',
+    async ({ toolProfile, sessionSkillsRef }) => {
+      const f = fixture({ toolProfile, sessionSkillsRef });
+      await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+        'unsupported Hosted profile',
+      );
+    },
+  );
 
   it('does not admit external files into migration', async () => {
     const f = fixture({ toolProfile: 'hosted-workspace-external-files/1' });
@@ -2256,11 +2293,7 @@ it('restores committed execution diagnostic source resources', async () => {
       message: { role: 'model', parts: [{ text: 'done' }] },
     });
   });
-  const source = {
-    ...f.source,
-    head: { ...f.source.head!, storageVersion: 4 },
-  };
-  await expect(verifyRecoverySession(source, f.io)).resolves.toBeDefined();
+  await expect(verifyRecoverySession(f.source, f.io)).resolves.toBeDefined();
   const diagnostics = [...f.resources.keys()].filter(
     (id) => f.refs.get(id)?.kind === 'managed-execution-diagnostics',
   );

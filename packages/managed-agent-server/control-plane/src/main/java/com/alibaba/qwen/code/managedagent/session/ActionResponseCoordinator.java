@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedActionStore.Action;
 import com.alibaba.qwen.code.managedagent.repository.ManagedActionStore.Response;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -31,7 +32,7 @@ public class ActionResponseCoordinator {
     private final LeaseRenewalRunner runner =
             new LeaseRenewalRunner("action-response-renewal");
 
-    @jakarta.annotation.PreDestroy
+    @PreDestroy
     void stopRenewals() {
         runner.close();
     }

@@ -659,6 +659,53 @@ describe('branch worktree preparation journal', () => {
 });
 
 describe('resolveBranchWorktreeBaseCheckout', () => {
+  it('accepts a worktree created under its nested registered workspace', async () => {
+    const workspaceCwd = path.join(root, 'nested');
+    const otherWorkspace = path.join(root, 'other');
+    await fs.mkdir(workspaceCwd);
+    await fs.mkdir(otherWorkspace);
+    const sessionId = '22222222-2222-4222-8222-222222222222';
+    const created = await new GitWorktreeService(
+      workspaceCwd,
+    ).createUserWorktree('nested-task', baseCommit, { detached: true });
+    if (!created.worktree) throw new Error(created.error);
+    const worktree = created.worktree;
+    await createWorktreeSessionMarker(worktree.path, sessionId);
+    await fs.mkdir(path.dirname(sidecarPath), { recursive: true });
+    const resolve = () =>
+      resolveBranchWorktreeBaseCheckout({
+        workspaceCwd,
+        sessionId,
+        sidecarPath,
+        snapshot: {
+          workspaceCwd,
+          effectiveCwd: worktree.path,
+          worktree: { slug: 'nested-task', path: worktree.path, branch: '' },
+        },
+      });
+    const attest = (owner: string) =>
+      fs.writeFile(
+        sidecarPath,
+        JSON.stringify({
+          slug: 'nested-task',
+          worktreePath: worktree.path,
+          worktreeBranch: '',
+          workspaceCwd: owner,
+          originalCwd: workspaceCwd,
+          originalBranch: 'main',
+          originalHeadCommit: baseCommit,
+        }),
+      );
+    await attest(otherWorkspace);
+    await expect(resolve()).resolves.toBeNull();
+    await attest(workspaceCwd);
+    await expect(resolve()).resolves.toMatchObject({
+      repoTop: await fs.realpath(root),
+      checkoutCwd: await fs.realpath(worktree.path),
+      headCommit: baseCommit,
+    });
+  });
+
   it('accepts a detached HEAD in the source session managed worktree', async () => {
     const sourceSessionId = '22222222-2222-4222-8222-222222222222';
     const service = new GitWorktreeService(root);

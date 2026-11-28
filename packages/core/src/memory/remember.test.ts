@@ -32,7 +32,8 @@ vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
 }));
 
-vi.mock('./indexer.js', () => ({
+vi.mock('./indexer.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./indexer.js')>()),
   rebuildManagedAutoMemoryIndex: vi.fn(),
   rebuildUserAutoMemoryIndex: vi.fn(),
 }));
@@ -47,6 +48,7 @@ function createConfig(
   return {
     isManagedMemoryAvailable: vi.fn().mockReturnValue(managed),
     getProjectRoot: vi.fn().mockReturnValue(projectRoot),
+    getModelContextWindowSize: vi.fn().mockReturnValue(200_000),
     getUserMemory: vi.fn().mockReturnValue('QWEN/AGENTS guidance'),
     getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
     getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
@@ -155,7 +157,10 @@ describe('remember memory helper', () => {
   // rebuilt; user `undefined`: unchecked.
   const expectRebuilt = (managed: boolean, user?: boolean) => {
     if (managed) {
-      expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+      expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(
+        projectRoot,
+        undefined,
+      );
     } else {
       expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
     }
@@ -357,6 +362,25 @@ describe('remember memory helper', () => {
         expect(systemPrompt).not.toContain('USER memory');
         expect(systemPrompt).not.toContain(getUserAutoMemoryRoot());
       }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'remembers a project topic without reading a symlinked index',
+    async () => {
+      const outside = path.join(tempDir, 'outside.md');
+      await fs.writeFile(outside, 'UNTRUSTED_PROJECT_INDEX');
+      await fs.mkdir(path.dirname(projMem('MEMORY.md')), { recursive: true });
+      await fs.symlink(outside, projMem('MEMORY.md'));
+      agentWrites([projMem('project', 'lesson.md')], 'Saved.');
+
+      await expect(runTargeted('project')).resolves.toMatchObject({
+        touchedScopes: ['project'],
+      });
+      expect(runForkedAgent).toHaveBeenCalledOnce();
+      expect(forkParams().systemPrompt).not.toContain(
+        'UNTRUSTED_PROJECT_INDEX',
+      );
     },
   );
 

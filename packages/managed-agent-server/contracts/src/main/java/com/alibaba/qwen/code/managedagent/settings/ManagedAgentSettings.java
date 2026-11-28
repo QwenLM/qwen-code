@@ -23,6 +23,8 @@ public interface ManagedAgentSettings {
     public Events getEvents();
     public RuntimeBroker getRuntimeBroker();
     public String getAgentRevision();
+    /** The account the server runs as; blank means the launching account. */
+    public default String getServiceUser() { return ""; }
     public List<String> getDefinitionToolProfiles();
     public List<String> getDefinitionModels();
     public List<? extends ModelOption> getModelCatalog();
@@ -166,9 +168,6 @@ public interface ManagedAgentSettings {
             public Duration getScanDelay();
         }
         public boolean isEnabled();
-        public String getHost();
-        public int getPort();
-        public boolean isAllowNonLoopback();
         public Duration getV3ResultWindow();
         public String getToken();
         public String getProvisioner();

@@ -57,6 +57,7 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.scope.workspace': 'Workspace',
   'settings.value.on': 'ON',
   'settings.value.off': 'OFF',
+  'settings.value.unset': 'Not set',
   'settings.action.edit': 'Edit',
   'settings.action.select': 'Select',
   'settings.action.save': 'Save',
@@ -114,6 +115,11 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.label.ui.chatWidth': 'Chat width',
   'settings.description.ui.chatWidth':
     'Frontend-only chat content width. Stored in this browser.',
+  'settings.arrowKeyHistory.label': 'Recall history with arrow keys',
+  'settings.arrowKeyHistory.description':
+    'Press Up or Down in the message box to recall previous prompts. Saved in this browser.',
+  'settings.arrowKeyHistory.disabledByHost':
+    'The host app has turned off arrow-key history recall.',
   'settings.label.ui.enableFollowupSuggestions': 'Enable Follow-up Suggestions',
   'settings.description.ui.enableFollowupSuggestions':
     'Show context-aware follow-up suggestions after a task completes. Press Tab or Right Arrow to insert, Enter to accept and submit.',
@@ -159,6 +165,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.scope.workspace': '工作区',
   'settings.value.on': '开',
   'settings.value.off': '关',
+  'settings.value.unset': '未设置',
   'settings.action.edit': '编辑',
   'settings.action.select': '选择',
   'settings.action.save': '保存',
@@ -216,6 +223,10 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.ui.chatWidth': '屏宽',
   'settings.description.ui.chatWidth':
     '纯前端的聊天内容宽度设置，保存在当前浏览器中。',
+  'settings.arrowKeyHistory.label': '用上下键寻回历史消息',
+  'settings.arrowKeyHistory.description':
+    '在消息输入框中按 ↑ 或 ↓ 可寻回历史消息。此设置保存在当前浏览器中。',
+  'settings.arrowKeyHistory.disabledByHost': '宿主应用已关闭方向键历史寻回。',
   'settings.option.ui.chatWidth.1000': '常规',
   'settings.option.ui.chatWidth.wide': '超宽',
   'settings.category.General': '通用',
@@ -256,6 +267,12 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.placeholder.general.outputLanguage': '自动（跟随输入）',
   'settings.option.general.outputLanguage.useCustom': (v) =>
     `使用“${v?.value ?? ''}”`,
+  'settings.label.general.displayLanguage': '语言：显示翻译',
+  'settings.description.general.displayLanguage':
+    '在终端和 Web Shell 中把模型的回复和展开的思考翻译成该语言显示。模型照常回答；存储的对话、模型读到的内容和复制的文本保持原文。每个翻译的块调用一次 fast model，未设置时使用会话模型。无需安装任何东西，也无需打开实验性功能。修改后新会话生效。',
+  'settings.option.general.displayLanguage.off': '关闭',
+  'settings.option.general.displayLanguage.zh-CN': '简体中文',
+  'settings.option.general.displayLanguage.en': 'English',
   'settings.label.general.preventSystemSleep': '运行时防止系统睡眠',
   'settings.description.general.preventSystemSleep':
     '当 Qwen Code 正在流式生成模型回复或执行工具时防止系统睡眠。空闲输入状态和权限确认状态不会阻止睡眠。',
@@ -454,10 +471,10 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
     '在受信任的本地交互终端、无界面会话和 ACP 会话中加载已启用扩展的实验性 Mods。修改后需重启。',
   'settings.label.experimental.unifiedAgentLoop': '统一 Agent Loop',
   'settings.description.experimental.unifiedAgentLoop':
-    '让会话运行在共享的 agent loop 上。未设置时，每个入口使用自己的默认值：headless 会话（`-p` 与 stream-json）、ACP 会话（Zed、VS Code、Web Shell、channel）、Ink TUI 和子代理运行在共享 loop 上，OpenTUI 和 Hosted Harness 仍用各自的 loop（在这些入口上属实验性）。设为 `true` 时它们都运行在共享 loop 上（Hosted Harness 的模型轮运行在它上面，同时保留其 journal 化工具派发），设为 `false` 时它们都用各自的 loop，headless、ACP 会话、Ink TUI 和子代理也是。QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP 环境变量按入口覆盖此设置：`1` 开启所有入口，`0` 关闭所有入口，逗号分隔的列表（如 `headless,acp=0`）强制指定入口（headless、acp、ink、opentui、agent-core、speculation、hosted）。裸 `1`/`0` 只作为整值识别，不在列表内生效；列表未点名的入口回退到此设置。项目级 `.env` 或 `settings.env` 无法设置该变量。',
+    '让会话运行在共享的 agent loop 上。未设置时，每个入口使用自己的默认值：headless 会话（`-p` 与 stream-json）、ACP 会话（Zed、VS Code、Web Shell、channel）、Ink TUI、OpenTUI 和子代理运行在共享 loop 上，Hosted Harness 仍用自己的 loop（在该入口上属实验性）。设为 `true` 时它们都运行在共享 loop 上（Hosted Harness 的模型轮运行在它上面，同时保留其 journal 化工具派发），设为 `false` 时它们都用各自的 loop，headless、ACP 会话、两个 TUI 和子代理也是。QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP 环境变量按入口覆盖此设置：`1` 开启所有入口，`0` 关闭所有入口，逗号分隔的列表（如 `headless,acp=0`）强制指定入口（headless、acp、ink、opentui、agent-core、speculation、hosted）。裸 `1`/`0` 只作为整值识别，不在列表内生效；列表未点名的入口回退到此设置。项目级 `.env` 或 `settings.env` 无法设置该变量。',
   'settings.label.experimental.eventBusAgentLoop': '事件总线 Agent Loop',
   'settings.description.experimental.eventBusAgentLoop':
-    '让共享 agent loop 运行在事件总线架构上（实验性）。对运行在共享 agent loop 上的入口生效：默认是 headless 会话（`-p` 与 stream-json）、ACP 会话（Zed、VS Code、Web Shell、channel）、Ink TUI 和子代理，开启 experimental.unifiedAgentLoop 时还有 OpenTUI；其他 surface 保留现有的 loop 内部实现。QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP 环境变量覆盖此设置：`1` 开启，`0` 关闭，逗号分隔的列表（如 `headless=0`）强制指定入口（headless、acp、ink、opentui、agent-core；`speculation` 为保留名）。今天只有这些已接线的入口生效；裸 `1`/`0` 只作为整值识别，不在列表内生效，列表未点名的入口回退到此设置。项目级 `.env` 或 `settings.env` 无法设置该变量。',
+    '让共享 agent loop 运行在事件总线架构上。对运行在共享 agent loop 上的入口生效：默认是 headless 会话（`-p` 与 stream-json）、ACP 会话（Zed、VS Code、Web Shell、channel）、Ink TUI、OpenTUI 和子代理；其他 surface 保留现有的 loop 内部实现。未设置时，headless 会话和 Ink TUI 运行在内核上，其他运行共享 loop 的入口使用过程式路径。设为 `true` 时使用内核，设为 `false` 时使用过程式路径，headless 和 Ink TUI 也可切回。QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP 环境变量覆盖此设置：`1` 开启，`0` 关闭，逗号分隔的列表（如 `headless=0`）强制指定入口（headless、acp、ink、opentui、agent-core；`speculation` 为保留名）。今天只有这些已接线的入口生效；裸 `1`/`0` 只作为整值识别，不在列表内生效，列表未点名的入口回退到此设置。项目级 `.env` 或 `settings.env` 无法设置该变量。',
   'settings.label.experimental.modelAvailabilityTracking': '模型可用性台账',
   'settings.description.experimental.modelAvailabilityTracking':
     '在会话内跨请求记住模型健康状态（实验性）。当某个 fallback 模型在容量错误（429/503/529）上耗尽重试后，模型 fallback 链在本轮剩余请求中跳过它，并在下一轮重新探测一次；显式重试也会重新探测本轮因容量被跳过的模型。primary 模型仍每个请求都会被尝试。命中永久配额耗尽（例如免费层或 token-plan 配额、需稍后才重置）的 fallback 模型会被标记为本会话剩余时间不可用，并在本对话后续请求中跳过（subagent 等后台轮仍会尝试它）；只有新会话才会重新探测它。关闭时 fallback 链行为与之前完全一致。',
@@ -484,6 +501,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.worktree.defaultForNewSessions': '新会话默认使用 Worktree',
   'settings.description.worktree.defaultForNewSessions':
     '开启（默认）时，受信任 Git workspace 中的新 Web Shell 会话默认进入隔离 worktree：composer 缺省为 Worktree 模式，首条消息发送时创建 worktree。设为 false 则缺省使用当前分支。仅影响 Web Shell composer 的缺省值；显式模式选择与 daemon API 不变。',
+  'settings.label.worktree.maxRetained': '保留的会话 Worktree 上限',
+  'settings.description.worktree.maxRetained':
+    '每个归属唯一的管理根保留最近相应数量的合规会话 worktree，默认 15。活跃及置顶会话不占删除候选配额。设为 0 只关闭自动清扫，不禁止显式恢复快照。归属不明、根重叠或配置不可读时保留；不顺带删除孤儿快照。不影响工具/agent worktree。',
 };
 
 export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
@@ -493,6 +513,12 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.placeholder.general.outputLanguage': 'auto (следовать вводу)',
   'settings.option.general.outputLanguage.useCustom': (v) =>
     `Использовать «${v?.value ?? ''}»`,
+  'settings.label.general.displayLanguage': 'Язык: перевод отображения',
+  'settings.description.general.displayLanguage':
+    'Показывать ответы модели и раскрытые размышления в переводе на этот язык в терминале и Web Shell. Модель отвечает как обычно; сохранённый разговор, то, что читает модель, и копируемый текст остаются в оригинале. Каждый переведённый блок — один вызов быстрой модели, а если она не задана, модели сессии. Ничего устанавливать и включать экспериментальные функции не нужно. Применяется к новым сессиям.',
+  'settings.option.general.displayLanguage.off': 'Выключено',
+  'settings.option.general.displayLanguage.zh-CN': '简体中文',
+  'settings.option.general.displayLanguage.en': 'English',
   'settings.label.ui.accessibility.enableLoadingPhrases':
     'Включить фразы загрузки',
   'settings.description.ui.accessibility.enableLoadingPhrases':
@@ -532,6 +558,7 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.scope.workspace': 'Рабочая область',
   'settings.value.on': 'ВКЛ',
   'settings.value.off': 'ВЫКЛ',
+  'settings.value.unset': 'Не задано',
   'settings.action.edit': 'Изменить',
   'settings.action.select': 'Выбрать',
   'settings.action.save': 'Сохранить',
@@ -590,6 +617,11 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.ui.chatWidth': 'Ширина чата',
   'settings.description.ui.chatWidth':
     'Ширина содержимого чата только на фронтенде. Хранится в этом браузере.',
+  'settings.arrowKeyHistory.label': 'История запросов по клавишам со стрелками',
+  'settings.arrowKeyHistory.description':
+    'Нажмите ↑ или ↓ в поле ввода, чтобы вернуть предыдущий запрос. Настройка сохраняется в этом браузере.',
+  'settings.arrowKeyHistory.disabledByHost':
+    'Основное приложение отключило вызов истории клавишами со стрелками.',
   'settings.label.ui.enableFollowupSuggestions':
     'Включить предложения следующих шагов',
   'settings.description.ui.enableFollowupSuggestions':
@@ -697,9 +729,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.description.ui.shellOutputMaxLines':
     'Максимум строк вывода shell, показываемых встроенно. 0 снимает лимит и показывает весь вывод; скрытые строки по-прежнему видны индикатором +N lines.',
   'settings.label.ui.disableWorkflowKeywordTrigger':
-    'Отключить срабатывание по слову Workflow',
+    'Отключить срабатывание Workflow по ключевым словам',
   'settings.description.ui.disableWorkflowKeywordTrigger':
-    'Если включено, слово `workflow` в запросе больше не мягко направляет ход к инструменту Workflow (индикатор `workflow active` в подвале тоже скрывается). Действует, только когда workflow включены.',
+    'Если настройка включена, запросы от человека с ключевыми словами `workflow` или `ultracode` больше не подсказывают модели использовать инструмент Workflow в текущем ходе. При включённой поддержке Workflow это действует в терминале, IDE, веб-интерфейсе и для сообщений SDK, явно помеченных как отправленные человеком. Обычные запросы в неинтерактивном режиме и автоматические сообщения не вызывают эту подсказку.',
   'settings.label.ui.showStatusInTitle': 'Статус в заголовке окна',
   'settings.description.ui.showStatusInTitle':
     'Показывать имя и статус сессии Qwen Code в заголовке окна терминала.',
@@ -714,13 +746,13 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.privacy.usageStatisticsEnabled':
     'Включить статистику использования',
   'settings.description.privacy.usageStatisticsEnabled':
-    'Включить сбор статистики использования.',
+    'Включить сбор статистики использования. Отключение этой настройки также останавливает обновление каталога models.dev.',
   'settings.label.fastModel': 'Быстрая модель',
   'settings.description.fastModel':
     'Модель для подсказок ввода и спекулятивного исполнения. Оставьте пустым, чтобы использовать основную. Более маленькая/быстрая модель (например qwen3-coder-flash) снижает задержку и стоимость.',
-  'settings.label.visionBridgeTimeoutMs': 'Тайм-аут Vision Bridge (мс)',
+  'settings.label.visionBridgeTimeoutMs': 'Тайм-аут моста зрения (мс)',
   'settings.description.visionBridgeTimeoutMs':
-    'Тайм-аут одной попытки в миллисекундах для вызова транскрипции изображений vision bridge (положительное целое до 2147483647). Без значения используются встроенные 30 с. Увеличьте для медленных или проксируемых vision-эндпоинтов. Задаётся через /model --vision --timeout <секунды>.',
+    'Тайм-аут одной попытки в миллисекундах для вызова транскрипции изображений моста зрения (положительное целое до 2147483647). Без значения используются встроенные 30 с. Увеличьте для медленных или проксируемых vision-эндпоинтов. Задаётся через /model --vision --timeout <секунды>.',
   'settings.label.modelFallbacks': 'Резервные модели',
   'settings.description.modelFallbacks':
     'Список ID резервных моделей (через запятую, до 3), которые пробуются по порядку при ошибках ёмкости основной (429/503/529). Например «qwen-plus,qwen-turbo». Можно задать CLI --fallback-model.',
@@ -755,7 +787,7 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.tools.toolSearch.threshold':
     'Порог предзагрузки отложенных инструментов (%)',
   'settings.description.tools.toolSearch.threshold':
-    'Доля окна контекста при старте сессии на предзагрузку отложенных инструментов (встроенных пакетов и MCP). Если schema всех отложенных инструментов умещается в бюджет, они объявляются в начале сессии, а не по требованию, и первый вызов обходится без моста tool_search. 0 отключает предзагрузку по порогу: отложенные инструменты грузятся по требованию через мост ToolSearch + ToolCall.',
+    'Процент окна контекста, отведённый на предзагрузку обычных отложенных инструментов при запуске сессии, включая встроенные и MCP-инструменты. По умолчанию 0, поэтому предзагрузка по порогу отключена. Такие инструменты обычно доступны через стабильный мост ToolSearch + ToolCall, поэтому перед первым использованием требуется дополнительный вызов tool_search. Если задано N и схемы всех подходящих отложенных инструментов укладываются в N% окна контекста, инструменты объявляются сразу и доступны для прямых вызовов без обращения к мосту. В противном случае они остаются доступны через мост, пока оба его инструмента зарегистрированы. Инструменты, переведённые в отложенные через tools.eager, не участвуют в предзагрузке и остаются доступны по запросу, пока мост зарегистрирован. Если один из инструментов моста не зарегистрирован (значение false для tools.toolSearch.enabled отключает оба, а правило запрета tool_search или tool_call отключает один), модель не видит оставшиеся скрытыми инструменты и не может вызвать их через мост в этой сессии. В журнал записывается предупреждение. Эти правила работы моста и выдачи предупреждений относятся к режиму прямого вызова. В режиме CodeModeOnly схемы отложенных инструментов ищутся через tool_search верхнего уровня, а вызовы выполняются через exec. Предзагрузка отложенных инструментов и стартовые каталоги пропускаются. Настройка tools.eager также сокращает начальное описание exec. Если поиск недоступен в текущей области, описание exec включает сигнатуры всех разрешённых инструментов. В режиме прямого вызова инструменты остаются зарегистрированными, поэтому вызов по имени проходит обычную проверку и согласование. Даже при пороге 0 отложенные инструменты могут объявляться через tools.visible, проверку истории при каждом обновлении набора инструментов (включая возобновление сессии, обнаружение MCP, первый вход в режим планирования и изменение определений субагентов), резервную немедленную загрузку при неполном мосте и позднюю регистрацию ACP в демоне, которая явно раскрывает и закрепляет create_sub_session.',
   'settings.label.tools.webSearch.enabled': 'Включить WebSearch',
   'settings.description.tools.webSearch.enabled':
     'false отключает встроенный инструмент web_search. Автозапуск при старте требует, чтобы enabled, model и бэкенд только из переменных окружения оставались незаданными; при true автовывод разрешён, только если бэкенд только из переменных окружения тоже не задан, иначе модель нужно указать. Переопределение: ENABLE_WEB_SEARCH.',
@@ -766,9 +798,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
     'Открывать страницы результатов',
   'settings.description.tools.webSearch.webExtractor':
     'Разрешить поисковому агенту открывать и читать страницы результатов (DashScope web_extractor), чтобы ответы были обоснованнее. DashScope тарифицирует это отдельно. Переопределение: WEB_SEARCH_EXTRACTOR.',
-  'settings.label.tools.webSearch.timeoutMs': 'Таймаут поиска (мс)',
+  'settings.label.tools.webSearch.timeoutMs': 'Тайм-аут поиска (мс)',
   'settings.description.tools.webSearch.timeoutMs':
-    'Общий бюджет времени одного вызова web_search в миллисекундах (по умолчанию 120000, максимум 600000; остальные значения откатываются к умолчанию). Поисковый агент делает несколько запросов и может открывать страницы; если бюджет исчерпан после хотя бы одного завершённого поиска, возвращаются частичные результаты — если бюджет кончился до первого поиска, инструмент сообщает ошибку таймаута, потому что рассказ без выполненного поиска не является аудируемым доказательством. Более низкий лимит одного инструмента (QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS) сработает раньше и отбросит частичные результаты; держите его выше этого бюджета. Переопределение: WEB_SEARCH_TIMEOUT_MS.',
+    'Общий бюджет времени одного вызова web_search в миллисекундах (по умолчанию 120000, максимум 600000; остальные значения откатываются к умолчанию). Поисковый агент делает несколько запросов и может открывать страницы; если бюджет исчерпан после хотя бы одного завершённого поиска, возвращаются частичные результаты — если бюджет кончился до первого поиска, инструмент сообщает ошибку тайм-аута, потому что рассказ без выполненного поиска не является аудируемым доказательством. Более низкий лимит одного инструмента (QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS) сработает раньше и отбросит частичные результаты; держите его выше этого бюджета. Переопределение: WEB_SEARCH_TIMEOUT_MS.',
   'settings.label.tools.webSearch.maxPerSession': 'Максимум поисков за сессию',
   'settings.description.tools.webSearch.maxPerSession':
     'Максимум вызовов web_search в одной сессии (по умолчанию 200, максимум 10000; остальные значения откатываются к умолчанию). Счётчик общий с субагентами и сбрасывается при смене сессии (/clear, /resume, ветка). По достижении лимита дальнейшие поиски пропускаются, модели предлагается продолжить с уже собранным. Переопределение: WEB_SEARCH_MAX_PER_SESSION.',
@@ -783,7 +815,7 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
     'Включить встроенный инструмент todo_write и его подсказку в системном промпте.',
   'settings.label.tools.workflowsEnabled': 'Динамический Workflow',
   'settings.description.tools.workflowsEnabled':
-    'Включить инструмент Workflow: модель может писать и запускать скрипт, оркестрирующий несколько субагентов параллельно. По умолчанию выключено; один запуск может породить много субагентов и токенов. QWEN_CODE_ENABLE_WORKFLOWS=1 и QWEN_CODE_DISABLE_WORKFLOWS=1 перекрывают настройку (запрет важнее). Не связано с видом «план и ревью» Session Workflow; чтобы слово «workflow» не направляло диалог, см. «Отключить срабатывание по слову Workflow».',
+    'Включить инструмент Workflow: модель может писать и запускать скрипт, оркестрирующий несколько субагентов параллельно. По умолчанию выключено; один запуск может породить много субагентов и токенов. QWEN_CODE_ENABLE_WORKFLOWS=1 и QWEN_CODE_DISABLE_WORKFLOWS=1 перекрывают настройку (запрет важнее). Не связано с видом «план и ревью» Session Workflow. Чтобы ключевые слова не направляли диалог, см. «Отключить срабатывание Workflow по ключевым словам».',
   'settings.label.tools.lspEnabled': 'LSP-интеллект кода',
   'settings.description.tools.lspEnabled':
     'Экспериментально. Включает LSP без `--experimental-lsp`: переход к определению, поиск ссылок, подсказки, символы, диагностика и code action. По умолчанию выключено. Серверы берутся из `.lsp.json` рабочей области или включённых расширений и работают с вашими правами; серверы из рабочей области требуют явного доверия к папке — включите `security.folderTrust.enabled` и доверьтесь папке либо пусть IDE сообщит, что рабочая область доверенная — иначе они пропускаются. При `tools.executionSandbox` запуск отклоняется; `--safe-mode`, `QWEN_CODE_SAFE_MODE=1` и `--bare` стартуют без LSP. QWEN_CODE_ENABLE_LSP=1 / QWEN_CODE_DISABLE_LSP=1 перекрывают настройку (запрет важнее); проектные `.env` и `settings.env` их задать не могут.',
@@ -808,7 +840,7 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
     'Использовать node-pty для интерактивного shell. Если не задано, явный одноразовый prompt по умолчанию идёт через child_process; интерактивный и ввод-ориентированный режимы — через PTY.',
   'settings.label.policy.permissionStrategy': 'Стратегия согласования прав',
   'settings.description.policy.permissionStrategy':
-    'Как решать запросы прав при нескольких клиентах. first-responder — действует первый ответивший клиент; designated — решает только инициатор; consensus — нужно согласие N из M; local-only — решать могут только loopback-клиенты. Нужен перезапуск daemon.',
+    'Определяет, как обрабатываются запросы разрешений при нескольких подключённых клиентах. В режиме `first-responder` (по умолчанию) ответить может любой клиент, и учитывается первый ответ. В режиме `designated` решение принимает только клиент, отправивший исходный запрос. Если он анонимен, действует `first-responder`. Идентификатор клиента берётся из указанного самим клиентом заголовка `X-Qwen-Client-Id` без подтверждения владения (аутентификация по токену сопряжения пока не реализована). Поэтому видимый в SSE идентификатор `originatorClientId` не защищает от подмены инициатора другим клиентом с тем же идентификатором. В режиме `consensus` должны согласиться N из M голосующих. По умолчанию N=floor(M/2)+1. При M=2 нужно единогласие, а при большем чётном M требуется квалифицированное большинство (M=4 → 3, M=6 → 4). При M=2 и расхождении голосов запрос завершается только по заданному тайм-ауту, при отмене одним из голосующих или при отмене сессии. В режиме `local-only` принимать решение могут только клиенты с loopback-адресов. Удалённые клиенты по-прежнему могут отменить ожидающий запрос через специальный ответ `({outcome:"cancelled"})`. Отмена доступна при любой стратегии. Чтобы ограничить и отмену, запустите отдельный демон, привязанный к loopback-адресу. Настройка считывается при запуске демона и требует его перезапуска.',
   'settings.option.policy.permissionStrategy.first-responder':
     'Первый ответивший',
   'settings.option.policy.permissionStrategy.designated':
@@ -824,11 +856,11 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.experimental.sessionWorkflow':
     'Session Workflow: план и ревью',
   'settings.description.experimental.sessionWorkflow':
-    'Показывать DAG Session Workflow и представлять режим Plan как «план и ревью».',
+    'Включить граф зависимостей (DAG) Session Workflow в Web Shell демона и показывать режим Plan как «план и ревью». По умолчанию выключено. Метки Workflow, этапы подтверждения и визуализация доступны после включения. При обновлении списка дел ранее заданные активные зависимости сохраняются в любом режиме, даже если их нет в обновлении.',
   'settings.label.experimental.emitToolUseSummaries':
     'Сводки использования инструментов',
   'settings.description.experimental.emitToolUseSummaries':
-    'После каждой пачки инструментов генерировать короткую LLM-метку. Метка завершённой группы заменяет общий заголовок Tool × N; у принудительно раскрытых групп ниже показывается приглушённая строка ● <label>. Нужна настроенная быстрая модель.',
+    'После завершения каждой группы вызовов инструментов модель генерирует краткую метку. Для завершённой группы она заменяет заголовок `Tool × N`, а при принудительном раскрытии группы отображается под ней приглушённой строкой `● <label>`. Требуется настроенная быстрая модель. Метка генерируется параллельно со следующим вызовом API, чтобы скрыть задержку. Сейчас настройка влияет только на отображение в интерактивном CLI. Отправка сообщения `tool_use_summary` через SDK и в неинтерактивном режиме пока не подключена. Фабрика сообщений уже экспортируется. Настройку можно переопределить переменной окружения `QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0` или `QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=1`.',
   'settings.label.experimental.sessionWriterLease':
     'Включить аренду записи сессии ACP',
   'settings.description.experimental.sessionWriterLease':
@@ -842,10 +874,10 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
     'Включить сотрудничество устойчивых агентов рабочей области в общих потоках задач (экспериментально). Независимо от Agent Team: ни один переключатель не подразумевает другой. Включение только разрешает сотрудничество; открытие агента внешним вызывающим, доверие к соединению и регистрация host по-прежнему требуют явной настройки. Также включается QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
   'settings.label.experimental.unifiedAgentLoop': 'Единый Agent Loop',
   'settings.description.experimental.unifiedAgentLoop':
-    'Запускать сессии на общем agent loop. Если не задано, у каждого входа своё умолчание: headless (`-p` и stream-json), Ink TUI и субагенты идут на общем loop, ACP (Zed, VS Code, Web Shell, channel), OpenTUI и Hosted Harness — на своих (для этих входов это экспериментально). `true` переводит всех на общий loop (раунд модели Hosted Harness тоже на нём, с сохранением journal-диспетчеризации инструментов), `false` — всех на свои loop, включая headless, Ink TUI и субагентов. QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP перекрывает по входам: `1` включает все, `0` выключает все, список через запятую (например `headless,acp=0`) принуждает названные входы (headless, acp, ink, opentui, agent-core, speculation, hosted). Голые `1`/`0` распознаются только как целое значение, не внутри списка; неназванные входы откатываются к этой настройке. Проектные `.env` и `settings.env` переменную задать не могут.',
+    'Запускать сессии на общем agent loop. Если настройка не задана, headless (`-p` и stream-json), ACP (Zed, VS Code, Web Shell, channel), Ink TUI, OpenTUI и субагенты работают на общем loop, а Hosted Harness — на своём (для него общий loop экспериментальный). `true` переводит всех на общий loop (раунд модели Hosted Harness тоже на нём, с сохранением journal-диспетчеризации инструментов), `false` — всех на свои loop, включая headless, ACP, оба TUI и субагентов. QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP перекрывает по входам: `1` включает все, `0` выключает все, список через запятую (например `headless,acp=0`) принуждает названные входы (headless, acp, ink, opentui, agent-core, speculation, hosted). Голые `1`/`0` распознаются только как целое значение, не внутри списка; неназванные входы откатываются к этой настройке. Проектные `.env` и `settings.env` переменную задать не могут.',
   'settings.label.experimental.eventBusAgentLoop': 'Agent Loop на шине событий',
   'settings.description.experimental.eventBusAgentLoop':
-    'Запускать общий agent loop на архитектуре шины событий (экспериментально). Действует для входов на общем agent loop: по умолчанию headless (`-p` и stream-json), Ink TUI и субагенты, а при experimental.unifiedAgentLoop ещё ACP (Zed, VS Code, Web Shell, channel) и OpenTUI; остальные поверхности оставляют свою внутреннюю реализацию loop. QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP перекрывает: `1` включает, `0` выключает, список через запятую (например `headless=0`) принуждает названные входы (headless, acp, ink, opentui, agent-core; `speculation` зарезервировано). Сегодня действуют только уже подключённые входы; голые `1`/`0` — только как целое значение, не внутри списка, неназванные входы откатываются к этой настройке. Проектные `.env` и `settings.env` переменную задать не могут.',
+    'Запускать общий agent loop на архитектуре шины событий. Действует для входов, использующих общий agent loop: по умолчанию это headless (`-p` и stream-json), ACP (Zed, VS Code, Web Shell, channel), Ink TUI, OpenTUI и субагенты; остальные входы сохраняют свою реализацию loop. Если настройка не задана, headless и Ink TUI работают на ядре, а остальные входы на общем loop — на процедурном пути. `true` выбирает ядро, `false` — процедурный путь, в том числе для headless и Ink TUI. QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP перекрывает: `1` включает, `0` выключает, список через запятую (например `headless=0`) принуждает названные входы (headless, acp, ink, opentui, agent-core; `speculation` зарезервировано). Сегодня действуют только уже подключённые входы; голые `1`/`0` — только как целое значение, не внутри списка, неназванные входы откатываются к этой настройке. Проектные `.env` и `settings.env` переменную задать не могут.',
   'settings.label.experimental.artifact': 'Включить Artifacts',
   'settings.description.experimental.artifact':
     'Включить инструменты artifact, по умолчанию включены. В интерактивных не-SDK сессиях модель может публиковать самодостаточные HTML-страницы как интерактивный Artifact и открывать их в браузере; не-SDK сессии daemon могут использовать record_artifact, который пишет только метаданные. false или QWEN_CODE_DISABLE_ARTIFACT=1 отключают оба.',
@@ -875,4 +907,7 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
     'Новые сессии по умолчанию в Worktree',
   'settings.description.worktree.defaultForNewSessions':
     'Если включено (по умолчанию), новые сессии Web Shell в доверенном Git workspace по умолчанию идут в изолированный worktree: композер по умолчанию в режиме Worktree, worktree создаётся при отправке первого сообщения. false — по умолчанию текущая ветка. Меняет только умолчание композера Web Shell; явный выбор режима и API daemon не затрагиваются.',
+  'settings.label.worktree.maxRetained': 'Лимит сохраняемых worktree',
+  'settings.description.worktree.maxRetained':
+    'Для каждого управляемого корня с уникальным владельцем сохраняйте до N самых недавних worktree для сеансов (по умолчанию N = 15). Активные и закреплённые сессии не входят в квоту на удаление. Значение 0 отключает только автоматическую очистку, но не явное восстановление снимков. При неясном владельце, перекрывающихся корнях или нечитаемой конфигурации состояние сохраняется. Сиротские снимки не удаляются. Рабочие деревья инструментов и агентов не затрагиваются.',
 };

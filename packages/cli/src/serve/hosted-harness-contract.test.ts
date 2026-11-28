@@ -48,7 +48,10 @@ describe('Hosted Harness private contract', () => {
       bootId: BOOT_ID,
       capabilityDigest: DIGEST,
       lifecycleProtocolVersion: 1,
-      lifecycleV2Profiles: ['hosted-workspace-shell/1'],
+      lifecycleV2Profiles: [
+        'hosted-workspace-files/1',
+        'hosted-workspace-shell/1',
+      ],
       titleProtocolVersion: 1,
       features: [
         'hosted_approval_resume_v1',
@@ -78,6 +81,7 @@ describe('Hosted Harness private contract', () => {
         'recovery-cleanup/1',
         'targeted-cancel/1',
         'event-keepalive/1',
+        'event-ingest/1',
         'web-fetch/1',
         'hosted-workspace-external-files/1',
         'hosted-workspace-external-shell/1',
@@ -100,6 +104,11 @@ describe('Hosted Harness private contract', () => {
       createHostedHarnessContract(DIGEST, BOOT_ID, ['hosted-workspace-shell/3'])
         .lifecycleV2Profiles,
     ).toEqual(['hosted-workspace-shell/3']);
+    // D3: ordinary files/1 joins the lifecycle-v2 profiles.
+    expect(
+      createHostedHarnessContract(DIGEST, BOOT_ID, ['hosted-workspace-files/1'])
+        .lifecycleV2Profiles,
+    ).toEqual(['hosted-workspace-files/1']);
     expect(() =>
       createHostedHarnessContract(DIGEST, BOOT_ID, [
         'hosted-workspace-shell/2',

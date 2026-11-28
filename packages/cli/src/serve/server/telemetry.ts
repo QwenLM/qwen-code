@@ -51,6 +51,18 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/sessions/recovery',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/recovery',
+  },
+  {
+    method: 'POST',
+    path: '/sessions/recovery/continue',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/recovery/continue',
+  },
+  {
+    method: 'POST',
     path: '/sessions/catalog',
     attribution: 'handler_resolved',
     route: 'POST /sessions/catalog',
@@ -78,6 +90,12 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/worktree-reset',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/worktree-reset',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/worktree-restore',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/worktree-restore',
   },
   {
     method: 'POST',
@@ -222,6 +240,18 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/mcp-app/tools/call',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/mcp-app/tools/call',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/retirements/:operationId',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/retirements/:operationId',
+  },
+  {
+    method: 'PUT',
+    path: '/session/:id/retirements/:operationId',
+    attribution: 'handler_resolved',
+    route: 'PUT /session/:id/retirements/:operationId',
   },
   {
     method: 'GET',
@@ -450,6 +480,12 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/model',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/model',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/feedback',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/feedback',
   },
   {
     method: 'POST',

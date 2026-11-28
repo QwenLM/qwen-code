@@ -24,11 +24,12 @@ import { MessageDeletionToolbar } from './MessageDeletionToolbar';
 import { GlobalTurnNavigation } from './GlobalTurnNavigation';
 import styles from './TranscriptViewport.module.css';
 import { useTranscriptViewport } from '../hooks/useTranscriptViewport';
+import { useOptionalDaemonHistoryNavigationStore } from '../daemon/session/DaemonSessionProvider';
 import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import { useI18n } from '../i18n';
 import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 import { SESSION_TIMELINE_MIN_VISIBLE_ENTRIES } from '../constants/sessions';
-import { ModReplyRowsProvider } from './messages/ModAssistantMessage';
+import { ModRowsProvider } from './messages/ModAssistantMessage';
 
 interface ReadingAnchor {
   source: string;
@@ -78,12 +79,79 @@ export function followRangeFromRows(
 
 export interface TranscriptViewportProps extends MessageListProps {
   approvalOverlayActive?: boolean;
+  /**
+   * Enables session-context historical turn navigation and message deletion.
+   * Defaults to `true` for daemon callers; pass `false` for flat live hosts
+   * (including non-daemon surfaces co-mounted inside a daemon provider tree).
+   */
+  sessionViewportEnabled?: boolean;
 }
+
+const LiveTranscriptViewport = forwardRef<
+  MessageListHandle,
+  TranscriptViewportProps
+>(function LiveTranscriptViewport(
+  {
+    approvalOverlayActive: _approvalOverlayActive,
+    sessionViewportEnabled: _sessionViewportEnabled,
+    ...props
+  },
+  ref,
+) {
+  return (
+    <div
+      className={`${styles.root} relative flex min-h-0 flex-1`}
+      data-history-viewport="live"
+    >
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+        <ModRowsProvider messages={props.messages}>
+          <MessageList
+            {...props}
+            ref={ref}
+            hookStatisticsSessionId={props.sourceSessionId}
+            mcpAppSessionId={props.mcpAppSessionId ?? props.sourceSessionId}
+          />
+        </ModRowsProvider>
+      </div>
+    </div>
+  );
+});
+
+const SessionAwareTranscriptViewport = forwardRef<
+  MessageListHandle,
+  TranscriptViewportProps
+>(function SessionAwareTranscriptViewport(props, ref) {
+  const historyStore = useOptionalDaemonHistoryNavigationStore();
+  if (!historyStore) {
+    return <LiveTranscriptViewport ref={ref} {...props} />;
+  }
+  return <DaemonTranscriptViewport ref={ref} {...props} />;
+});
 
 export const TranscriptViewport = forwardRef<
   MessageListHandle,
   TranscriptViewportProps
->(function TranscriptViewport({ approvalOverlayActive, ...props }, ref) {
+>(function TranscriptViewport(
+  { sessionViewportEnabled = true, ...props },
+  ref,
+) {
+  if (!sessionViewportEnabled) {
+    return <LiveTranscriptViewport ref={ref} {...props} />;
+  }
+  return <SessionAwareTranscriptViewport ref={ref} {...props} />;
+});
+
+const DaemonTranscriptViewport = forwardRef<
+  MessageListHandle,
+  TranscriptViewportProps
+>(function DaemonTranscriptViewport(
+  {
+    approvalOverlayActive,
+    sessionViewportEnabled: _sessionViewportEnabled,
+    ...props
+  },
+  ref,
+) {
   const { onCanScrollToBottomChange } = props;
   const { t } = useI18n();
   const viewport = useTranscriptViewport(props.messages, t);
@@ -545,7 +613,7 @@ export const TranscriptViewport = forwardRef<
           <TurnCallsProvider
             onOpen={openTurnCalls ? openViewportTurnCalls : undefined}
           >
-            <ModReplyRowsProvider messages={viewport.messages}>
+            <ModRowsProvider messages={viewport.messages}>
               <MessageList
                 {...props}
                 key={viewport.viewKey}
@@ -589,6 +657,7 @@ export const TranscriptViewport = forwardRef<
                       onRetryFailedPrompt: undefined,
                       showRetryHint: false,
                       failedPromptMessageId: undefined,
+                      failedPromptStatus: undefined,
                       tailContent: undefined,
                       welcomeHeader: undefined,
                       activeTurnStartedAt: undefined,
@@ -602,7 +671,7 @@ export const TranscriptViewport = forwardRef<
                     }
                   : {})}
               />
-            </ModReplyRowsProvider>
+            </ModRowsProvider>
           </TurnCallsProvider>
           {deletion && !historical && (
             <MessageDeletionToolbar controls={deletion} />

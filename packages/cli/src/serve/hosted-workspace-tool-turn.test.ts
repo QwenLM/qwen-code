@@ -109,7 +109,6 @@ import {
   LOOP_PROMPT_MAX_CHARS,
 } from './hosted-loop-session.js';
 import { HostedCronSession } from './hosted-cron-session.js';
-import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
 import * as hostedPlan from './hosted-plan-mode.js';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import {
@@ -3474,27 +3473,48 @@ it('offers glob under the unified Shell, file-search and read profiles', async (
   ]);
 });
 
-it('refuses an external files Skill lane before warming the Broker', () => {
+it('admits the skill catalog on the external files lane as turn content', async () => {
   broker.warm.mockClear();
-  expect(
-    () =>
-      new HostedWorkspaceToolTurn(
-        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-        session,
-        harness,
-        'prompt',
-        commit,
-        messageFitsInline,
-        undefined,
-        undefined,
-        undefined,
-        {
-          profile: 'hosted-workspace-external-files/1',
-          skills: publishedSkills(),
-        },
-      ),
-  ).toThrow('External files profile does not support optional lanes.');
-  expect(broker.warm).not.toHaveBeenCalled();
+  const skills = publishedSkills();
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    {
+      profile: 'hosted-workspace-external-files/1',
+      skills,
+    },
+  );
+  const declared = await turn.declarations(new AbortController().signal);
+  expect(declared.map((tool) => tool.name)).toEqual([
+    'read_file',
+    'write_file',
+    'edit',
+    'glob',
+    'skill',
+  ]);
+  expect(declared).toContainEqual(skills.declaration());
+  // The catalog is served from the pinned definition, so a Skill call resolves
+  // without touching the Broker; only the declaration makes it reachable.
+  const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: 'skill', args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['output']).toBe(
+    skills.response(call.args),
+  );
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
 });
 
 it('declares the external Shell tool set: file tools, foreground Shell and glob', async () => {
@@ -3530,10 +3550,38 @@ it('declares the external Shell tool set: file tools, foreground Shell and glob'
   expect(schema.properties?.['is_background']).toBeUndefined();
 });
 
-it('refuses an external Shell Turn without its publication or with another lane', () => {
+it('refuses a still-closed lane on an external files Turn before warming the Broker', () => {
+  // Skills became turn content on this lane; the other optional lanes stay
+  // closed, so the refusal arm must still fire for them.
+  broker.warm.mockClear();
+  expect(
+    () =>
+      new HostedWorkspaceToolTurn(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        harness,
+        'prompt',
+        commit,
+        messageFitsInline,
+        undefined,
+        undefined,
+        undefined,
+        {
+          profile: 'hosted-workspace-external-files/1',
+          mcp: {} as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+        },
+      ),
+  ).toThrow('External files profile does not support optional lanes.');
+  expect(broker.warm).not.toHaveBeenCalled();
+});
+
+it('refuses an external Shell Turn without its publication', async () => {
   const build = (
     publication?: { owner: HttpToolPublicationOwner; captureBytes: number },
-    extras?: { skills?: ReturnType<typeof publishedSkills> },
+    extras?: {
+      skills?: ReturnType<typeof publishedSkills>;
+      mcp?: import('./hosted-mcp-session.js').HostedMcpSession;
+    },
   ) =>
     new HostedWorkspaceToolTurn(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -3552,14 +3600,24 @@ it('refuses an external Shell Turn without its publication or with another lane'
   expect(() => build()).toThrow(
     'External Shell profile requires a publication and no other lanes.',
   );
+  // Skills are turn content on this lane; every other optional lane stays
+  // closed, so the shared lane list must still refuse them.
   expect(() =>
     build(
       { owner: {} as HttpToolPublicationOwner, captureBytes: 4096 },
-      { skills: publishedSkills() },
+      {
+        mcp: {} as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      },
     ),
   ).toThrow(
     'External Shell profile requires a publication and no other lanes.',
   );
+  const withSkills = build(
+    { owner: {} as HttpToolPublicationOwner, captureBytes: 4096 },
+    { skills: publishedSkills() },
+  );
+  const declared = await withSkills.declarations(new AbortController().signal);
+  expect(declared.map((tool) => tool.name)).toContain('skill');
 });
 
 it('dispatches exactly the external file tools with ordinary capture controls', async () => {
@@ -3705,30 +3763,19 @@ it.each([
   );
 });
 
-it('keeps PDF pages out of resident and private CSI declarations', async () => {
+it('keeps PDF pages out of resident declarations', async () => {
   broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
   turn = createTurn();
-  const resident = await turn.declarations(new AbortController().signal);
-  const csi = await new HostedCsiToolTurn(
-    session,
-    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-    { bindingId: 'binding', generation: '1' },
-    'prompt',
-    commit,
-    harness,
-    messageFitsInline,
-  ).declarations(new AbortController().signal);
-  for (const declarations of [resident, csi]) {
-    expect(declarations.map((tool) => tool.name)).toEqual([
-      'read_file',
-      'write_file',
-      'edit',
-    ]);
-    expect(declarations[0]).toEqual(HOSTED_WORKSPACE_FILE_TOOLS[0]);
-    expect(declarations[0]).not.toHaveProperty(
-      'parametersJsonSchema.properties.pages',
-    );
-  }
+  const declarations = await turn.declarations(new AbortController().signal);
+  expect(declarations.map((tool) => tool.name)).toEqual([
+    'read_file',
+    'write_file',
+    'edit',
+  ]);
+  expect(declarations[0]).toEqual(HOSTED_WORKSPACE_FILE_TOOLS[0]);
+  expect(declarations[0]).not.toHaveProperty(
+    'parametersJsonSchema.properties.pages',
+  );
 });
 
 it('dispatches PDF pages with the original input and declaration persisted', async () => {
@@ -3872,6 +3919,57 @@ it.each([false, true])(
     expect(await session.resources.read(inputRef)).toEqual(bytes);
   },
 );
+
+// S5 (#18149): a Hooks plan resumes only on a Hooks Session, and only while
+// the journal still holds exactly the Hook results the plan recorded. An
+// occurrence with a record but no result reads as undefined.
+it.each([
+  ['a Session without Hooks', false, [] as const],
+  ['an occurrence with no result', true, undefined],
+  [
+    'a different result',
+    true,
+    [{ event: 'PreToolUse', resultDigest: 'b'.repeat(64) }] as const,
+  ],
+])('declines a saved Hooks batch on %s', async (_, hooks, current) => {
+  const call = { ...calls[0], args: { file_path: 'a.txt' } };
+  const saved = {
+    plan: {
+      promptId: 'prompt',
+      runtime: {
+        runtimeSessionId: 'extensions-components-owner',
+        bindingId: 'binding',
+        generation: '1',
+        workspaceGeneration: '1',
+      },
+      calls: [
+        {
+          call,
+          hookResults: [{ event: 'PreToolUse', resultDigest: 'a'.repeat(64) }],
+        },
+      ],
+    },
+  };
+  const receiver = {
+    session,
+    hooks: hooks
+      ? { broker: { runtimeSessionId: 'extensions-components-owner' } }
+      : undefined,
+    broker: { ...broker, runtimeSessionId: 'extensions-components-owner' },
+    promptId: 'prompt',
+    savedToolHookResults: vi.fn().mockReturnValue(current),
+    executeNative: vi.fn(),
+  };
+  await expect(
+    Reflect.apply(
+      HostedWorkspaceToolTurn.prototype.resumeSavedNativeBatch,
+      receiver,
+      [saved, 1, new AbortController().signal],
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(receiver.executeNative).not.toHaveBeenCalled();
+});
 
 // #13753 I3: the read profile's two tools dispatch like any profile's.
 it('dispatches read_file and glob on the read profile', async () => {
@@ -6654,7 +6752,7 @@ it('asks before an edit in default mode and runs the batch once the owner allows
     (await session.resources.read(action.optionsRef!)).toString(),
   );
   expect(options).toEqual({
-    v: 2,
+    v: 3,
     inputRef: (await checkpoint()).approval!.invocationRef,
     requestId,
     turnId: 'prompt',
@@ -6824,7 +6922,7 @@ it.each(['allow', 'deny'])(
         )
       ).toString(),
     );
-    expect(options.v).toBe(1);
+    expect(options.v).toBe(3);
     expect(options).not.toHaveProperty('inputRef');
     const approvedRef = (await checkpoint()).approval!.invocationRef!;
     const approved = (await session.resources.read(approvedRef)).toString();
@@ -6909,7 +7007,7 @@ it('binds successive approvals for the same tool to their own inputs', async () 
     ).toString(),
   );
   expect(options).toMatchObject({
-    v: 2,
+    v: 3,
     functionCallId: 'call-1',
     toolName: 'write_file',
     inputRef: (await checkpoint()).approval!.invocationRef,
@@ -7392,7 +7490,7 @@ it('asks before Shell in auto-edit mode and runs the edit when Shell is denied',
     (await session.resources.read(action.optionsRef!)).toString(),
   );
   expect(options).toMatchObject({
-    v: 2,
+    v: 3,
     functionCallId: 'call-1',
     toolName: 'run_shell_command',
   });
@@ -9159,7 +9257,7 @@ it('asks once, after PreToolUse and PermissionRequest, about the input PreToolUs
         )
       ).toString(),
     ),
-  ).toMatchObject({ v: 2, inputRef });
+  ).toMatchObject({ v: 3, inputRef });
   expect(
     JSON.parse(
       JSON.parse((await session.resources.read(inputRef)).toString())
@@ -13166,7 +13264,7 @@ it('registers the Session capture lane for a background turn in publication mode
   // installed on the Runtime, fed this call's register, and its
   // settleAttached is the hook the attach arm drives — it fires right
   // after the attach, without any client retry anywhere in the turn.
-  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor);
+  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor, 1);
   expect(broker.registerPublisher).toHaveBeenCalledTimes(1);
   const register = lane.publisher!.register as ReturnType<typeof vi.fn>;
   expect(register).toHaveBeenCalledTimes(1);
@@ -13243,7 +13341,7 @@ it('picks the background lane from the input a PreToolUse Hook left, not the mod
   expect(result[0]?.functionResponse?.response).toMatchObject({
     executionStatus: 'success',
   });
-  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor);
+  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor, 1);
   expect(register).toHaveBeenCalledOnce();
   expect(register.mock.calls[0]![0]).toMatchObject({
     capture: { background: true },
@@ -15343,7 +15441,7 @@ it('restores an approved personal memory action without a Runtime or a second ap
   await harness.resolveDurableWait();
   const saved = await readHostedApprovalContinuation(
     session,
-    options.continuationRef,
+    options.continuationRef!,
     'prompt',
   );
   expect(saved.plan.runtime).toBeNull();

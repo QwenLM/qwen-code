@@ -7,6 +7,16 @@
 // Русский перевод для Qwen Code CLI
 // Ключ служит одновременно ключом перевода и текстом по умолчанию
 
+const pluralRules = new Intl.PluralRules('ru');
+
+function counted(one, few, many) {
+  return ({ count }) => {
+    const category = pluralRules.select(Number(count));
+    const noun = category === 'one' ? one : category === 'few' ? few : many;
+    return `{{count}} ${noun}`;
+  };
+}
+
 export default {
   user: 'пользователь',
   assistant: 'ассистент',
@@ -480,6 +490,7 @@ export default {
   'Debug Keystroke Logging': 'Логирование нажатий клавиш для отладки',
   'Language: UI': 'Язык: интерфейс',
   'Language: Model': 'Язык: модель',
+  'Language: Display Translation': 'Язык: перевод отображения',
   'Output Format': 'Формат вывода',
   'Hide Window Title': 'Скрыть заголовок окна',
   'Show Status in Title': 'Показывать статус в заголовке',
@@ -499,11 +510,10 @@ export default {
   'Screen Reader Mode': 'Режим программы чтения с экрана',
   'Max Session Turns': 'Макс. количество ходов сессии',
   'Skip Next Speaker Check': 'Пропустить проверку следующего говорящего',
-  'Skip Loop Detection': 'Пропустить обнаружение циклов',
   'Skip Startup Context': 'Пропустить начальный контекст',
   'Enable OpenAI Logging': 'Включить логирование OpenAI',
   'OpenAI Logging Directory': 'Директория логов OpenAI',
-  Timeout: 'Таймаут',
+  Timeout: 'Тайм-аут',
   'Max Retries': 'Макс. количество попыток',
   'Load Memory From Include Directories':
     'Загружать память из включенных директорий',
@@ -784,8 +794,11 @@ export default {
   // ============================================================================
   'Manage Qwen Code hooks': 'Управлять хуками Qwen Code',
   'List all configured hooks': 'Показать все настроенные хуки',
+  'No hooks were loaded.': 'Ни один хук не был загружен.',
+  'skipped (unsupported args)': 'пропущен (параметр args не поддерживается)',
   // Hooks - Dialog
   Hooks: 'Хуки',
+  'A hook stopped the turn: {{reason}}': 'Хук остановил ход: {{reason}}',
   'Loading hooks...': 'Загрузка хуков...',
   'Error loading hooks:': 'Ошибка загрузки хуков:',
   'Press Escape to close': 'Нажмите Escape для закрытия',
@@ -1159,6 +1172,8 @@ export default {
     'Не удалось сжать историю чата, потому что сводка сжатия была усечена.',
   'Could not compress chat history due to an API error.':
     'Не удалось сжать историю чата из-за ошибки API.',
+  'Could not compress chat history because it is too large for the context window.':
+    'Не удалось сжать историю чата: она слишком велика для контекстного окна.',
   // ============================================================================
   // Команды - Директория
   // ============================================================================
@@ -1304,7 +1319,7 @@ export default {
     'Пожалуйста, посетите этот URL для авторизации:',
   'Waiting for authorization': 'Ожидание авторизации',
   'Time remaining:': 'Осталось времени:',
-  'Qwen OAuth Authentication Timeout': 'Таймаут авторизации Qwen OAuth',
+  'Qwen OAuth Authentication Timeout': 'Тайм-аут авторизации Qwen OAuth',
   'OAuth token expired (over {{seconds}} seconds). Please select authentication method again.':
     'Токен OAuth истек (более {{seconds}} секунд). Пожалуйста, выберите метод авторизации снова.',
   'Press any key to return to authentication type selection.':
@@ -1431,7 +1446,7 @@ export default {
   '{{count}} {{name}} file': '{{count}} файл {{name}}',
   '{{count}} {{name}} files': '{{count}} файла(ов) {{name}}',
   '{{count}} MCP server': '{{count}} MCP-сервер',
-  '{{count}} MCP servers': '{{count}} MCP-серверов',
+  '{{count}} MCP servers': counted('MCP-сервер', 'MCP-сервера', 'MCP-серверов'),
   '{{count}} Blocked': '{{count}} заблокирован(о)',
   '(ctrl+t to view)': '(ctrl+t для просмотра)',
   '(ctrl+t to toggle)': '(ctrl+t для переключения)',
@@ -2170,6 +2185,8 @@ export default {
   'Loading suggestions...': 'Загрузка предложений...',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     'Показать разбивку использования окна контекста. Используйте "/context detail" для детализации по элементам.',
+  'Save the context window for the current model.':
+    'Сохранить размер окна контекста для текущей модели.',
   'Show per-item context usage breakdown.':
     'Показать разбивку использования контекста по элементам.',
 
@@ -2337,21 +2354,33 @@ export default {
   // reload-plugins command
   // ============================================================================
   '{{count}} extension': '{{count}} расширение',
-  '{{count}} extensions': '{{count}} расширений',
+  '{{count}} extensions': counted('расширение', 'расширения', 'расширений'),
   '{{count}} command': '{{count}} команда',
-  '{{count}} commands': '{{count}} команд',
+  '{{count}} commands': counted('команда', 'команды', 'команд'),
   '{{count}} skill': '{{count}} навык',
-  '{{count}} skills': '{{count}} навыков',
+  '{{count}} skills': counted('навык', 'навыка', 'навыков'),
   '{{count}} agent': '{{count}} агент',
-  '{{count}} agents': '{{count}} агентов',
+  '{{count}} agents': counted('агент', 'агента', 'агентов'),
   '{{count}} workflow': '{{count}} рабочий процесс',
-  '{{count}} workflows': '{{count}} рабочих процессов',
+  '{{count}} workflows': counted(
+    'рабочий процесс',
+    'рабочих процесса',
+    'рабочих процессов',
+  ),
   '{{count}} hook': '{{count}} хук',
-  '{{count}} hooks': '{{count}} хуков',
+  '{{count}} hooks': counted('хук', 'хука', 'хуков'),
   '{{count}} extension MCP server': '{{count}} MCP-сервер расширения',
-  '{{count}} extension MCP servers': '{{count}} MCP-серверов расширения',
+  '{{count}} extension MCP servers': counted(
+    'MCP-сервер расширения',
+    'MCP-сервера расширения',
+    'MCP-серверов расширения',
+  ),
   '{{count}} extension LSP server': '{{count}} LSP-сервер расширения',
-  '{{count}} extension LSP servers': '{{count}} LSP-серверов расширения',
+  '{{count}} extension LSP servers': counted(
+    'LSP-сервер расширения',
+    'LSP-сервера расширения',
+    'LSP-серверов расширения',
+  ),
   'Reload extension changes from disk':
     'Перезагрузить изменения расширений с диска',
   'Reloaded extensions: {{summary}}': 'Перезагружены расширения: {{summary}}',
@@ -2443,12 +2472,14 @@ export default {
     ' Кредиты должны обновиться через {{time}}.',
   '{{days}} and {{hours}}': '{{days}} и {{hours}}',
   '1 day': '1 день',
-  '{{count}} days': '{{count}} дней',
+  '{{count}} days': counted('день', 'дня', 'дней'),
   '1 hour': '1 час',
-  '{{count}} hours': '{{count}} часов',
+  '{{count}} hours': counted('час', 'часа', 'часов'),
   Retry: 'Повторить',
   'Connecting…': 'Подключение…',
   'Loading models from provider…': 'Загрузка моделей провайдера…',
+  'Could not list models. Enter model IDs manually.':
+    'Не удалось получить список моделей. Введите идентификаторы моделей вручную.',
   'Recommended models · provider list unavailable, showing built-ins':
     'Рекомендуемые модели · список провайдера недоступен, показаны встроенные',
   'Cannot disable an extension-provided MCP server here.':
@@ -2649,7 +2680,7 @@ export default {
   'toolDisplayName.ListAgents': 'Список Agent',
   'toolDisplayName.TaskCreate': 'Создать задачу',
   'toolDisplayName.TaskUpdate': 'Обновить задачу',
-  'toolDisplayName.TaskList': 'Список задач',
+  'toolDisplayName.TaskList': 'Список задач команды',
   'toolDisplayName.TaskStop': 'Остановить задачу',
   'toolDisplayName.TeamCreate': 'Создать команду',
   'toolDisplayName.TeamDelete': 'Удалить команду',
@@ -2771,7 +2802,7 @@ export default {
     'Включён минимальный режим, поэтому хуки в этой сессии не выполняются.',
   'All hooks are disabled by the disableAllHooks setting.':
     'Все хуки отключены настройкой disableAllHooks.',
-  'Timeout:': 'Таймаут:',
+  'Timeout:': 'Тайм-аут:',
   'Status message:': 'Сообщение о статусе:',
   'Condition:': 'Условие:',
   'Options:': 'Параметры:',

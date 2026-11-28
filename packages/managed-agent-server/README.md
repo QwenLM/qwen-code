@@ -70,7 +70,8 @@ executable and worker entry. `QWEN_MANAGED_AGENT_WORKSPACE_ID` is the first
 it identifies the fallback Runtime and Session Store, independently of
 the bound Workspace IDs created through the API. Public API requests use signed authentication;
 the front door retains the signing key and fixed tenant/actor identity.
-Java, Harness and Broker listeners must stay on loopback. Readiness is
+Java and Harness listeners must stay on loopback; the Broker routes share the
+Java Spring listener rather than opening another port. Readiness is
 `GET /actuator/health/readiness`, which includes the database and Spring's
 readiness state. The public front door opens after readiness and the
 authenticated Harness capability probe succeed.
@@ -384,7 +385,7 @@ sets the Harness's `QWEN_MANAGED_RUNTIME_BROKER_URL` and
 of them, or with either one empty, refuses startup. Write each of these keys as `KEY=value` on one line,
 with no whitespace around the `=` and only letters, digits and `._:/+=-` in the
 value (the Broker URL may also use `[` and `]` to bracket an IPv6 literal, as
-in `http://[::1]:4182`), and start comments with `#`. The server
+in `http://[::1]:8080`), and start comments with `#`. The server
 refuses, by file and line, any line it might read differently from systemd or
 a shell, such as a continuation, a carriage return from CRLF line endings, a
 `;` comment, an unterminated quote or text after a closing quote.
@@ -592,9 +593,11 @@ that physically reaches a collected byte copy fails the named check
 
 This revision starts with a new empty database. Existing development or application databases keep their historical data under the old binary; the new service refuses legacy catalogs before running its baseline. Session identities and public URLs remain stable within their own environment.
 
-The public listener intentionally ignores end-user `Authorization`. The
-optional Runtime Broker listener still requires a separate machine bearer and
-must remain private.
+The public API listener intentionally ignores end-user `Authorization`. The
+optional Runtime Broker routes under `/internal/runtime-broker/v1/**` instead
+require their separate machine bearer on the Managed Agent internal surface;
+public API signatures and Session Store writer credentials do not authorize
+them.
 
 ## Private Managed Session store
 
@@ -732,6 +735,17 @@ deployed provider acceptance remain unverified; see also [Hosted recovery scope]
 The [English design](../../docs/design/2026-10-18-hosted-wake-recovery.md) and
 [Chinese design](../../docs/design/2026-10-18-hosted-wake-recovery.zh-CN.md) describe
 the recovery boundary and acceptance criteria.
+
+Suspension with pending wake inputs is opt-in through
+`qwen.managed-agent.wake-dispatch.enabled=true` (default `false`). The Store
+then advertises `wakeDispatch` in its writer grants, and a Harness that sees it
+may suspend an idle Session whose only pending inputs are deferred,
+unattempted wake inputs. Its seal stamps the head with what the wake pump would pick: the scan
+skips the head until its earliest input is due, then loads it without replaying
+the journal. Any later writer acquisition clears the stamp. Disabling the flag
+stops new such suspensions; heads already stamped are still delivered when due.
+See the [English design](../../docs/design/2026-11-19-managed-control-plane-wake-seal-stamp.md)
+and [Chinese design](../../docs/design/2026-11-19-managed-control-plane-wake-seal-stamp.zh-CN.md).
 
 ## Managed automation (H6)
 
@@ -910,7 +924,7 @@ deployment passes #12904, #13010 and public FG6f physical failure gates. See
 
 ### Public child agents
 
-`QWEN_MANAGED_AGENT_WORKSPACE_CHILD_AGENTS_ENABLED` defaults to true and enables public `agent` delegation for qualified new built-in `qwen-code` Workspace Sessions. Set it to false to disable new delegation. Admission requires public Shell, a durable LOCAL process Broker, Session isolation, and a Harness advertising `public-child-agents/1`, approval selection and Shell lifecycle v2. Other deployment profiles continue to start without public child admission. Existing Sessions remain opted out. SSH, custom definitions, Team, Workflow, messaging, nesting and isolated child Workspaces are excluded from this first release.
+`QWEN_MANAGED_AGENT_WORKSPACE_CHILD_AGENTS_ENABLED` defaults to true and enables public `agent` delegation for qualified new built-in `qwen-code` Workspace Sessions. Set it to false to disable new delegation. Admission requires public Shell, Session isolation, a durable LOCAL process Broker or an SSH Broker with configured nodes and Session isolation, and a single or pooled Harness advertising `public-child-agents/1`, approval selection and Shell lifecycle v2. AgentDefinition children additionally require managed extension execution. Resident/CSI Workspaces never qualify — the provisioner capability arms and the public Shell profile requirement exclude them structurally. Team, Workflow, messaging, nesting and isolated child Workspaces remain excluded. Other deployment profiles continue to start without public child admission. Existing Sessions remain opted out.
 
 Children share the parent's directory, definition and owner, start without its conversation, and keep the effective approval mode, actual model route and Skills captured at launch. Later parent policy changes apply only to new children. Default execution is background; explicit foreground waits retain the existing mount restrictions. Each root admits at most four active children and 64 launches over its lifetime.
 
@@ -1188,7 +1202,11 @@ internal surface
 (`/internal/**`) may move to its own listener via
 `QWEN_MANAGED_AGENT_INTERNAL_SERVER_PORT` and
 `QWEN_MANAGED_AGENT_INTERNAL_SERVER_ADDRESS` (default `127.0.0.1`); either
-port then answers 404 for the other surface's routes. Leaving loopback —
+port then answers 404 for the other surface's routes. The Broker's Spring routes
+share the selected internal listener and open no dedicated port. A standalone
+main connector bound beyond loopback requires this separate internal connector
+when the Broker is enabled; remote Harness calls use the deployment's
+TLS-protected internal ingress. Leaving loopback —
 public or internal — requires signed mode or a configured binding key
 respectively, unless `QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND=true`
 explicitly overrides the guard. Loopback is a trust boundary only as strong
@@ -1206,9 +1224,10 @@ Design: [English](../../docs/design/2026-10-26-retire-managed-cwd-change.md) | [
 
 ### Broker deployment
 
-The Broker starts before the first Hosted Harness connection, so the supported
-startup order is Spring/Broker first, Hosted Harness second, traffic last. The
-Harness SDK handshake is lazy and occurs on the first admitted Turn.
+The Broker service and its routes on the shared Spring listener start with the
+control plane, before the first Hosted Harness connection; the supported startup
+order is control plane first, Hosted Harness second, traffic last. The Harness
+SDK handshake is lazy and occurs on the first admitted Turn.
 
 For the single-node local-process provisioner, also set:
 
@@ -1309,11 +1328,10 @@ The YAML-only ring, the retirement query, the operator-recovery ring and the
 single-key-pair migration entry are normative in [Rotate the Runtime credential key](../../docs/users/managed-agent-reference-deployment.md#rotate-the-runtime-credential-key),
 with the rationale in the [rotation design](../../docs/design/2026-10-15-runtime-credential-key-rotation.md).
 
-Two optional settings change how the Broker listens and how long it waits for
-a dispatched v3 execution's result: `runtime-broker.allow-non-loopback` and
-`runtime-broker.v3-result-window`. Read their entries in the
+The optional `runtime-broker.v3-result-window` setting changes how long the
+Broker waits for a dispatched v3 execution's result. Read its entry in the
 [configuration reference](../../docs/users/managed-agent-configuration-reference.md#qwenmanaged-agentruntime-broker)
-before changing either.
+before changing it.
 
 Every `qwen.managed-agent.*` duration setting binds a suffix-less number as
 seconds except for `runtime-broker.retention.max-age`,
@@ -1349,8 +1367,12 @@ fails before traffic is accepted. The derivation does not apply to
 `external-scratch`, which requires an explicit ID because its worker-side cwd
 cannot be hashed on the Broker host.
 
-The Hosted file profile connects through the private Broker endpoint, which
-defaults to `http://127.0.0.1:4182`. When enabled, the embedded
+The Hosted file profile connects to the Broker's
+`/internal/runtime-broker/v1/**` routes on the Managed Agent internal surface.
+The standalone bootstrap points `QWEN_MANAGED_RUNTIME_BROKER_URL` at the shared
+loopback origin `http://127.0.0.1:8080`; deployments with an internal connector
+or TLS ingress set the Harness URL to that same internal origin used by the
+Session Store. There is no independent Broker listener. When enabled, the embedded
 Broker always uses the Spring `DataSource` and Flyway-managed Runtime tables;
 it does not fall back to in-memory repositories. The active credential key and
 every configured previous key must decode to exactly 32 bytes and protect
@@ -1666,9 +1688,10 @@ container-visible host — or Flyway's boot probe is denied (`ERROR 1142`)
 and startup stops.
 
 Publishing the API needs no Runtime Broker face: the broker ships disabled
-by default, and a non-loopback broker bind is a separate opt-in — the broker
-refuses one unless `QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK=true`
-is also set (see Broker deployment above).
+by default. If it is enabled, a non-loopback `server.address` requires a
+separate `qwen.managed-agent.internal-server.port`; the Harness reaches the
+Broker through that internal listener's TLS-protected ingress, not through
+the published public API connector (see Broker deployment above).
 
 The opt-in makes the authentication consequence load-bearing. Under the
 shipped default — `auto` resolving to `open` — there is no HTTP
@@ -1718,6 +1741,65 @@ still stop all contexts and child processes. State is preserved between methods,
 nested classes, and context restarts inside one class. See the
 [isolation design](../../docs/design/2026-10-20-hosted-it-database-isolation.md)
 ([简体中文](../../docs/design/2026-10-20-hosted-it-database-isolation.zh-CN.md)).
+
+### Disposable MySQL safety
+
+A leaked MySQL 8 `mysqld` whose datadir was removed keeps looping on
+`MY-012894 Unable to open './#innodb_redo/...'`, and the stray log can reach
+hundreds of GB within hours — enough to fill the volume. MariaDB emits no
+`MY-0*` codes and fails silently instead, so the pre-delete presence check in
+rule 3 is what has to work there. Scripted fixtures such as
+`integration-tests/helpers/provider-media-mysql.mjs` already pair start and
+stop; these rules are for instances started by hand:
+
+1. Cap the output. Start the server under bash with `ulimit -f 8388608`
+   (8 GiB in bash's 1024-byte blocks; dash counts 512-byte blocks, so the
+   same value is 4 GiB there) and pass `--log-error=<path>` so the server
+   keeps its own log, including startup notes, independent of the launching
+   shell. A runaway writer then dies with SIGXFSZ at the cap. The limit
+   bounds shell redirects too; the server's own log is preferred because it
+   survives the shell, not because a redirect would be uncapped.
+   `RLIMIT_FSIZE` is per-process: it also caps the datadir's own files, so
+   keep the bound well above the expected datadir size or a legitimate
+   `ibdata`/redo grow fails with SIGXFSZ and reads as a mysterious crash.
+2. Pair start and stop in the same shell, and always pass `--pid-file=`.
+   Trap EXIT for the stop and make INT/TERM exit, so the stop runs exactly
+   once:
+
+   ```bash
+   (ulimit -f 8388608; exec mysqld --no-defaults --datadir="$DATADIR" \
+     --socket="$SOCKET" --pid-file="$DATADIR/mysql.pid" \
+     --log-error="$DATADIR/mysql.log") &
+   PID=$!
+   trap 'mysqladmin --socket="$SOCKET" -uroot shutdown 2>/dev/null;
+         kill -0 "$PID" 2>/dev/null && kill -9 "$PID"' EXIT
+   trap 'exit 130' INT; trap 'exit 143' TERM
+   ```
+
+   With `exec`, `$PID` is the server itself. The guarded `kill -9` fires
+   only if the graceful shutdown left the server alive, so a recycled PID
+   is not signalled.
+
+3. Confirm the process is actually gone **before** removing the datadir,
+   and fail closed on unknown — an empty or missing pid file is not "gone":
+
+   ```bash
+   PID=$(cat "$DATADIR/mysql.pid") && [ -n "$PID" ] \
+     || { echo 'no pid recorded — do not delete'; exit 1; }
+   if kill -0 "$PID" 2>/dev/null; then
+     echo 'server still alive — do not delete'; exit 1
+   fi
+   ```
+
+   `pgrep -f <datadir>` is argv-text matching, not a presence check: it
+   misses a server started from a config file (no datadir on argv) and
+   matches any launcher whose argv merely mentions the path. Use it only
+   as a secondary sweep when `--datadir` is on the command line.
+
+4. A background wrapper reporting "terminated by signal 9" killed only the
+   wrapper. Re-check the real child with a pid-file `kill -0` (or
+   `pgrep -f <datadir>` when the datadir is on argv) and stop it explicitly
+   before deleting anything.
 
 ## Managed extension packages
 
@@ -2082,7 +2164,7 @@ The [SQL wake scan](#wake-recovery-after-harness-loss) has separate local
 macOS/MySQL 8.4 evidence; it does not yet have Linux/Windows, real-MQ or deployed
 provider acceptance. The scope below does not extend those claims.
 
-The first Hosted release supports recovery for one Java control-plane instance
+First-release Hosted recovery acceptance covers one Java control-plane instance
 on one trusted Linux host. That control plane replaces reachable Hosted Harness
 process generations one after another, and a Runtime Session stays exclusive
 to its Session. Recovery covers only the profiles and parked states that are
@@ -2096,13 +2178,20 @@ durable engine ownership, capability and journal-contract checks and
 fail-closed recovery apply throughout. A refused recovery is never replayed
 through another Runtime or the Legacy engine.
 
-The frozen control-plane arm shows that a woken former control plane's stale
-claim is refused and changes nothing, and a store test pins the bind guards
-that claim never reaches. Neither makes two live control planes a supported
-deployment. Routing between them is out of scope: a new Turn could
-be claimed by either one. Cross-host takeover, physical-ownership handoff
-between hosts, real providers and mixed-version clusters still need their own
-acceptance before they are supported.
+The frozen control-plane arm verifies that a former control plane's stale
+claim is fenced. A store test verifies the binding guards independently.
+Separate MySQL integration tests use two Java control-plane instances with the
+same Session Store and Hosted Harness. They cover reusing an existing
+attachment for the first Turn, cancelling the original Turn, and delivering
+Shell approval decisions from a replica with no local attachment. See the
+[cross-instance attachment recovery design](https://github.com/QwenLM/qwen-code/blob/f43f4d1813674f0f2e3b4e10fdd72afda965c9ef/docs/design/2026-11-26-managed-control-plane-attachments.md)
+([简体中文](https://github.com/QwenLM/qwen-code/blob/f43f4d1813674f0f2e3b4e10fdd72afda965c9ef/docs/design/2026-11-26-managed-control-plane-attachments.zh-CN.md)).
+
+Multi-replica release acceptance needs routing evidence in the intended
+topology. When Workspace tools are enabled, acceptance also covers Runtime
+Broker and Workspace ownership. Cross-host takeover, physical-ownership
+handoff between hosts, real providers, and mixed-version clusters also need
+their own acceptance.
 
 The `--big-output` long-answer mode is also Workspace-bound:
 

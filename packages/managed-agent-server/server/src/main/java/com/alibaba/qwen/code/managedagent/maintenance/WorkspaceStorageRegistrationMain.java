@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.maintenance;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.runtimebroker.provisioning.NativeStorageIdentityReader;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -39,7 +40,7 @@ public final class WorkspaceStorageRegistrationMain {
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
                 new WorkspaceMount(args[1], args[2], args[3])));
         WorkspaceStorageGuard guard = new WorkspaceStorageGuard(new JdbcTemplate(dataSource),
-                new DataSourceTransactionManager(dataSource), properties, new com.alibaba.qwen.code.runtimebroker.provisioning.NativeStorageIdentityReader());
+                new DataSourceTransactionManager(dataSource), properties, new NativeStorageIdentityReader());
         if (inspect) {
             System.out.println(guard.inspect(args[1], args[2]));
         } else if (register) {

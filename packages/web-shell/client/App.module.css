@@ -438,6 +438,35 @@
   overflow-y: auto;
 }
 
+/* iOS overlays its software keyboard without resizing the layout viewport.
+   Keep both the centered welcome composer and the bottom-anchored session
+   composer inside the visible viewport reported by visualViewport. */
+.app[data-compact-sidebar] .chatPane {
+  padding-bottom: var(--web-shell-visual-viewport-inset-bottom, 0px);
+}
+
+/* The reservation above shrinks the box that vertically centres the welcome
+   group, so a group taller than the reduced box overflows equally at both
+   ends; with the compact empty pane's `overflow: hidden` the top is clipped
+   and, worse, Send is pushed back under the keyboard. While the keyboard
+   occludes the viewport (the inset is non-zero), anchor the group to the
+   bottom of the padded content box, so any overflow goes upward only and the
+   composer always sits on the reserved inset. Without occlusion the compact
+   empty state keeps the centring from `.appChatEmpty .chatPane` above. */
+.appChatEmpty[data-compact-sidebar][data-visual-viewport-occluded] .chatPane {
+  justify-content: flex-end;
+}
+
+/* Only the session layout wraps the composer in an absolutely positioned
+   `.chatViewWrap` whose bottom edge must be lifted. The empty welcome state
+   resets the wrap to `position: static` (and the custom-footer variant makes
+   it `position: relative` as the bottom-panel anchor), where `bottom` would
+   displace the whole shrink-to-content group above the overflow-hidden pane
+   on top of the pane padding that already reserves the inset. */
+.app:not(.appChatEmpty)[data-compact-sidebar] .chatViewWrap {
+  bottom: var(--web-shell-visual-viewport-inset-bottom, 0px);
+}
+
 .themeDark {
   --background: #0d0d0d;
   --foreground: #fafafa;
@@ -767,6 +796,10 @@
 }
 
 .chatSubtree {
+  display: contents;
+}
+
+.chatSubtree .chatSurface {
   display: contents;
 }
 

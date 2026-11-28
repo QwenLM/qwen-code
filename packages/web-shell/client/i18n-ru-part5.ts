@@ -778,6 +778,21 @@ export const RU_PART5: Record<
   'chat.scrollToBottom': 'Прокрутить вниз',
   'chatHeader.toggleEnvironment': 'Переключить сведения об окружении',
   'chatHeader.toggleRightPanel': 'Переключить правую панель',
+  'chatHeader.openScheduledTasks': (v) =>
+    `${ruPlural(v?.count, 'Задача', 'Задачи', 'Задач')} по расписанию (${v?.count ?? 0})`,
+  'chatHeader.scheduledTasksPaused': (v) =>
+    `${ruPlural(v?.count, 'Задача', 'Задачи', 'Задач')} по расписанию (${v?.count ?? 0}, приостановлено)`,
+  'environment.scheduledTasks': 'Задачи по расписанию',
+  'environment.scheduledTasks.scopeDurable': 'Постоянная',
+  'environment.scheduledTasks.scopeSession': 'Только текущая сессия',
+  'environment.scheduledTasks.scopeWakeup': 'Пробуждение цикла',
+  'environment.scheduledTasks.statusActive': 'Активна',
+  'environment.scheduledTasks.statusPaused': 'Приостановлена',
+  'environment.scheduledTasks.nextRun': (v) => `Через ${v?.when ?? ''}`,
+  'scheduledTasks.durableHistoricalSnapshot':
+    'Это постоянная задача по расписанию. Показан снимок при создании: текущее состояние недоступно.',
+  'environment.scheduledTasks.stop': 'Остановить',
+  'environment.scheduledTasks.viewAll': 'Управление всеми',
   'environment.title': 'Окружение',
   'environment.changes': 'Изменения',
   'environment.changeCount': (v) =>
@@ -828,8 +843,12 @@ export const RU_PART5: Record<
     `Не удалось восстановить панель: ${v?.error ?? 'Неизвестная ошибка'}`,
   'userMessage.showMore': 'Показать ещё',
   'userMessage.showLess': 'Свернуть',
-  'userMessage.sendFailed': 'Не удалось отправить',
-  'userMessage.retrySend': 'Повторить отправку сообщения',
+  'userMessage.automatic.title': 'Автоматическое срабатывание',
+  'userMessage.retrySend': 'Отправить снова',
+  'userMessage.retryUncertain':
+    'Возможно, не доставлено — нажмите, чтобы отправить снова',
+  'userMessage.deliveryUncertain':
+    'Сообщение могло не дойти. Нажмите ! слева, чтобы отправить снова.',
   'userMessage.edit': 'Изменить сообщение',
   'message.moreActions': 'Другие действия с сообщением',
   'userMessage.editSubmit': 'Отправить',

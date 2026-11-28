@@ -23,6 +23,8 @@ import { MANAGED_TASK_MESSAGES_ZH } from './components/managed/managed-task-mess
 import { BROWSER_NOTIFICATION_MESSAGES_ZH } from './browser-notifications/messages.js';
 import { WORKSPACE_REGISTRATION_MESSAGES_ZH } from './components/managed/managed-workspace-messages.js';
 import { ARTIFACT_LIBRARY_MESSAGES_ZH } from './components/managed/managed-artifact-library-messages.js';
+import { WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_ZH } from './components/artifacts/workspace-artifact-library-messages.js';
+import { ARCHIVED_SESSIONS_MESSAGES_ZH } from './components/sidebar/archived-sessions-messages.js';
 import { MANAGED_MCP_MESSAGES_ZH } from './components/managed/managed-mcp-messages.js';
 import type { Messages, MessageValue } from './i18n.js';
 import { WEB_SHELL_LANGUAGES } from './i18n-language.js';
@@ -325,7 +327,6 @@ export const ZH: Messages = {
   'managed.discarded': '已丢弃本次请求。草稿已放回输入框。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
-  'managed.question.title': '请回答以下问题',
   'managed.actions.title': '待处理请求',
   'managed.actions.root': '当前会话',
   'managed.actions.child': (v) => `子会话 · ${v?.session}`,
@@ -1266,6 +1267,12 @@ export const ZH: Messages = {
   'composerMobile.commands': '全部命令',
   'composerMobile.searchCommands': '搜索命令',
   'composerMobile.history': '输入历史',
+  'composerMobile.acceptFollowup': '接受建议',
+  'composerMobile.dismissFollowup': '忽略建议',
+  'composerMobile.caretUp': '光标上移',
+  'composerMobile.caretDown': '光标下移',
+  'composerMobile.caretRight': '光标右移',
+  'composerMobile.insertSlash': '插入斜杠',
   'composerMobile.stop': '停止',
   'composerMobile.attachments': (v) => `已添加附件/图片：${v?.count ?? 0}`,
   'composerAdd.emptyState': '此处没有可用的添加操作',
@@ -1338,6 +1345,28 @@ export const ZH: Messages = {
     '此旧会话已取消，但未记录来源。继续前需要你确认。',
   'session.recovery.confirmCancellation':
     '此轮任务可能已被主动停止，但未记录原因。确定要继续执行吗？',
+  'restartRecovery.title': (v) => `上次重启中断了 ${v?.['count'] ?? 0} 个任务`,
+  'restartRecovery.review': '查看',
+  'restartRecovery.hide': '收起',
+  'restartRecovery.continue': '继续',
+  'restartRecovery.continueAll': '全部继续',
+  'restartRecovery.confirmToolTurn': '确认并继续',
+  'restartRecovery.toolTurnHint':
+    '任务在工具调用中中断；继续会先把未完成的调用标记为失败，再由模型接续。',
+  'restartRecovery.inFlight': '进程中断',
+  'restartRecovery.daemonShutdown': 'Daemon 重启',
+  'restartRecovery.interrupted': '已中断',
+  'restartRecovery.cancellationNeedsConversation': '请打开会话确认这次取消。',
+  'restartRecovery.notContinuable': '该任务已不再等待恢复。',
+  'restartRecovery.failed': '无法继续',
+  'restartRecovery.batchStopped':
+    'Daemon 未回复；前面的会话可能已在运行，请先确认会话状态再重试。',
+  'restartRecovery.loadFailed': '无法读取中断任务',
+  'restartRecovery.retry': '重试',
+  'restartRecovery.truncated':
+    '可能还有更多被中断的任务超出扫描上限，请重试扫描。',
+  'restartRecovery.scanFailedWorkspaces': (v) =>
+    `无法扫描：${v?.workspaces ?? ''}`,
   'session.archived': '该会话已归档',
   'session.archivedDescription': '需要先取消归档，才能打开该会话。',
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',
@@ -1407,6 +1436,12 @@ export const ZH: Messages = {
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} 个问题`,
   'askUser.selectAnswer': '选择一个答案',
   'askUser.typePlaceholder': '输入内容...',
+  'chat.promptNotConfirmed': '提示词未确认',
+  'chat.promptNotAdmitted': '提示词未被接受',
+  'chat.failedToSend': '发送消息失败',
+  'chat.approvalNotAccepted': '审批未被接受',
+  'chat.acknowledgeUnknown': '我已检查会话',
+  'chat.stopNotConfirmed': '停止请求未确认',
   'askUser.shortcuts.previous': '← 上一步',
   'askUser.shortcuts.optionsSingle': '↑↓ 选择 · Enter 提交',
   'askUser.shortcuts.optionsNext': '↑↓ 选择 · Enter 下一步',
@@ -2343,6 +2378,13 @@ export const ZH: Messages = {
   'attachment.readFailed': '读取附件失败。',
   'attachment.loadingFile': '正在加载文件...',
   'attachment.loadingPreview': '正在加载预览...',
+  'pdf.previousPage': '上一页',
+  'pdf.nextPage': '下一页',
+  'pdf.openFull': '打开完整 PDF',
+  'pdf.page': (v) => `PDF 第 ${v?.page ?? 1} 页`,
+  'pdf.fileChanged': '加载期间文件已更改，请重新打开预览。',
+  'pdf.workerFailed': '无法启动 PDF 预览。',
+  'pdf.externalFontMap': '此 PDF 需要字体映射。请打开完整 PDF 查看。',
   'sideTask.creating': '正在创建侧边任务…',
   'sideTask.createFailed': '创建侧边任务失败',
   'sideTask.commandsLoadingTimedOut':
@@ -2372,6 +2414,9 @@ export const ZH: Messages = {
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',
   'sidebar.newTask': '新建会话',
+  'sidebar.overloadPaused': '系统过载 · 暂停新建',
+  'sidebar.overloadDetail': (v) =>
+    `主机负荷比 ${v?.['ratio'] ?? '?'}，事件循环 p99 ${v?.['lag'] ?? '?'} ms（${v?.['reason'] ?? 'unknown'}）。负荷回落后恢复新建。`,
   'sidebar.newWorktreeTask': '新建 Worktree 会话',
   'sidebar.moveWorkspaceUp': '上移',
   'sidebar.moveWorkspaceDown': '下移',
@@ -2522,6 +2567,8 @@ export const ZH: Messages = {
   'sidebar.openWorkspaceTerminalFailed': '打开终端失败',
   'sidebar.openWorkspaceTerminalOpened': '已在工作区打开终端',
   'sidebar.manageWorkspace': '管理',
+  'sidebar.trustWorkspace': '信任工作区',
+  'sidebar.trustingWorkspace': '正在信任…',
   'sidebar.reloadWorkspace': '重新加载运行时',
   'sidebar.reloadWorkspaceFailed': '重新加载工作区运行时失败',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} 个工作区`,
@@ -2554,6 +2601,13 @@ export const ZH: Messages = {
   'sidebar.overview.hooksDisabled': (v) => `${v?.count ?? 0} 个 hook（已禁用）`,
   'sidebar.overview.hooksUntrusted': (v) =>
     `${v?.count ?? 0} 个 hook，${v?.untrusted ?? 0} 个未加载（目录未受信任）。请启用 security.folderTrust.enabled 并信任该目录，或在交互式终端中运行 qwen 审查。`,
+  'sidebar.overview.openFacet': (v) =>
+    `管理 ${v?.workspace ?? ''} 的${v?.facet ?? ''}：${v?.detail ?? ''}`,
+  'workspaceHooks.title': 'Hooks',
+  'workspaceHooks.loading': '正在加载 hooks…',
+  'workspaceHooks.empty': '此工作区尚未配置任何 hook。',
+  'workspaceHooks.enabled': '已启用',
+  'workspaceHooks.disabled': '已禁用',
   'sidebar.forceRemoveWorkspace': '强制移除',
   'sidebar.removeWorkspaceTitle': '移除工作区',
   'sidebar.removeWorkspaceConfirm': (v) =>
@@ -2665,6 +2719,8 @@ export const ZH: Messages = {
   'sidebar.sessionIssueStateNotPlanned': '未计划',
   'sidebar.userInputNeeded': '需要用户输入',
   'sidebar.userInputNeededShort': '需输入',
+  'sidebar.continuationNeeded': '需要继续执行',
+  'sidebar.continuationNeededShort': '待继续',
   'sidebar.completedUnread': '刚完成',
   'sidebar.pin': '置顶',
   'sidebar.selectSessions': '多选对话',
@@ -2717,11 +2773,6 @@ export const ZH: Messages = {
   'queue.submittingDisabled': '排队消息正在提交中...',
   'queue.summaryEditDisabled': '恢复的队列摘要无法还原原始附件。',
   'queue.admissionUnknown': '消息是否送达尚不确定，请先检查会话再重试。',
-  'queue.restoreUnknown': '恢复本地副本',
-  'queue.discardUnknown': '丢弃本地副本',
-  'queue.continueEditing': '继续编辑',
-  'queue.continueEditingConfirm':
-    '这条消息可能已经在执行。只有在接受重复发送风险时才继续编辑。',
   'queue.commandBlocked': '当前回合运行时，Slash 命令不能进入排队。',
   'queue.commandGoalBlocked':
     'Goal 正在占用会话或状态仍在加载，暂时无法执行 Slash 命令。',
@@ -2737,7 +2788,7 @@ export const ZH: Messages = {
   'queue.insertCommandDisabled': '命令不能插入当前回合',
   'queue.sendNow': '立即发送',
   'queue.sendNowTip':
-    '立即发送排队的消息，并截断模型当前的回复（回复已开始调用工具时不截断）；正在运行的工具会先执行完',
+    '立即发送排队的消息。可能打断当前回复或工具调用。可转后台的 shell 命令会继续运行。',
   'queue.sendNowFailed': '立即发送排队消息失败',
   'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,
@@ -2846,18 +2897,8 @@ export const ZH: Messages = {
     '模型在调用工具时反复尝试或达到了安全上限，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
   'error.loopDetected.explicitCap': (vars) =>
     `本轮工具调用达到了 model.maxToolCallsPerTurn 设定的上限（${vars?.limit} 次），因此系统停止了本轮操作。会话并未结束，你可以在设置中调高上限，或发送新的指令继续。`,
-  'error.loopDetected.backstop': (vars) =>
-    `本轮工具调用达到了 ${vars?.limit} 次的安全上限，因此系统停止了本轮操作。会话并未结束，你可以发送新的指令继续，也可以通过 model.maxToolCallsPerTurn 设定其他上限。`,
-  'error.loopDetected.stuckRepetition': (vars) =>
-    `工具调用超过 ${vars?.limit} 次后，模型仍在重复同一个调用，因此系统停止了本轮操作。会话并未结束，你可以换一种方式或给出更明确的指令。`,
-  'error.loopDetected.repeatedCall':
-    '模型在本轮中反复发起同一个工具调用，因此系统停止了本轮操作。会话并未结束，你可以换一种方式或给出更明确的指令。',
   'error.loopDetected.providerDuplicateId':
     '模型服务发来了一个已经执行过的工具调用，为避免重复执行，系统停止了本轮操作。会话并未结束，你可以发送新消息继续。',
-  'error.loopDetected.invalidToolParams':
-    '模型反复向同一个工具传入无效参数，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
-  'error.loopDetected.repeatedToolFailure':
-    '同一个工具在收到提醒后仍因相同原因失败，因此系统停止了本轮操作。会话并未结束，你可以查看上面的错误，或换一种方式。',
   'shell.command': 'Shell 命令',
   'shell.result.timedOut': '执行超时',
   'shell.result.notices': '提示',
@@ -4106,6 +4147,28 @@ export const ZH: Messages = {
   'chatHeader.toggleEnvironment': '切换环境信息',
   'chatHeader.toggleRightPanel': '切换右侧扩展区',
   'chatHeader.openArtifacts': (v) => `产物（${v?.count ?? 0}）`,
+  'chatHeader.openScheduledTasks': (v) => `定时任务（${v?.count ?? 0}）`,
+  'chatHeader.scheduledTasksPaused': (v) =>
+    `定时任务（${v?.count ?? 0}，已暂停）`,
+  'environment.scheduledTasks': '定时任务',
+  'environment.scheduledTasks.scopeDurable': '持久化',
+  'environment.scheduledTasks.scopeSession': '仅当前会话',
+  'environment.scheduledTasks.scopeWakeup': '循环唤醒',
+  'environment.scheduledTasks.statusActive': '运行中',
+  'environment.scheduledTasks.statusPaused': '已暂停',
+  'environment.scheduledTasks.nextRun': (v) => `${v?.when ?? ''}后`,
+  'environment.scheduledTasks.stop': '停止',
+  'environment.scheduledTasks.viewAll': '管理全部',
+  'scheduledTasks.durableHistoricalSnapshot':
+    '这是持久定时任务；实时状态不可用，展示其创建时的快照。',
+  'scheduledTasks.sessionScopedActive':
+    '当前会话运行中，停止后会立即取消后续触发。',
+  'scheduledTasks.sessionScopedPaused':
+    '当前会话的定时任务已暂停。停止后会移除剩余调度。',
+  'scheduledTasks.sessionScopedCancelled': '该会话级定时任务已停止或已过期。',
+  'scheduledTasks.stopSessionTask': '停止任务',
+  'scheduledTasks.error.cancelFailed': '停止定时任务失败',
+  'tasks.pill.scheduled': (v) => `${v?.count ?? 0} 个定时任务`,
   'environment.title': '环境信息',
   'environment.changes': '变更',
   'environment.changeCount': (v) => `${v?.count ?? 0} 项变更`,
@@ -4149,8 +4212,10 @@ export const ZH: Messages = {
   'rightPanel.restoreFailed': (v) => `面板恢复失败：${v?.error ?? '未知错误'}`,
   'userMessage.showMore': '显示更多',
   'userMessage.showLess': '收起',
-  'userMessage.sendFailed': '发送失败',
-  'userMessage.retrySend': '重新发送消息',
+  'userMessage.automatic.title': '自动触发',
+  'userMessage.retrySend': '重发',
+  'userMessage.retryUncertain': '可能未送达，点击重发',
+  'userMessage.deliveryUncertain': '消息可能未送达，点击左侧感叹号重发',
   'userMessage.edit': '编辑消息',
   'message.moreActions': '更多操作',
   ...MESSAGE_DELETION_MESSAGES_ZH,
@@ -4401,6 +4466,11 @@ export const ZH: Messages = {
   'sessionsOverview.popupBlocked':
     '弹出窗口被拦截。请允许本站弹窗，以便在新标签页中打开会话。',
   'sessionsOverview.refresh': '刷新',
+  'sessionsOverview.restoreWorktree': '恢复快照',
+  'sessionsOverview.restoreWorktreeUnavailable':
+    '当前工作区没有可用的 Worktree 快照',
+  'sessionsOverview.restoringWorktree': '恢复中…',
+  'sessionsOverview.restoreWorktreeFailed': '恢复快照失败',
   'sessionsOverview.selectAll': '全选',
   'sessionsOverview.titleColumn': '标题',
   'sessionsOverview.actions': '操作',
@@ -5085,9 +5155,11 @@ export const ZH: Messages = {
   ...MANAGED_LIFECYCLE_MESSAGES_ZH,
   ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
   ...ARTIFACT_LIBRARY_MESSAGES_ZH,
+  ...WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_ZH,
   ...MANAGED_MCP_MESSAGES_ZH,
   ...MANAGED_EXTENSION_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,
+  ...ARCHIVED_SESSIONS_MESSAGES_ZH,
 };

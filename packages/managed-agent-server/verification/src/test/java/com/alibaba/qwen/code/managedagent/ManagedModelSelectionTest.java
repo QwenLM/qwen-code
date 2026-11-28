@@ -13,7 +13,6 @@ import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -64,7 +63,7 @@ class ManagedModelSelectionTest {
 
     @BeforeEach
     void setup() {
-        tenant = "model-selection-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_workspace (tenant_id,workspace_id,workspace_generation,storage_id,"
                 + "display_name,config_ref,policy_ref,state) VALUES (?,'ws',1,'storage','Workspace',?,?,'ACTIVE')",
                 tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
@@ -255,10 +254,9 @@ class ManagedModelSelectionTest {
 
     @Test
     void pendingApprovalDoesNotBlockFutureModelSelectionOrResolveTheAction() {
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,"
+        jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,"
                 + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
-                + " VALUES (?,?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)",
-                ManagedSessionStore.sessionScopeKey(tenant, session), "a".repeat(64), tenant, session,
+                + " VALUES (?,?,'action','action',1,1,'ACTION','requested','action',1,?)", tenant, session,
                 "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         assertThat(change("actor", "pending-approval", "model-a", 0).modelSelection())
                 .isEqualTo(new WebShellModelSelection("model-a", 1));
@@ -282,13 +280,12 @@ class ManagedModelSelectionTest {
                 "digest-pinned-command", session, input, SubmitHarnessTurn.computePayloadDigest(input)));
         String prompt = store.findTurn(tenant, session, turn.turnId()).orElseThrow().promptId();
         String pendingReceipt = "e".repeat(64);
-        jdbc.update("INSERT INTO ma_request_receipt (receipt_key,namespace,tenant_key,tenant_id,scope_kind,"
-                + "scope_key,scope_id,idempotency_key,idempotency_digest,request_digest,operation,session_id,"
-                + "state,gmt_create,gmt_modified) VALUES (?,'SESSION_COMMAND',?,?,'TENANT',?,"
+        jdbc.update("INSERT INTO ma_request_receipt (receipt_key,namespace,tenant_id,scope_kind,"
+                + "scope_ref,scope_id,idempotency_key,idempotency_digest,request_digest,operation,session_id,"
+                + "state,gmt_create,gmt_modified) VALUES (?,'SESSION_COMMAND',?,'TENANT',?,"
                 + "'RENAME_SESSION',?,?,'sha256:pending','RENAME_SESSION',?,'PENDING',1,1)",
-                pendingReceipt,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant), tenant,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant, "RENAME_SESSION"),
+                pendingReceipt, tenant,
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.receiptScopeRef(tenant, "RENAME_SESSION"),
                 "pending-rename", "p".repeat(64), session);
         assertThat(change("actor", "during-pending-command", "model-b", 1).modelSelection())
                 .isEqualTo(new WebShellModelSelection("model-b", 2));
@@ -311,7 +308,7 @@ class ManagedModelSelectionTest {
                 "digest-pinned-runtime", session, input, SubmitHarnessTurn.computePayloadDigest(input)));
         String prompt = store.findTurn(tenant, session, turn.turnId()).orElseThrow().promptId();
         jdbc.update("UPDATE ma_turn SET status='RUNNING' WHERE tenant_id=? AND turn_id=?", tenant, turn.turnId());
-        jdbc.update("INSERT INTO ma_runtime_session (scope_key,runtime_session_id,tenant_id,workspace_id,"
+        jdbc.update("INSERT INTO ma_runtime_session (scope_id,runtime_session_id,tenant_id,workspace_id,"
                 + "workspace_generation,canonical_cwd,capability_digest,isolation_class,harness_session_id,"
                 + "turn_kind,binding_id,runtime_generation,session_state,record_version,last_active_at)"
                 + " VALUES (?,'retained',?,'ws','1','/tmp/model-selection','digest','session',?,"
@@ -392,19 +389,16 @@ class ManagedModelSelectionTest {
 
     @Test
     void aSelectionCommittedDuringSummaryReadCannotReviveThePreviousContext() {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        String record = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(session,
-                "hosted_context_usage", "latest");
         byte[] bytes = "{\"version\":1,\"model\":\"model-a\",\"attempts\":[{\"promptTokenCount\":12,\"contextWindowSize\":100}]}"
                 .getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id,workspace_id,"
                 + "session_id,resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,"
-                + "state,gmt_create) VALUES (?,?,?,'ws',?,'usage','managed-hosted-model-usage',1,?,?,"
-                + "'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ")", "f".repeat(64), scope, tenant, session,
+                + "state,gmt_create) VALUES (?,'ws',?,'usage','managed-hosted-model-usage',1,?,?,"
+                + "'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ")", tenant, session,
                 bytes.length, ExtensionRecordJournal.sha256(bytes), bytes);
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,workspace_id,"
+        jdbc.update("INSERT INTO ma_session_record (tenant_id,workspace_id,"
                 + "session_id,domain,record_id,revision,record_resource_id,gmt_create,settled_at)"
-                + " VALUES (?,?,?,'ws',?,'hosted_context_usage','latest',1,'usage',1,1)", scope, record, tenant, session);
+                + " VALUES (?,'ws',?,'hosted_context_usage','latest',1,'usage',1,1)", tenant, session);
         assertThat(store.findModelContexts(tenant, List.of(session))).containsKey(session);
         var raced = spy(store);
         doAnswer(invocation -> {
@@ -419,49 +413,47 @@ class ManagedModelSelectionTest {
     @ParameterizedTest
     @ValueSource(strings = {"managed-hosted-model-usage", "managed-hosted-model-usage-v2"})
     void switchingPreservesStaleDiagnosticsAndNeverReplaysInvalidation(String kind) throws Exception {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        String record = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(session,
-                "hosted_context_usage", "latest");
         boolean diagnostics = kind.endsWith("-v2");
         byte[] bytes = diagnostics ? json.writeValueAsBytes(json.readTree(VerificationFixtures.moduleRoot()
                 .resolve("../core/src/managed-runtime/contracts/managed-model-statistics-v1.fixtures.json").toFile())
                 .path("valid").get(0).path("body")) : "{\"version\":1,\"model\":\"model-a\",\"attempts\":[]}"
                         .getBytes(java.nio.charset.StandardCharsets.UTF_8);
         for (String id : List.of("usage", "new-usage")) {
-            jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,"
+            jdbc.update("INSERT INTO ma_resource (tenant_id,workspace_id,"
                     + "session_id,resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,"
-                    + "state,gmt_create) VALUES (?,?,?,'ws',?,?,?,1,?,?,"
+                    + "state,gmt_create) VALUES (?,'ws',?,?,?,1,?,?,"
                     + "'MYSQL_INLINE',?,'REFERENCED',1)",
-                    ManagedSessionStore.resourceKey(scope, id), scope, tenant, session, id, kind,
+                    tenant, session, id, kind,
                     bytes.length, ExtensionRecordJournal.sha256(bytes), bytes);
         }
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,workspace_id,"
+        jdbc.update("INSERT INTO ma_session_record (tenant_id,workspace_id,"
                 + "session_id,domain,record_id,revision,record_resource_id,gmt_create,settled_at)"
-                + " VALUES (?,?,?,'ws',?,'hosted_context_usage','latest',1,'usage',1,1)", scope, record, tenant, session);
+                + " VALUES (?,'ws',?,'hosted_context_usage','latest',1,'usage',1,1)", tenant, session);
         change("actor", "a", "model-a", 0);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE session_scope_key=?",
-                Integer.class, scope)).isEqualTo(diagnostics ? 1 : 0);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session)).isEqualTo(diagnostics ? 1 : 0);
         if (diagnostics) {
-            assertThat(jdbc.queryForObject("SELECT settled_at FROM ma_session_record WHERE session_scope_key=?",
-                    Long.class, scope)).isNull();
-            assertThat(jdbc.queryForObject("SELECT record_resource_id FROM ma_session_record WHERE session_scope_key=?",
-                    String.class, scope)).isEqualTo("usage");
+            assertThat(jdbc.queryForObject("SELECT settled_at FROM ma_session_record WHERE tenant_id = ? AND session_id = ?",
+                    Long.class, tenant, session)).isNull();
+            assertThat(jdbc.queryForObject("SELECT record_resource_id FROM ma_session_record WHERE tenant_id = ? AND session_id = ?",
+                    String.class, tenant, session)).isEqualTo("usage");
         }
         change("actor", "b", "model-b", 1);
         change("actor", "again-a", "model-a", 2);
         if (diagnostics) {
             jdbc.update("UPDATE ma_session_record SET revision=2,record_resource_id='new-usage',settled_at=2"
-                    + " WHERE session_scope_key=? AND record_key=?", scope, record);
+                    + " WHERE tenant_id = ? AND session_id = ? AND domain='hosted_context_usage'"
+                    + " AND record_id='latest'", tenant, session);
         } else {
-            jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,workspace_id,"
+            jdbc.update("INSERT INTO ma_session_record (tenant_id,workspace_id,"
                     + "session_id,domain,record_id,revision,record_resource_id,gmt_create,settled_at)"
-                    + " VALUES (?,?,?,'ws',?,'hosted_context_usage','latest',2,'new-usage',2,2)", scope, record, tenant, session);
+                    + " VALUES (?,'ws',?,'hosted_context_usage','latest',2,'new-usage',2,2)", tenant, session);
         }
         assertThat(change("actor", "again-a", "model-a", 2).replayed()).isTrue();
-        assertThat(jdbc.queryForObject("SELECT record_resource_id FROM ma_session_record WHERE session_scope_key=?",
-                String.class, scope)).isEqualTo("new-usage");
-        assertThat(jdbc.queryForObject("SELECT settled_at FROM ma_session_record WHERE session_scope_key=?",
-                Long.class, scope)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT record_resource_id FROM ma_session_record WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, session)).isEqualTo("new-usage");
+        assertThat(jdbc.queryForObject("SELECT settled_at FROM ma_session_record WHERE tenant_id = ? AND session_id = ?",
+                Long.class, tenant, session)).isEqualTo(2);
     }
 
     private ManagedAgentStore store(boolean catalog) {

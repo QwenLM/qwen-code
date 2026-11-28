@@ -699,6 +699,35 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('keeps Stop hook notices separate from assistant output', () => {
+    const answer = '{"ok":true}';
+    const stopReason = 'Model switched: verification still required';
+    expect(
+      transcriptBlocksToDaemonMessages([
+        textBlock('reply', 'assistant', answer, 1),
+        statusBlock('stop-notice', stopReason, 2, {
+          source: 'stop_hook_notice',
+        }),
+      ]),
+    ).toEqual([
+      {
+        id: 'reply',
+        role: 'assistant',
+        content: answer,
+        isStreaming: false,
+        timestamp: 1,
+      },
+      {
+        id: 'stop-notice',
+        role: 'system',
+        content: stopReason,
+        variant: 'info',
+        source: 'stop_hook_notice',
+        timestamp: 2,
+      },
+    ]);
+  });
+
   it('projects a compression result as a structured system row', () => {
     const result = {
       originalTokenCount: 263195,
@@ -1891,6 +1920,32 @@ describe('transcriptBlocksToDaemonMessages', () => {
       ['first', true],
       ['answer', true],
     ]);
+  });
+
+  it("keeps a thought from a missing parent apart from the model's thought", () => {
+    const parentToolCallId = 'missing-call';
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('own', 'thought', 'Model thought', 1),
+      textBlock('nested', 'thought', 'Subagent', 2, false, {
+        parentToolCallId,
+      }),
+      textBlock('nested-continuation', 'thought', ' thought', 3, false, {
+        parentToolCallId,
+      }),
+      textBlock('answer', 'assistant', 'Model reply', 4),
+    ]);
+
+    expect(messages).toMatchObject([
+      { id: 'own', role: 'thinking', content: 'Model thought' },
+      {
+        id: 'nested',
+        role: 'thinking',
+        content: 'Subagent thought',
+        parentToolCallId,
+      },
+      { id: 'answer', role: 'assistant', content: 'Model reply' },
+    ]);
+    expect(messages[0]).not.toHaveProperty('parentToolCallId');
   });
 
   it('keeps the parent on assistant text split around an insight', () => {
@@ -4594,7 +4649,12 @@ describe('transcriptBlocksToDaemonMessages', () => {
     };
 
     const [withCause] = transcriptBlocksToDaemonMessages(
-      [loopError({ loopType: 'turn_tool_call_cap', loopReason: 'backstop' })],
+      [
+        loopError({
+          loopType: 'turn_tool_call_cap',
+          loopReason: 'explicit_cap',
+        }),
+      ],
       { labels },
     );
     const [unknownCause] = transcriptBlocksToDaemonMessages(
@@ -4605,7 +4665,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       labels,
     });
 
-    expect(withCause.content).toBe('Cause: backstop');
+    expect(withCause.content).toBe('Cause: explicit_cap');
     expect(unknownCause.content).toBe('Generic loop guidance.');
     expect(noLoop.content).toBe('Generic loop guidance.');
   });

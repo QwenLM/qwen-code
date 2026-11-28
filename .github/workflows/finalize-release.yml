@@ -19,7 +19,7 @@ jobs:
     name: 'Finalize Stable Release'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     if: |-
-      ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false) }}
+      ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))) }}
     environment:
       name: 'production-release'
     permissions:
@@ -29,7 +29,31 @@ jobs:
       RELEASE_TAG: '${{ github.event.release.tag_name || inputs.tag }}'
 
     steps:
-      - uses: '$/.github/actions/prepare-release-runner'
+      - name: 'Prepare isolated release runner'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        working-directory: '${{ runner.temp }}'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          WORKFLOW_SHA: '${{ github.workflow_sha }}'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          bootstrap=$(mktemp -d "${RUNNER_TEMP:?}/release-bootstrap.XXXXXX")
+          trap 'rm -rf -- "$bootstrap"' EXIT
+          export GH_CONFIG_DIR="$bootstrap/gh"
+          mkdir -p "$GH_CONFIG_DIR"
+          for script in prepare-release-runner.sh check-disk-floor.sh; do
+            for attempt in 1 2 3; do
+              if gh api "repos/${GITHUB_REPOSITORY}/contents/.github/scripts/${script}?ref=${WORKFLOW_SHA}" --jq .content | base64 --decode > "$bootstrap/$script" && [ -s "$bootstrap/$script" ]; then
+                break
+              fi
+              [ "$attempt" -lt 3 ] || exit 1
+              sleep 2
+            done
+          done
+          bash "$bootstrap/prepare-release-runner.sh"
+          node -e 'if (Number(process.versions.node.split(".")[0]) !== 22) throw new Error("Release hosts require Node 22")'
+          bash "$bootstrap/check-disk-floor.sh" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
 
       - name: 'Validate stable release tag'
         id: 'meta'
