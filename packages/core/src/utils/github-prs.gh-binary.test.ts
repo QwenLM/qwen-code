@@ -22,6 +22,7 @@ vi.mock('./debugLogger.js', () => ({
 }));
 
 import { existsSync } from 'node:fs';
+import * as path from 'node:path';
 import { resolveGhBinary } from './github-prs.js';
 
 const mockExistsSync = vi.mocked(existsSync);
@@ -53,14 +54,16 @@ describe('resolveGhBinary fallback candidates', () => {
   it('prefers the per-user install over a package-manager candidate', () => {
     // A host can carry both a system gh and a newer official-installer gh;
     // the docstring's "per-user install leads" contract must decide.
+    // The candidate is built with path.join, as the resolver builds it, so the
+    // probe matches on a host whose separator is not '/'.
     const home = '/Users/alice';
+    const perUser = path.join(home, '.local', 'bin', 'gh');
     mockExistsSync.mockImplementation(
       (candidate) =>
-        candidate === `${home}/.local/bin/gh` ||
-        candidate === '/usr/local/bin/gh',
+        candidate === perUser || candidate === '/usr/local/bin/gh',
     );
     expect(resolveGhBinary({ PATH: '/nonexistent', HOME: home }, CWD)).toBe(
-      `${home}/.local/bin/gh`,
+      perUser,
     );
   });
 
