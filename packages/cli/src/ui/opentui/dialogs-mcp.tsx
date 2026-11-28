@@ -405,9 +405,7 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
   const [navigationStack, setNavigationStack] = useState<string[]>([
     MCP_MANAGEMENT_STEPS.SERVER_LIST,
   ]);
-  // ink derives the selected server from the live list (useMemo on
-  // [servers, selectedServerIndex]) so a reload after an action refreshes
-  // the detail view; keying by name survives the host rebuilding the array.
+  // Keying selection by name survives the host rebuilding the server array.
   const [selectedServerName, setSelectedServerName] = useState<string | null>(
     null,
   );

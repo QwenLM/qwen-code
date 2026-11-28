@@ -40,10 +40,13 @@ const pressKey = (overrides: Partial<Key>) => {
   });
 };
 
-const server = (name: string): MCPServerDisplayInfo => ({
+const server = (
+  name: string,
+  source: MCPServerDisplayInfo['source'] = 'user',
+): MCPServerDisplayInfo => ({
   name,
   status: MCPServerStatus.CONNECTED,
-  source: 'user',
+  source,
   config: {},
   toolCount: 0,
   promptCount: 0,
@@ -61,6 +64,27 @@ describe('ServerListStep', () => {
     });
   });
 
+  it('reports the selected server itself when grouping reorders rows', () => {
+    // `assembleMcpServers` appends a top-tier server (`--mcp-config`, an ACP
+    // session, or bundled Mem0) after project `.mcp.json` servers, while the
+    // list renders User before Project. Rows and `servers` therefore diverge:
+    // `servers` is [user, project, cli] but the rows are [user, cli, project].
+    const user = server('user-server');
+    const project = server('project-server', 'project');
+    const topTier = server('cli-server');
+    const onSelect = vi.fn();
+    const { lastFrame } = render(
+      <ServerListStep servers={[user, project, topTier]} onSelect={onSelect} />,
+    );
+
+    expect(lastFrame()).toContain('❯ user-server');
+    pressKey({ name: 'n', sequence: '\u000E', ctrl: true });
+    expect(lastFrame()).toContain('❯ cli-server');
+
+    pressKey({ name: 'return' });
+    expect(onSelect).toHaveBeenCalledWith(topTier);
+  });
+
   it('navigates with Ctrl+N/P readline aliases', () => {
     const { lastFrame } = render(
       <ServerListStep
@@ -76,6 +100,15 @@ describe('ServerListStep', () => {
 
     pressKey({ name: 'p', sequence: '\u0010', ctrl: true });
     expect(lastFrame()).toContain('❯ first');
+  });
+
+  it('does not select a server from an empty list after navigation', () => {
+    const onSelect = vi.fn();
+    render(<ServerListStep servers={[]} onSelect={onSelect} />);
+    pressKey({ name: 'down' });
+    pressKey({ name: 'up' });
+    pressKey({ name: 'return' });
+    expect(onSelect).not.toHaveBeenCalled();
   });
 
   describe('approval reason (gated servers skipped by discovery)', () => {
