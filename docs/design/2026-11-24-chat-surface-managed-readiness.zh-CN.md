@@ -60,10 +60,15 @@ Managed 适配器核心（#18117）以及 `useManagedChatController` provider �
     `<ModRowsProvider>` + `<MessageList>`，零 daemon hook 调用）与既有的
     `<DaemonTranscriptViewport>`。
   - 为 `TranscriptViewportProps` 新增后端中立属性
-    `sessionViewportEnabled?: boolean`（在 `TranscriptViewport` 上默认 `true`，
-    确保 `App.tsx`、`ChatPane.tsx` 与既有 viewport 测试行为零变化）。当
-    `sessionViewportEnabled === false` 时直接渲染 `<LiveTranscriptViewport>`，不
-    读取任何 daemon 上下文；当 `sessionViewportEnabled !== false` 时检查
+    `sessionViewportEnabled?: boolean`（在 `TranscriptViewport` 上默认 `true`；
+    后续在 [切片 6c](2026-11-28-managed-host-zero-daemon-cleanup.zh-CN.md) 演
+    进为与显式注入的 `sessionViewportComponent` 配对，不再在
+    `TranscriptViewport.tsx` 内直接导入 daemon hook）。当
+    `sessionViewportEnabled === false` 或未注入 `sessionViewportComponent` 时，
+    `TranscriptViewport` 直接渲染 `<LiveTranscriptViewport>` 且不读取任何
+    daemon 上下文（若开启 `sessionViewportEnabled` 却未注入组件则在开发环境输
+    出告警）；当 daemon 宿主（`App.tsx`、`ChatPane.tsx`）注入
+    `DaemonTranscriptViewport` 时，后者检查
     `useOptionalDaemonHistoryNavigationStore()`，缺失时优雅回退到
     `<LiveTranscriptViewport>` 而非抛错。
   - 为 `ChatSurfaceProps` 新增后端中立属性 `sessionViewportEnabled?: boolean`
@@ -113,11 +118,13 @@ Managed 适配器核心（#18117）以及 `useManagedChatController` provider �
    - 为何不能只靠显式开关？在无 daemon provider 的树（独立壳或单测）里渲染默认
      `<TranscriptViewport>` 或 `<ChatSurface sessionViewportEnabled />` 时，也应
      平稳退回纯实时 `<MessageList>` 而不是崩溃。
-   - 为何 `TranscriptViewport` 默认 `true` 而 `ChatSurface` 默认 `false`？现有
-     `TranscriptViewport` 的 daemon 调用方（`App.tsx`、`ChatPane.tsx`、4 套
-     viewport 单测）零改动、逐字节保真；`ChatSurface` 本身后端中立且尚无任何
-     daemon 列接入，fail-closed 默认值无需按 `controller.kind` 分支即可防止静默
-     跨 provider 泄漏。
+   - 为何 `TranscriptViewport` 默认 `true` 而 `ChatSurface` 默认 `false`？
+     `ChatSurface` 本身后端中立，fail-closed 默认值无需按 `controller.kind` 分
+     支即可防止静默跨 provider 泄漏；随后在
+     [切片 6c](2026-11-28-managed-host-zero-daemon-cleanup.zh-CN.md) 中，
+     `DaemonTranscriptViewport` 已从 `TranscriptViewport.tsx` 拆出并由
+     `App.tsx` 与 `ChatPane.tsx` 通过 `sessionViewportComponent` 显式注入，使
+     `TranscriptViewport.tsx` 彻底零 daemon 导入。
 2. **可选题（`required: false`）绝不替用户伪造答案。**
    - 挂载或切换到可选单选题时，答案保持未选（所有选项 `aria-checked="false"`），
      不再自动预选第 0 项。
@@ -149,8 +156,10 @@ Managed 适配器核心（#18117）以及 `useManagedChatController` provider �
 
 ## 约束与风险
 
-- **对 daemon 零回归：** 省略 `required`、`allowText`、`disabled`、
-  `sessionViewportEnabled` 时，`App.tsx`、`ChatPane.tsx` 与既有
+- **对 daemon 零回归：** 省略 `required`、`allowText`、`disabled` 时，
+  `App.tsx`、`ChatPane.tsx`（按
+  [切片 6c](2026-11-28-managed-host-zero-daemon-cleanup.zh-CN.md) 显式经
+  `sessionViewportComponent` 注入 `DaemonTranscriptViewport`）与既有
   `TranscriptViewport`/`AskUserQuestion` 测试行为保持完全一致。
 - **测试 mock 对齐：** 4 份 `TranscriptViewport*.test.tsx` 部分 mock 了
   `../daemon/session/DaemonSessionProvider`（仅导出

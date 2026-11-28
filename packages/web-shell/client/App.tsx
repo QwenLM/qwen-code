@@ -172,6 +172,7 @@ import {
   TranscriptViewport,
   type TranscriptViewportProps,
 } from './components/TranscriptViewport';
+import { DaemonTranscriptViewport } from './components/DaemonTranscriptViewport';
 import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { TurnCallsProvider } from './turnCallsContext';
@@ -233,6 +234,9 @@ import { ChatSurface } from './chat-core/ChatSurface';
 import { useDaemonChatControllerFromState } from './daemon/useDaemonChatController';
 import type { ComposerToolbarAction } from './components/ChatEditor';
 import { DAEMON_COMPOSER_INTEGRATIONS } from './components/composer/daemon-composer-integrations';
+import { DaemonStatusCardsContext } from './components/messages/daemon-status-cards-context';
+import { DAEMON_STATUS_CARD_RENDERERS } from './components/messages/daemon-status-cards';
+import { WorkspaceRuntimeContext } from './utils/workspace-context.js';
 import { getWorkflowModeMessages } from './components/workflow-mode-messages';
 import {
   mapRestoredInputAnnotationsAfterTextChange,
@@ -1422,6 +1426,7 @@ const LiveMessageList = memo(
       <TranscriptViewport
         {...props}
         ref={ref}
+        sessionViewportComponent={DaemonTranscriptViewport}
         messages={displayMessages}
         transcriptBlockCount={live.blocks.length}
       />
@@ -26088,6 +26093,10 @@ export function App({
           {/* Compact view is fixed on for every message surface (main chat,
               split panes, subagent detail, drawer) — no toggle remains. */}
           <CompactModeContext.Provider value={true}>
+          <WorkspaceRuntimeContext.Provider value={workspace}>
+          <DaemonStatusCardsContext.Provider
+            value={DAEMON_STATUS_CARD_RENDERERS}
+          >
           <ArrowKeyHistoryProvider disabledByHost={disableArrowKeyHistory}>
         <div
           ref={appRootRef}
@@ -29929,6 +29938,8 @@ export function App({
           </GeneratedUiRuntimeProvider>
         </div>
         </ArrowKeyHistoryProvider>
+        </DaemonStatusCardsContext.Provider>
+        </WorkspaceRuntimeContext.Provider>
         </CompactModeContext.Provider>
         </WebShellPortalRootContext.Provider>
         </McpAppHostContext.Provider>

@@ -2,12 +2,12 @@
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { useBrowserNotificationSettings } from '../../browser-turn-notifications';
+import { useBrowserNotificationSettings } from '../../browser-notification-settings-context';
 import { I18nProvider } from '../../i18n';
 import { BrowserNotificationControl } from './BrowserNotificationControl';
 import { ToolApproval } from './ToolApproval';
 
-vi.mock('../../browser-turn-notifications', () => ({
+vi.mock('../../browser-notification-settings-context', () => ({
   useBrowserNotificationSettings: vi.fn(),
 }));
 

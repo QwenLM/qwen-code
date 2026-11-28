@@ -120,6 +120,9 @@ import type { ManagedAgentProvider } from './components/managed/managed-agent-pr
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
 import type { ComposerIntegrations } from './components/composer/composer-integrations';
 import { DAEMON_COMPOSER_INTEGRATIONS } from './components/composer/daemon-composer-integrations';
+import { DaemonTranscriptViewport } from './components/DaemonTranscriptViewport';
+import { DAEMON_STATUS_CARD_RENDERERS } from './components/messages/daemon-status-cards';
+import type { DaemonStatusCardRenderers } from './components/messages/daemon-status-cards-context';
 
 vi.mock('./components/managed/ManagedSessionsPage', async () => {
   const React = await import('react');
@@ -858,6 +861,47 @@ const {
     getStats: vi.fn().mockResolvedValue({}),
     getContextUsage: vi.fn().mockResolvedValue(paneContextFixture),
   };
+  const mockWorkspaceActions = {
+    setUiLanguage: vi.fn().mockImplementation(async (language: string) => ({
+      language,
+      outputLanguage: null,
+      refresh: { runtimes: 1, sessions: 1, failed: 0 },
+    })),
+    readWorkspaceFile: vi.fn().mockResolvedValue({
+      content: '',
+      truncated: false,
+    }),
+    stat: vi.fn().mockResolvedValue({
+      kind: 'stat',
+      path: '',
+      type: 'file',
+      sizeBytes: 0,
+      modifiedMs: 0,
+    }),
+    loadSkillsStatus,
+    loadProviders: vi.fn().mockResolvedValue({ current: null }),
+    getSubscriptionConfig: vi.fn().mockResolvedValue({ enabled: false }),
+    signOutSubscription: vi.fn().mockResolvedValue(undefined),
+    loadPreflight: vi.fn().mockResolvedValue(null),
+    loadEnv: vi.fn().mockResolvedValue(null),
+    loadMcpStatus: vi.fn().mockResolvedValue({ servers: [] }),
+    loadMcpTools: vi.fn().mockResolvedValue([]),
+    loadMcpResources: vi.fn().mockResolvedValue([]),
+    addWorkspace: vi.fn(),
+    addScratchWorkspace: vi.fn(),
+    suggestWorkspacePaths: vi.fn(),
+    pickWorkspaceDirectory: vi.fn(),
+    listScheduledTasks: vi.fn(),
+    updateScheduledTask: vi.fn(),
+    deleteScheduledTask: vi.fn(),
+    runScheduledTask: vi.fn(),
+    assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+    deleteModel: vi.fn().mockResolvedValue(undefined),
+    unarchiveSession: vi.fn().mockResolvedValue(undefined),
+    controlGoal: vi.fn().mockResolvedValue({
+      snapshot: { v: 2, activity: 'idle', goal: null },
+    }),
+  };
   return {
     mockCollectSystemInfo,
     mockConnection: connection,
@@ -874,50 +918,11 @@ const {
       brandSettled: false,
       status: 'connected' as 'connected' | 'error',
       client: workspaceClient,
+      actions: mockWorkspaceActions,
       refreshCapabilities: vi.fn(),
       refreshBrand: vi.fn(),
     },
-    mockWorkspaceActions: {
-      setUiLanguage: vi.fn().mockImplementation(async (language: string) => ({
-        language,
-        outputLanguage: null,
-        refresh: { runtimes: 1, sessions: 1, failed: 0 },
-      })),
-      readWorkspaceFile: vi.fn().mockResolvedValue({
-        content: '',
-        truncated: false,
-      }),
-      stat: vi.fn().mockResolvedValue({
-        kind: 'stat',
-        path: '',
-        type: 'file',
-        sizeBytes: 0,
-        modifiedMs: 0,
-      }),
-      loadSkillsStatus,
-      loadProviders: vi.fn().mockResolvedValue({ current: null }),
-      getSubscriptionConfig: vi.fn().mockResolvedValue({ enabled: false }),
-      signOutSubscription: vi.fn().mockResolvedValue(undefined),
-      loadPreflight: vi.fn().mockResolvedValue(null),
-      loadEnv: vi.fn().mockResolvedValue(null),
-      loadMcpStatus: vi.fn().mockResolvedValue({ servers: [] }),
-      loadMcpTools: vi.fn().mockResolvedValue([]),
-      loadMcpResources: vi.fn().mockResolvedValue([]),
-      addWorkspace: vi.fn(),
-      addScratchWorkspace: vi.fn(),
-      suggestWorkspacePaths: vi.fn(),
-      pickWorkspaceDirectory: vi.fn(),
-      listScheduledTasks: vi.fn(),
-      updateScheduledTask: vi.fn(),
-      deleteScheduledTask: vi.fn(),
-      runScheduledTask: vi.fn(),
-      assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
-      deleteModel: vi.fn().mockResolvedValue(undefined),
-      unarchiveSession: vi.fn().mockResolvedValue(undefined),
-      controlGoal: vi.fn().mockResolvedValue({
-        snapshot: { v: 2, activity: 'idle', goal: null },
-      }),
-    },
+    mockWorkspaceActions,
     mockMcp: {
       ensureRuntime: vi.fn().mockResolvedValue({}),
       runtimeStatus: vi.fn().mockResolvedValue({
@@ -1030,6 +1035,7 @@ const {
             promptLabel?: string,
           ) => void)
         | undefined,
+      daemonStatusCards: undefined as DaemonStatusCardRenderers | undefined,
       backgroundDetails: undefined as
         | ((turn: import('@qwen-code/sdk/daemon').DaemonBackgroundTurn) => void)
         | undefined,
@@ -1038,6 +1044,7 @@ const {
         | WebShellAssistantFeedbackOptions
         | undefined,
       latestMessageListProps: null as {
+        sessionViewportComponent?: unknown;
         onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
         turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
         messages?: Array<{
@@ -1823,6 +1830,9 @@ vi.mock('./components/TranscriptViewport', async () => {
   const { useInteractionBlocker } = await import('./interactionBlockContext');
   const { useSubagentDetails } = await import('./subagentDetailsContext');
   const { useOpenTurnCalls } = await import('./turnCallsContext');
+  const { useDaemonStatusCards } = await import(
+    './components/messages/daemon-status-cards-context'
+  );
   const { useWebShellCustomization } = await import('./customization');
   function InteractionBlockerProbe() {
     const registerInteractionBlocker = useInteractionBlocker();
@@ -1875,6 +1885,7 @@ vi.mock('./components/TranscriptViewport', async () => {
       testState.latestMessageListProps = props;
       testState.backgroundDetails = useSubagentDetails()?.onOpenBackground;
       testState.openTurnCalls = useOpenTurnCalls();
+      testState.daemonStatusCards = useDaemonStatusCards();
       // The main transcript mounts inside mainChatCustomization, so this reads
       // the hostOwnsArtifactPreview value App derives from onRightPanelOpen.
       testState.capturedHostOwnsArtifactPreview =
@@ -16078,6 +16089,7 @@ beforeEach(() => {
   testState.latestMessageListProps = null;
   testState.backgroundDetails = undefined;
   testState.openTurnCalls = undefined;
+  testState.daemonStatusCards = undefined;
   testState.capturedHostOwnsArtifactPreview = undefined;
   testState.capturedAssistantFeedback = undefined;
   testState.latestBtwMessageProps = null;
@@ -17036,6 +17048,9 @@ describe('App live transcript boundary', () => {
       { id: 'assistant', role: 'assistant', content: 'ab' },
     ]);
     expect(testState.latestMessageListProps?.transcriptBlockCount).toBe(2);
+    expect(testState.latestMessageListProps?.sessionViewportComponent).toBe(
+      DaemonTranscriptViewport,
+    );
     expect(testState.snapshotCallOptions).toContainEqual({
       structuralOnly: true,
     });
@@ -21125,6 +21140,10 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.composerIntegrations).toBe(
       DAEMON_COMPOSER_INTEGRATIONS,
     );
+    expect(testState.latestMessageListProps?.sessionViewportComponent).toBe(
+      DaemonTranscriptViewport,
+    );
+    expect(testState.daemonStatusCards).toBe(DAEMON_STATUS_CARD_RENDERERS);
   });
 
   it('keeps primary Voice model reads and writes on legacy routes', async () => {
