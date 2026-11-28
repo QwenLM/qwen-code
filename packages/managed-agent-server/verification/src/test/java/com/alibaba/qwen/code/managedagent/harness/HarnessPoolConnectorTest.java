@@ -30,6 +30,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
@@ -822,6 +823,111 @@ class HarnessPoolConnectorTest {
         assertThatThrownBy(() -> HarnessPoolConnector.validateEndpoint(
                 new HarnessDiscovery.Endpoint("remote", URI.create("https://10.0.0.2:4170"), true), null))
                 .hasMessageContaining("mTLS");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,true,true", "false,true,false", "true,false,false"})
+    void releasedPlacementWaitsForAClaimOnlyWithPullOnAndAWorkPullPool(boolean enabled, boolean advertised,
+            boolean gated) {
+        var placements = mock(JdbcHarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var leafA = leaf();
+        var clientA = client("a");
+        if (advertised) {
+            when(clientA.capabilities().getFeatures())
+                    .thenReturn(List.of("harness-pool-owner/1", "harness-instance-lifecycle/1", "work-pull/1"));
+        }
+        String boot = clientA.capabilities().getBootId();
+        var released = new Placement("tenant", "session", "workspace", "a", boot, 1, "RELEASED");
+        when(placements.get("tenant", "session")).thenReturn(released);
+        when(placements.recordDemand("tenant", "session")).thenReturn(1_000L);
+        when(placements.takeover(eq("tenant"), eq("session"), eq(released), eq("a"), anyString()))
+                .thenReturn(new Placement("tenant", "session", "workspace", "a", boot, 2, "ACTIVE"));
+        when(placements.assign(eq("tenant"), eq("fresh"), eq("a"), anyString()))
+                .thenReturn(new Placement("tenant", "fresh", "workspace", "a", boot, 1, "ACTIVE"));
+        var demands = new AtomicInteger();
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a), true), ignored -> leafA, null, null,
+                ignored -> clientA)) {
+            if (enabled) {
+                pool.enableWorkPull();
+            }
+            pool.onClaimDemand(demands::incrementAndGet);
+            pool.refresh();
+            pool.recoverForWake("tenant", "fresh");
+            verify(placements, never()).recordDemand("tenant", "fresh");
+            if (gated) {
+                assertThatThrownBy(() -> pool.recoverForWake("tenant", "session"))
+                        .isInstanceOf(ManagedAgentException.class).extracting("code")
+                        .isEqualTo("harness_placement_released");
+                assertThat(demands).hasValue(1);
+                verify(placements, never()).takeover(any(), any(), any(), any(), any());
+                when(placements.recordDemand("tenant", "session")).thenReturn(30_000L);
+            }
+            pool.recoverForWake("tenant", "session");
+            verify(placements).takeover(eq("tenant"), eq("session"), eq(released), eq("a"), anyString());
+            verify(leafA).recoverForWake("tenant", "session");
+            if (!gated) {
+                verify(placements, never()).recordDemand(anyString(), anyString());
+            }
+        }
+    }
+
+    @Test
+    void claimDemandIsRecordedEvenWithoutAnAcceptingPushMember() {
+        var placements = mock(JdbcHarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var clientA = client("a");
+        when(clientA.capabilities().getFeatures())
+                .thenReturn(List.of("harness-pool-owner/1", "harness-instance-lifecycle/1", "work-pull/1"));
+        when(clientA.readInstance()).thenReturn(Map.of("state", "QUIESCING"));
+        var released = new Placement("tenant", "session", "workspace", "a", clientA.capabilities().getBootId(), 1,
+                "RELEASED");
+        when(placements.get("tenant", "session")).thenReturn(released);
+        when(placements.recordDemand("tenant", "session")).thenReturn(0L);
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a), true), ignored -> leaf(), null, null,
+                ignored -> clientA)) {
+            pool.enableWorkPull();
+            pool.refresh();
+            assertThat(pool.acceptsWorkPullClaims("a", released.bootId())).isFalse();
+            assertThatThrownBy(() -> pool.recoverForWake("tenant", "session"))
+                    .isInstanceOf(ManagedAgentException.class).extracting("code")
+                    .isEqualTo("harness_placement_released");
+            verify(placements).recordDemand("tenant", "session");
+            when(placements.recordDemand("tenant", "session")).thenReturn(30_000L);
+            assertThatThrownBy(() -> pool.recoverForWake("tenant", "session"))
+                    .isInstanceOf(ManagedAgentException.class).extracting("code")
+                    .isEqualTo("harness_pool_unavailable");
+        }
+    }
+
+    @Test
+    void workPullClaimsComeFromNegotiatedMembersAndCarryTheClaimedPlacement() {
+        var a = endpoint("a", 4101);
+        var leafA = leaf();
+        var clientA = client("a");
+        when(clientA.capabilities().getFeatures())
+                .thenReturn(List.of("harness-pool-owner/1", "harness-instance-lifecycle/1", "work-pull/1"));
+        String boot = clientA.capabilities().getBootId();
+        when(leafA.passiveWakeLoad("tenant", "session")).thenReturn(Map.of("sessionId", "session"));
+        try (var pool = new HarnessPoolConnector(settings(), mock(JdbcHarnessPlacementStore.class),
+                () -> new HarnessDiscovery.Snapshot(List.of(a), true), ignored -> leafA, null, null,
+                ignored -> clientA)) {
+            pool.refresh();
+            assertThat(pool.acceptsWorkPullClaims("a", boot)).isFalse();
+            pool.enableWorkPull();
+            assertThat(pool.acceptsWorkPullClaims("a", boot)).isTrue();
+            assertThat(pool.acceptsWorkPullClaims("a", "other-boot")).isFalse();
+            assertThat(pool.acceptsWorkPullClaims("z", boot)).isFalse();
+            var claimed = new Placement("tenant", "session", "workspace", "a", boot, 3, "ACTIVE");
+            assertThat(pool.claimLoad("tenant", "session", claimed)).containsEntry("sessionId", "session");
+            var routed = ArgumentCaptor.forClass(QwenHostedHarnessConnector.PoolCall.class);
+            verify(leafA).withPlacement(routed.capture(), any());
+            assertThat(routed.getValue().placement().getPlacementEpoch()).isEqualTo(3);
+            assertThat(routed.getValue().placement().getInstanceId()).isEqualTo("a");
+            assertThat(routed.getValue().writerToken()).isNotBlank();
+        }
     }
 
     private static QwenHostedHarnessConnector leaf() {

@@ -473,7 +473,11 @@ public final class HostedHarnessClient implements AutoCloseable {
         return loadSession(request, true);
     }
 
-    private HarnessSessionRef loadSession(LoadHarnessSession request, boolean mcpManagementOnly) {
+    /**
+     * The body {@link #loadSession} would post, checked against this client's
+     * negotiated capabilities, for a caller that delivers it another way.
+     */
+    public Map<String, Object> loadSessionBody(LoadHarnessSession request) {
         if (request == null) {
             throw new IllegalArgumentException("request must not be null");
         }
@@ -487,8 +491,12 @@ public final class HostedHarnessClient implements AutoCloseable {
                 && !capabilities.getFeatures().contains("targeted-cancel/1")) {
             throw new DaemonProtocolException("Hosted targeted cancellation capability is required");
         }
+        return request.toJson();
+    }
+
+    private HarnessSessionRef loadSession(LoadHarnessSession request, boolean mcpManagementOnly) {
+        Map<String, Object> body = loadSessionBody(request);
         String path = sessionPath(request.getHarnessSessionId()) + "/load";
-        Map<String, Object> body = request.toJson();
         if (mcpManagementOnly) {
             if (request.isRuntimeRecoveryLoad() || body.containsKey("cancellationTakeover")
                     || body.containsKey("lifecycleAuthority") || body.containsKey("stopMessages")) {

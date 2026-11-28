@@ -3,11 +3,14 @@ package com.alibaba.qwen.code.managedagent.session;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
 import java.time.Clock;
@@ -65,6 +68,26 @@ class ContextCompressionCoordinatorTest {
         verify(fixture.store, never()).markContextCompressionSubmitted(any(), anyString());
         verify(fixture.harness, never()).runContextCompression(anyString(), anyString(), any());
         verify(fixture.store).retryContextCompressionPreparation(eq(fixture.operation), anyString(), anyLong());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"409,harness_placement_released,false", "503,harness_pool_unavailable,true",
+            "409,session_scope_conflict,true"})
+    void aReleasedSessionAwaitingItsClaimRetriesWhileOtherRefusalsFail(int status, String code, boolean fails) {
+        var fixture = new Fixture("JAVA_DURABLE");
+        when(fixture.records.findRecord(anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(Optional.empty());
+        when(fixture.harness.prepareContextCompression(anyString(), anyString(), any()))
+                .thenThrow(new ManagedAgentException(status, code, "refused"));
+        fixture.coordinator.dispatch("tenant", "session", "operation");
+        if (fails) {
+            verify(fixture.store).settleContextCompression(eq(fixture.operation), anyString(), eq("failed"),
+                    eq(null), eq(code));
+            verify(fixture.store, never()).retryContextCompressionPreparation(any(), anyString(), anyLong());
+        } else {
+            verify(fixture.store).retryContextCompressionPreparation(eq(fixture.operation), anyString(), anyLong());
+            verify(fixture.store, never()).settleContextCompression(any(), anyString(), anyString(), any(), any());
+        }
     }
 
     @Test
