@@ -96,10 +96,13 @@ final class AgentEventJournal {
                 arguments.add(key.tenantId());
                 arguments.add(key.sessionId());
             }
+            // OR equality groups keep the optimizer on an index range scan;
+            // a row-constructor IN this wide can fall back to a full table scan.
             jdbc.query("SELECT tenant_id, session_id, last_sequence FROM ma_event_stream"
                             + " WHERE stream_kind = 'SESSION' AND stream_id = ''"
-                            + " AND (tenant_id, session_id) IN ("
-                            + String.join(", ", Collections.nCopies(batch.size(), "(?, ?)")) + ")",
+                            + " AND ("
+                            + String.join(" OR ", Collections.nCopies(batch.size(),
+                                    "(tenant_id = ? AND session_id = ?)")) + ")",
                     reader, arguments.toArray());
         }
         return tails;

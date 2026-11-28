@@ -24,7 +24,7 @@ import static org.mockito.Mockito.when;
 /**
  * Unit coverage for the first P1 seam extracted from RuntimeBrokerService:
  * the UNKNOWN-lookup cooldown. The integrated behavior stays covered by
- * RuntimeBrokerServiceTest, RuntimeBrokerHttpServerTest and the
+ * RuntimeBrokerServiceTest, RuntimeBrokerHttpControllerTest and the
  * Issue13183 regression/adversarial suites.
  */
 class ExecutionObservationCooldownTest {

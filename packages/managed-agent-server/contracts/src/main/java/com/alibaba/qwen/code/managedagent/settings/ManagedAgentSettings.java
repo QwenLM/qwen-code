@@ -168,9 +168,6 @@ public interface ManagedAgentSettings {
             public Duration getScanDelay();
         }
         public boolean isEnabled();
-        public String getHost();
-        public int getPort();
-        public boolean isAllowNonLoopback();
         public Duration getV3ResultWindow();
         public String getToken();
         public String getProvisioner();

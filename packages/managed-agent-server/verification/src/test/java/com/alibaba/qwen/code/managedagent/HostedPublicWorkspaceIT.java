@@ -173,13 +173,13 @@ class HostedPublicWorkspaceIT {
         assertThat(modelRequests).hasSize(1);
         var properties = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class);
         int harnessPort = URI.create(properties.getHarness().getBaseUrl()).getPort();
-        int brokerPort = properties.getRuntimeBroker().getPort();
+        int brokerPort = port;
         harness.destroyForcibly();
         assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
         spring.close();
         restarted = true;
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath();
-        startSpring(cli, roots, harnessPort, brokerPort);
+        startSpring(cli, roots, harnessPort);
         startHarness(cli, harnessPort, brokerPort);
         JsonNode refreshed = request("POST", "/api/agent/web-shell/v1/actions/query", Map.of("sessionId", session), null, "actor", 200)
                 .path("data").get(0);
@@ -340,13 +340,13 @@ class HostedPublicWorkspaceIT {
 
         var properties = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class);
         int harnessPort = URI.create(properties.getHarness().getBaseUrl()).getPort();
-        int brokerPort = properties.getRuntimeBroker().getPort();
+        int brokerPort = port;
         harness.destroyForcibly();
         assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
         spring.close();
         restarted = true;
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath();
-        startSpring(cli, roots, harnessPort, brokerPort);
+        startSpring(cli, roots, harnessPort);
         startHarness(cli, harnessPort, brokerPort);
         JsonNode restored = awaitMemoryAction(session);
         assertThat(restored.path("actionId").asText()).isEqualTo(pending.path("actionId").asText());
@@ -532,13 +532,13 @@ class HostedPublicWorkspaceIT {
         String child = waiting.path("sessionId").asText();
         var properties = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class);
         int harnessPort = URI.create(properties.getHarness().getBaseUrl()).getPort();
-        int brokerPort = properties.getRuntimeBroker().getPort();
+        int brokerPort = port;
         harness.destroyForcibly();
         assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
         spring.close();
         restarted = true;
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath();
-        startSpring(cli, roots, harnessPort, brokerPort);
+        startSpring(cli, roots, harnessPort);
         startHarness(cli, harnessPort, brokerPort);
         await().atMost(Duration.ofSeconds(45)).untilAsserted(() -> {
             JsonNode page = request("POST", "/api/agent/web-shell/v1/actions/query",
@@ -1073,7 +1073,7 @@ class HostedPublicWorkspaceIT {
         Path replicaBroker = Files.createDirectory(temporary.resolve("replica-broker"),
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
         Path cli = Path.of(System.getProperty("qwen.cli.entry")).toAbsolutePath();
-        try (var replica = startControlPlane(cli, roots, harnessPort, reservePort(), 0, replicaBroker, "100ms")) {
+        try (var replica = startControlPlane(cli, roots, harnessPort, 0, replicaBroker, "100ms")) {
             var cold = replica.getBean(HarnessConnector.class);
             int replicaPort = replica.getWebServer().getPort();
             String session = request("POST", "/v1/agents/sessions", Map.of(
@@ -1516,7 +1516,7 @@ class HostedPublicWorkspaceIT {
         harness.destroyForcibly();
         assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
         startHarness(Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath(),
-                URI.create(settings.getHarness().getBaseUrl()).getPort(), settings.getRuntimeBroker().getPort());
+                URI.create(settings.getHarness().getBaseUrl()).getPort(), port);
         assertThat(harness.pid()).isNotEqualTo(oldPid);
     }
 
@@ -1611,7 +1611,7 @@ class HostedPublicWorkspaceIT {
 
         var properties = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class);
         int harnessPort = URI.create(properties.getHarness().getBaseUrl()).getPort();
-        int brokerPort = properties.getRuntimeBroker().getPort();
+        int brokerPort = port;
         HarnessPlacementStore placements = poolDatabase == null ? null : spring.getBean(HarnessPlacementStore.class);
         HarnessPlacementStore.Placement original = placements == null ? null : placements.get(tenant, session);
         long oldLease = 0;
@@ -1634,7 +1634,7 @@ class HostedPublicWorkspaceIT {
             if (children && "allow".equals(outcome)) {
                 spring.close();
                 restarted = true;
-                startSpring(cli, roots, harnessPort, brokerPort);
+                startSpring(cli, roots, harnessPort);
                 assertThat(HostedParkedAction.read(jdbc, tenant, session, turn)).isEqualTo(parked);
             }
             startHarness(cli, harnessPort, brokerPort);
@@ -2094,11 +2094,10 @@ class HostedPublicWorkspaceIT {
         int harnessPort;
         int brokerPort;
         try (var springSocket = new ServerSocket(reservePort(), 1, java.net.InetAddress.getByName("127.0.0.1"));
-                var harnessSocket = new ServerSocket(reservePort(), 1, java.net.InetAddress.getByName("127.0.0.1"));
-                var brokerSocket = new ServerSocket(reservePort(), 1, java.net.InetAddress.getByName("127.0.0.1"))) {
+                var harnessSocket = new ServerSocket(reservePort(), 1, java.net.InetAddress.getByName("127.0.0.1"))) {
             port = springSocket.getLocalPort();
             harnessPort = harnessSocket.getLocalPort();
-            brokerPort = brokerSocket.getLocalPort();
+            brokerPort = port;
             model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             model.createContext("/v1/chat/completions", this::modelReply);
             if (personalMemory) {
@@ -2114,7 +2113,7 @@ class HostedPublicWorkspaceIT {
                 storeRelay.start();
             }
         }
-        startSpring(cli, roots, harnessPort, brokerPort);
+        startSpring(cli, roots, harnessPort);
         startHarness(cli, harnessPort, brokerPort);
         if (poolDatabase != null) {
             startHarness(cli, poolSuccessorPort, brokerPort, "pool-b");
@@ -2449,8 +2448,8 @@ class HostedPublicWorkspaceIT {
         assertThat(modelRequests).hasSize(approvals ? 16 : 30);
     }
 
-    private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) throws IOException {
-        spring = startControlPlane(cli, roots, harnessPort, brokerPort, port, temporary.resolve("broker"),
+    private void startSpring(Path cli, List<Path> roots, int harnessPort) throws IOException {
+        spring = startControlPlane(cli, roots, harnessPort, port, temporary.resolve("broker"),
                 coldApprovalReplica ? "120s" : null);
         jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
         if (!restarted && (holdRuntimeStartup || definitionApproval || personalMemory || "Linux".equals(System.getProperty("os.name")))) {
@@ -2463,7 +2462,7 @@ class HostedPublicWorkspaceIT {
     }
 
     private ServletWebServerApplicationContext startControlPlane(Path cli, List<Path> roots, int harnessPort,
-            int brokerPort, int httpPort, Path brokerDirectory, String scanDelay) throws IOException {
+            int httpPort, Path brokerDirectory, String scanDelay) throws IOException {
         boolean mysql = System.getProperty("mysql.url") != null;
         var isolatedDatabase = parkingDatabase == null ? poolDatabase : parkingDatabase;
         String databaseUrl = isolatedDatabase != null ? isolatedDatabase.url() : System.getProperty("mysql.url",
@@ -2493,7 +2492,6 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.harness.token=" + TOKEN,
                 "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + decoy,

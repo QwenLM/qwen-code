@@ -27,7 +27,6 @@ import {
   comparatorMonthlyEquivalent,
   comparatorPayment,
   type ComparatorInputs,
-  type Plan,
 } from './fixtures.js';
 import {
   SHOW_TOOL,
@@ -324,12 +323,25 @@ export async function runBillSplitter(
     const copied = await env.page.evaluate(() =>
       navigator.clipboard.readText(),
     );
+    const [totalLine = '', ...shareLines] = copied
+      .split(/\r?\n/)
+      .filter((line) => line.trim());
+    const expectedShares = billShares(BILL_SCENARIO);
     return checks.expect(
       'copies-current',
       'case 1 / R5',
-      parseAmounts(copied).includes(billTotal(BILL_SCENARIO)),
+      parseSingleAmount(totalLine) === billTotal(BILL_SCENARIO) &&
+        shareLines.length === expectedShares.length &&
+        expectedShares.every((share, index) => {
+          const amounts = parseAmounts(shareLines[index]);
+          return (
+            amounts.pop() === share &&
+            (amounts.length === 0 ||
+              (amounts.length === 1 && amounts[0] === (index + 1) * 100))
+          );
+        }),
       copied
-        ? `clipboard holds "${copied.slice(0, 80)}"`
+        ? `expected the current total and ${expectedShares.length} ordered shares in the clipboard. Saw "${copied.slice(0, 200)}"`
         : 'nothing reached the clipboard',
     );
   });
@@ -1280,25 +1292,31 @@ async function followUpComparator(env: AcceptanceEnv, prompt: string) {
   return card;
 }
 
-function csvPayment(csv: string, plan: Plan): number | undefined {
+function csvPaymentsMatch(csv: string, inputs: ComparatorInputs): boolean {
   const [header, ...rows] = csv.trim().split(/\r?\n/);
   if (!/^(?:"plan"|plan)\s*,\s*(?:"payment"|payment)$/i.test(header.trim())) {
-    return undefined;
+    return false;
   }
-  const selectedPayments: string[] = [];
+  const expected = new Map<string, number>(
+    PLANS.map((plan) => [plan, comparatorPayment(plan, inputs)]),
+  );
   for (const row of rows) {
     if (!row.trim()) continue;
     const fields =
       /^\s*(?:"([a-z]+)"|([a-z]+))\s*,\s*(?:"([^"]+)"|([^,"]+))\s*$/i.exec(row);
-    if (!fields) return undefined;
+    if (!fields) return false;
     const [, quotedPlan, barePlan, quotedPayment, barePayment] = fields;
     const key = (quotedPlan ?? barePlan).toLowerCase();
-    if (!PLANS.some((candidate) => candidate === key)) return undefined;
-    if (key === plan) selectedPayments.push(quotedPayment ?? barePayment);
+    const payment = expected.get(key);
+    if (
+      payment === undefined ||
+      parseSingleAmount(quotedPayment ?? barePayment) !== payment
+    ) {
+      return false;
+    }
+    expected.delete(key);
   }
-  return selectedPayments.length === 1
-    ? parseSingleAmount(selectedPayments[0])
-    : undefined;
+  return expected.size === 0;
 }
 
 /** Comparator: monthly equivalent vs payment, extension across turns, export, reset. */
@@ -1451,8 +1469,8 @@ export async function runComparator(
     return checks.expect(
       'exports-current-csv',
       'case 4 / R5',
-      csvPayment(csv, COMPARATOR_SELECTED_PLAN) === expected,
-      `CSV did not contain the current payment for ${COMPARATOR_SELECTED_PLAN}: ${csv.slice(0, 120)}`,
+      csvPaymentsMatch(csv, inputs),
+      `expected one current payment for each plan at ${inputs.seats} seats. Saw "${csv.slice(0, 120)}"`,
     );
   });
 

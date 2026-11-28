@@ -73,7 +73,6 @@ describe('Managed local service environment', () => {
       capabilityDigest: 'sha256:digest',
       javaPort: 5011,
       harnessPort: 5012,
-      brokerPort: 5013,
     };
     const models = [{ modelId: 'a,comma-model', label: 'Local model' }];
     const environment = managedLocalJavaEnvironment(
@@ -111,6 +110,15 @@ describe('Managed local service environment', () => {
     expect(environment['QWEN_MANAGED_AGENT_SESSION_STORE_BINDING_KEY']).toBe(
       'writer',
     );
+    expect(environment['QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL']).toBe(
+      'http://127.0.0.1:5011',
+    );
+    expect(
+      environment['QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST'],
+    ).toBeUndefined();
+    expect(
+      environment['QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT'],
+    ).toBeUndefined();
     expect(environment['QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN']).toBe(
       'broker',
     );
@@ -164,7 +172,6 @@ describe('Managed local startup supervision', () => {
         capabilityDigest: `sha256:${'a'.repeat(64)}`,
         javaPort: 5011,
         harnessPort: 5012,
-        brokerPort: 5013,
       };
       const models = [{ modelId: 'model-b', label: 'Model B' }];
       const modelPresets = [
@@ -248,6 +255,9 @@ describe('Managed local startup supervision', () => {
             }),
           }),
         );
+        expect(
+          mocks.spawn.mock.calls[0]![2].env.QWEN_MANAGED_RUNTIME_BROKER_URL,
+        ).toBe('http://127.0.0.1:5011');
         expect(
           JSON.parse(mocks.spawn.mock.calls[1]![2].env.SPRING_APPLICATION_JSON)[
             'qwen.managed-agent.model-catalog'

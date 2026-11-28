@@ -120,6 +120,9 @@ export function createHostedHarnessContract(
       // GET /session/:id/events writes keepalive comments while no event
       // is committed, so a client may bound a stream by its silence.
       'event-keepalive/1',
+      // POST /events:ingest on the Session Store delivers an admitted
+      // Turn's events when its submission asks for it.
+      'event-ingest/1',
       'web-fetch/1',
       HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
       HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,

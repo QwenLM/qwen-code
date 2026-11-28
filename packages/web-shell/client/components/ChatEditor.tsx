@@ -1109,6 +1109,16 @@ function ToolbarPopover({
   }, [open, submenuOpen, mobileSheet]);
 
   const hasCheckItems = hasRichItems || showCheck;
+  const pickerHeader = pickerContext && modelPicker?.mountHeader && (
+    <ModelPickerContent
+      key={scopeKey}
+      mount={modelPicker.mountHeader}
+      context={pickerContext}
+      overlayRoot={overlayRoot}
+      revision={modelPicker}
+      className={styles.modelPickerContent}
+    />
+  );
   const dropdownItems = (
     <div
       className={`${styles.dropdownList} ${
@@ -1119,6 +1129,7 @@ function ToolbarPopover({
             : ''
       } ${searchable ? styles.dropdownListConstrained : ''}`}
     >
+      {mobileSheet && pickerHeader}
       {visibleItems.map((item) => (
         <ToolbarDropdownRow
           key={JSON.stringify([scopeKey, item.id])}
@@ -1167,7 +1178,9 @@ function ToolbarPopover({
       aria-label={searchLabel}
       placeholder={searchLabel}
       autoComplete="off"
-      className={touchSearchField ? 'h-11 text-base md:text-base' : undefined}
+      className={
+        touchSearchField ? 'h-11 min-h-11 text-base md:text-base' : undefined
+      }
       autoCapitalize={touchSearchField ? 'off' : undefined}
       autoCorrect={touchSearchField ? 'off' : undefined}
       spellCheck={touchSearchField ? false : undefined}
@@ -1183,16 +1196,7 @@ function ToolbarPopover({
   ) : null;
   const searchableItems = (
     <>
-      {pickerContext && modelPicker?.mountHeader && (
-        <ModelPickerContent
-          key={scopeKey}
-          mount={modelPicker.mountHeader}
-          context={pickerContext}
-          overlayRoot={overlayRoot}
-          revision={modelPicker}
-          className={styles.modelPickerContent}
-        />
-      )}
+      {!mobileSheet && pickerHeader}
       {searchable &&
         (searchAction ? (
           <div className={styles.dropdownSearch}>
@@ -1249,7 +1253,7 @@ function ToolbarPopover({
           <div
             ref={sheetBodyRef}
             tabIndex={-1}
-            className="min-h-0 overflow-y-auto px-3 outline-none"
+            className={`min-h-0 px-3 outline-none ${submenu ? 'overflow-y-auto' : 'flex flex-col overflow-clip'}`}
             data-vaul-no-drag
           >
             {header}
@@ -1287,7 +1291,7 @@ function ToolbarPopover({
                   ref={sheetListRef}
                   tabIndex={-1}
                   data-web-shell-model-sheet-list
-                  className="absolute inset-x-3 bottom-[calc(100%+8px)] max-h-[60vh] overflow-y-auto rounded-xl border bg-popover p-2 shadow-lg outline-none"
+                  className="absolute inset-x-3 bottom-[calc(100%+8px)] flex max-h-[60vh] flex-col overflow-clip rounded-xl border bg-popover p-2 shadow-lg outline-none"
                   data-vaul-no-drag
                   onClick={(event) => event.stopPropagation()}
                 >

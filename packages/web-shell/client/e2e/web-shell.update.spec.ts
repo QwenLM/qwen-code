@@ -1,9 +1,30 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import type { DaemonUpdateStatus } from '@qwen-code/sdk/daemon';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
 } from './utils/mockDaemon';
+
+async function expectUpdateAboveSettings(page: Page) {
+  // Read both rectangles in one frame while the menu animates.
+  const { buttonWidth, updateBottom, settingsTop } = await page
+    .locator('[data-web-shell-sidebar-more]')
+    .evaluate((menu) => {
+      const update = menu
+        .querySelector('[data-web-shell-update]')!
+        .getBoundingClientRect();
+      const settings = menu
+        .querySelector('button[aria-label="设置"]')!
+        .getBoundingClientRect();
+      return {
+        buttonWidth: update.width,
+        updateBottom: update.bottom,
+        settingsTop: settings.top,
+      };
+    });
+  expect(buttonWidth).toBeGreaterThan(100);
+  expect(updateBottom).toBeLessThan(settingsTop);
+}
 
 test('downloads silently, shows an update action in More and restarts in place @smoke', async ({
   page,
@@ -49,52 +70,8 @@ test('downloads silently, shows an update action in More and restarts in place @
   status = { ...status, state: 'ready' };
   await page.getByRole('button', { name: '更多', exact: true }).click();
   await expect(entry).toHaveAccessibleName('更新');
-  const sidebar = page.getByRole('complementary', {
-    name: '工作区侧边栏',
-  });
-  const resizeHandle = sidebar.getByRole('separator');
-  const moreMenu = page.locator('[data-web-shell-sidebar-more]');
-  // Desktop adds a 56px rail to the 220px minimum.
-  for (const width of [220, 343, 360, 260]) {
-    await page.keyboard.press('Escape');
-    await expect(entry).toHaveCount(0);
-    await expect(resizeHandle).toBeVisible();
-    const sidebarBox = (await sidebar.boundingBox())!;
-    const handleBox = (await resizeHandle.boundingBox())!;
-    // The handle extends beyond the sidebar's clipped edge.
-    const x = handleBox.x + 1;
-    const y = handleBox.y + handleBox.height / 2;
-    await page.mouse.move(x, y);
-    await page.mouse.down();
-    await page.mouse.move(x + width - sidebarBox.width, y, { steps: 4 });
-    await page.mouse.up();
-    await expect
-      .poll(async () => (await sidebar.boundingBox())!.width)
-      .toBeCloseTo(Math.max(width, 276), 0);
-    await page.getByRole('button', { name: '更多', exact: true }).click();
-    await expect(entry).toBeVisible();
-    // Read both rectangles in one frame while the popover animates.
-    const {
-      width: buttonWidth,
-      updateBottom,
-      settingsTop,
-    } = await moreMenu.evaluate((menu) => {
-      const update = menu
-        .querySelector('[data-web-shell-update]')!
-        .getBoundingClientRect();
-      const settings = menu
-        .querySelector('button[aria-label="设置"]')!
-        .getBoundingClientRect();
-      return {
-        width: update.width,
-        updateBottom: update.bottom,
-        settingsTop: settings.top,
-      };
-    });
-    expect(buttonWidth).toBeGreaterThan(100);
-    expect(updateBottom).toBeLessThan(settingsTop);
-  }
-  await page.screenshot({ path: testInfo.outputPath('update-sidebar.png') });
+  await expect(entry).toBeVisible();
+  await expectUpdateAboveSettings(page);
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: '收起', exact: true }).click();
   await page.getByRole('button', { name: '更多', exact: true }).click();
@@ -115,6 +92,63 @@ test('downloads silently, shows an update action in More and restarts in place @
   await expect(entry).toHaveCount(0);
   expect(preparations).toBe(1);
   expect(restarts).toBe(1);
+});
+
+test('keeps the update action above Settings across sidebar widths @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  scenario.capabilities.features.push('daemon_update');
+  scenario.capabilities.qwenCodeVersion = '0.24.4';
+  await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  let updatePosts = 0;
+  await page.route('**/daemon/update**', async (route) => {
+    if (route.request().method() === 'POST') {
+      updatePosts++;
+    }
+    await route.fulfill({
+      status: 200,
+      json: {
+        state: 'ready',
+        currentVersion: '0.24.4',
+        latestVersion: '0.24.6',
+        canInstall: false,
+      } satisfies DaemonUpdateStatus,
+    });
+  });
+  await page.addInitScript(() => {
+    localStorage.setItem('qwen-code-web-shell-language', 'zh-CN');
+    if (!localStorage.getItem('qwen-code-web-shell-sidebar-width')) {
+      localStorage.setItem('qwen-code-web-shell-sidebar-width', '220');
+    }
+  });
+  await page.goto(`/session/${scenario.sessionId}?language=zh-CN#turn-2`);
+  const sidebar = page.getByRole('complementary', { name: '工作区侧边栏' });
+  const entry = page.locator('[data-web-shell-update]');
+  const widths = [
+    { stored: 220, expected: 276 },
+    { stored: 343, expected: 343 },
+    { stored: 360, expected: 360 },
+  ];
+  for (const [index, { stored, expected }] of widths.entries()) {
+    if (index > 0) {
+      await page.evaluate((sidebarWidth) => {
+        localStorage.setItem(
+          'qwen-code-web-shell-sidebar-width',
+          String(sidebarWidth),
+        );
+      }, stored);
+      await page.reload();
+    }
+    await expect(sidebar).toHaveCSS('width', `${expected}px`);
+    await page.getByRole('button', { name: '更多', exact: true }).click();
+    await expect(entry).toBeVisible();
+    await expectUpdateAboveSettings(page);
+  }
+  expect(updatePosts).toBe(0);
+  await page.screenshot({ path: testInfo.outputPath('update-sidebar.png') });
 });
 
 test('older daemons do not expose update controls @smoke', async ({
