@@ -87,7 +87,6 @@ describe('check-failsafe-reports', () => {
     ['o4-mysql', 'O4MySqlGate'],
     ['o4-oss', 'O4OssGate'],
     ['event-transport', 'EventTransportBrokerGate'],
-    ['event-transport-multi-node', 'EventTransportMultiNodeGate'],
   ])(
     'requires complete opt-in %s evidence without changing the ordinary family',
     (family, gate) => {
@@ -125,6 +124,27 @@ describe('check-failsafe-reports', () => {
       expect(check(family, absent).status).toBe(1);
     },
   );
+
+  it.each([
+    ['passes', 'rocketMqWakeupsAndPolling(Path)', '', 0],
+    ['skipped', 'rocketMqWakeupsAndPolling(Path)', '<skipped/>', 1],
+    ['failed', 'rocketMqWakeupsAndPolling(Path)', '<failure/>', 1],
+    ['errored', 'rocketMqWakeupsAndPolling(Path)', '<error/>', 1],
+    ['wrong method', 'rowCountPageBoundariesAndResumeAcrossOwners', '', 1],
+    ['missing report', null, '', 1],
+  ])('checks the GC MQ case when it is %s', (label, method, result, status) => {
+    const eventGate = 'com.example.EventTransportMultiNodeGate';
+    const gcGate = 'com.example.SessionResourceCollectionMySqlIT';
+    const dir = module(label, [eventGate, gcGate], { [eventGate]: [1, 0] });
+    if (method !== null) {
+      writeFileSync(
+        join(dir, 'target', 'failsafe-reports', `TEST-${gcGate}.xml`),
+        `<testsuite name="${gcGate}"><properties/><testcase name="${method}" classname="${gcGate}">${result}</testcase></testsuite>`,
+      );
+    }
+    const checked = check('event-transport-multi-node', dir);
+    expect(checked.status, checked.output).toBe(status);
+  });
 
   it('passes when every integration test of the family ran, whatever the other family did', () => {
     const sources = [

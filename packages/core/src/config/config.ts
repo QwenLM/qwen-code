@@ -8410,6 +8410,7 @@ export class Config {
     const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
     return [
       `${this.sessionId}.jsonl`,
+      `${this.sessionId}.prompt-time.json`,
       `${this.sessionId}.runtime.json`,
       `${this.sessionId}.worktree.json`,
       `${this.sessionId}.pr.json`,

@@ -119,7 +119,7 @@ describe('scheduled-task session lifecycle', () => {
     expect(Object.keys(await byId()).sort()).toEqual(['b', 'c']);
   });
 
-  it('advances deletion generations only for tasks removed with their session', async () => {
+  it('advances owner deletion generations only for removed tasks', async () => {
     await seed([
       task({ id: 'a', sessionId: 'sess-1' }),
       task({ id: 'b', sessionId: 'sess-1', recurring: false }),
@@ -129,20 +129,51 @@ describe('scheduled-task session lifecycle', () => {
     await removeTasksForSessions(workspace, ['sess-1']);
 
     let generations = new Map<string, number>();
+    const ownerKey = (id: string) => JSON.stringify(['sess-1', id]);
     await updateCronTasks(workspace, (tasks) => tasks, {
-      observeDeletionIds: ['a', 'b', 'c'],
+      observeDeletionIds: [ownerKey('a'), ownerKey('b'), ownerKey('c')],
       onDeletionGenerations: (observed) => {
         generations = new Map(observed);
       },
     });
     expect(generations).toEqual(
       new Map([
-        ['a', 1],
-        ['b', 2],
-        ['c', 0],
+        [ownerKey('a'), 1],
+        [ownerKey('b'), 2],
+        [ownerKey('c'), 0],
       ]),
     );
     expect(Object.keys(await byId())).toEqual(['c']);
+  });
+
+  it('does not expose a same-id sibling to a bare deletion tombstone', async () => {
+    await seed([
+      task({ id: 'shared', sessionId: 'sess-1' }),
+      task({ id: 'shared', sessionId: 'sess-2' }),
+    ]);
+    await removeTasksForSessions(workspace, ['sess-1']);
+
+    let generations = new Map<string, number>();
+    const ownerKey = JSON.stringify(['sess-1', 'shared']);
+    await updateCronTasks(workspace, (tasks) => tasks, {
+      observeDeletionIds: [
+        'shared',
+        ownerKey,
+        'session:sess-1',
+        'session:sess-2',
+      ],
+      onDeletionGenerations: (observed) => {
+        generations = new Map(observed);
+      },
+    });
+    expect(generations).toEqual(
+      new Map([
+        ['shared', 0],
+        [ownerKey, 1],
+        ['session:sess-1', 2],
+        ['session:sess-2', 0],
+      ]),
+    );
   });
 
   it('is a no-op when nothing matches (no write, ordinary sessions untouched)', async () => {

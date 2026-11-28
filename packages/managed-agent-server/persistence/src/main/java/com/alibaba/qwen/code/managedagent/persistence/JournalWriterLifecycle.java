@@ -142,6 +142,16 @@ final class JournalWriterLifecycle {
 
     WriterGrant acquireWriter(String tenantId, String sessionId, String writerToken,
             AcquireWriterRequest request, RuntimeLifecycleAuthority authority) {
+        WriterGrant grant = acquire(tenantId, sessionId, writerToken, request, authority);
+        // A null grant commits and retries, so only a granted writer consumes the claim.
+        if (grant != null) {
+            JdbcHarnessPlacementStore.consumeClaim(jdbc, tenantId, sessionId);
+        }
+        return grant;
+    }
+
+    private WriterGrant acquire(String tenantId, String sessionId, String writerToken,
+            AcquireWriterRequest request, RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
@@ -651,6 +661,34 @@ final class JournalWriterLifecycle {
         return new RecoveryStateReceipt(head.writerGeneration(),
                 request.recoveryStatus(), request.recoveryDetailCode(),
                 false);
+    }
+
+    long authenticateEventIngest(String tenantId, String sessionId,
+            String writerToken, String workspaceId, String writerId,
+            long writerGeneration, boolean sealed) {
+        JournalStoreRows.validateScope(tenantId, workspaceId, sessionId);
+        fencing.requireCredential(tenantId, workspaceId, sessionId, writerToken);
+        JournalStoreRows.validateStableId(writerId, "writerId", 128);
+        JournalStoreRows.validateCounter(writerGeneration, "writerGeneration", 1);
+        fencing.requirePlacement(tenantId, workspaceId, sessionId, writerToken, writerId, false);
+        fencing.lockSessionFirst(tenantId, sessionId);
+        JournalStoreRows.HeadRow head = fencing.requireHeadAfterRootLock(tenantId, sessionId);
+        storeRows.requireHeadScope(head, tenantId, workspaceId, sessionId);
+        if (sealed && "SEALED".equals(head.state())) {
+            // The clean-sealed release arm's proof: the sealed incarnation
+            // itself is the fence, and only a wake-stamped seal qualifies.
+            if (writerGeneration != head.writerGeneration()
+                    || !writerId.equals(head.writerId())
+                    || !JournalFencing.secureEquals(JournalFencing.tokenHash(writerToken),
+                            head.leaseTokenHash())
+                    || !Objects.equals(head.wakeSealRevision(), head.journalRevision())) {
+                throw JournalFencing.writerConflict();
+            }
+        } else {
+            fencing.requireWriter(head, writerId, writerGeneration, writerToken,
+                    storeRows.databaseNow(), true);
+        }
+        return head.committedSequence();
     }
 
     /**

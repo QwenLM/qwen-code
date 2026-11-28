@@ -172,8 +172,14 @@ export function runCleanup(
   let state: AutofixPrState | null;
   try {
     state = readState(paths.statePath);
+    if (state && state.prNumber !== prNumber) {
+      throw new Error(
+        `PR #${prNumber}'s state file (${paths.statePath}) records PR #${state.prNumber}; delete ${paths.statePath} or run \`qwen autofix-pr cleanup ${prNumber} --force\` to remove only PR #${prNumber}'s watch files.`,
+      );
+    }
   } catch (err) {
-    // An unreadable state file must not pin the watch: --force discards it.
+    // An unreadable or PR-mismatched state file must not pin the watch:
+    // --force removes only this PR's watch files without reading the state.
     if (!force) throw err;
     state = null;
   }
@@ -349,6 +355,9 @@ export function runCleanup(
     // it to.
     if (refExists(`refs/heads/${paths.branch}`)) {
       git('branch', '-D', paths.branch);
+    }
+    if (refExists(paths.headRef)) {
+      gitOpt('update-ref', '-d', paths.headRef);
     }
     return removeWatchFiles(watch);
   };

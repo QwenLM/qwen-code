@@ -71,6 +71,7 @@ vi.mock('./MessageList', () => ({
   ),
 }));
 const { TranscriptViewport } = await import('./TranscriptViewport');
+const { DaemonTranscriptViewport } = await import('./DaemonTranscriptViewport');
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 afterEach(() => {
@@ -249,6 +250,7 @@ async function setup(
     act(() =>
       root!.render(
         <TranscriptViewport
+          sessionViewportComponent={DaemonTranscriptViewport}
           messages={[
             { id: 'live', role: 'user', content: 'live', timestamp: 1 },
           ]}

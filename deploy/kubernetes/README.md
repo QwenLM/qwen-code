@@ -131,7 +131,7 @@ initialization grants the application user its database privileges and SELECT on
 `performance_schema.user_variables_by_thread`, required by Flyway's boot probe.
 
 Only the signed public API is exposed on the ClusterIP Service's port 8080.
-The Harness pool members `harness` and `harness-b` use loopback ports 4170 and 4172. The private Session Store uses loopback port 8081. The control plane
+The Harness pool members `harness` and `harness-b` use loopback ports 4170 and 4172. The private Session Store uses loopback port 8081. When `runtime.enabled` is true, the Runtime Broker shares that same internal origin: each Harness receives `QWEN_MANAGED_RUNTIME_BROKER_URL=http://127.0.0.1:8081`, and no dedicated Broker listener is exposed. With `runtime.enabled` false, the Harnesses receive neither a Broker URL nor a Broker token, preserving text-only Sessions. The control plane
 routes Sessions to their recorded owners, and SQL wake dispatch enables
 placement release after clean suspension. Pod readiness covers all containers,
 so a restarting Harness can temporarily remove the API endpoint from the
@@ -289,6 +289,14 @@ MySQL and optional Runtime/Workspace PVCs and credentials. Repeat the installati
 new images and run the Session smoke before restoring traffic. The application
 uses one replica and Recreate, so upgrades have downtime. Do not scale it to
 multiple replicas.
+
+Upgrade a release whose Harnesses still use the dedicated Broker URL
+`http://127.0.0.1:4182` with the new chart and matching server and Harness
+images together. The new template replaces that value with the shared Session
+Store origin `http://127.0.0.1:8081`. A rollback to the dedicated-listener
+release must restore its previous chart and matched images together, including
+the old 4182 URL; do not combine shared-listener Harness configuration with an
+older dedicated-listener server.
 
 Once the pool assigns Sessions, their writer credentials include the member
 and epoch. To return to a release with the unpooled connector, restore a

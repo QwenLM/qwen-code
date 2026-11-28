@@ -119,7 +119,7 @@ MySQL 初始化时授予应用用户数据库权限，以及 Flyway 启动探针
 
 ClusterIP Service 仅在 8080 暴露签名认证的公开 API。Harness 池成员 `harness`
 和 `harness-b` 分别使用回环端口 4170 和 4172，私有 Session Store 使用回环端口
-8081。控制面按记录的 owner 路由会话，SQL wake dispatch 使会话在干净挂起后释放
+8081。`runtime.enabled` 为 true 时，Runtime Broker 共用同一个内部 origin：每个 Harness 都获得 `QWEN_MANAGED_RUNTIME_BROKER_URL=http://127.0.0.1:8081`，不再暴露独立的 Broker 监听器。`runtime.enabled` 为 false 时，Harness 不获得 Broker URL 或 token，继续支持纯文本 Session。控制面按记录的 owner 路由会话，SQL wake dispatch 使会话在干净挂起后释放
 placement。Pod 的就绪状态覆盖全部容器，Harness 重启时可能暂时从 Service 摘除 API
 端点。不启用无认证公开监听、LoadBalancer 或 Ingress。远程客户端
 使用独立配置的 TLS ingress 或可信网关，并保留 API 签名；tenant 和 actor header
@@ -252,6 +252,8 @@ node deploy/kubernetes/smoke.mjs --key-file "$QWEN_K8S_KEY_FILE" --session-id <s
 release 名、MySQL 和可选 Runtime/Workspace PVC，以及凭据不变。使用匹配的新镜像
 重复安装命令，恢复流量前执行
 Session smoke。应用固定单副本并使用 Recreate，升级存在停机时间，请勿扩为多副本。
+
+从 Harness 仍使用独立 Broker URL `http://127.0.0.1:4182` 的版本升级时，必须同时升级 chart 以及匹配的服务端和 Harness 镜像。新模板会把该值替换为共享的 Session Store origin `http://127.0.0.1:8081`。回滚到使用独立监听器的版本时，也必须同时恢复旧 chart 与配套镜像，包括旧的 4182 URL；不要把共享监听器的 Harness 配置与旧的独立监听器服务端混用。
 
 会话进入池后，其 writer 凭据绑定成员与 epoch。若回退到使用非池连接器的版本，
 在接受写入前一并恢复配套的升级前数据库和应用备份。

@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { SquareArrowOutUpRightIcon } from 'lucide-react';
-import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { ACPToolCall } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
+import { useOptionalWorkspaceRuntime } from '../../utils/workspace-context.js';
 import type { TurnOutputOpenRequest } from '../artifacts/TurnOutputs';
 import { getImageMimeTypeFromPath } from '../artifacts/artifactUtils';
 import { getToolFilePath } from '../artifacts/turnOutputSelectors';
-import { useArtifactWorkspaceTarget } from '../artifacts/useArtifactWorkspaceTarget';
+import { useArtifactWorkspaceTargetFromRuntime } from '../artifacts/artifact-workspace-target.js';
 import { Button } from '../ui/button';
 
 export function ToolFilePreviewButton({
@@ -56,8 +56,13 @@ function AvailableFileButton({
   iconOnly?: boolean;
 }) {
   const { t } = useI18n();
-  const { status } = useWorkspace();
-  const target = useArtifactWorkspaceTarget(workspaceCwd);
+  const workspace = useOptionalWorkspaceRuntime();
+  const status = workspace?.status;
+  const target = useArtifactWorkspaceTargetFromRuntime(
+    workspace,
+    workspace?.actions,
+    workspaceCwd,
+  );
   const actions = target?.actions;
   const [availableFor, setAvailableFor] = useState<typeof actions>();
   const requests = useRef({ sequence: 0 }).current;

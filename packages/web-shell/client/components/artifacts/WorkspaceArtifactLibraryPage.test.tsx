@@ -652,7 +652,29 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
     expect(firstSessionBtn.textContent).toContain('Session 12345678');
     expect(firstSessionBtn.textContent).toContain('Archived');
 
-    // Metadata-only managed artifact is selected first and rendered from descriptor
+    // Opening the page shows the list only: no row is pre-selected and no
+    // artifact is read before the user clicks (#18508)
+    expect(
+      container.querySelector(
+        '[data-testid="workspace-artifact-library-detail"]',
+      ),
+    ).toBeNull();
+    expect(
+      container.querySelector(
+        '[data-testid="workspace-artifact-library-select-prompt"]',
+      ),
+    ).not.toBeNull();
+    expect(mocks.stat).not.toHaveBeenCalled();
+    expect(mocks.readWorkspaceFile).not.toHaveBeenCalled();
+
+    // Clicking the metadata-only managed row renders it from the descriptor
+    const firstRowBtn = container
+      .querySelectorAll('[data-testid="workspace-artifact-library-row"]')[0]
+      ?.querySelector('button') as HTMLButtonElement;
+    await act(async () => {
+      firstRowBtn.click();
+    });
+    await flush();
     expect(onJumpToSessionArtifact).not.toHaveBeenCalled();
     expect(
       container.querySelector(
@@ -833,18 +855,9 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
     });
     await flush();
 
-    // R2-5: Passive auto-selection must skip the cold jump row ('snap-cold-active')
-    // and select the next openable row ('snap-race'), without jumping out of the library.
-    expect(mocks.readSessionArtifactContent).toHaveBeenLastCalledWith(
-      'sess-live',
-      'snap-race',
-      expect.any(Object),
-    );
-    expect(mocks.readSessionArtifactContent).not.toHaveBeenCalledWith(
-      'sess-cold-active',
-      expect.anything(),
-      expect.anything(),
-    );
+    // R2-5: Nothing is previewed on open — not the cold jump row
+    // ('snap-cold-active') and not the live snapshot below it (#18508)
+    expect(mocks.readSessionArtifactContent).not.toHaveBeenCalled();
     expect(onJumpToSessionArtifact).not.toHaveBeenCalled();
 
     const rows = container.querySelectorAll(
@@ -940,7 +953,16 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
     });
     await flush();
 
-    // While live in the store, the snapshot previews inline via readSessionArtifactContent
+    // Opening the page loads nothing; the live snapshot previews inline only
+    // after an explicit click (#18508)
+    expect(mocks.readSessionArtifactContent).not.toHaveBeenCalled();
+    const rowBtn = container
+      .querySelector('[data-testid="workspace-artifact-library-row"]')
+      ?.querySelector('button') as HTMLButtonElement;
+    await act(async () => {
+      rowBtn.click();
+    });
+    await flush();
     expect(mocks.readSessionArtifactContent).toHaveBeenCalledWith(
       'sess-store-live',
       'snap-store',
@@ -948,19 +970,11 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
     );
     expect(onJumpToSessionArtifact).not.toHaveBeenCalled();
 
-    // Clear live state -> subscribeLiveSessions fires -> re-render drops the
-    // now-cold auto-selected inline detail pane before any click (R1-16)
+    // Clear live state -> subscribeLiveSessions fires -> the selected row is
+    // now cold, so clicking it jumps to the session instead of previewing (R1-16)
     await act(async () => {
       store.applyLiveState('/work/proj', []);
     });
-    expect(
-      container.querySelector(
-        '[data-testid="workspace-artifact-library-detail"]',
-      ),
-    ).toBeNull();
-    const rowBtn = container
-      .querySelector('[data-testid="workspace-artifact-library-row"]')
-      ?.querySelector('button') as HTMLButtonElement;
     await act(async () => {
       rowBtn.click();
     });
@@ -969,6 +983,90 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
       'snap-store',
       'active',
     );
+  });
+
+  it('opens on the list with nothing selected, and only previews the newest artifact after an explicit click (#18508)', async () => {
+    const onJumpToSessionArtifact = vi.fn();
+    const reader: WorkspaceArtifactLibraryReader = {
+      artifactLibraryStream: vi.fn(),
+      artifactLibrary: vi.fn().mockResolvedValue({
+        v: 1,
+        sessions: [
+          makeEnvelope('sess-newest', [
+            makeArtifact('newest-art', {
+              title: 'newest.md',
+              workspacePath: 'docs/newest.md',
+              updatedAt: '2026-11-21T12:00:00.000Z',
+            }),
+            makeArtifact('older-art', {
+              title: 'older.md',
+              workspacePath: 'docs/older.md',
+              updatedAt: '2026-11-21T11:00:00.000Z',
+            }),
+          ]),
+        ],
+        errors: [],
+      }),
+    };
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkspaceArtifactLibraryPage
+            workspaceCwd="/work/proj"
+            reader={reader}
+            features={[WORKSPACE_ARTIFACT_LIBRARY_FEATURE]}
+            isSessionLive={() => false}
+            onOpenSession={vi.fn()}
+            onJumpToSessionArtifact={onJumpToSessionArtifact}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    // The list is the landing view: both rows, no preview, no workspace read
+    expect(
+      container.querySelectorAll(
+        '[data-testid="workspace-artifact-library-row"]',
+      ),
+    ).toHaveLength(2);
+    expect(
+      container.querySelector(
+        '[data-testid="workspace-artifact-library-detail"]',
+      ),
+    ).toBeNull();
+    expect(
+      container.querySelector(
+        '[data-testid="workspace-artifact-library-select-prompt"]',
+      )?.textContent,
+    ).toContain('Select an artifact to preview it here.');
+    expect(mocks.stat).not.toHaveBeenCalled();
+    expect(mocks.readWorkspaceFile).not.toHaveBeenCalled();
+    expect(onJumpToSessionArtifact).not.toHaveBeenCalled();
+
+    // An explicit click is what opens the preview
+    const newestBtn = container
+      .querySelector('[data-testid="workspace-artifact-library-row"]')
+      ?.querySelector('button') as HTMLButtonElement;
+    await act(async () => {
+      newestBtn.click();
+    });
+    await flush();
+    expect(mocks.readWorkspaceFile).toHaveBeenCalledWith(
+      'docs/newest.md',
+      expect.objectContaining({ maxBytes: 256 * 1024 }),
+    );
+    expect(
+      container.querySelector(
+        '[data-testid="workspace-artifact-library-detail"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      container.querySelector(
+        '[data-testid="workspace-artifact-library-select-prompt"]',
+      ),
+    ).toBeNull();
   });
 
   it('distinguishes finished-with-errors wording, renders 409 persistence-unavailable and 503 runtime-unavailable states, and shows the partial banner without empty state when a stream ends without complete (R1-5 & R2-2)', async () => {

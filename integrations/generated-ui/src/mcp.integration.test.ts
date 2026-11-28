@@ -95,6 +95,11 @@ describe('built generated UI MCP artifact', () => {
           ? 'only for the current activation'
           : 'With a state-capable host and daemon',
       );
+      expect(tools[0]?.description).toContain(
+        appUri === APP_URI
+          ? 'Web Shell performs neither ui.copy nor ui.download'
+          : 'In a click handler, ui.copy(text) and ui.download',
+      );
       expect(tools[0]).toMatchObject({
         name: 'generated_ui_show',
         inputSchema: {
