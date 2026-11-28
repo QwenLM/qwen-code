@@ -503,6 +503,58 @@ describe('local provider extension example', () => {
     20_000,
   );
 
+  const POOL_SCALED = Boolean(
+    process.env['RUNNER_NAME']?.startsWith('ecs-qwen-'),
+  );
+  // The shared ECS pool runs this suite several times slower than a developer
+  // machine (#10490), and buildExample() rewrites a 2.4 MB bundle immediately
+  // before these spawns, so the first child pays a cold module-compile cost. A
+  // fixed 5s child bound SIGKILLs that startup and surfaces as
+  // `code: null, killed: true, stderr: ''` instead of the fail-fast exit this
+  // case asserts (observed cold start 10.7s vs 1.0-3.8s warm). The bound is only
+  // a hang ceiling -- the fail-fast contract is carried by `killed: false` plus
+  // `code: 1`, i.e. the child exited on its own rather than being killed.
+  const FAIL_FAST_SPAWN_TIMEOUT_MS = POOL_SCALED ? 60_000 : 5_000;
+  const FAIL_FAST_CASE_TIMEOUT_MS = POOL_SCALED ? 300_000 : 30_000;
+
+  it.skipIf(!npmCli)(
+    'enforces the fail-fast spawn bound (the timeout must reach execFileAsync)',
+    async () => {
+      // Regression pin for a two-character bug: `}),` was once `},`, which moved
+      // `timeout:` out of the execFileAsync options and into the stringEnvironment()
+      // argument list. stringEnvironment(env) takes exactly ONE parameter, so the
+      // bound silently did nothing and the fail-fast spawn had no timeout at all --
+      // the opposite of what FAIL_FAST_SPAWN_TIMEOUT_MS exists to guarantee.
+      //
+      // The child below never exits, so a lost bound shows up as a hang. The race
+      // converts that into a clean assertion failure instead of a stuck suite,
+      // because a hanging test is exactly how this defect shipped unnoticed.
+      const neverExits = 'setInterval(() => {}, 1_000)';
+      const outcome = await Promise.race([
+        execFileAsync(process.execPath, ['-e', neverExits], {
+          cwd: exampleRoot,
+          env: stringEnvironment({
+            ...process.env,
+            http_proxy: undefined,
+            https_proxy: undefined,
+            all_proxy: undefined,
+            no_proxy: undefined,
+          }),
+          timeout: FAIL_FAST_SPAWN_TIMEOUT_MS,
+        }).then(
+          () => 'resolved',
+          (error: unknown) => error,
+        ),
+        new Promise((resolve) =>
+          setTimeout(() => resolve('NOT_ENFORCED'), FAIL_FAST_SPAWN_TIMEOUT_MS * 4),
+        ),
+      ]);
+      expect(outcome).not.toBe('NOT_ENFORCED');
+      expect(outcome).toMatchObject({ killed: true });
+    },
+    FAIL_FAST_CASE_TIMEOUT_MS,
+  );
+
   it.skipIf(!npmCli)(
     'packs an executable that fails fast without provider configuration',
     async () => {
@@ -548,7 +600,7 @@ describe('local provider extension example', () => {
               ALL_PROXY: '',
               NO_PROXY: '',
             }),
-            timeout: 10_000,
+            timeout: FAIL_FAST_SPAWN_TIMEOUT_MS,
           }),
         ).rejects.toMatchObject({ stderr, code: 1, killed: false });
       }
@@ -577,6 +629,6 @@ describe('local provider extension example', () => {
         manifest.mcpServers['provider-context-local-example']?.args,
       ).toEqual(['${extensionPath}${/}dist${/}main.js']);
     },
-    30_000,
+    FAIL_FAST_CASE_TIMEOUT_MS,
   );
 });

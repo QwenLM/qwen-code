@@ -2869,21 +2869,20 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         expectNoBodyDiagnostics();
       });
 
-      it('truncates Streamable HTTP GET SSE error body diagnostics', async () => {
+      it('does not log fallback response bodies', async () => {
+        const marker = 'SYNTHETIC-SECRET-DO-NOT-LOG';
         const { response } = await compatFetch(
-          'large-error-body',
-          'x'.repeat(1024),
+          'secret-error-body',
+          marker,
           400,
         );
 
         expect(response.status).toBe(405);
         expect(mockDebugLogger.warn).toHaveBeenCalledWith(
-          expect.stringContaining(
-            `Response body: ${JSON.stringify(`${'x'.repeat(512)}...`)}`,
-          ),
+          expect.stringContaining('HTTP 400'),
         );
         expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
-          expect.stringContaining('x'.repeat(600)),
+          expect.stringContaining(marker),
         );
       });
 
