@@ -496,6 +496,8 @@ describe('external content-allowlist downgrade (operator opt-in)', () => {
       'CHANGELOG.md',
       'CONTRIBUTING.md',
       'LICENSE.md',
+      'DOCS/GUIDE.MD',
+      'Readme.md',
     ]) {
       expect(isReviewContentAllowlistedPath(p)).toBe(true);
     }

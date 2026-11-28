@@ -3420,7 +3420,9 @@ describe('review CLI capability gate (production cutover blocker)', () => {
         join(binDir, 'npm'),
         `#!/bin/sh\necho "npm $*" >> ${JSON.stringify(callLog)}\n` +
           `if [ "$1" = "install" ]; then\n` +
-          `  if [ -f ${JSON.stringify(join(dir, 'qwen-upgraded'))} ]; then cp ${JSON.stringify(join(dir, 'qwen-upgraded'))} ${JSON.stringify(join(binDir, 'qwen'))}; fi\n` +
+          `  prev=''; pfx=''\n` +
+          `  for a in "$@"; do case "$prev" in --prefix) pfx="$a" ;; esac; prev="$a"; done\n` +
+          `  if [ -n "$pfx" ] && [ -f ${JSON.stringify(join(dir, 'qwen-upgraded'))} ]; then mkdir -p "$pfx/node_modules/.bin"; cp ${JSON.stringify(join(dir, 'qwen-upgraded'))} "$pfx/node_modules/.bin/qwen"; chmod +x "$pfx/node_modules/.bin/qwen"; fi\n` +
           `  exit 0\nfi\n` +
           `if [ "$1" = "run" ]; then exit ${buildOk ? 0 : 1}; fi\nexit 0\n`,
       );

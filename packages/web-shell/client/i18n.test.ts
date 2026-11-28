@@ -1166,6 +1166,31 @@ describe('touch follow-up catalog parity', () => {
   });
 });
 
+describe('overload strip messages interpolate their readings', () => {
+  const vars = { ratio: '2.50', lag: 20, reason: 'cpu_load' };
+
+  it.each(['en', 'zh-CN', 'zh-TW', 'ru'] as const)(
+    '%s renders the readings, not the raw template',
+    (language) => {
+      const t = getTranslator(language);
+      const detail = t('sidebar.overloadDetail', vars);
+      expect(detail).toContain('2.50');
+      expect(detail).toContain('20');
+      expect(detail).toContain('cpu_load');
+      if (language !== 'en') {
+        // Parity: a dropped translation would silently render the EN template.
+        expect(detail).not.toBe(
+          getTranslator('en')('sidebar.overloadDetail', vars),
+        );
+      }
+      expect(detail).not.toContain('{ratio}');
+      expect(detail).not.toContain('{lag}');
+      expect(detail).not.toContain('{reason}');
+      expect(t('sidebar.overloadPaused')).not.toBe('sidebar.overloadPaused');
+    },
+  );
+});
+
 const ARCHIVED_PANEL_KEYS = [
   'sidebar.archivedSearchPlaceholder',
   'sidebar.clearSearch',

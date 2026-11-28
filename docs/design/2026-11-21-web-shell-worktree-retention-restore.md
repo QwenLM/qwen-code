@@ -2,7 +2,7 @@
 
 [English](2026-11-21-web-shell-worktree-retention-restore.md) | [简体中文](2026-11-21-web-shell-worktree-retention-restore.zh-CN.md)
 
-- Status: U4/U5 is implemented. The 2026-11-21 isolated primary+secondary HTTP/Chromium baseline validated that historical state only. Follow-up hardening and its new validation are still in progress; this is not a claim of current-head CI or a merge. Later P6/P7 remains out of scope.
+- Status: U4/U5 is delivered on `main` in [PR #18009](https://github.com/QwenLM/qwen-code/pull/18009) as squash commit `ed5d033e813f90ecb12153ae3307fd035d4b3741`; U4/U5 acceptance remains tracked in [#17237](https://github.com/QwenLM/qwen-code/issues/17237). Follow-up validation on the pre-squash head of that PR (`68a4074b60a4a161e94eb8eaa9e7a467f9977653`, not a `main` commit) covered retention guards, snapshot moves, restore fencing, and isolated primary+secondary HTTP/Chromium restore. GitHub CI results for the merge commit remain separate from these facts. Later P6/P7 remains out of scope.
 - Investigated on: `01b7e92f61b1593517acd1e4afe752d431280e90`.
 - Tracks: [#17237](https://github.com/QwenLM/qwen-code/issues/17237), P6 U4/U5 only.
 - Builds on: `2026-11-17-worktree-carry-metadata.md` and `2026-11-17-worktree-retention-snapshots.md`.

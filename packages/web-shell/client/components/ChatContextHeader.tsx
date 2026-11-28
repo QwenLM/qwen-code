@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import {
+  CalendarClockIcon,
   FolderClosedIcon,
   GaugeIcon,
   LayoutListIcon,
@@ -8,7 +9,8 @@ import {
   PanelRightIcon,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
-import { LocalControlQrButton } from './LocalControlQrButton';
+import { useSharedNow } from '../hooks/useSharedNow';
+import { formatCountdown } from './dialogs/scheduledTasksSchedule';
 import styles from './ChatContextHeader.module.css';
 import {
   Tooltip,
@@ -59,8 +61,16 @@ interface ChatContextHeaderProps {
    * case, not for unrelated open tabs.
    */
   artifactsTabActive?: boolean;
-  /** Shows the Local Control QR entry; hidden when omitted. */
-  onOpenLocalControlSettings?: () => void;
+  /** Session scheduled task count (durable bound + session-scoped); shown when > 0. */
+  scheduledTaskCount?: number;
+  /** Count of enabled/active scheduled tasks in this session. */
+  scheduledTaskActiveCount?: number;
+  /** Earliest next fire timestamp (epoch ms) among active tasks. */
+  scheduledTaskNextRunAt?: number | null;
+  /** Opens the environment panel's scheduled-tasks section; hidden when omitted. */
+  onOpenScheduledTasks?: () => void;
+  /** Renders an optional leading action button ahead of header actions. */
+  renderLeadingAction?: (actionClassName: string) => ReactNode;
 }
 
 export function ChatContextHeader({
@@ -82,9 +92,35 @@ export function ChatContextHeader({
   artifactCount,
   onOpenArtifacts,
   artifactsTabActive,
-  onOpenLocalControlSettings,
+  scheduledTaskCount,
+  scheduledTaskActiveCount,
+  scheduledTaskNextRunAt,
+  onOpenScheduledTasks,
+  renderLeadingAction,
 }: ChatContextHeaderProps) {
   const { t } = useI18n();
+  const hasActiveScheduledCountdown =
+    Boolean(onOpenScheduledTasks) &&
+    (scheduledTaskCount ?? 0) > 0 &&
+    (scheduledTaskActiveCount ?? 0) > 0 &&
+    scheduledTaskNextRunAt != null;
+  const now = useSharedNow(hasActiveScheduledCountdown);
+  const scheduledCountdown =
+    hasActiveScheduledCountdown && scheduledTaskNextRunAt != null
+      ? formatCountdown(scheduledTaskNextRunAt - now, t)
+      : null;
+  const scheduledPausedOnly =
+    (scheduledTaskCount ?? 0) > 0 && (scheduledTaskActiveCount ?? 0) === 0;
+  const scheduledEntryLabel =
+    scheduledTaskCount != null && scheduledTaskCount > 0
+      ? scheduledPausedOnly
+        ? t('chatHeader.scheduledTasksPaused', { count: scheduledTaskCount })
+        : scheduledCountdown
+          ? scheduledCountdown === t('scheduledTasks.dueNow')
+            ? `${t('chatHeader.openScheduledTasks', { count: scheduledTaskCount })} · ${scheduledCountdown}`
+            : `${t('chatHeader.openScheduledTasks', { count: scheduledTaskCount })} · ${t('environment.scheduledTasks.nextRun', { when: scheduledCountdown })}`
+          : t('chatHeader.openScheduledTasks', { count: scheduledTaskCount })
+      : undefined;
   const workspaceLabel = workspaceName ?? t('sidebar.noWorkspace');
   const WorkspaceIcon = onOpenFiles ? 'button' : 'span';
   const workspaceAriaLabel = workspaceName
@@ -134,12 +170,7 @@ export function ChatContextHeader({
         </div>
       )}
       <div className={styles.actions}>
-        {onOpenLocalControlSettings && (
-          <LocalControlQrButton
-            onOpenSettings={onOpenLocalControlSettings}
-            className={styles.action}
-          />
-        )}
+        {renderLeadingAction?.(styles.action)}
         {environmentAvailable && (
           <button
             type="button"
@@ -194,6 +225,30 @@ export function ChatContextHeader({
             <PanelRightIcon />
           </button>
         )}
+        {onOpenScheduledTasks &&
+          scheduledTaskCount != null &&
+          scheduledTaskCount > 0 && (
+            <button
+              type="button"
+              className={`${styles.action} ${styles.scheduledAction}${
+                scheduledPausedOnly ? ` ${styles.scheduledActionPaused}` : ''
+              }`}
+              data-web-shell-scheduled-tasks-entry
+              data-active={scheduledPausedOnly ? 'false' : 'true'}
+              aria-label={scheduledEntryLabel}
+              title={scheduledEntryLabel}
+              onClick={onOpenScheduledTasks}
+            >
+              <CalendarClockIcon />
+              <span className={styles.artifactCount} aria-hidden="true">
+                {!scheduledPausedOnly &&
+                scheduledTaskCount === 1 &&
+                scheduledCountdown
+                  ? scheduledCountdown
+                  : scheduledTaskCount}
+              </span>
+            </button>
+          )}
         {onOpenArtifacts &&
           artifactCount != null &&
           (artifactCount > 0 || (rightPanelOpen && artifactsTabActive)) && (

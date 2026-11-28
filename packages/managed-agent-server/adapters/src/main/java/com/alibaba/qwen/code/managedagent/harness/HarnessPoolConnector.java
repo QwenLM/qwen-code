@@ -434,6 +434,11 @@ public class HarnessPoolConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsEventIngest() {
+        return feature(HarnessFeature.EVENT_INGEST);
+    }
+
+    @Override
     public synchronized SideQueryTarget prepareSideQuery() {
         if (closed || !supportsSideQueries()) {
             throw new ManagedAgentException(503, "harness_unavailable", "No side-query Harness is available.");
@@ -718,6 +723,12 @@ public class HarnessPoolConnector implements HarnessConnector {
     @Override
     public Admission submit(String tenant, String session, String prompt, List<Map<String, Object>> input, String digest) {
         return call(tenant, session, leaf -> leaf.submit(tenant, session, prompt, input, digest));
+    }
+
+    @Override
+    public Admission submit(String tenant, String session, String prompt, List<Map<String, Object>> input, String digest,
+            String ingestTurn) {
+        return call(tenant, session, leaf -> leaf.submit(tenant, session, prompt, input, digest, ingestTurn));
     }
 
     @Override
