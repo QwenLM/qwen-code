@@ -632,6 +632,24 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
+    it('does not read project provider sources for untrusted loaded settings', () => {
+      const settingsService = new SettingsService();
+      const getProjectSettingsSources = vi
+        .spyOn(settingsService, 'getProjectSettingsSources')
+        .mockReturnValue({
+          project: { read: () => undefined },
+          local: { read: () => undefined },
+        } as never);
+      const config = new Config({
+        ...baseParams,
+        settingsService,
+        loadedSettings: createEmptyLoadedSettings(),
+      });
+
+      expect(getProjectSettingsSources).not.toHaveBeenCalled();
+      return config.dispose();
+    });
+
     it.each(['openai', 'openai-responses', 'anthropic'])(
       '未传 transport 时仍创建项目 Custom Provider（%s）',
       async (protocol) => {
@@ -652,9 +670,12 @@ describe('Server Config (config.ts)', () => {
           },
           local: { read: () => undefined },
         } as never);
+        const loadedSettings = createEmptyLoadedSettings();
+        loadedSettings.setTrusted(true);
         const config = new Config({
           ...baseParams,
           settingsService,
+          loadedSettings,
           modelTransportManager: undefined,
         });
         try {
@@ -6240,6 +6261,42 @@ describe('setPermissionMode with folder trust', () => {
     expect(config.getProjectHooks()).toEqual(refreshedProjectHooks);
   });
 
+  it('refreshes project providers after loaded settings become trusted', async () => {
+    const loadedSettings = createEmptyLoadedSettings();
+    loadedSettings.local.settings.providers = {
+      local: {
+        baseUrl: 'https://unused.invalid',
+        apiKey: '',
+        model: 'helper',
+      },
+    };
+    const config = new Config({
+      ...baseParams,
+      folderTrust: true,
+      trustedFolder: false,
+      loadedSettings,
+      modelTransportManager: undefined,
+      customProviderAccessMode: 'local',
+    });
+    const manager = config.getModelProviderManager();
+    await manager.start();
+
+    try {
+      expect(config.canUseCustomProviders()).toBe(false);
+      expect(await manager.getModel('local/helper')).toBeUndefined();
+
+      loadedSettings.setTrusted(true);
+      config.setTrustedFolder(true);
+
+      await vi.waitFor(async () => {
+        expect(await manager.getModel('local/helper')).toBeDefined();
+      });
+      expect(config.getCustomProvidersState().status).toBe('active');
+    } finally {
+      await config.dispose();
+    }
+  });
+
   it('should reload skills when folder trust is revoked', () => {
     const config = new Config({
       ...baseParams,
@@ -6742,6 +6799,8 @@ describe('Config getHooks', () => {
 
     it('共享 SettingsService 的项目 provider 按各 Config 的 cwd 装配', () => {
       const settingsService = new SettingsService();
+      const loadedSettings = createEmptyLoadedSettings();
+      loadedSettings.setTrusted(true);
       const sources = vi
         .spyOn(settingsService, 'getProjectSettingsSources')
         .mockReturnValue({
@@ -6757,6 +6816,7 @@ describe('Config getHooks', () => {
           ...baseParams,
           cwd,
           settingsService,
+          loadedSettings,
           modelTransportManager,
         });
         configs.push(config);
