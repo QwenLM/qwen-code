@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -183,6 +183,55 @@ const startAcquire = (
 const acquire = (...args) => startAcquire(...args).done;
 
 describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
+  it.each([
+    ['queue creation', 'mkdir() { return 1; }', null],
+    ['host lock open', 'mkdir "${QUEUE%.queue}"', null],
+    ['counter read', 'tail() { return 1; }', ''],
+    ['counter open', 'mkdir "$QUEUE/.seq"', null],
+    ['sequence lock', 'flock() { [[ $1 != 8 ]]; }', ''],
+    ['counter write', "trap '' XFSZ; ulimit -f 0", ''],
+    ['ticket publication', 'mkdir "$QUEUE/1-0000000001-$$"', '1\n'],
+  ])('returns to the caller on %s failure', (_, setup, counter) => {
+    const home = mkdtempSync(join(tmpdir(), 'lock-admission-'));
+    const queue = queueDir(home);
+    mkdirSync(queue, { recursive: true });
+    const stub = flockStub(freeFlock);
+    const result = spawnSync(
+      'bash',
+      [
+        '-eo',
+        'pipefail',
+        '-c',
+        [
+          `source "${script}"`,
+          setup,
+          'rc=0; sdk_java_lock_acquire 3 || rc=$?',
+          'echo "caller status=$rc"',
+          'if { : >&8; } 2>/dev/null || { : >&9; } 2>/dev/null; then exit 1; fi',
+        ].join('\n'),
+      ],
+      {
+        env: {
+          ...baseEnv,
+          HOME: home,
+          QUEUE: queue,
+          PATH: `${stub}:${process.env.PATH}`,
+        },
+        encoding: 'utf8',
+      },
+    );
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('caller status=1');
+    expect(
+      readdirSync(queue, { withFileTypes: true }).filter(
+        (entry) => entry.isFile() && entry.name !== '.seq',
+      ),
+    ).toHaveLength(0);
+    if (counter !== null) {
+      expect(readFileSync(join(queue, '.seq'), 'utf8')).toBe(counter);
+    }
+  });
+
   it(
     'grants the lock to the head of the queue before a later ticket',
     { timeout: 30000 },

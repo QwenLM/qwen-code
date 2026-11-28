@@ -45,26 +45,28 @@ sdk_java_lock_acquire() {
   local promote_after="${SDK_JAVA_LOCK_PROMOTE_AFTER:-1200}"
   local lock="${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
   local queue="${lock}.queue"
-  mkdir -p "${queue}"
-  exec 9>"${lock}"
+  mkdir -p "${queue}" || return 1
+  exec 9>"${lock}" || return 1
 
   # Atomic sequence: fd 8 holds the counter file and flock serializes the
   # read-increment-write. A holder killed inside this millisecond window only
   # costs one sequence number, not a stuck queue.
   # Append, never truncate: opening with `>` would wipe the counter before
   # this process even takes the lock.
-  exec 8>>"${queue}/.seq"
-  flock 8
-  local seq
-  seq=$(tail -n 1 "${queue}/.seq" 2>/dev/null)
-  seq=$((${seq:-0} + 1))
-  printf '%s\n' "${seq}" >>"${queue}/.seq"
-  local ticket
-  ticket=$(printf '%s/%d-%010d-%s' "${queue}" "${rank}" "${seq}" "$$")
   # Publish inside the critical section: a later arrival that sees an empty
   # queue names itself head and wins out of arrival order.
-  : >"${ticket}"
-  exec 8>&-
+  local seq ticket
+  {
+    flock 8 &&
+      seq=$(tail -n 1 "${queue}/.seq") &&
+      seq=$((${seq:-0} + 1)) &&
+      printf '%s\n' "${seq}" >&8 &&
+      printf -v ticket '%s/%d-%010d-%s' "${queue}" "${rank}" "${seq}" "$$" &&
+      : >"${ticket}"
+  } 8>>"${queue}/.seq" || {
+    exec 9>&-
+    return 1
+  }
 
   local start=${SECONDS} head name pid mtime age remaining last_log=-60 blocking head_hint=0
   local promoted=$((rank == 0)) promoted_ticket keepalive acquired
