@@ -2014,27 +2014,36 @@ export class ExtensionManager {
     } catch {
       return [];
     }
-    const extensions: Extension[] = [];
-    for (const extName of extNames) {
+    const slots = extNames.flatMap((extName) => {
       const extNameDir = path.join(versionsDir, extName);
-      let slots: string[];
       try {
-        if (!fs.statSync(extNameDir).isDirectory()) continue;
-        slots = fs.readdirSync(extNameDir);
+        if (!fs.statSync(extNameDir).isDirectory()) return [];
+        return fs.readdirSync(extNameDir).map((slot) => ({
+          dir: path.join(extNameDir, slot),
+          name: slot,
+        }));
       } catch {
-        continue;
+        return [];
       }
-      for (const slot of slots) {
-        const slotDir = path.join(extNameDir, slot);
-        const loaded = await this.loadExtension(
-          { extensionDir: slotDir, workspaceDir },
-          options,
-        );
-        if (loaded) {
-          loaded.versionSlot = slot;
-          loaded.installDir = slotDir;
-          extensions.push(loaded);
-        }
+    });
+    const extensions: Extension[] = [];
+    const batchSize = 4;
+    for (let offset = 0; offset < slots.length; offset += batchSize) {
+      const results = await Promise.allSettled(
+        slots.slice(offset, offset + batchSize).map(async (slot) => {
+          const loaded = await this.loadExtension(
+            { extensionDir: slot.dir, workspaceDir },
+            options,
+          );
+          if (!loaded) return null;
+          loaded.versionSlot = slot.name;
+          loaded.installDir = slot.dir;
+          return loaded;
+        }),
+      );
+      for (const result of results) {
+        if (result.status === 'rejected') throw result.reason;
+        if (result.value != null) extensions.push(result.value);
       }
     }
     return extensions;
