@@ -2880,7 +2880,7 @@ jobs:
             github.event.inputs.verify_pr != '')) &&
            needs.authorize.outputs.verify_lane == 'true' &&
            needs.authorize.outputs.should_run == 'true' &&
-           vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') &&
+           vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' &&
           format('{0}-verify-{1}', github.workflow, github.event.issue.number || github.event.inputs.verify_pr) ||
           format('{0}-verify-run-{1}', github.workflow, github.run_id)
         }}
