@@ -11,6 +11,7 @@ import subprocess
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from inspect import isasyncgen, isawaitable, iscoroutine
 from pathlib import Path
 from typing import Any
 
@@ -138,7 +139,11 @@ class ProcessTransport:
             text = chunk.decode("utf-8", errors="replace").rstrip("\n")
             try:
                 if self._options.stderr is not None:
-                    self._options.stderr(text)
+                    result = self._options.stderr(text)
+                    if isawaitable(result) or isasyncgen(result):
+                        if iscoroutine(result):
+                            result.close()
+                        raise TypeError("stderr must be a sync callable")
                 elif self._options.debug:
                     print(text, file=sys.stderr)
             except Exception:

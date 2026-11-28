@@ -168,7 +168,7 @@ with query_sync(
 | `continue_session`         | `bool`                                                     | Continue the latest CLI session.                                                                                                                                  |
 | `session_id`               | UUID string                                                | Start or correlate a session with a known id.                                                                                                                     |
 | `timeout`                  | mapping                                                    | Timeouts in seconds.                                                                                                                                              |
-| `stderr`                   | callable                                                   | Receives CLI stderr lines.                                                                                                                                        |
+| `stderr`                   | synchronous callable                                       | Receives CLI stderr lines.                                                                                                                                        |
 
 Use only one of `resume`, `continue_session`, or `session_id` in a request. The
 SDK raises `ValidationError` if these session options are combined.
@@ -212,8 +212,22 @@ When the CLI emits a `can_use_tool` control request, the SDK routes it through
 - Timeout fallback: deny
 - Callback exceptions: converted to deny with an error message
 - Callback context: `cancel_event`, `suggestions`, and `blocked_path`
-- Callback contract: `can_use_tool` must be async with 3 positional arguments;
-  `stderr` must accept 1 positional string argument
+- Callback contract: `can_use_tool` must be an async callable: an `async def`
+  function or an instance with an async `__call__` method accepting
+  `(tool_name, tool_input, context)`. It may be wrapped in `functools.partial`;
+  validation checks the remaining arguments after binding. `stderr` must be a synchronous callable
+  accepting one positional string argument; async-generator functions and
+  async-generator callable instances are rejected. Neither callback may require
+  additional keyword-only arguments. An inspectable decorated callback is
+  checked against the wrapper that the SDK calls. When a `stderr` wrapper has
+  no inspectable signature, validation checks the first inspectable wrapped
+  callback instead, retaining any partial's bound arguments. If a stderr callback
+  returns an awaitable or async generator,
+  the SDK writes the original line to standard error. It does not await or
+  iterate the result, and closes native coroutine objects. Already scheduled
+  tasks or futures remain owned by the caller: the SDK does not cancel them,
+  and they can continue independently. Ordinary synchronous return values are
+  ignored.
 
 Example:
 

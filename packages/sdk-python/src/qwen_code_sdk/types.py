@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
-from inspect import Parameter, Signature, iscoroutinefunction, signature
+from functools import partial
+from inspect import Signature, isasyncgenfunction, iscoroutinefunction, signature
 from typing import (
     Any,
     Literal,
@@ -126,7 +127,7 @@ class QueryOptionsDict(TypedDict, total=False):
     session_id: str
     timeout: TimeoutOptionsDict
     mcp_servers: dict[str, dict[str, Any]]
-    stderr: Callable[[str], None]
+    stderr: Callable[[str], object]
     fork_session: bool
     max_tool_calls: int
     max_subagent_depth: int
@@ -167,7 +168,7 @@ class QueryOptions:
     session_id: str | None = None
     timeout: TimeoutOptions = TimeoutOptions()
     mcp_servers: dict[str, dict[str, Any]] | None = None
-    stderr: Callable[[str], None] | None = None
+    stderr: Callable[[str], object] | None = None
     fork_session: bool = False
     max_tool_calls: int | None = None
     max_subagent_depth: int | None = None
@@ -225,7 +226,7 @@ class QueryOptions:
             timeout=timeout,
             mcp_servers=_as_optional_nested_dict(data, "mcp_servers"),
             stderr=cast(
-                Callable[[str], None] | None,
+                Callable[[str], object] | None,
                 _as_optional_callable(data, "stderr"),
             ),
             fork_session=_as_optional_bool(data, "fork_session") or False,
@@ -300,52 +301,76 @@ def _validate_can_use_tool_callable(value: object, error_type: type[Exception]) 
     if not callable(value):
         raise error_type("can_use_tool must be callable")
 
-    if not iscoroutinefunction(value):
+    if not _is_async_callable(value):
         raise error_type("can_use_tool must be an async callable")
 
     try:
-        sig = signature(value)
+        sig = signature(value, follow_wrapped=False)
     except (TypeError, ValueError):
         return
 
     if not _supports_argument_count(sig, 3):
-        raise error_type("can_use_tool must accept exactly 3 positional arguments")
+        raise error_type(
+            "can_use_tool must accept exactly 3 positional arguments "
+            "and no required keyword-only arguments"
+        )
 
 
 def _validate_stderr_callable(value: object, error_type: type[Exception]) -> None:
     if not callable(value):
         raise error_type("stderr must be callable")
 
-    try:
-        sig = signature(value)
-    except (TypeError, ValueError):
+    inspected: dict[int, object] = {}
+    while callable(value):
+        target: object = value
+        while isinstance(target, partial):
+            target = target.func
+        if (
+            _is_async_callable(target)
+            or isasyncgenfunction(target)
+            or isasyncgenfunction(type(target).__call__)
+        ):
+            raise error_type("stderr must be a sync callable")
+
+        try:
+            sig = signature(value, follow_wrapped=False)
+        except (TypeError, ValueError):
+            value = _unwrap_stderr_callable(value, inspected)
+            continue
+
+        if not _supports_argument_count(sig, 1):
+            raise error_type(
+                "stderr must accept exactly 1 positional argument "
+                "and no required keyword-only arguments"
+            )
         return
 
-    if not _supports_argument_count(sig, 1):
-        raise error_type("stderr must accept exactly 1 positional argument")
+
+def _unwrap_stderr_callable(value: object, inspected: dict[int, object]) -> object:
+    if id(value) in inspected:
+        return None
+    # Keep reconstructed partials alive so their IDs cannot be reused.
+    inspected[id(value)] = value
+    if isinstance(value, partial):
+        wrapped = _unwrap_stderr_callable(value.func, inspected)
+        if callable(wrapped):
+            return partial(wrapped, *value.args, **value.keywords)
+        return None
+    return getattr(value, "__wrapped__", None)
+
+
+def _is_async_callable(value: object) -> bool:
+    while isinstance(value, partial):
+        value = value.func
+    return iscoroutinefunction(value) or iscoroutinefunction(type(value).__call__)
 
 
 def _supports_argument_count(sig: Signature, count: int) -> bool:
-    params = list(sig.parameters.values())
-    positional_params = [
-        param
-        for param in params
-        if param.kind
-        in (
-            Parameter.POSITIONAL_ONLY,
-            Parameter.POSITIONAL_OR_KEYWORD,
-        )
-    ]
-    required_positional = [
-        param for param in positional_params if param.default is Parameter.empty
-    ]
-    has_var_positional = any(param.kind is Parameter.VAR_POSITIONAL for param in params)
-
-    if len(required_positional) > count:
+    try:
+        sig.bind(*([None] * count))
+    except TypeError:
         return False
-    if has_var_positional:
-        return True
-    return len(positional_params) >= count
+    return True
 
 
 def _as_optional_str_dict(data: Mapping[str, Any], key: str) -> dict[str, str] | None:

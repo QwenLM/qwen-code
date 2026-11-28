@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import subprocess
 import sys
@@ -671,7 +672,13 @@ async def test_read_messages_skips_malformed_json_lines() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stderr_callback_exceptions_do_not_fail_transport() -> None:
+@pytest.mark.parametrize(
+    "failure_kind",
+    ["raises", "coroutine", "future", "task", "failing_task", "async_generator"],
+)
+async def test_stderr_callback_exceptions_do_not_fail_transport(
+    capsys: pytest.CaptureFixture[str], failure_kind: str
+) -> None:
     class FakeStdout:
         async def readline(self) -> bytes:
             return b""
@@ -689,12 +696,37 @@ async def test_stderr_callback_exceptions_do_not_fail_transport() -> None:
     )
 
     callback_calls = 0
+    async_results: list[Any] = []
+    scheduled_calls: list[str] = []
 
-    def stderr_callback(text: str) -> None:
+    async def async_sink() -> None:
+        pytest.fail("stderr callbacks must not be awaited")
+
+    async def async_generator() -> Any:
+        pytest.fail("stderr generators must not be iterated")
+        yield None
+
+    async def scheduled_sink() -> None:
+        scheduled_calls.append("error message")
+        if failure_kind == "failing_task":
+            raise RuntimeError("scheduled sink failed")
+
+    def stderr_callback(text: str) -> Any:
         nonlocal callback_calls
         callback_calls += 1
         assert text == "error message"
-        raise RuntimeError("sink failed")
+        if failure_kind == "raises":
+            raise RuntimeError("sink failed")
+        if failure_kind == "coroutine":
+            result: Any = async_sink()
+        elif failure_kind == "future":
+            result = asyncio.get_running_loop().create_future()
+        elif failure_kind in {"task", "failing_task"}:
+            result = asyncio.create_task(scheduled_sink())
+        else:
+            result = async_generator()
+        async_results.append(result)
+        return result
 
     transport = transport_module.ProcessTransport(
         QueryOptions(
@@ -720,3 +752,26 @@ async def test_stderr_callback_exceptions_do_not_fail_transport() -> None:
     await transport.wait_for_exit()
 
     assert callback_calls == 1
+    try:
+        assert capsys.readouterr().err == "error message\n"
+        for result in async_results:
+            if inspect.iscoroutine(result):
+                assert inspect.getcoroutinestate(result) == inspect.CORO_CLOSED
+            elif isinstance(result, asyncio.Future):
+                assert not result.cancelled()
+                if failure_kind == "failing_task":
+                    with pytest.raises(RuntimeError, match="scheduled sink failed"):
+                        await result
+                elif failure_kind == "task":
+                    await result
+        assert scheduled_calls == (
+            ["error message"] if failure_kind in {"task", "failing_task"} else []
+        )
+    finally:
+        for result in async_results:
+            if inspect.iscoroutine(result):
+                result.close()
+            elif inspect.isasyncgen(result):
+                await result.aclose()
+            else:
+                result.cancel()

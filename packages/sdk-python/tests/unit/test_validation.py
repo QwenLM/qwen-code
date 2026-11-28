@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import AsyncIterator
+from functools import cache, lru_cache, partial, wraps
 from pathlib import Path
 from typing import Any, cast, get_args
 
@@ -208,6 +210,266 @@ def test_validation_rejects_stderr_with_wrong_arity() -> None:
         ValidationError, match="stderr must accept exactly 1 positional argument"
     ):
         validate_query_options(QueryOptions(stderr=cast(Any, stderr)))
+
+
+@pytest.mark.parametrize("callback_option", ["can_use_tool", "stderr"])
+@pytest.mark.parametrize("as_object", [False, True])
+def test_callbacks_accept_optional_keyword_only_and_variadic_arguments(
+    callback_option: str, as_object: bool
+) -> None:
+    async def permission(
+        name: str,
+        payload: dict[str, Any],
+        context: Any,
+        *args: Any,
+        verbose: bool = False,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        return {"behavior": "allow", "updatedInput": payload}
+
+    def stderr(text: str, *args: Any, prefix: str = "", **kwargs: Any) -> None:
+        pass
+
+    options: dict[str, Any] = {
+        callback_option: permission if callback_option == "can_use_tool" else stderr
+    }
+    validate_query_options(
+        QueryOptions(**options) if as_object else QueryOptions.from_mapping(options)
+    )
+
+
+@pytest.mark.parametrize("cache_kind", ["cache", "lru_cache"])
+@pytest.mark.parametrize("as_object", [False, True])
+@pytest.mark.parametrize("partial_wrapper", [False, True])
+def test_cached_stderr_with_wrong_arity_is_rejected(
+    cache_kind: str, as_object: bool, partial_wrapper: bool
+) -> None:
+    def stderr(text: str, level: str) -> None:
+        pass
+
+    callback = cache(stderr) if cache_kind == "cache" else lru_cache(maxsize=8)(stderr)
+    if partial_wrapper:
+        callback = partial(callback)
+    with pytest.raises(
+        ValidationError if as_object else TypeError,
+        match="stderr must accept exactly 1 positional argument",
+    ):
+        if as_object:
+            validate_query_options(QueryOptions(stderr=cast(Any, callback)))
+        else:
+            QueryOptions.from_mapping({"stderr": callback})
+
+
+@pytest.mark.parametrize("cache_kind", ["cache", "lru_cache"])
+@pytest.mark.parametrize("as_object", [False, True])
+@pytest.mark.parametrize("binding", ["positional", "keyword"])
+def test_cached_stderr_partial_preserves_bound_arguments(
+    cache_kind: str, as_object: bool, binding: str
+) -> None:
+    seen: list[tuple[str, str]] = []
+
+    def stderr(first: str, second: str) -> None:
+        seen.append((first, second))
+
+    cached = cache(stderr) if cache_kind == "cache" else lru_cache(maxsize=8)(stderr)
+    callback = (
+        partial(cached, "fixed")
+        if binding == "positional"
+        else partial(cached, second="fixed")
+    )
+    if as_object:
+        validate_query_options(QueryOptions(stderr=callback))
+    else:
+        QueryOptions.from_mapping({"stderr": callback})
+    callback("diagnostic")
+    assert seen == [
+        ("fixed", "diagnostic") if binding == "positional" else ("diagnostic", "fixed")
+    ]
+
+
+@pytest.mark.parametrize(
+    "callback_kind",
+    [
+        "function",
+        "instance",
+        "cached_function",
+        "partial_instance",
+        "partial_cached_function",
+        "async_generator_function",
+        "async_generator_instance",
+        "cached_async_generator_function",
+        "partial_async_generator_instance",
+        "partial_cached_async_generator_function",
+    ],
+)
+@pytest.mark.parametrize("as_object", [False, True])
+def test_async_stderr_is_rejected(callback_kind: str, as_object: bool) -> None:
+    async def stderr(text: str) -> None:
+        pass
+
+    class AsyncStderr:
+        async def __call__(self, text: str) -> None:
+            pass
+
+    class PrefixedAsyncStderr:
+        async def __call__(self, prefix: str, text: str) -> None:
+            pass
+
+    async def async_generator_stderr(text: str) -> AsyncIterator[str]:
+        yield text
+
+    class AsyncGeneratorStderr:
+        async def __call__(self, text: str, *, prefix: str = "") -> AsyncIterator[str]:
+            yield prefix + text
+
+    callback = {
+        "function": stderr,
+        "instance": AsyncStderr(),
+        "cached_function": cache(stderr),
+        "partial_instance": partial(PrefixedAsyncStderr(), "cli: "),
+        "partial_cached_function": partial(cache(stderr)),
+        "async_generator_function": async_generator_stderr,
+        "async_generator_instance": AsyncGeneratorStderr(),
+        "cached_async_generator_function": cache(async_generator_stderr),
+        "partial_async_generator_instance": partial(
+            AsyncGeneratorStderr(), prefix="cli: "
+        ),
+        "partial_cached_async_generator_function": partial(
+            cache(async_generator_stderr)
+        ),
+    }[callback_kind]
+    with pytest.raises(
+        ValidationError if as_object else TypeError,
+        match="stderr must be a sync callable",
+    ):
+        if as_object:
+            validate_query_options(QueryOptions(stderr=cast(Any, callback)))
+        else:
+            QueryOptions.from_mapping({"stderr": callback})
+
+
+@pytest.mark.parametrize("as_object", [False, True])
+@pytest.mark.parametrize("as_instance", [False, True])
+def test_async_generator_permission_is_rejected(
+    as_object: bool, as_instance: bool
+) -> None:
+    async def permission(
+        name: str, payload: dict[str, Any], context: Any
+    ) -> AsyncIterator[dict[str, Any]]:
+        yield {"behavior": "allow", "updatedInput": payload}
+
+    class Permission:
+        __call__ = staticmethod(permission)
+
+    callback = Permission() if as_instance else permission
+    with pytest.raises(
+        ValidationError if as_object else TypeError,
+        match="can_use_tool must be an async callable",
+    ):
+        if as_object:
+            validate_query_options(QueryOptions(can_use_tool=cast(Any, callback)))
+        else:
+            QueryOptions.from_mapping({"can_use_tool": callback})
+
+
+@pytest.mark.parametrize("as_object", [False, True])
+@pytest.mark.parametrize("bind_prefix", [False, True])
+def test_async_callable_partial_preserves_bound_arity(
+    as_object: bool, bind_prefix: bool
+) -> None:
+    class Permission:
+        async def __call__(
+            self, prefix: str, name: str, payload: dict[str, Any], context: Any
+        ) -> dict[str, Any]:
+            return {"behavior": "allow", "updatedInput": payload}
+
+    callback = partial(Permission(), "cli: ") if bind_prefix else partial(Permission())
+
+    def validate() -> None:
+        if as_object:
+            validate_query_options(QueryOptions(can_use_tool=cast(Any, callback)))
+        else:
+            QueryOptions.from_mapping({"can_use_tool": callback})
+
+    if bind_prefix:
+        validate()
+    else:
+        with pytest.raises(
+            ValidationError if as_object else TypeError,
+            match="can_use_tool must accept exactly 3 positional arguments",
+        ):
+            validate()
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("as_object", [False, True])
+@pytest.mark.parametrize("partial_wrapper", [False, True])
+def test_sync_stderr_wrapper_uses_its_own_call_contract(
+    cached: bool, as_object: bool, partial_wrapper: bool
+) -> None:
+    async def async_inner(text: str) -> None:
+        pass
+
+    seen: list[str] = []
+
+    @wraps(async_inner)
+    def stderr(text: str) -> None:
+        seen.append(text)
+
+    callback = cache(stderr) if cached else stderr
+    if partial_wrapper:
+        callback = partial(callback)
+    if as_object:
+        validate_query_options(QueryOptions(stderr=callback))
+    else:
+        QueryOptions.from_mapping({"stderr": callback})
+    callback("diagnostic")
+    assert seen == ["diagnostic"]
+
+
+@pytest.mark.parametrize("as_object", [False, True])
+@pytest.mark.parametrize("partial_wrapper", [False, True])
+def test_uninspectable_stderr_wrapper_cycle_terminates(
+    as_object: bool, partial_wrapper: bool
+) -> None:
+    seen: list[str] = []
+
+    @cache
+    def stderr(text: str) -> None:
+        seen.append(text)
+
+    stderr.__wrapped__ = stderr
+    callback = partial(stderr) if partial_wrapper else stderr
+    if as_object:
+        validate_query_options(QueryOptions(stderr=callback))
+    else:
+        QueryOptions.from_mapping({"stderr": callback})
+    callback("diagnostic")
+    assert seen == ["diagnostic"]
+
+
+@pytest.mark.parametrize(
+    "callback_kind", ["print", "bound_method", "cache", "lru_cache"]
+)
+@pytest.mark.parametrize("as_object", [False, True])
+def test_supported_stderr_callbacks_remain_valid(
+    callback_kind: str, as_object: bool
+) -> None:
+    seen: list[str] = []
+
+    def stderr(text: str) -> None:
+        seen.append(text)
+
+    callback = {
+        "print": print,
+        "bound_method": seen.append,
+        "cache": cache(stderr),
+        "lru_cache": lru_cache(maxsize=8)(stderr),
+    }[callback_kind]
+    if as_object:
+        validate_query_options(QueryOptions(stderr=callback))
+    else:
+        QueryOptions.from_mapping({"stderr": callback})
 
 
 def test_rejects_invalid_max_session_turns() -> None:
