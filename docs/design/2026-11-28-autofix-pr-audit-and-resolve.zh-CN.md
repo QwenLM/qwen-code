@@ -35,8 +35,8 @@
    - 区分聚合汇总 CI job 与实际失败子 job，准确分辨 PR 缺陷与外部基础设施/runner 负载 flake/base 基线自坏。
    - 覆盖行内 `review_thread`、`review` 正文中的 findings/deferred 清单（包括携带 `<!-- qwen-review-deferred -->` 等 deferred 清单的 `APPROVED` review，由 `snapshot` 标记 `deferredOnly: true` 透出清账，同时保持纯 approval 静默并保留条目的非阻断 deferred 状态），以及可信 `issue_comment` 中的验证报告（如 `Verdict: findings`、`F1..Fn`）和维护者追问；同时区分纯程序性 bot 状态提示（如 CI-pending downgrade），避免无意义改代码。
 2. **多轮无方向审计与对抗审计（`## Audit until clean`）**：
-   - **刷新并固定 base 起点**：选择审计 diff 前，先执行 `git fetch --no-tags <remote> <baseRefName>`，固定 `BASE_SHA=$(git rev-parse FETCH_HEAD)` 并计算 `MERGE_BASE=$(git merge-base "$BASE_SHA" HEAD)`，避免陈旧的本地 `<remote>/<baseRefName>` 缓存把无关上游提交混入审计范围。
-   - **无方向审计**：不带预设检查表通读 `"$MERGE_BASE"..HEAD` 的完整 PR diff 与邻近调用方，排查漏改调用点、未接线的死开关、契约/文档（含仓库要求的双语设计文档）漂移与合并副作用。
+   - **刷新并固定 base 起点（覆盖工作树与未跟踪文件）**：选择审计 diff 前，先执行 `git fetch --no-tags <remote> <baseRefName>`，固定 `BASE_SHA=$(git rev-parse FETCH_HEAD)` 并计算 `MERGE_BASE=$(git merge-base "$BASE_SHA" HEAD)`，避免陈旧的本地 `<remote>/<baseRefName>` 缓存把无关上游提交混入审计范围；再以 `git diff "$MERGE_BASE"` 直接对比工作树（涵括已提交、暂存与未暂存改动）并审阅 `git ls-files --others --exclude-standard` 列出的全部未跟踪新文件。
+   - **无方向审计**：不带预设检查表通读上述完整 diff、未跟踪文件与邻近调用方，排查漏改调用点、未接线的死开关、契约/文档（含仓库要求的双语设计文档）漂移与合并副作用。
    - **对抗审计**：假设现有实现与测试都有错，主动用边界输入、路径/平台边缘情形、并发/重启/断连/失败清理、旧格式兼容等反例攻击，并检验测试是否真承重（删或破坏修复能否打红测试，而非 mock 假绿）。
    - **收敛门控**：每修一个 PR 范围内的真实缺陷，补回归测试、重跑受影响检查并重置干净计数。非平凡代码改动需**连续 2 轮干净**（上限 5 轮，超限未收敛则停止扩改并如实报告残余风险）；纯文档/极小配置改动 1 轮仔细干净通读即可。
    - **禁止本地 `/review`**：`## Never` 明确禁止运行本地 `/review` skill 或 `qwen review run`，正式评审交由 CI 完成。
@@ -63,8 +63,8 @@ resolve 线程的写操作严格收敛在确定性 helper
 - 线程 resolve **仅在**线程回复、总结评论与 `handledCommentIds` 全部持久化之后执行，并在调用 GitHub GraphQL `resolveReviewThread` 前强制通过全部 fail-closed 门禁：
   1. `post === true`（`--no-post` 时以 `no_post` 跳过）。
   2. `resolve !== false`（`--no-resolve` 时以 `disabled` 跳过）。
-  3. `state.pushedShas.includes(head)`、本轮 prepared snapshot（`autofix-pr-<n>-snapshot.json` 或后台修复认领后的 `autofix-pr-<n>-fix-snapshot.json`）存在且含 `headSha !== head` 与非空 `roundId`，**且** `state.lastPush`（由 `push` 绑定该 `roundId` 写入，并在 `sync`/`prepare` 经 `withKnownHead` 采纳不同 head 时清除）同时匹配 `head` 与 `roundId` —— 严格证明本轮自身推送了 `head`，即便他人将分支回退到早先推送过的 SHA 也会被拦截（否则 `not_pushed`）。
-  4. 发完回复并持久化状态后，在逐条 resolve 前立即通过 `fetchPrData` 重新读取实时 PR 状态（读失败则以 `recheck_failed` fail-closed 跳过）：校验 `freshPr.state === 'OPEN'`（否则 `pr_not_open`）且 `freshPr.headRefOid === head`（否则 `head_mismatch`）。
+  3. `state.pushedShas.includes(head)`、本轮 prepared snapshot（`autofix-pr-<n>-snapshot.json` 或后台修复认领后的 `autofix-pr-<n>-fix-snapshot.json`）存在且含 `headSha !== head` 与非空 `roundId`，**且** `state.lastPush`（由 `push` 在执行 `git push` 与 pre-push hook **之前**从启动该次推送的快照捕获，并在 `sync`/`prepare` 经 `withKnownHead` 采纳不同 head 时清除）同时匹配 `head` 与 `roundId` —— 严格证明本轮自身推送了 `head`，即便他人回退分支回旧 SHA 或推送暂停于 pre-push hook 期间被另一轮 `snapshot` 替换文件，也会拦截为 `not_pushed`。
+  4. 发完回复并持久化状态后，在逐条 resolve 前通过**单次原子 GraphQL `node(id: $id)` 响应**同时读取该候选 `PullRequestReviewThread` 及其父 PR（`number`、`repository.nameWithOwner`、`state`、`headRefOid`、`author`），消除 100+ 线程 PR 跨页撕裂读且免翻无关 checks/线程（网络或 GraphQL 报错则以 `recheck_failed` fail-closed 跳过）：校验父 PR 归属（否则 `thread_not_found`）、`state === 'OPEN'`（否则 `pr_not_open`）且 `headRefOid === head`（否则 `head_mismatch`）。
   5. 线程存在且有合法 GraphQL id（否则 `thread_not_found`）、当前处于未关闭状态（已关闭则幂等跳过并记 `already_resolved`，绝不调用 `unresolveReviewThread`），且评论历史完整（`!thread.comments.pageInfo.hasPreviousPage`，超过 100 条截断历史时 fail-closed 跳过并记 `incomplete_history`）。
   6. 实时复检的线程上存在与本计划回复 `bodyHash` 匹配的 `isOwnReply` 评论，且 `reply.handled` 全部已入 `done`（否则 `not_replied`）。校验 `bodyHash` 可防止后续推送轮次误关闭先前回复过 `"Needs a human decision"` 的旧线程。
   7. 实时复检的线程内不存在未进入 `done` 的新可信追问评论（`actionable(buildSnapshot(freshPr, state)).threads` 无漏项，否则 `new_comment_in_thread`，可捕获回复 POST 期间新到达的追问）。

@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   ensureAuthenticated,
+  gh,
   ghWithInput,
   setGhHost,
 } from '../review/lib/gh.js';
@@ -377,6 +378,87 @@ function postComment(path: string, body: string): { id: string; url: string } {
     throw new Error(`GitHub answered ${path} without a comment id`);
   }
   return { id: response.node_id, url: response.html_url ?? '' };
+}
+
+const RECHECK_REVIEW_THREAD_QUERY = `
+  query($id: ID!) {
+    node(id: $id) {
+      ... on PullRequestReviewThread {
+        id
+        isResolved
+        pullRequest {
+          number
+          state
+          headRefOid
+          author { login }
+          repository { nameWithOwner }
+        }
+        root: comments(first: 1) {
+          nodes { databaseId }
+        }
+        comments(last: 100) {
+          pageInfo { hasPreviousPage }
+          nodes {
+            id
+            databaseId
+            author { __typename login }
+            authorAssociation
+            body
+            url
+            state
+            replyTo { id }
+          }
+        }
+      }
+    }
+  }
+`;
+
+interface LiveThreadSnapshot {
+  id: string;
+  isResolved: boolean;
+  pullRequest: {
+    number: number;
+    state: string;
+    headRefOid: string;
+    author: { login: string } | null;
+    repository?: { nameWithOwner?: string } | null;
+  };
+  root: { nodes: Array<{ databaseId: number }> };
+  comments: {
+    pageInfo: { hasPreviousPage: boolean };
+    nodes: CommentNode[];
+  };
+}
+
+function fetchLiveThread(
+  threadId: string,
+): { ok: true; thread: LiveThreadSnapshot | null } | { ok: false } {
+  try {
+    const response = JSON.parse(
+      gh(
+        'api',
+        'graphql',
+        '-f',
+        `query=${RECHECK_REVIEW_THREAD_QUERY}`,
+        '-f',
+        `id=${threadId}`,
+      ),
+    ) as {
+      errors?: unknown[];
+      data?: { node?: LiveThreadSnapshot | null };
+    };
+    if (Array.isArray(response.errors) && response.errors.length > 0) {
+      return { ok: false };
+    }
+    const node = response.data?.node;
+    if (!node || typeof node.id !== 'string' || !node.pullRequest) {
+      return { ok: true, thread: null };
+    }
+    return { ok: true, thread: node };
+  } catch {
+    return { ok: false };
+  }
 }
 
 const RESOLVE_REVIEW_THREAD_MUTATION = `
@@ -858,9 +940,9 @@ function replyLocked(
   // Fail-closed thread resolution: only after replies and handled state are
   // persisted, only when this round actually pushed the current head (tied to
   // the round's snapshot `roundId` and invalidated on external `sync`), and
-  // only after re-reading the live PR head, matching reply, full thread
-  // history (`!hasPreviousPage`), and thread comments immediately before each
-  // candidate is resolved. Never calls unresolve.
+  // only after re-reading the candidate thread and its parent PR state/head
+  // in one atomic GraphQL response immediately before resolving. Never calls
+  // unresolve.
   const resolveCandidates = plan.replies.filter(
     (reply) => reply.resolve === true,
   );
@@ -887,49 +969,63 @@ function replyLocked(
         });
       }
     } else {
+      const expectedRepo = `${state.owner}/${state.repo}`.toLowerCase();
       for (const reply of resolveCandidates) {
-        let freshPr: PrData;
-        try {
-          freshPr = fetchPrData(state, roundReplyCheck(state, true)).pr;
-        } catch {
-          outcome.resolveSkipped.push({
-            replyTo: reply.replyTo,
-            reason: 'recheck_failed',
-          });
-          continue;
-        }
-        if (freshPr.state !== 'OPEN') {
-          outcome.resolveSkipped.push({
-            replyTo: reply.replyTo,
-            reason: 'pr_not_open',
-          });
-          continue;
-        }
-        if (freshPr.headRefOid !== head) {
-          outcome.resolveSkipped.push({
-            replyTo: reply.replyTo,
-            reason: 'head_mismatch',
-          });
-          continue;
-        }
-        const thread = freshPr.reviewThreads.nodes.find(
+        const initialThread = pr.reviewThreads.nodes.find(
           (t) => t.root.nodes[0]?.databaseId === reply.replyTo,
         );
-        if (!thread || !thread.id) {
+        if (!initialThread || !initialThread.id) {
           outcome.resolveSkipped.push({
             replyTo: reply.replyTo,
             reason: 'thread_not_found',
           });
           continue;
         }
-        if (thread.isResolved) {
+        const liveResult = fetchLiveThread(initialThread.id);
+        if (!liveResult.ok) {
+          outcome.resolveSkipped.push({
+            replyTo: reply.replyTo,
+            reason: 'recheck_failed',
+          });
+          continue;
+        }
+        const live = liveResult.thread;
+        if (
+          !live ||
+          live.id !== initialThread.id ||
+          live.pullRequest.number !== args.pr ||
+          live.pullRequest.repository?.nameWithOwner?.toLowerCase() !==
+            expectedRepo ||
+          live.root?.nodes?.[0]?.databaseId !== reply.replyTo
+        ) {
+          outcome.resolveSkipped.push({
+            replyTo: reply.replyTo,
+            reason: 'thread_not_found',
+          });
+          continue;
+        }
+        if (live.pullRequest.state !== 'OPEN') {
+          outcome.resolveSkipped.push({
+            replyTo: reply.replyTo,
+            reason: 'pr_not_open',
+          });
+          continue;
+        }
+        if (live.pullRequest.headRefOid !== head) {
+          outcome.resolveSkipped.push({
+            replyTo: reply.replyTo,
+            reason: 'head_mismatch',
+          });
+          continue;
+        }
+        if (live.isResolved) {
           outcome.resolveSkipped.push({
             replyTo: reply.replyTo,
             reason: 'already_resolved',
           });
           continue;
         }
-        if (thread.comments.pageInfo.hasPreviousPage) {
+        if (live.comments.pageInfo.hasPreviousPage) {
           outcome.resolveSkipped.push({
             replyTo: reply.replyTo,
             reason: 'incomplete_history',
@@ -937,7 +1033,7 @@ function replyLocked(
           continue;
         }
         const replyBodyHash = bodyHash(reply.body);
-        const replied = thread.comments.nodes.some(
+        const replied = live.comments.nodes.some(
           (node) =>
             isOwnReply(node, state.viewer) &&
             bodyHash(node.body) === replyBodyHash,
@@ -949,7 +1045,28 @@ function replyLocked(
           });
           continue;
         }
-        const freshOffer = actionable(buildSnapshot(freshPr, state));
+        const liveThreadNode: PrData['reviewThreads']['nodes'][number] = {
+          id: live.id,
+          isResolved: live.isResolved,
+          isOutdated: initialThread.isOutdated,
+          path: initialThread.path,
+          line: initialThread.line,
+          root: live.root,
+          comments: live.comments,
+        };
+        const singleThreadPr: PrData = {
+          ...pr,
+          state: live.pullRequest.state,
+          headRefOid: live.pullRequest.headRefOid,
+          author: live.pullRequest.author,
+          reviewThreads: {
+            pageInfo: { hasNextPage: false },
+            nodes: [liveThreadNode],
+          },
+          reviews: { pageInfo: { hasPreviousPage: false }, nodes: [] },
+          comments: { pageInfo: { hasPreviousPage: false }, nodes: [] },
+        };
+        const freshOffer = actionable(buildSnapshot(singleThreadPr, state));
         const threadOpen = freshOffer.threads.get(reply.replyTo);
         if (threadOpen && [...threadOpen].some((id) => !done.has(id))) {
           outcome.resolveSkipped.push({
@@ -958,9 +1075,9 @@ function replyLocked(
           });
           continue;
         }
-        const resolved = resolveReviewThread(thread.id);
+        const resolved = resolveReviewThread(live.id);
         if (resolved.resolved) {
-          outcome.resolvedThreads.push(thread.id);
+          outcome.resolvedThreads.push(live.id);
         } else {
           outcome.resolveSkipped.push({
             replyTo: reply.replyTo,

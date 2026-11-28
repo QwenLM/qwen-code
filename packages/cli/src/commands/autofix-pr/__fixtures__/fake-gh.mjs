@@ -353,6 +353,27 @@ function project(value, fields, path) {
 // `Int!` variable.
 function graphql(fields, typed) {
   const query = fields.query ?? '';
+  if (
+    query.includes('PullRequestReviewThread') &&
+    typeof fields.id === 'string'
+  ) {
+    const thread = world.threads.find((t) => t.id === fields.id);
+    if (!thread) return { data: { node: null } };
+    return {
+      data: {
+        node: {
+          ...threadNode(thread),
+          pullRequest: {
+            number: pr.number,
+            state: pr.state,
+            headRefOid: headSha(),
+            author: { login: pr.author },
+            repository: { nameWithOwner: `${world.owner}/${world.repo}` },
+          },
+        },
+      },
+    };
+  }
   if (query.includes('$number: Int!') && !typed.has('number')) {
     fail('GraphQL: Variable $number of type Int! was provided invalid value');
   }

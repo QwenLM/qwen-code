@@ -1160,14 +1160,17 @@ describe('buildSnapshot', () => {
       'Looks good overall.\n\n<!-- qwen-review-deferred -->\n\nDeferred under the convergence posture (round 2, not a blocker):\n\n- `src/foo.ts:12` [Suggestion] tidy helper';
     const taskListBody =
       'Approved.\n\n- [ ] Follow up on retry metric in a later PR';
+    const inlineCodeTaskBody = 'Approved.\n\n- [ ] `updateFoo()`';
+    const orderedTaskBody = 'Approved.\n\n1. [ ] `updateBar()`';
     const headingBody =
       'Approved!\n\n### Deferred items\n- Consolidate error strings';
     const proseOnly =
       'Approved, we can defer refactoring to a later PR.\n\n- Great tests';
     const quotedInline =
-      'Looks good, glad `<!-- qwen-review-deferred -->` is now handled!';
+      'Looks good, glad `` `<!-- qwen-review-deferred -->` `` is now handled!';
+    const emptyCodeTask = 'Approved.\n\n- [ ] `   `';
     const quotedFence =
-      'Approved!\n\n```md\n<!-- qwen-review-deferred -->\n### Deferred\n- [ ] example\n```';
+      'Approved!\n\n```md\n<!-- qwen-review-deferred -->\n### Deferred\n- [ ] `updateFoo()`\n1. [ ] example\n```';
 
     const snap = buildSnapshot(
       pr({
@@ -1186,6 +1189,10 @@ describe('buildSnapshot', () => {
               body: quotedInline,
               state: 'APPROVED',
             }),
+            comment('R_EMPTY_CODE_TASK', 'a', 'MEMBER', {
+              body: emptyCodeTask,
+              state: 'APPROVED',
+            }),
             comment('R_FENCED_CODE', 'a', 'MEMBER', {
               body: quotedFence,
               state: 'APPROVED',
@@ -1197,6 +1204,14 @@ describe('buildSnapshot', () => {
             }),
             comment('R_TASK', 'alice', 'MEMBER', {
               body: taskListBody,
+              state: 'APPROVED',
+            }),
+            comment('R_INLINE_TASK', 'alice', 'MEMBER', {
+              body: inlineCodeTaskBody,
+              state: 'APPROVED',
+            }),
+            comment('R_ORDERED_TASK', 'alice', 'MEMBER', {
+              body: orderedTaskBody,
               state: 'APPROVED',
             }),
             comment('R_HEADING', 'bob', 'COLLABORATOR', {
@@ -1234,6 +1249,26 @@ describe('buildSnapshot', () => {
         type: 'review',
         state: 'APPROVED',
         deferredOnly: true,
+        id: 'R_INLINE_TASK',
+        author: 'alice',
+        trust: 'member',
+        body: inlineCodeTaskBody,
+        url: 'https://github.com/o/r/pull/7#R_INLINE_TASK',
+      },
+      {
+        type: 'review',
+        state: 'APPROVED',
+        deferredOnly: true,
+        id: 'R_ORDERED_TASK',
+        author: 'alice',
+        trust: 'member',
+        body: orderedTaskBody,
+        url: 'https://github.com/o/r/pull/7#R_ORDERED_TASK',
+      },
+      {
+        type: 'review',
+        state: 'APPROVED',
+        deferredOnly: true,
         id: 'R_HEADING',
         author: 'bob',
         trust: 'collaborator',
@@ -1258,6 +1293,10 @@ describe('buildSnapshot', () => {
             }),
             comment('R_INLINE_CODE', 'a', 'MEMBER', {
               body: quotedInline,
+              state: 'APPROVED',
+            }),
+            comment('R_EMPTY_CODE_TASK', 'a', 'MEMBER', {
+              body: emptyCodeTask,
               state: 'APPROVED',
             }),
             comment('R_FENCED_CODE', 'a', 'MEMBER', {

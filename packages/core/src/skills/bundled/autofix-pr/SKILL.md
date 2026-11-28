@@ -218,9 +218,12 @@ When this session has the `autofix_pr` tool, run `"${QWEN_CODE_CLI:-qwen}" autof
    `prepare` and `sync` fetch the PR head, not the base — and pin the
    fetched base SHA so stale cached `<remote>/<baseRefName>` refs never
    pull unrelated upstream commits into the audit: run
-   `git fetch --no-tags <remote> <baseRefName> && BASE_SHA=$(git rev-parse FETCH_HEAD) && MERGE_BASE=$(git merge-base "$BASE_SHA" HEAD)`,
-   then audit `git diff "$MERGE_BASE"..HEAD` (including your uncommitted
-   changes and newly added files) in repeated passes combining two lenses:
+   `git fetch --no-tags <remote> <baseRefName> && BASE_SHA=$(git rev-parse FETCH_HEAD) && MERGE_BASE=$(git merge-base "$BASE_SHA" HEAD)`.
+   Then compare the working tree directly against the pinned merge base
+   with `git diff "$MERGE_BASE"` (covering committed, staged, and unstaged
+   changes from this round) and also inspect every untracked file listed by
+   `git ls-files --others --exclude-standard` before declaring a pass clean,
+   in repeated passes combining two lenses:
 
    1. **Undirected audit**: read the entire diff and nearby callers without
       a preset checklist. Look for missed sibling call sites, dead switches

@@ -57,15 +57,18 @@ workflow before committing:
      procedural bot status notices (e.g., CI-pending downgrades) that require
      no code change.
 2. **Multi-round undirected & adversarial audit (`## Audit until clean`)**:
-   - **Fresh base diff**: before choosing the audit diff, run
-     `git fetch --no-tags <remote> <baseRefName>`, pin
-     `BASE_SHA=$(git rev-parse FETCH_HEAD)`, and compute
+   - **Fresh base diff (including working tree and untracked files)**: before
+     choosing the audit diff, run `git fetch --no-tags <remote> <baseRefName>`,
+     pin `BASE_SHA=$(git rev-parse FETCH_HEAD)`, and compute
      `MERGE_BASE=$(git merge-base "$BASE_SHA" HEAD)` so stale local
      `<remote>/<baseRefName>` refs never pull unrelated upstream commits into
-     the audit.
-   - **Undirected audit**: read the full PR diff from `"$MERGE_BASE"..HEAD`
-     and nearby callers without a preset checklist to catch missed sibling call
-     sites, unwired switches, contract/docs drift, and merge side effects.
+     the audit. Compare the working tree directly against `"$MERGE_BASE"` with
+     `git diff "$MERGE_BASE"` (covering committed, staged, and unstaged
+     changes) and inspect every untracked file from
+     `git ls-files --others --exclude-standard`.
+   - **Undirected audit**: read that full diff and untracked files plus nearby
+     callers without a preset checklist to catch missed sibling call sites,
+     unwired switches, contract/docs drift, and merge side effects.
    - **Adversarial audit**: assume implementation and tests are wrong; probe
      boundaries, platform/path edge cases, concurrency/restart/cleanup paths,
      legacy compatibility, and whether tests are truly load-bearing.
@@ -130,15 +133,20 @@ call raw `gh api` or GraphQL mutations directly.
   3. `state.pushedShas.includes(head)`, the round's prepared snapshot
      (`autofix-pr-<n>-snapshot.json` or background-fix
      `autofix-pr-<n>-fix-snapshot.json`) exists with `headSha !== head` and a
-     non-empty `roundId`, **and** `state.lastPush` (recorded by `push` for that
-     `roundId` and cleared by `withKnownHead` whenever `sync` or `prepare`
-     adopts a different head) matches both `head` and `roundId` — proving this
-     round itself pushed `head`, even if another contributor rolls the branch
-     back to an earlier pushed SHA (`not_pushed`).
+     non-empty `roundId`, **and** `state.lastPush` (captured by `push` from
+     the initiating snapshot _before_ running `git push` or pre-push hooks,
+     and cleared by `withKnownHead` whenever `sync` or `prepare` adopts a
+     different head) matches both `head` and `roundId` — proving this round
+     itself pushed `head`, even across rollbacks to an earlier pushed SHA or a
+     snapshot replaced while `git push` was paused in a hook (`not_pushed`).
   4. Immediately before resolving each candidate (after posting replies and
-     persisting state), re-read the live PR state via `fetchPrData` (read
-     failure skips with `recheck_failed`): verify `freshPr.state === 'OPEN'`
-     (`pr_not_open`) and `freshPr.headRefOid === head` (`head_mismatch`).
+     persisting state), re-read the candidate `PullRequestReviewThread` and its
+     parent PR (`number`, `repository.nameWithOwner`, `state`, `headRefOid`,
+     `author`) in **one atomic GraphQL `node(id: $id)` response** — avoiding
+     multi-page torn reads on 100+-thread PRs and unrelated check/thread paging
+     (read/GraphQL error skips with `recheck_failed`): verify parent PR
+     ownership (`thread_not_found`), `state === 'OPEN'` (`pr_not_open`), and
+     `headRefOid === head` (`head_mismatch`).
   5. Thread exists with a valid GraphQL id (`thread_not_found`), is currently
      open (`isResolved === true` skips idempotently with `already_resolved`;
      `unresolveReviewThread` is never called), and has complete comment history

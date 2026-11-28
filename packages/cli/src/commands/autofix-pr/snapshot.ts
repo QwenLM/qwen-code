@@ -1168,6 +1168,35 @@ function startupFailures(suites: CheckSuite[]): FailedCheck[] {
   return failed;
 }
 
+function stripInlineCodeSpans(text: string): string {
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === '`') {
+      let ticks = 0;
+      while (i + ticks < text.length && text[i + ticks] === '`') ticks += 1;
+      const delim = '`'.repeat(ticks);
+      let close = text.indexOf(delim, i + ticks);
+      while (
+        close !== -1 &&
+        ((close > 0 && text[close - 1] === '`') || text[close + ticks] === '`')
+      ) {
+        close = text.indexOf(delim, close + 1);
+      }
+      if (close !== -1) {
+        i = close + ticks;
+        continue;
+      }
+      out += delim;
+      i += ticks;
+      continue;
+    }
+    out += text[i];
+    i += 1;
+  }
+  return out;
+}
+
 /**
  * Whether an `APPROVED` review body carries a deferred checklist that should
  * be surfaced for accounting, while plain approvals ("LGTM", prose-only
@@ -1175,22 +1204,31 @@ function startupFailures(suites: CheckSuite[]): FailedCheck[] {
  */
 export function approvalHasDeferredChecklist(body: string): boolean {
   if (!body.trim()) return false;
-  // Strip fenced code blocks and inline code spans so quoted snippets (e.g.,
-  // an approval mentioning `<!-- qwen-review-deferred -->` in prose) stay quiet.
-  const stripped = body
-    .replace(
-      /(^|\n)[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n[ \t]*\2[ \t]*(?=\n|$)|$)/g,
-      '$1',
-    )
-    .replace(/`+[^`\n]*`+/g, '');
-  if (!stripped.trim()) return false;
-  if (/<!--\s*qwen-review-deferred\s*-->/i.test(stripped)) return true;
-  // Unchecked Markdown task list item (`- [ ] ...` / `* [ ] ...`).
-  if (/^[ \t]*[-*+][ \t]+\[\s\][ \t]+\S/m.test(stripped)) return true;
-  // Explicit "Deferred ..." heading or lead-in line followed by list items.
-  return /(?:^|\n)[ \t]*(?:#{1,6}[ \t]+|[*_]{1,2})?deferred\b[^\n]*:?(?:[*_]{1,2})?[ \t]*\n+(?:[ \t]*\n)*[ \t]*(?:[-*+]|\d+\.)[ \t]+\S/i.test(
-    stripped,
+  // Strip fenced code blocks so checklist or marker examples inside fences stay quiet.
+  const withoutFences = body.replace(
+    /(^|\n)[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n[ \t]*\2[ \t]*(?=\n|$)|$)/g,
+    '$1',
   );
+  if (!withoutFences.trim()) return false;
+  // Strip inline code only for the HTML marker check so prose quoting
+  // `<!-- qwen-review-deferred -->` stays quiet, while task items whose entire
+  // label is inline code (e.g. `- [ ] `updateFoo()``) still count as content.
+  const withoutInlineCode = stripInlineCodeSpans(withoutFences);
+  if (/<!--\s*qwen-review-deferred\s*-->/i.test(withoutInlineCode)) return true;
+  // Unchecked Markdown task list item (`- [ ] ...`, `* [ ] ...`, `1. [ ] ...`,
+  // `1) [ ] ...`), requiring at least one non-whitespace, non-backtick char.
+  for (const match of withoutFences.matchAll(
+    /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+\[\s\][ \t]+([^\n]+)/gm,
+  )) {
+    if (/[^\s`]/.test(match[1]!)) return true;
+  }
+  // Explicit "Deferred ..." heading or lead-in line followed by list items.
+  for (const match of withoutFences.matchAll(
+    /(?:^|\n)[ \t]*(?:#{1,6}[ \t]+|[*_]{1,2})?deferred\b[^\n]*:?(?:[*_]{1,2})?[ \t]*\n+(?:[ \t]*\n)*[ \t]*(?:[-*+]|\d+[.)])[ \t]+([^\n]+)/gi,
+  )) {
+    if (/[^\s`]/.test(match[1]!)) return true;
+  }
+  return false;
 }
 
 /**

@@ -609,6 +609,9 @@ describe('bundled autofix-pr skill', () => {
     expect(brief).toContain('## Audit until clean');
     expect(brief).toContain('git fetch --no-tags <remote> <baseRefName>');
     expect(brief).toContain('git merge-base "$BASE_SHA" HEAD');
+    expect(brief).toContain('git diff "$MERGE_BASE"');
+    expect(brief).not.toContain('git diff "$MERGE_BASE"..HEAD');
+    expect(brief).toContain('git ls-files --others --exclude-standard');
     expect(brief).toContain('Undirected audit');
     expect(brief).toContain('Adversarial audit');
     expect(brief).toContain('2 consecutive clean passes');
