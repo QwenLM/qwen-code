@@ -67,7 +67,7 @@ public class ManagedMcpManagementService {
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
         if (!ACTIONS.contains(command.action()) || !command.serverId().matches("[A-Za-z0-9._:-]{1,128}")
                 || command.expectedRevision() == null || command.expectedRevision() < 0
-                || command.expectedRevision() > MAX_REVISION
+                || command.expectedRevision() >= MAX_REVISION
                 || Set.of("add", "edit").contains(command.action()) != (command.server() != null)
                 || command.server() != null && !command.serverId().equals(command.server().serverId())) {
             throw new ManagedAgentException(400, "invalid_request", "Invalid MCP management command.");
