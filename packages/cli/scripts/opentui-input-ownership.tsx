@@ -7,7 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error The Bun-only native runner has no types in the Node build.
 import { mock } from 'bun:test';
-import { act } from 'react';
+import { act, useState } from 'react';
 import { TextareaRenderable, type Renderable } from '@opentui/core';
 import { testRender } from '@opentui/react/test-utils';
 import type { InputPromptProps } from '../src/ui/opentui/input-prompt.js';
@@ -61,18 +61,28 @@ try {
   const { OpenTuiInputPrompt } = await import(
     '../src/ui/opentui/input-prompt.js'
   );
-  await act(async () => {
-    setup = await testRender(
+  let setInputFocus!: (focus: boolean) => void;
+  function Prompt() {
+    const [focus, setFocus] = useState(true);
+    setInputFocus = setFocus;
+    return (
       <OpenTuiInputPrompt
+        focus={focus}
         userMessages={[]}
         onNotice={(message) => notices.push(message)}
         onSubmit={(...args) => {
           submissions.push(args);
           return accepted;
         }}
-      />,
-      { width: 80, height: 12, exitOnCtrlC: false },
+      />
     );
+  }
+  await act(async () => {
+    setup = await testRender(<Prompt />, {
+      width: 80,
+      height: 12,
+      exitOnCtrlC: false,
+    });
   });
   assert(setup);
   const ui = setup;
@@ -182,6 +192,29 @@ try {
   await key('q', true);
   assert.deepEqual(submissions[6].slice(0, 2), ['queue selected', [a]]);
   assert.equal(submissions[6][2]?.deferUntilIdle, true);
+
+  await type('retained');
+  await input(() => setInputFocus(false));
+  const submissionCount = submissions.length;
+  assert.equal(editor.focused, false);
+  assert.equal(editor.focusable, false);
+  await input(() => ui.mockMouse.click(editor.x + 2, editor.y));
+  assert.equal(editor.focused, false);
+  await type('bad');
+  await input(() => ui.mockInput.pasteBracketedText('pasted'));
+  await key('RETURN');
+  assert.equal(editor.plainText, 'retained');
+  assert.equal(submissions.length, submissionCount);
+  await input(() => setInputFocus(true));
+  assert.equal(editor.focusable, true);
+  assert.equal(editor.focused, true);
+  await input(() =>
+    ui.mockMouse.click(editor.x + editor.plainText.length, editor.y),
+  );
+  await type(' restored');
+  await key('RETURN');
+  assert.equal(submissions.at(-1)?.[0], 'retained restored');
+  assert.equal(submissions.length, submissionCount + 1);
 } finally {
   try {
     if (setup) await act(async () => setup!.renderer.destroy());

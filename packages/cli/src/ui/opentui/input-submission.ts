@@ -124,8 +124,8 @@ export interface OpenTuiComposerHandle {
 }
 
 /**
- * The entry's hold on the composer. A dialog unmounts the composer, so a
- * prompt handed back meanwhile waits in `returned` for the next one to mount.
+ * The entry's hold on the composer. When a dialog replaces the composer, a
+ * returned prompt waits here until the next mount. Live previews keep it mounted.
  */
 export interface OpenTuiComposerSlot {
   current: OpenTuiComposerHandle | null;

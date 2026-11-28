@@ -86,6 +86,9 @@ const mockUIActions = {
 } as unknown as UIActions;
 
 const baseUIState: Partial<UIState> = {
+  confirmUpdateExtensionRequests: [],
+  settingInputRequests: [],
+  pluginChoiceRequests: [],
   dialogsVisible: false,
   isFeedbackDialogOpen: false,
   mainControlsRef: { current: null },
@@ -130,8 +133,70 @@ function frameHeight(frame: string): number {
 }
 
 describe('DefaultAppLayout', () => {
+  it('keeps the composer below the status line picker but not other dialogs', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      dialogsVisible: true,
+      isStatusLineDialogOpen: true,
+    });
+    const output = lastFrame() ?? '';
+    expect(output).toContain('DialogManager');
+    expect(output).toContain('Composer');
+    expect(output.indexOf('DialogManager')).toBeLessThan(
+      output.indexOf('Composer'),
+    );
+    expect(
+      renderLayout({ ...baseUIState, dialogsVisible: true }).lastFrame(),
+    ).not.toContain('Composer');
+  });
+  it.each([8, 10, 12])(
+    'keeps the picker visible at %i rows',
+    (terminalHeight) => {
+      dialogManagerMockState.lineCount = 20;
+      const { lastFrame, unmount } = renderLayout({
+        ...baseUIState,
+        constrainHeight: true,
+        terminalHeight,
+        staticExtraHeight: 3,
+        dialogsVisible: true,
+        isStatusLineDialogOpen: true,
+      });
+      expect(lastFrame()).toContain('DialogManager 1');
+      expect(lastFrame()).not.toContain('DialogManager 2');
+      expect(lastFrame()).toContain('Composer');
+      unmount();
+    },
+  );
+  it.each([
+    [true, 12],
+    [false, 19],
+  ] as const)(
+    'reserves composer rows only for the picker (picker=%s)',
+    (isStatusLineDialogOpen, lastRow) => {
+      dialogManagerMockState.lineCount = 20;
+      const { lastFrame, unmount } = renderLayout({
+        ...baseUIState,
+        terminalHeight: 24,
+        staticExtraHeight: 3,
+        constrainHeight: true,
+        dialogsVisible: true,
+        isStatusLineDialogOpen,
+      });
+      expect(lastFrame()).toContain(`DialogManager ${lastRow}`);
+      expect(lastFrame()).not.toContain(`DialogManager ${lastRow + 1}`);
+      unmount();
+    },
+  );
   beforeEach(() => {
     dialogManagerMockState.lineCount = 1;
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
   });
 
   it('renders sticky todo list before the composer in the main view', () => {

@@ -1934,14 +1934,16 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
   const [isStatusLineDialogOpen, setStatusLineDialogOpen] = useState(false);
+  const [statusLinePreviewConfig, setStatusLinePreviewConfig] =
+    useState<StatusLinePresetConfig>();
   const openStatusLineDialog = useCallback(
     () => setStatusLineDialogOpen(true),
     [],
   );
-  const closeStatusLineDialog = useCallback(
-    () => setStatusLineDialogOpen(false),
-    [],
-  );
+  const closeStatusLineDialog = useCallback(() => {
+    setStatusLinePreviewConfig(undefined);
+    setStatusLineDialogOpen(false);
+  }, []);
   const [statusLineSettingsVersion, setStatusLineSettingsVersion] = useState(0);
   const [statusLineConfigOverride, setStatusLineConfigOverride] = useState<
     StatusLinePresetConfig | undefined
@@ -5438,6 +5440,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isStatusLineDialogOpen,
       statusLineSettingsVersion,
       statusLineConfigOverride,
+      statusLinePreviewConfig,
       isMemoryDialogOpen,
       isSkillReviewDialogOpen,
       skillReviewPending,
@@ -5590,6 +5593,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isStatusLineDialogOpen,
       statusLineSettingsVersion,
       statusLineConfigOverride,
+      statusLinePreviewConfig,
       isMemoryDialogOpen,
       isSkillReviewDialogOpen,
       skillReviewPending,
@@ -5751,6 +5755,7 @@ export const AppContainer = (props: AppContainerProps) => {
       closeSettingsDialog,
       closeStatusLineDialog,
       notifyStatusLineSettingsChanged,
+      setStatusLinePreviewConfig,
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
@@ -5846,6 +5851,7 @@ export const AppContainer = (props: AppContainerProps) => {
       closeSettingsDialog,
       closeStatusLineDialog,
       notifyStatusLineSettingsChanged,
+      setStatusLinePreviewConfig,
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,

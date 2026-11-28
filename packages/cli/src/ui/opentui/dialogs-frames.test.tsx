@@ -122,7 +122,10 @@ import {
 } from './dialogs-stats-skills.js';
 import { OpenTuiThemeDialog } from './dialogs-theme.js';
 
-const SETTINGS = { merged: {} } as unknown as LoadedSettings;
+const SETTINGS = {
+  merged: {},
+  forScope: () => ({ settings: {} }),
+} as unknown as LoadedSettings;
 
 /** The layout primitives the jsx mock captured on the element. */
 function layoutOf(node: Element | null | undefined): Record<string, unknown> {
@@ -185,6 +188,36 @@ describe('sibling dialog frames (region clips, frame does not shrink)', () => {
     });
     expect(layoutOf(container.firstElementChild)['marginTop']).toBeUndefined();
   });
+
+  it.each([
+    [12, false],
+    [13, false],
+    [14, false],
+    [15, false],
+    [16, true],
+  ] as const)(
+    'keeps useful statusline options at the %i-row boundary',
+    (availableTerminalHeight, full) => {
+      const { container } = render(
+        <OpenTuiStatusLineDialog
+          config={{} as Config}
+          settings={SETTINGS}
+          addItem={vi.fn()}
+          onClose={() => {}}
+          availableTerminalHeight={availableTerminalHeight}
+        />,
+      );
+      expect(container.textContent?.includes('Configure Status Line')).toBe(
+        full,
+      );
+      expect(container.textContent).toContain('project-name');
+      expect(container.textContent).toContain('git-branch');
+      if (!full) {
+        expect(container.textContent).toContain('model-with-reasoning');
+        expect(container.textContent).toContain('model-only');
+      }
+    },
+  );
 
   it('stats frame opens flush and unshrinkable', () => {
     const { container } = render(

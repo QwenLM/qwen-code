@@ -63,6 +63,9 @@ const mocks = vi.hoisted(() => {
           let cursor = { row: 0, col: 0, offset: 0 };
           return {
             width: 78,
+            focusable: true,
+            focus: vi.fn(),
+            blur: vi.fn(),
             get plainText() {
               return text;
             },
