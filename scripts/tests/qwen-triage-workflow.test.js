@@ -1843,14 +1843,56 @@ describe('qwen-triage verify workflow', () => {
             },
           ],
         };
+        const issueComments = {
+          totalCount: 104,
+          nodes: [
+            {
+              createdAt: '2026-11-01T01:15:00Z',
+              updatedAt: '2026-11-01T01:20:00Z',
+              url: 'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-501',
+              body: '**[P1]** Separate git dir objects under `.qwen/tmp/` are dropped.',
+              author: { login: 'maintainer' },
+              authorAssociation: 'COLLABORATOR',
+              isMinimized: false,
+            },
+            {
+              createdAt: '2026-11-01T01:25:00Z',
+              updatedAt: '2026-11-01T01:25:00Z',
+              url: 'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-502',
+              body: '**[Critical]** Deleted owner account review',
+              author: null,
+              authorAssociation: 'OWNER',
+              isMinimized: false,
+            },
+            {
+              createdAt: '2026-11-01T01:30:00Z',
+              updatedAt: '2026-11-01T01:30:00Z',
+              url: 'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-503',
+              body: 'Hidden outdated comment **[P1]**',
+              author: { login: 'colleague' },
+              authorAssociation: 'MEMBER',
+              isMinimized: true,
+            },
+            {
+              createdAt: '2026-11-01T01:35:00Z',
+              updatedAt: '2026-11-01T01:35:00Z',
+              url: 'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-504',
+              body: 'External comment must stay out of token-free context',
+              author: { login: 'outsider' },
+              authorAssociation: 'NONE',
+              isMinimized: false,
+            },
+          ],
+        };
         // Two pages, as --paginate --slurp returns them: the threads continue,
-        // and the change requests repeat with every page.
+        // and the change requests and top-level comments repeat with every page.
         const pages = [
           {
             data: {
               repository: {
                 pullRequest: {
                   latestOpinionatedReviews: opinionated,
+                  comments: issueComments,
                   reviewThreads: {
                     pageInfo: { hasNextPage: true, endCursor: 'c1' },
                     nodes: [
@@ -1894,6 +1936,7 @@ describe('qwen-triage verify workflow', () => {
               repository: {
                 pullRequest: {
                   latestOpinionatedReviews: opinionated,
+                  comments: issueComments,
                   reviewThreads: {
                     pageInfo: { hasNextPage: false, endCursor: 'c2' },
                     nodes: [
@@ -1958,6 +2001,21 @@ describe('qwen-triage verify workflow', () => {
           ['maintainer', 'a'.repeat(40)],
           [null, null],
         ]);
+        expect(ok.state.issueCommentCount).toBe(104);
+        expect(
+          ok.state.issueComments.map((c) => [c.author, c.association, c.url]),
+        ).toEqual([
+          [
+            'maintainer',
+            'COLLABORATOR',
+            'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-501',
+          ],
+          [
+            null,
+            'OWNER',
+            'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-502',
+          ],
+        ]);
         // The query the local preflight sends, against this PR of this repo.
         expect(ok.args).toEqual(
           expect.arrayContaining([
@@ -1975,19 +2033,162 @@ describe('qwen-triage verify workflow', () => {
 
         // A failed fetch, or pages that are not this query's answer, leave no
         // file: the skill reads its absence as "unknown", and a partial file
-        // would read as "nothing open".
+        // would read as "nothing open". Both the workflow jq filter and local
+        // reviewState() must reject the exact same malformed shapes, including
+        // arrays masquerading as objects (`[[]]`) and null comment entries.
+        const pull0 = pages[0].data.repository.pullRequest;
+        const malformedPages = [
+          [{ data: null }],
+          [],
+          [{ data: { repository: { pullRequest: [] } } }],
+          [
+            {
+              data: {
+                repository: { pullRequest: { ...pull0, comments: null } },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    comments: { totalCount: 1, nodes: [null] },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    comments: { totalCount: 1, nodes: [[]] },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    comments: {
+                      totalCount: 1,
+                      nodes: [
+                        {
+                          createdAt: '2026-11-01T01:15:00Z',
+                          updatedAt: '2026-11-01T01:15:00Z',
+                          url: 'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-1',
+                          body: 'x',
+                          author: [],
+                          authorAssociation: 'COLLABORATOR',
+                          isMinimized: false,
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    comments: {
+                      totalCount: 1,
+                      nodes: [
+                        {
+                          createdAt: '2026-11-01T01:15:00Z',
+                          updatedAt: '2026-11-01T01:15:00Z',
+                          url: 'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-2',
+                          body: 'x',
+                          author: [],
+                          authorAssociation: 'NONE',
+                          isMinimized: false,
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    latestOpinionatedReviews: { nodes: [[]] },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    reviewThreads: {
+                      ...pull0.reviewThreads,
+                      nodes: [
+                        {
+                          ...pull0.reviewThreads.nodes[0],
+                          comments: { totalCount: 1, nodes: [null] },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    reviewThreads: {
+                      ...pull0.reviewThreads,
+                      nodes: [
+                        {
+                          ...pull0.reviewThreads.nodes[0],
+                          comments: { totalCount: 1, nodes: [[]] },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        ];
         for (const [input, env] of [
           [pages, { GH_STUB_FAIL_LIST: '1' }],
           // gh exits 0 with nothing on stdout, and jq then exits 0 too.
           [pages, { GH_STUB_EMPTY_LIST: '1' }],
-          [[{ data: null }], {}],
-          [[], {}],
+          ...malformedPages.map((bad) => [bad, {}]),
         ]) {
           const failed = run(input, env);
           expect(failed.state).toBeNull();
           expect(failed.out).toContain(
             "Could not snapshot the PR's review threads",
           );
+        }
+        for (const bad of malformedPages) {
+          expect(reviewState(bad)).toBeNull();
         }
         expect(reviewState([{ data: null }])).toBeNull();
         expect(reviewState([])).toBeNull();
@@ -2068,6 +2269,95 @@ describe('qwen-triage verify workflow', () => {
     expect(flat).toContain('report item 7 (_Not covered_)');
     expect(verifySkill).toMatch(/^7\. \*\*Not covered\*\*/m);
     expect(flat).toContain('Title, body, comments, review threads,');
+    // Top-level maintainer blocking comments carry the same merge-ready bar.
+    expect(flat).toContain(
+      "top-level blocking review comments in `review-threads.json`'s `issueComments`",
+    );
+    expect(flat).toContain(
+      'treat every remaining top-level comment tagged Critical, Blocker, P0, or P1 as an **open blocking review item** on par with open blocking review threads',
+    );
+    expect(flat).toContain(
+      'When `issueCommentCount > 100`, disclose under _Not covered_ that only the latest 100 top-level comments were snapshotted',
+    );
+  });
+
+  // PR #18494 showed five rounds of A/B + mutation matrices missing silent
+  // data loss, multi-round archive duplication, quadratic ignore-rule scans,
+  // and symlinked external objects until manual review constructed adversarial
+  // counterexamples. Pin the diff-triggered protocol, recovery oracle, and
+  // guard binding in SKILL.md.
+  it('requires adversarial axes, independent recovery oracles, and mechanical guard binding', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain(
+      'For destructive, exclusion, ignore, cleanup, snapshot, or migration diffs, apply the same diff-triggered rule',
+    );
+    expect(flat).toContain('Path indirection and reverse dependencies');
+    expect(flat).toContain('Placement and nesting depth');
+    expect(flat).toContain(
+      'Rule-spelling variants, mixed layouts, and complexity ladders',
+    );
+    expect(flat).toContain(
+      'Real caller entry point and multi-round steady state',
+    );
+    expect(flat).toContain('Combinatorial control-flow interaction');
+    expect(flat).toContain('Anti-over-refusal (liveness) control');
+    expect(flat).toContain(
+      "**Snapshot, backup, cleanup, and pruning PRs**: never treat the system under test's own `verify()` return value",
+    );
+    expect(flat).toContain('adversarially attack your own patch too');
+    expect(flat).toContain('**Bind the guard before every local publish.**');
+    expect(flat).toContain(
+      "Keep every round's start snapshot, final snapshot, verdict, log, and digest in a **per-round host directory** outside the container-mounted verify cache (`qwen-verify-guard/pr<n>/<round-id>/`",
+    );
+    expect(flat).toContain(
+      'create `guard-start.json` exclusively with `--no-clobber` **before** `verify-pr-prepare.mjs` fetches `review-threads.json`',
+    );
+    expect(verifySkill).toContain(
+      'mkdir -p ~/.cache/qwen-verify-guard/pr<n>/<round-id>',
+    );
+    expect(verifySkill).toContain(
+      '--snapshot ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-start.json \\',
+    );
+    expect(verifySkill).toContain('--no-clobber \\');
+    expect(flat).toContain(
+      'clear stale guard files in that same `<round-id>` directory, refresh `guard-now.json` in the same publish step',
+    );
+    expect(flat).toContain(
+      'run `verify-pr-check.mjs` with `--require-guard` before posting the PR comment',
+    );
+    expect(verifySkill).toContain(
+      'rm -f ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-now.json ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256',
+    );
+    expect(verifySkill).toContain(
+      '--snapshot ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-now.json \\',
+    );
+    expect(verifySkill).toContain(
+      '--out ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json',
+    );
+    expect(verifySkill).toContain(
+      "sed -n 's/^  guard-sha256  //p' ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log > ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256",
+    );
+    expect(verifySkill).toContain('--require-guard \\');
+    expect(verifySkill).toContain(
+      '--guard ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json \\',
+    );
+    expect(verifySkill).toContain(
+      '--guard-sha256 "$(cat ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256)" \\',
+    );
+    // Guard paths must never live inside the container-mounted verify-context directory.
+    expect(verifySkill).not.toContain(
+      '~/.cache/qwen-verify/pr<n>/<round-id>/guard-',
+    );
+    expect(verifySkill).not.toContain('~/.cache/qwen-verify/pr<n>/guard-');
+    // Runner-backed VM publish preserves --execution-record and its digest in
+    // the same final verify-pr-check.mjs invocation as --require-guard.
+    expect(flat).toContain(
+      'For runner-backed VM rounds (`microvm` or `provider-vm`, such as Firecracker, vfkit, or provider VM)',
+    );
+    expect(verifySkill).toContain('--execution-record <execution-record> \\');
+    expect(verifySkill).toContain(
+      '--execution-record-sha256 <execution-record-sha256> \\',
+    );
   });
 
   // The deepen step's cutoff comes from the resolve step, which holds the

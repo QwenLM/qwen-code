@@ -184,6 +184,22 @@ jobs:
           # was deleted. Search the whole output for the quoted JSX prop, which
           # the scoped CSS cannot produce.
           grep -rqF 'data-web-shell-portal-root":' 'packages/web-shell/dist-managed-host'
+          # Enforce zero leaked daemon runtime code across every emitted chunk
+          # using live markers verified to survive minification in `dist/`.
+          for marker in \
+            'DaemonSessionProvider' \
+            'DaemonWorkspaceProvider' \
+            'useDaemonWorkspace must be used within' \
+            'The daemon is unavailable. Automatic refresh is paused.' \
+            '__qwenWebShellDaemonWorkspaceProviderCopies' \
+            'DaemonUnavailableError' \
+            'web-shell:mcp-status:v1:' \
+            'web-shell:tasks-status:v1:'; do
+            if grep -rqF "$marker" 'packages/web-shell/dist-managed-host'; then
+              echo "::error::Managed host bundle leaked daemon runtime marker: $marker"
+              exit 1
+            fi
+          done
           echo "Managed host entry emitted: $(wc -c < "$entry") bytes"
 
       # The output must stay outside `dist/`: the app build empties that

@@ -115,8 +115,7 @@ import type {
   WebShellUnavailableModelTooltipMount,
 } from '../unavailableModels';
 import { appendUnavailableComposerModels } from '../utils/composerModels';
-import { VoiceButton, type VoiceButtonHandle } from '../voice/VoiceButton';
-import { LiveVoiceButton } from '../live/LiveVoiceButton';
+import type { VoiceButtonHandle } from '../voice/VoiceButton';
 import type {
   VoiceStatusRevision,
   VoiceWorkspaceTarget,
@@ -127,10 +126,8 @@ import {
   gitBranchAriaLabel,
 } from './GitBranchIndicator';
 import { GitModePopover, type SessionGitIntent } from './GitModePopover';
-import {
-  BranchPickerPopover,
-  type BranchPickerPreservedState,
-} from './BranchPickerPopover';
+import type { BranchPickerPreservedState } from './BranchPickerPopover';
+import type { ComposerIntegrations } from './composer/composer-integrations';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
   ArrowDownIcon,
@@ -421,6 +418,7 @@ interface ChatEditorProps {
   composerTagIcons?: WebShellComposerTagIconMap;
   voiceTarget?: VoiceWorkspaceTarget;
   voiceStatusRevision?: VoiceStatusRevision;
+  composerIntegrations?: ComposerIntegrations;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** Click a pasted image in the composer to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
@@ -2097,6 +2095,7 @@ export const ChatEditor = memo(
       composerTagIcons,
       voiceTarget,
       voiceStatusRevision,
+      composerIntegrations,
       onImageIngestionNotice,
       onImagePreview,
       onAttachmentPreview,
@@ -2818,8 +2817,24 @@ export const ChatEditor = memo(
     const [mobileFocused, setMobileFocused] = useState(false);
     const [expandedEditor, setExpandedEditor] = useState(false);
     const expandedSelectionRef = useRef<[number, number]>([0, 0]);
+    const BranchPickerPopoverComponent =
+      composerIntegrations?.BranchPickerPopover;
+    const VoiceButtonComponent = composerIntegrations?.VoiceButton;
+    const LiveVoiceButtonComponent = composerIntegrations?.LiveVoiceButton;
+
     const [liveVoiceOpen, setLiveVoiceOpen] = useState(false);
     const [liveVoiceSupported, setLiveVoiceSupported] = useState(false);
+    useEffect(() => {
+      if (!VoiceButtonComponent) {
+        setVoiceActive(false);
+      }
+    }, [VoiceButtonComponent]);
+    useEffect(() => {
+      if (!LiveVoiceButtonComponent) {
+        setLiveVoiceOpen(false);
+        setLiveVoiceSupported(false);
+      }
+    }, [LiveVoiceButtonComponent]);
     useEffect(() => {
       setExpandedEditor(false);
     }, [sessionId, atWorkspaceCwd, disabled]);
@@ -3277,8 +3292,11 @@ export const ChatEditor = memo(
     const workspaceIndicatorVisible = Boolean(
       workspaceName && showToolbarAction('workspace'),
     );
+    const hasGitBranchControl =
+      Boolean(gitModeIntent && onGitModeIntentChange) ||
+      Boolean(BranchPickerPopoverComponent);
     const gitBranchVisible = Boolean(
-      gitBranch && showToolbarAction('gitBranch'),
+      gitBranch && showToolbarAction('gitBranch') && hasGitBranchControl,
     );
     // Both chips say where the prompt goes rather than how it runs, so a caller
     // can move them out of the toolbar without touching their availability.
@@ -3365,8 +3383,8 @@ export const ChatEditor = memo(
             draft={gitModeDraft}
             onDraftChange={setGitModeDraft}
           />
-        ) : (
-          <BranchPickerPopover
+        ) : BranchPickerPopoverComponent ? (
+          <BranchPickerPopoverComponent
             open={activeContextMenu === 'branch'}
             onOpenChange={(open) => setContextMenuOpen('branch', open)}
             preservedStateRef={branchPickerPreservedStateRef}
@@ -3394,8 +3412,8 @@ export const ChatEditor = memo(
                 worktree={gitWorktree}
               />
             </button>
-          </BranchPickerPopover>
-        )
+          </BranchPickerPopoverComponent>
+        ) : null
       ) : null;
     const renderGitBranchMeasure = (
       compact: boolean,
@@ -3475,7 +3493,8 @@ export const ChatEditor = memo(
       !isSimple &&
       !mobileVoiceActive &&
       gitBranchVisible &&
-      !(gitModeIntent && onGitModeIntentChange);
+      !(gitModeIntent && onGitModeIntentChange) &&
+      Boolean(BranchPickerPopoverComponent);
 
     useEffect(() => {
       if (activeContextMenu !== 'workspace') setWorkspaceNewSubOpen(false);
@@ -3838,7 +3857,9 @@ export const ChatEditor = memo(
                   },
                   shellMode: core.shellMode,
                   onLiveVoice:
-                    liveVoiceSupported && showToolbarAction('voice')
+                    liveVoiceSupported &&
+                    Boolean(LiveVoiceButtonComponent) &&
+                    showToolbarAction('voice')
                       ? () => setLiveVoiceOpen(true)
                       : undefined,
                 }
@@ -4568,47 +4589,52 @@ export const ChatEditor = memo(
               )}
             {!isSimple && toolbarSecondary}
             {modeToggle}
-            {showToolbarAction('voice') && (
-              <>
-                <LiveVoiceButton
-                  portalContainer={liveVoicePortalContainer}
-                  hideInactiveTrigger={
-                    isSimple || (isMobile && Boolean(showAddMenuAction))
-                  }
-                  open={liveVoiceOpen}
-                  onOpenChange={setLiveVoiceOpen}
-                  onSupportedChange={setLiveVoiceSupported}
-                  onRequestFocusFallback={() => {
-                    containerRef.current
-                      ?.querySelector<HTMLButtonElement>(
-                        '[data-testid="composer-add-menu-trigger"]',
-                      )
-                      ?.focus();
-                  }}
-                />
-                <span
-                  data-web-shell-simple-voice={isSimple ? '' : undefined}
-                  hidden={
-                    isSimple &&
-                    (core.hasContent || isRunning || composerPreparing) &&
-                    !voiceActive
-                  }
-                  style={{
-                    // Inline display must not override [hidden] in simple mode.
-                    display: !isSimple ? 'contents' : undefined,
-                  }}
-                >
-                  <VoiceButton
-                    ref={voiceButtonRef}
-                    disabled={disabled}
-                    onActiveChange={setVoiceActive}
-                    target={voiceTarget}
-                    statusRevision={voiceStatusRevision}
-                    onInsert={(text) => insertVoiceTextRef.current(text)}
-                  />
-                </span>
-              </>
-            )}
+            {showToolbarAction('voice') &&
+              (LiveVoiceButtonComponent || VoiceButtonComponent) && (
+                <>
+                  {LiveVoiceButtonComponent && (
+                    <LiveVoiceButtonComponent
+                      portalContainer={liveVoicePortalContainer}
+                      hideInactiveTrigger={
+                        isSimple || (isMobile && Boolean(showAddMenuAction))
+                      }
+                      open={liveVoiceOpen}
+                      onOpenChange={setLiveVoiceOpen}
+                      onSupportedChange={setLiveVoiceSupported}
+                      onRequestFocusFallback={() => {
+                        containerRef.current
+                          ?.querySelector<HTMLButtonElement>(
+                            '[data-testid="composer-add-menu-trigger"]',
+                          )
+                          ?.focus();
+                      }}
+                    />
+                  )}
+                  {VoiceButtonComponent && (
+                    <span
+                      data-web-shell-simple-voice={isSimple ? '' : undefined}
+                      hidden={
+                        isSimple &&
+                        (core.hasContent || isRunning || composerPreparing) &&
+                        !voiceActive
+                      }
+                      style={{
+                        // Inline display must not override [hidden] in simple mode.
+                        display: !isSimple ? 'contents' : undefined,
+                      }}
+                    >
+                      <VoiceButtonComponent
+                        ref={voiceButtonRef}
+                        disabled={disabled}
+                        onActiveChange={setVoiceActive}
+                        target={voiceTarget}
+                        statusRevision={voiceStatusRevision}
+                        onInsert={(text) => insertVoiceTextRef.current(text)}
+                      />
+                    </span>
+                  )}
+                </>
+              )}
             {(isMobile || isSimple) &&
               isRunning &&
               (core.hasContent || voiceActive) && (

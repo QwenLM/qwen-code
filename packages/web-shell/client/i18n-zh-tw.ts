@@ -6206,6 +6206,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'workspaceArtifactLibrary.activeBadge': '活躍',
   'workspaceArtifactLibrary.openSession': '開啟會話',
   'workspaceArtifactLibrary.jumpToPreview': '開啟會話以預覽',
+  'workspaceArtifactLibrary.selectPrompt': '選擇一個產物在此預覽。',
   'workspaceArtifactLibrary.loadMore': '顯示更多',
   'workspaceArtifactLibrary.refresh': '重新整理',
   'workspaceArtifactLibrary.retry': '重試',

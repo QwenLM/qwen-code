@@ -20,6 +20,7 @@ import {
 } from '../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../daemon/availability.js';
 import { useI18n } from '../i18n';
+import { scheduledTaskRuntimeKey } from '../components/dialogs/scheduledTasksSchedule';
 import {
   runScheduledTaskManually,
   type ScheduledTaskRunPrompt,
@@ -67,15 +68,7 @@ export type SessionScheduledTask =
   | SessionDurableScheduledTask
   | SessionScopedScheduledTask;
 
-export function scheduledTaskRuntimeKey(
-  task:
-    | Pick<SessionDurableScheduledTask, 'id' | 'scope'>
-    | Pick<SessionScopedScheduledTask, 'id' | 'scope' | 'source'>,
-): string {
-  return task.scope === 'session'
-    ? JSON.stringify([task.scope, task.source, task.id])
-    : JSON.stringify([task.scope, task.id]);
-}
+export { scheduledTaskRuntimeKey };
 
 export type SessionScheduledTaskLiveState = 'active' | 'paused';
 

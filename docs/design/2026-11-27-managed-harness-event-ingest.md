@@ -2,7 +2,7 @@
 
 [English](2026-11-27-managed-harness-event-ingest.md) | [简体中文](2026-11-27-managed-harness-event-ingest.zh-CN.md)
 
-Status: proposed design, 2026-11-27. Current-state claims are checked against `main` at `43dc924882`. The first slice in §10 is implemented in the same change. This design builds on [the stateless Harness design](2026-11-16-managed-stateless-harness.md) and [suspension placement release](2026-11-26-managed-suspension-placement-release.md).
+Status: proposed design, 2026-11-27. Current-state claims are checked against `main` at `add9dd8e3b`. The three slices in §10 are implemented; its real-process scenarios have not run yet. This design builds on [the stateless Harness design](2026-11-16-managed-stateless-harness.md) and [suspension placement release](2026-11-26-managed-suspension-placement-release.md).
 
 ## 1. Problem and current state
 
@@ -134,14 +134,14 @@ Java decodes each envelope with the rules of the SDK stream decoder, so the proj
 
 The reply is `{ "cursor": 131, "leaseRenewAfterMillis": 20000, "terminal": false }`.
 
-| Reply                                                                        | Harness action                                                                                                    |
-| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Success with `terminal: false`                                               | Continue from `cursor`; stop if the request carried an end marker                                                 |
-| `managed_event_ingest_cursor_mismatch`                                       | Re-read the journal from the returned cursor                                                                      |
-| `managed_event_ingest_not_ready`                                             | Retry with backoff, for no longer than the lease duration                                                         |
-| `terminal: true`, `managed_event_ingest_not_owner` or a writer fence refusal | Stop pushing for this admission                                                                                   |
-| `managed_event_ingest_end_refused`                                           | Flush through the committed sequence and retry if the cursor was short; otherwise stop pushing for this admission |
-| Transport failure                                                            | Resend the same request                                                                                           |
+| Reply                                                                        | Harness action                                                                                        |
+| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Success with `terminal: false`                                               | Continue from `cursor`; stop if the request carried an end marker                                     |
+| `managed_event_ingest_cursor_mismatch`                                       | Re-read the journal from the returned cursor                                                          |
+| `managed_event_ingest_not_ready`                                             | Retry with backoff, for no longer than the lease duration                                             |
+| `terminal: true`, `managed_event_ingest_not_owner` or a writer fence refusal | Stop pushing for this admission                                                                       |
+| `managed_event_ingest_end_refused`                                           | Recheck the recovery-blocked marker on the next tick. For a refused park marker, let the lease lapse. |
+| Transport failure                                                            | Resend the same request                                                                               |
 
 ## 5. Dispatcher changes
 
@@ -149,7 +149,7 @@ The reply is `{ "cursor": 131, "leaseRenewAfterMillis": 20000, "terminal": false
   - A fresh submission is a drive in which the Turn has no recorded admission (`harness_event_epoch` is null) and `submit` succeeds. It covers a new Turn's first drive and its retries before any admission was recorded, including a resubmission after a withdrawn submission mark.
   - A `submit` answered with `hosted_prompt_recovery_required` is not fresh, and neither is any drive of a Turn that already has an event epoch.
   - Delivery is decided per admission, so one Turn can start on ingest and finish on the stream after a recovery.
-- **Admission and hand-off.** `recordAdmission` gains a hand-off variant. In the same transaction it sets `dispatch_owner = 'harness:' + bootId` and `dispatch_lease_until = now + lease`. The dispatcher closes its renewal before the hand-off and returns without opening the stream. `releaseTurnLease` in `coordinate`'s `finally` then matches nothing. A Turn that is already `CANCELLING` when its admission is recorded is not handed off. The dispatcher continues on today's cancellation path, and the Harness's pushes get `not_owner`.
+- **Admission and hand-off.** `recordAdmission` gains a hand-off variant. In the same transaction it sets `dispatch_owner = 'harness:' + bootId` and `dispatch_lease_until = now + lease`. The dispatcher returns without opening the stream. Its renewal and the `releaseTurnLease` in `coordinate`'s `finally` then match nothing, because both require the dispatcher as owner. A Turn that is already `CANCELLING` when its admission is recorded is not handed off. The dispatcher continues on today's cancellation path, and the Harness's pushes get `not_owner`.
 - **Unchanged paths.** Recovery admission, continuation, cancellation and recovery-blocked observation open the stream as today, and their Turns remain dispatcher-owned.
 - **Cancel take-back.** `findDispatchable` and `claimTurn` also admit `status = 'CANCELLING' AND dispatch_owner LIKE 'harness:%'` regardless of `dispatch_lease_until` and `retry_after`. The Harness renews that lease every 20 s, so a claim that waited for it would never deliver the cancel. The claimer becomes the owner and runs today's cancellation path, including `cancelOriginalTurn` and the stream. The cursor is shared, so the take-back neither loses nor duplicates events.
 - **Lease lapse.** A lapsed Harness-owned lease is an ordinary lapsed lease. The sweep claims the Turn, and today's attach, takeover and recovery admission take it from there.
@@ -157,12 +157,15 @@ The reply is `{ "cursor": 131, "leaseRenewAfterMillis": 20000, "terminal": false
 ## 6. Harness changes
 
 - **Capability.** `event-ingest/1` joins the contract features. A pool still requires identical features.
-- **Pusher.** A per-Session pusher runs while an ingest admission is active.
+- **Pusher.** One pusher runs for each ingest admission.
   - It reuses the `eventEnvelope` projection and `streamedDeltaIds` seeding of the events route, and reads `authority.readEvents` from its cursor at the same 250 ms cadence.
   - It starts at the admission's `lastEventId`.
   - It posts through a new `ingestEvents` method on the Session Store client.
   - It stops on a reply with `terminal: true`, on `not_owner`, a writer fence refusal, or an acknowledged end marker.
-- **Park.** After the seal is confirmed and before the placement is released (#18404), the pusher flushes through the committed sequence and posts `end: "parked"` with the sealed incarnation. If this fails, the suspension continues, and the lapsed lease leads to today's recovery.
+- **Admission.** A malformed `eventDelivery` is refused with 400 `invalid_hosted_event_delivery`. A Session without an HTTP Session Store refuses it with 409 `hosted_event_ingest_unavailable`. The connectors report ingest support only while the Session Store is enabled, so the dispatcher does not send it to such a Session.
+- **Replayed admission.** A retried submission can be answered 202 from the in-memory admission or from the journal. Each such answer with `eventDelivery` also starts a pusher at the watermark it answers, because the dispatcher hands the Turn off on any 202. A pusher already running for the prompt is replaced.
+- **Suspension and close.** A pusher counts as an open event stream: an ordinary idle suspension waits until it stops, and every close path stops it. An Action-parked suspension pauses every pusher before the seal.
+- **Park.** After pausing and while the writer is still live, the pusher flushes committed events in batches. The flush stops if the cursor makes no progress. After the seal is confirmed and before the placement is released (#18404), the pusher posts `end: "parked"` with the sealed incarnation if the marker can reach the committed sequence. If delivery fails, suspension continues and the Turn recovers when its lease lapses.
 - **Recovery block.** The condition is the one Java polls today: no active prompt for the Turn, `recoveryBlocked`, and the cursor at the committed sequence. When it holds, the pusher posts `end: "recovery_blocked"`.
 
 ## 7. Compatibility and rollout
@@ -200,18 +203,19 @@ The reply is `{ "cursor": 131, "leaseRenewAfterMillis": 20000, "terminal": false
 
 - `server/.../api/ManagedSessionStoreController.java`: the `events:ingest` route.
 - `persistence/.../JournalWriterLifecycle.java` and `JdbcManagedSessionStore.java`: ingest authentication, live or clean-sealed.
-- `persistence/.../AgentTurnExecution.java`: the admission hand-off, the CANCELLING take-back predicates in `findDispatchable` and `claimTurn`, and cursor advance without events.
+- `persistence/.../AgentTurnHandOff.java`: the admission hand-off, and the CANCELLING take-back predicate (`HARNESS_HELD_CANCEL`).
+- `persistence/.../AgentTurnExecution.java`: that predicate in `findDispatchable` and `claimTurn`, and cursor advance without events.
 - `control-plane/.../HarnessCoordinator.java`: request ingest and hand off after a fresh submission. The per-envelope logic of `consumeStream` moves to a class shared by the stream and the ingest handler.
 - `adapters/.../QwenHostedHarnessConnector.java` and `contracts/.../HarnessConnector.java`: `eventDelivery` on submit, and feature detection.
 - `adapters/.../harness/HarnessFeature.java`: the `event-ingest/1` token.
 - `packages/sdk-java/qwencode/.../daemon/SubmitHarnessTurn.java`: the `eventDelivery` field of the submit body.
-- `ManagedAgentProperties.java`, `application.yml`: `qwen.managed-agent.event-ingest.enabled` (default `false`).
+- `application.yml` and `configuration-descriptions.json`: `qwen.managed-agent.event-ingest.enabled` (default `false`), read by `HarnessCoordinator`.
 
 ### Harness and Store client
 
 - `packages/core/src/managed-runtime/http-managed-session-store.ts`: `ingestEvents`.
 - `packages/cli/src/serve/hosted-harness-contract.ts`: `event-ingest/1`.
-- `packages/cli/src/serve/hosted-harness-session/turn.ts`: accept `eventDelivery`.
+- `packages/cli/src/serve/hosted-harness-session/turn.ts`: accept `eventDelivery`, and start the pusher on a fresh or replayed admission.
 - `packages/cli/src/serve/hosted-harness-session/event-ingest.ts` (new): the pusher. `observation-routes.ts` exports the envelope projection.
 - `packages/cli/src/serve/hosted-harness-session/session-suspension.ts` and the Action-parking flow: the `parked` marker between seal and release.
 

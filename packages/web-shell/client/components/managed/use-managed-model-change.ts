@@ -7,7 +7,7 @@ import type {
   ManagedSessionModels,
 } from './managed-agent-provider';
 import { managedRequestId } from './managed-session-storage';
-import { withActionTimeout } from '../../daemon/timing';
+import { withActionTimeout } from '../../utils/action-timeout';
 
 function latestSelection(
   current: ManagedModelSelection | undefined,

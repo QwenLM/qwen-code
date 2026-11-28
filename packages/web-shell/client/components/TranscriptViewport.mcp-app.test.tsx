@@ -89,6 +89,7 @@ vi.mock('../hooks/useAssistantFeedback', async (importOriginal) => {
   };
 });
 const { TranscriptViewport } = await import('./TranscriptViewport');
+const { DaemonTranscriptViewport } = await import('./DaemonTranscriptViewport');
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 afterEach(() => {
@@ -233,7 +234,10 @@ async function setup(
                 : undefined
             }
           >
-            <TranscriptViewport {...props} />
+            <TranscriptViewport
+              {...props}
+              sessionViewportComponent={DaemonTranscriptViewport}
+            />
           </McpAppGeneratedUiContext.Provider>
         </McpAppToolsContext.Provider>
       </McpAppHostContext.Provider>,

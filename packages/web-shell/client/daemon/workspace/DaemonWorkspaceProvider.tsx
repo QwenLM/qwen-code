@@ -5,7 +5,6 @@
  */
 
 import {
-  createContext,
   useCallback,
   useContext,
   useEffect,
@@ -29,6 +28,7 @@ import { DaemonAvailabilityContext } from '../availability-context.js';
 import { getSessionCatalogStore } from '../../session-catalog/session-catalog-store.js';
 import { createDaemonWorkspaceActions } from './actions.js';
 import { setBoundedMapEntry } from '../../utils/bounded-map.js';
+import { WorkspaceRuntimeContext } from '../../utils/workspace-context.js';
 import type {
   DaemonWorkspaceContextValue,
   DaemonWorkspaceProviderProps,
@@ -36,9 +36,7 @@ import type {
   DaemonWorkspaceStatus,
 } from './types.js';
 
-const DaemonWorkspaceContext = createContext<
-  DaemonWorkspaceContextValue | undefined
->(undefined);
+const DaemonWorkspaceContext = WorkspaceRuntimeContext;
 
 // Module-copy marker for diagnosing "must be used within" failures. When the
 // page ends up with two copies of this module (a Vite dev module-graph hiccup,

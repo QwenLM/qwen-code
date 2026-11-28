@@ -79,6 +79,7 @@ describe('main CI failure resolver', () => {
       actions: 'read',
       contents: 'read',
       issues: 'write',
+      'pull-requests': 'read',
     });
     expect(job.concurrency).toEqual(reporter.jobs.file_issue.concurrency);
     expect(job.steps[0].env.GH_TOKEN).toBe('${{ github.token }}');

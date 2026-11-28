@@ -2819,6 +2819,9 @@ export class AcpDispatcher {
               },
               {
                 runtimeBaseDir: this.sessionRuntimeBaseDir,
+                ...(!this.isWorkspaceTrusted()
+                  ? { allowSidecarWrite: false }
+                  : {}),
                 signal: conn.abortSignal,
               },
             );
@@ -5623,7 +5626,9 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}sessions/delete`: {
           const ids = this.parseSessionIds(params);
           if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
-          const svc = new SessionService(this.boundWorkspace);
+          const svc = new SessionService(this.boundWorkspace, {
+            onWarning: logSessionArchiveWarning,
+          });
           const result = await this.runWithSessionListInvalidation(
             ['active', 'archived'],
             () =>

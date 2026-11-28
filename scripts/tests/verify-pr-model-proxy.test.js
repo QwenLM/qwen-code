@@ -782,6 +782,8 @@ describe('local container recipe pins', () => {
     const basic = ' <n> --repo <owner>/<repo> --execution container';
     const logSuffix =
       '> ~/.cache/qwen-verify/pr<n>/prepare.log 2>&1 || { cat ~/.cache/qwen-verify/pr<n>/prepare.log >&2; exit 1; }';
+    const guardLogSuffix =
+      '> ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log 2>&1 || { cat ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log >&2; exit 1; }';
     const logged = ` ${basic.trim()} --context-out ~/.cache/qwen-verify/pr<n>/pr.json ${logSuffix}`;
     const script = '<trusted-clone>/scripts/verify-pr-prepare.mjs';
     const valueFlags = new Set([
@@ -948,6 +950,12 @@ describe('local container recipe pins', () => {
       ) {
         text = text.slice(0, -logSuffix.length).trimEnd();
       } else if (
+        kind === 'guard' &&
+        text.endsWith(guardLogSuffix) &&
+        (text.includes('--out') || text.includes('--snapshot'))
+      ) {
+        text = text.slice(0, -guardLogSuffix.length).trimEnd();
+      } else if (
         kind === 'model-proxy' &&
         text.endsWith(
           '> ~/.cache/qwen-verify/pr<n>/proxy.json 2> ~/.cache/qwen-verify/pr<n>/proxy.err &',
@@ -972,6 +980,10 @@ describe('local container recipe pins', () => {
           /"\$\(cat ~\/\.cache\/qwen-verify\/pr<n>\/pr\.sha256\)"/g,
           '<digest>',
         )
+        .replace(
+          /"\$\(cat ~\/\.cache\/qwen-verify-guard\/pr<n>\/<round-id>\/guard\.sha256\)"/g,
+          '<guard-digest>',
+        )
         .replace(/(^|\s)--repo=/g, '$1--repo ')
         .replaceAll('[--round <r>]', '--round <r>')
         .replaceAll('[--artifact-dir <dir>]', '--artifact-dir <artifact-dir>')
@@ -980,6 +992,7 @@ describe('local container recipe pins', () => {
         .replaceAll('<host snapshot>', '<host-snapshot>')
         .replaceAll('<artifact dir>', '<artifact-dir>')
         .replaceAll('<absolute qwen>', '<absolute-qwen>')
+        .replaceAll('<round-id>', 'roundId')
         .replaceAll('pr<n>', 'prN')
         .replaceAll('<owner>/<repo>', 'owner/repo');
       if (kind === 'prepare') {
@@ -988,14 +1001,35 @@ describe('local container recipe pins', () => {
           text === '--require-isolation --artifact-dir <round-dir>'
         );
       }
+      if (kind === 'guard') {
+        const isGuardHostPath = (path) =>
+          path.startsWith('~/.cache/qwen-verify-guard/prN/roundId/') &&
+          validDocumentedPath(path);
+        const compareMatch = text.match(
+          exact(
+            String.raw` --compare --start (${pathValue}) --now (${pathValue}) --out (${pathValue})`,
+          ),
+        );
+        if (compareMatch !== null) {
+          return compareMatch.slice(1).every((path) => isGuardHostPath(path));
+        }
+        const snapMatch = text.match(
+          exact(
+            String.raw` --pr <n> --repo (${repo}) --snapshot (${pathValue})(?: --no-clobber)?`,
+          ),
+        );
+        return snapMatch !== null && isGuardHostPath(snapMatch[2]);
+      }
       if (kind === 'check') {
         const match = text.match(
           exact(
-            String.raw` --context (${pathValue}) --context-sha256 <digest>(?: --context-root (${pathValue}))? (${pathValue})`,
+            String.raw` --context (${pathValue}) --context-sha256 <digest>(?: --context-root (${pathValue}))?(?: --execution-record <execution-record> --execution-record-sha256 <execution-record-sha256>)?(?: --require-guard --guard (${pathValue}) --guard-sha256 <guard-digest>)? (${pathValue})`,
           ),
         );
         return (
           match !== null &&
+          (match[3] === undefined ||
+            match[3].startsWith('~/.cache/qwen-verify-guard/prN/roundId/')) &&
           match
             .slice(1)
             .every((path) => path === undefined || validDocumentedPath(path))
@@ -6459,8 +6493,19 @@ describe('local container recipe pins', () => {
           ? raw.slice(1, -1)
           : raw;
       const cacheRoot = '~/.cache/qwen-verify/pr<n>';
+      const guardCacheRoot = '~/.cache/qwen-verify-guard/pr<n>/<round-id>';
       const cachePath = (raw, suffix = '') => {
         const path = `.cache/qwen-verify/pr<n>${suffix ? `/${suffix}` : ''}`;
+        return [
+          `~/${path}`,
+          `$HOME/${path}`,
+          `"$HOME/${path}"`,
+          `\${HOME}/${path}`,
+          `"\${HOME}/${path}"`,
+        ].includes(raw);
+      };
+      const guardCachePath = (raw, suffix = '') => {
+        const path = `.cache/qwen-verify-guard/pr<n>/<round-id>${suffix ? `/${suffix}` : ''}`;
         return [
           `~/${path}`,
           `$HOME/${path}`,
@@ -6546,7 +6591,7 @@ describe('local container recipe pins', () => {
         if (hasBashCaseInSyntax(source)) return false;
         const parsed = source
           .replace(
-            /"<[A-Za-z0-9](?:[A-Za-z0-9_.,+ -]*[A-Za-z0-9])?>"|(?<=^|[\s/="'`:-]|\bpr)<(?:n|owner|repo|clone|pr-clone|trusted-clone|ts|assets-repo|default|branch|path|dir|round-dir|trusted-dir)>(?=\/)|(?<=^|[\s/="'`:-]|\bpr)<[A-Za-z0-9](?:[A-Za-z0-9_,+ -]*[A-Za-z0-9])?>(?![A-Za-z0-9_./])/g,
+            /"<[A-Za-z0-9](?:[A-Za-z0-9_.,+ -]*[A-Za-z0-9])?>"|(?<=^|[\s/="'`:-]|\bpr)<(?:n|owner|repo|clone|pr-clone|trusted-clone|ts|assets-repo|default|branch|path|dir|round-dir|round-id|trusted-dir)>(?=\/)|(?<=^|[\s/="'`:-]|\bpr)<[A-Za-z0-9](?:[A-Za-z0-9_,+ -]*[A-Za-z0-9])?>(?![A-Za-z0-9_./])/g,
             (placeholder) =>
               placeholder.startsWith('"')
                 ? `"${'P'.repeat(placeholder.length - 2)}"`
@@ -6765,7 +6810,13 @@ describe('local container recipe pins', () => {
             if (raw === `> ${cacheRoot}/prepare.log`) {
               return helper('prepare');
             }
-            if (raw === `> ${cacheRoot}/pr.sha256`) {
+            if (raw === `> ${guardCacheRoot}/guard.log`) {
+              return helper('guard');
+            }
+            if (
+              raw === `> ${cacheRoot}/pr.sha256` ||
+              raw === `> ${guardCacheRoot}/guard.sha256`
+            ) {
               return name === 'sed';
             }
             if (raw === `> ${cacheRoot}/previous-report.md`) {
@@ -6898,6 +6949,9 @@ describe('local container recipe pins', () => {
                 (relativeDataPath(rawValues[0]) ||
                   ['prepare.log', 'pr.sha256', 'proxy.pid'].some((suffix) =>
                     cachePath(rawValues[0], suffix),
+                  ) ||
+                  ['guard.log', 'guard.sha256'].some((suffix) =>
+                    guardCachePath(rawValues[0], suffix),
                   ))
               );
             }
@@ -6951,7 +7005,10 @@ describe('local container recipe pins', () => {
                 rawValues[0] === '-Eq' &&
                 values[1] === '^[0-9a-f]{64}$'
               ) {
-                return cachePath(rawValues[2], 'pr.sha256');
+                return (
+                  cachePath(rawValues[2], 'pr.sha256') ||
+                  guardCachePath(rawValues[2], 'guard.sha256')
+                );
               }
               if (
                 values.length >= 2 &&
@@ -6984,6 +7041,7 @@ describe('local container recipe pins', () => {
                 rawValues[0] === '-p' &&
                 (cachePath(rawValues[1]) ||
                   cachePath(rawValues[1], 'qwen-base') ||
+                  guardCachePath(rawValues[1]) ||
                   (trustedDockerExec && rawValues[1] === '"$HOME/.qwen"'))
               );
             }
@@ -7048,16 +7106,23 @@ describe('local container recipe pins', () => {
                   rawValues.length >= 2 &&
                   rawValues
                     .slice(1)
-                    .every((raw) =>
-                      [
-                        'prepare.log',
-                        'pr.sha256',
-                        'review-threads.json',
-                        'previous-report.md',
-                        'proxy.json',
-                        'proxy.err',
-                        'proxy.pid',
-                      ].some((suffix) => cachePath(raw, suffix)),
+                    .every(
+                      (raw) =>
+                        [
+                          'prepare.log',
+                          'pr.sha256',
+                          'review-threads.json',
+                          'previous-report.md',
+                          'proxy.json',
+                          'proxy.err',
+                          'proxy.pid',
+                        ].some((suffix) => cachePath(raw, suffix)) ||
+                        [
+                          'guard-now.json',
+                          'guard-verdict.json',
+                          'guard.log',
+                          'guard.sha256',
+                        ].some((suffix) => guardCachePath(raw, suffix)),
                     )
                 );
               }
@@ -7261,8 +7326,10 @@ describe('local container recipe pins', () => {
               valid =
                 rawValues.length === 3 &&
                 rawValues[0] === '-n' &&
-                rawValues[1] === "'s/^  context-sha256  //p'" &&
-                cachePath(rawValues[2], 'prepare.log');
+                ((rawValues[1] === "'s/^  context-sha256  //p'" &&
+                  cachePath(rawValues[2], 'prepare.log')) ||
+                  (rawValues[1] === "'s/^  guard-sha256  //p'" &&
+                    guardCachePath(rawValues[2], 'guard.log')));
               return;
             }
             if (name === 'tar') {
@@ -7554,9 +7621,10 @@ describe('local container recipe pins', () => {
       const families = calls.map((call) => call.family);
       const actions = calls.map((call) => call.action);
       return (
-        calls.length === 24 &&
+        calls.length === 29 &&
         families.filter((family) => family === 'prepare').length === 4 &&
-        families.filter((family) => family === 'check').length === 3 &&
+        families.filter((family) => family === 'check').length === 5 &&
+        families.filter((family) => family === 'guard').length === 3 &&
         families.filter((family) => family === 'watch-state').length === 12 &&
         families.filter((family) => family === 'watch-gate').length === 3 &&
         families.filter((family) => family === 'model-proxy').length === 1 &&
@@ -7568,6 +7636,65 @@ describe('local container recipe pins', () => {
       );
     };
     expect(await onlyDocumentedPrepareCalls(skill)).toBe(true);
+    // Hostile mutations of the new guard-start, guard-refresh, guard-verdict,
+    // VM execution record, and --require-guard gate must be rejected by the AST auditor.
+    for (const [label, mutated] of [
+      [
+        'guard start from untrusted PR clone',
+        skill.replace(
+          'node <trusted-clone>/scripts/verify-pr-guard.mjs \\\n  --pr <n> --repo <owner>/<repo> \\\n  --snapshot ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-start.json',
+          'node <pr-clone>/scripts/verify-pr-guard.mjs \\\n  --pr <n> --repo <owner>/<repo> \\\n  --snapshot ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-start.json',
+        ),
+      ],
+      [
+        'guard start placed inside container-mounted verify-context directory',
+        skill.replace(
+          '--snapshot ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-start.json',
+          '--snapshot ~/.cache/qwen-verify/pr<n>/<round-id>/guard-start.json',
+        ),
+      ],
+      [
+        'guard refresh from untrusted PR clone',
+        skill.replace(
+          'node <trusted-clone>/scripts/verify-pr-guard.mjs \\\n  --pr <n> --repo <owner>/<repo> \\\n  --snapshot ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-now.json',
+          'node <pr-clone>/scripts/verify-pr-guard.mjs \\\n  --pr <n> --repo <owner>/<repo> \\\n  --snapshot ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-now.json',
+        ),
+      ],
+      [
+        'guard compare from untrusted PR clone',
+        skill.replace(
+          'node <trusted-clone>/scripts/verify-pr-guard.mjs --compare',
+          'node <pr-clone>/scripts/verify-pr-guard.mjs --compare',
+        ),
+      ],
+      [
+        'guard.log redirected outside per-round host cache',
+        skill.replace(
+          '> ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log 2>&1',
+          '> /tmp/guard.log 2>&1',
+        ),
+      ],
+      [
+        'guard.sha256 written outside per-round host cache',
+        skill.replace(
+          '> ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256',
+          '> /tmp/guard.sha256',
+        ),
+      ],
+      [
+        'command injection appended to guard check',
+        skill.replace('--require-guard \\', '--require-guard --unknown \\'),
+      ],
+      [
+        'untrusted execution-record path in VM publish check',
+        skill.replace(
+          '--execution-record <execution-record> \\',
+          '--execution-record /tmp/evil.json \\',
+        ),
+      ],
+    ]) {
+      expect(await onlyDocumentedPrepareCalls(mutated), label).toBe(false);
+    }
     expect(
       await onlyDocumentedPrepareCalls(
         `${skill}\n\`\`\`bash\ncorepack pnpm install --frozen-lockfile\n\`\`\``,
@@ -8619,6 +8746,9 @@ describe('local container recipe pins', () => {
       ['fenced unlabeled abs path no ext', '```\n/tmp/payload\n```'],
       ['fenced console extensionless path', '```console\n./payload\n```'],
       ['fenced text benign-path-name', '```text\n../escape\n```'],
+      ['bare null-builtin semicolon whoami', ':; whoami'],
+      ['inline null-builtin semicolon whoami', '`:; whoami`'],
+      ['fenced text null-builtin semicolon whoami', '```text\n:; whoami\n```'],
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(`${skill}\n${block}`),
