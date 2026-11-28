@@ -18,7 +18,7 @@ import {
   getShellConfiguration,
   getShellDisplayName,
 } from '../utils/shell-utils.js';
-import { escapeSystemReminderTags } from '../utils/xml.js';
+import { escapeSystemReminderTags, unescapeXml } from '../utils/xml.js';
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
@@ -568,6 +568,168 @@ export async function buildAvailableSkillsReminder(
 }
 
 /**
+ * Reconstructs the skill/command entries a stored startup prelude listed, so a
+ * resume can seed reminder dedup from what the model actually saw instead of
+ * re-announcing the whole listing on the first turn.
+ */
+export function parseAvailableSkillsFromPrelude(
+  prelude: Content,
+): AvailableSkillEntry[] {
+  // Anchor on the listing's own part, like isSkillListingReminder: MCP
+  // instructions and ordinary messages can quote the same tags.
+  const listing = (prelude.parts ?? []).find((part) =>
+    part.text?.startsWith(
+      `${SYSTEM_REMINDER_OPEN}\n${SKILLS_AVAILABLE_OPENER}`,
+    ),
+  )?.text;
+  if (listing === undefined) return [];
+
+  const block = /<available_skills>([\s\S]*?)<\/available_skills>/.exec(
+    listing,
+  );
+  if (block?.[1] === undefined) return [];
+
+  const entries: AvailableSkillEntry[] = [];
+  for (const match of block[1].matchAll(/<skill>([\s\S]*?)<\/skill>/g)) {
+    const body = match[1] ?? '';
+    const name = /<name>\s*([\s\S]*?)\s*<\/name>/.exec(body)?.[1];
+    if (name === undefined) continue;
+    const location = /<location>\s*([\s\S]*?)\s*<\/location>/.exec(body)?.[1];
+    entries.push({
+      name: unescapeXml(name.trim()),
+      description: '',
+      ...(location !== undefined
+        ? {
+            level: unescapeXml(location.trim()) as NonNullable<
+              AvailableSkillEntry['level']
+            >,
+          }
+        : {}),
+    });
+  }
+  return entries;
+}
+
+/**
+ * Reminders a stored startup prelude already replayed for the model. Resume
+ * seeding uses these so the live MCP registry, which fills in after
+ * `startChat` under progressive discovery, does not announce the same
+ * instructions/tools a second time on the next turn.
+ */
+export interface StoredMcpReminders {
+  /**
+   * Full rendered MCP-instructions reminder bodies (closing tag stripped).
+   * Kept whole because server instructions are interpolated unescaped; a
+   * `\n\n### ` inside one payload must not be mistaken for a server boundary.
+   */
+  instructionBodies: string[];
+  /** MCP tool names listed in the stored added/changed/deferred reminders. */
+  toolNames: Set<string>;
+}
+
+const MCP_INSTRUCTIONS_REMINDER_OPENER = `${SYSTEM_REMINDER_OPEN}\nThe text below was supplied by the MCP server.`;
+const ADDED_MCP_TOOLS_REMINDER_OPENER = `${SYSTEM_REMINDER_OPEN}\nThe following MCP tools became available after startup`;
+const CHANGED_MCP_TOOLS_REMINDER_OPENER = `${SYSTEM_REMINDER_OPEN}\nThe available MCP tools changed after startup.`;
+const DEFERRED_TOOLS_REMINDER_OPENER = `${SYSTEM_REMINDER_OPEN}\nThe following tools are reachable through`;
+
+function collectRenderedToolNames(text: string, names: Set<string>): void {
+  for (const match of text.matchAll(/^- "((?:[^"\\]|\\.)+)":/gm)) {
+    try {
+      names.add(JSON.parse(`"${match[1]}"`) as string);
+    } catch {
+      // A malformed line is not a rendered tool name.
+    }
+  }
+}
+
+function collectMcpSectionToolNames(text: string, names: Set<string>): void {
+  const mcpSection = text.indexOf('\n### MCP servers');
+  if (mcpSection !== -1) {
+    collectRenderedToolNames(text.slice(mcpSection), names);
+  }
+}
+
+/**
+ * Applies the removed-tools list of a changed reminder. The builder emits
+ * added tools first and removals second, so deleting from the accumulated set
+ * leaves the net state the model last saw.
+ */
+function collectRemovedMcpToolNames(text: string, names: Set<string>): void {
+  const removed = text.indexOf(
+    '\nThe following MCP tools are no longer available.',
+  );
+  if (removed === -1) return;
+  for (const match of text
+    .slice(removed)
+    .matchAll(/^- "((?:[^"\\]|\\.)+)"$/gm)) {
+    try {
+      names.delete(JSON.parse(`"${match[1]}"`) as string);
+    } catch {
+      // A malformed line is not a rendered tool name.
+    }
+  }
+}
+
+/**
+ * Parses the MCP instructions and MCP tool listings out of replayed history.
+ * Anchored on the envelope each builder writes, so ordinary messages or tool
+ * output that merely quote the same markers cannot seed the dedup sets.
+ */
+export function parseStoredMcpReminders(
+  history: readonly Content[],
+): StoredMcpReminders {
+  const instructionBodies: string[] = [];
+  const toolNames = new Set<string>();
+  for (const content of history) {
+    for (const part of content.parts ?? []) {
+      const raw = part.text;
+      if (typeof raw !== 'string') continue;
+      const text = raw.endsWith(SYSTEM_REMINDER_CLOSE)
+        ? raw.slice(0, -SYSTEM_REMINDER_CLOSE.length)
+        : raw;
+      if (text.startsWith(MCP_INSTRUCTIONS_REMINDER_OPENER)) {
+        instructionBodies.push(text);
+      } else if (text.startsWith(ADDED_MCP_TOOLS_REMINDER_OPENER)) {
+        collectRenderedToolNames(text, toolNames);
+      } else if (text.startsWith(CHANGED_MCP_TOOLS_REMINDER_OPENER)) {
+        collectMcpSectionToolNames(text, toolNames);
+        collectRemovedMcpToolNames(text, toolNames);
+      } else if (text.startsWith(DEFERRED_TOOLS_REMINDER_OPENER)) {
+        collectMcpSectionToolNames(text, toolNames);
+      }
+    }
+  }
+  return { instructionBodies, toolNames };
+}
+
+/**
+ * The exact rendered section for one server, escaped the same way
+ * `wrapSystemReminder` escapes the reminder body.
+ */
+export function storedMcpInstructionSection(
+  serverName: string,
+  instructions: string,
+): string {
+  return escapeSystemReminderTags(
+    `### ${serverName}\n${instructions.trimEnd()}`,
+  );
+}
+
+/**
+ * Whether a stored instructions reminder already contains the exact rendered
+ * section for `serverName`. Compares the whole live section (escaped exactly
+ * like `wrapSystemReminder`) instead of splitting the stored body, so payload
+ * text containing `\n\n### ` cannot truncate the match and cause a re-announce.
+ */
+export function storedMcpInstructionsInclude(
+  body: string,
+  serverName: string,
+  instructions: string,
+): boolean {
+  return body.includes(storedMcpInstructionSection(serverName, instructions));
+}
+
+/**
  * Builds the per-turn "newly available skills/commands" delta reminder. Used by
  * the client to announce skills enabled mid-session (e.g. via /skills) and MCP
  * prompts added after startup — WITHOUT mutating the cached prefix (it is a tail
@@ -730,6 +892,16 @@ export async function getInitialChatHistory(
   const includeAvailableSkillsReminder =
     (options.includeAvailableSkillsReminder ?? true) &&
     toolRegistry.getAllToolNames().includes(ToolNames.SKILL);
+
+  // A resumed session replays the prelude it originally sent. Rebuilding it
+  // here would change the date/git snapshot in the middle of an otherwise
+  // byte-identical conversation and invalidate an implicit prefix cache from
+  // the first user message onward. Skills are restored from history by the
+  // caller (`restoreLoadedSkillsFromHistory`), so no fresh snapshot is needed.
+  if (extraHistory?.[0] && isSystemReminderContent(extraHistory[0])) {
+    return [[...extraHistory], []];
+  }
+
   const today = formatDateForContext();
   const startupReminder = config.getSkipStartupContext()
     ? null

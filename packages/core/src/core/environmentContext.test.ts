@@ -25,9 +25,12 @@ import {
   getInitialChatHistory,
   getStartupContextLength,
   markCompressedHistory,
+  parseStoredMcpReminders,
+  storedMcpInstructionsInclude,
   RETAINED_COMPACTION_TAIL_REMINDER,
   isSkillListingReminder,
   isSystemReminderContent,
+  parseAvailableSkillsFromPrelude,
   stripSystemReminderBlocks,
   stripStartupContext,
   wrapSystemReminder,
@@ -409,6 +412,20 @@ describe('date announcements', () => {
         'Thursday, June 4, 2026',
       );
       expect(await startupDate(undefined, null)).toBeUndefined();
+    });
+
+    it('reuses a stored startup prelude instead of rebuilding it', async () => {
+      const stored = userText(
+        '<system-reminder>\nstored prelude\n</system-reminder>',
+      );
+      const extra = [stored, userText('Earlier')];
+      const { config } = chatHistorySetup();
+
+      const [history] = await getInitialChatHistory(config as Config, extra, {
+        gitStatus: 'dirty',
+      });
+
+      expect(history).toEqual(extra);
     });
   });
 });
@@ -1486,6 +1503,197 @@ describe('buildAvailableSkillsReminder', () => {
     expect(result!.reminder).toContain('Bundled when-to-use');
     expect(result!.reminder).not.toContain('Project second line');
     expect(result!.reminder).not.toContain('Project when-to-use');
+  });
+});
+
+describe('parseAvailableSkillsFromPrelude', () => {
+  const prelude = (body: string): Content => ({
+    role: 'user',
+    parts: [{ text: wrapSystemReminder(body) }],
+  });
+
+  it('recovers skills and commands from a rendered listing', () => {
+    const content = prelude(
+      [
+        'The following skills are available for use with the Skill tool.',
+        '<available_skills>',
+        '<skill>',
+        '<name>',
+        'alpha &amp; beta',
+        '</name>',
+        '<description>',
+        'A &amp; B',
+        '</description>',
+        '<location>',
+        'project',
+        '</location>',
+        '</skill>',
+        '<skill>',
+        '<name>',
+        'mcp &lt;prompt&gt;',
+        '</name>',
+        '<description>',
+        'A command',
+        '</description>',
+        '</skill>',
+        '</available_skills>',
+      ].join('\n'),
+    );
+
+    expect(parseAvailableSkillsFromPrelude(content)).toEqual([
+      { name: 'alpha & beta', description: '', level: 'project' },
+      { name: 'mcp <prompt>', description: '' },
+    ]);
+  });
+
+  it('ignores a quoted listing outside the skill-listing part', () => {
+    const content: Content = {
+      role: 'user',
+      parts: [
+        {
+          text: wrapSystemReminder(
+            '<available_skills>\n<skill>\n<name>\nfake</name>\n</skill>\n</available_skills>',
+          ),
+        },
+        {
+          text: wrapSystemReminder(
+            'The following skills are available for use with the Skill tool.\n<available_skills>\n<skill>\n<name>\nreal</name>\n<location>\nuser\n</location>\n</skill>\n</available_skills>',
+          ),
+        },
+      ],
+    };
+
+    expect(parseAvailableSkillsFromPrelude(content)).toEqual([
+      { name: 'real', description: '', level: 'user' },
+    ]);
+  });
+
+  it('returns no entries without an available_skills block', () => {
+    expect(
+      parseAvailableSkillsFromPrelude(
+        prelude('No skills are currently available.'),
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe('parseStoredMcpReminders', () => {
+  const content = (text: string): Content => ({
+    role: 'user',
+    parts: [{ text }],
+  });
+
+  it('keeps a whole instructions reminder when a payload contains a section marker', () => {
+    const instructions = buildMcpServerInstructionsReminderFromEntries(
+      new Map([
+        ['server-a', 'Use A.'],
+        ['server-b', 'Use B.\n\n### payload'],
+      ]),
+    )!;
+
+    const parsed = parseStoredMcpReminders([content(instructions)]);
+
+    expect(parsed.instructionBodies).toHaveLength(1);
+    expect(
+      storedMcpInstructionsInclude(
+        parsed.instructionBodies[0],
+        'server-a',
+        'Use A.',
+      ),
+    ).toBe(true);
+    expect(
+      storedMcpInstructionsInclude(
+        parsed.instructionBodies[0],
+        'server-b',
+        'Use B.\n\n### payload',
+      ),
+    ).toBe(true);
+  });
+
+  it('collects MCP tool names from added, changed and deferred reminders', () => {
+    const added = buildAddedMcpToolsReminder([
+      {
+        name: 'mcp__server-a__do',
+        description: 'Does.',
+        serverName: 'server-a',
+      },
+    ])!;
+    const changed = buildChangedMcpToolsReminder(
+      [
+        {
+          name: 'mcp__server-c__new',
+          description: 'New.',
+          serverName: 'server-c',
+        },
+      ],
+      ['mcp__server-c__old'],
+    )!;
+    const deferred = buildDeferredToolsReminder({
+      getDeferredToolSummary: () => [
+        {
+          name: 'cron_list',
+          description: 'List scheduled jobs.',
+        },
+        {
+          name: 'mcp__server-d__go',
+          description: 'Goes.',
+          serverName: 'server-d',
+        },
+      ],
+      isDeferredToolRevealed: () => false,
+      getTool: (name: string) =>
+        name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+          ? {}
+          : null,
+    } as unknown as ToolRegistry)!;
+
+    const parsed = parseStoredMcpReminders([
+      content(added),
+      content(changed),
+      content(deferred),
+    ]);
+
+    expect(parsed.toolNames).toEqual(
+      new Set(['mcp__server-a__do', 'mcp__server-c__new', 'mcp__server-d__go']),
+    );
+    expect(parsed.toolNames).not.toContain('mcp__server-c__old');
+    expect(parsed.toolNames).not.toContain('cron_list');
+  });
+
+  it('drops a tool that a later changed reminder removes', () => {
+    const added = buildAddedMcpToolsReminder([
+      {
+        name: 'mcp__server-a__do',
+        description: 'Does.',
+        serverName: 'server-a',
+      },
+    ])!;
+    const removed = buildChangedMcpToolsReminder([], ['mcp__server-a__do'])!;
+
+    const parsed = parseStoredMcpReminders([content(added), content(removed)]);
+
+    expect(parsed.toolNames.has('mcp__server-a__do')).toBe(false);
+  });
+
+  it('ignores the same markers outside a reminder envelope', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          {
+            text: 'The text below was supplied by the MCP server. ...\n\n### server-a\nUse A.',
+          },
+          {
+            text: 'The following MCP tools became available after startup\n- "mcp__fake__tool": "x"',
+          },
+        ],
+      },
+    ];
+
+    const parsed = parseStoredMcpReminders(history);
+
+    expect(parsed.instructionBodies).toHaveLength(0);
+    expect(parsed.toolNames.size).toBe(0);
   });
 });
 

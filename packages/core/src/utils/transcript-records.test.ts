@@ -464,6 +464,8 @@ describe('validateTranscriptRecord', () => {
   const RECORDED_SUBTYPES: Record<NonNullable<ChatRecord['subtype']>, true> = {
     chat_compression: true,
     memory_catalog_snapshot: true,
+    startup_context: true,
+    context_reminder: true,
     permission_context_snapshot: true,
     slash_command: true,
     ui_telemetry: true,
