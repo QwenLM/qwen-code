@@ -557,6 +557,13 @@ export class McpClient {
   private status: MCPServerStatus = MCPServerStatus.DISCONNECTED;
   private isDisconnecting = false;
   /**
+   * The transport whose connect a stop interrupted, or `undefined` when none
+   * is pending. A later completion of that connect belongs to a lifetime the
+   * owner already ended.
+   */
+  private connectingTransport: Transport | undefined;
+  private stopLifetime = false;
+  /**
    * captures the most recent error
    * delivered to the SDK Client's `onerror` callback. The pool entry's
    *  silent-drop block (the DISCONNECTED-on-active branch inside
@@ -593,6 +600,7 @@ export class McpClient {
    */
   async connect(): Promise<void> {
     this.isDisconnecting = false;
+    this.stopLifetime = false;
     invocationContextClients.delete(this.client);
     clearMcpOAuthRequirement(this.serverName, this.serverConfig);
     // clear stale upstream error from
@@ -604,6 +612,8 @@ export class McpClient {
     this.updateStatus(MCPServerStatus.CONNECTING);
     try {
       this.transport = await this.createTransport();
+      this.connectingTransport = this.transport;
+      const connectingTransport = this.transport;
 
       this.client.onerror = (error) => {
         // Legacy Streamable HTTP can wrap a JSON-RPC -32601 response in a
@@ -647,14 +657,23 @@ export class McpClient {
         };
       });
 
-      await this.client.connect(this.transport, {
+      await this.client.connect(connectingTransport, {
         timeout: this.serverConfig.timeout,
       });
+      this.connectingTransport = undefined;
+      // A stop during `connect()` ended the lifetime this transport belongs
+      // to. Completing into CONNECTED would revive a transport the owner
+      // already closed, admit `discover()` on it, and leave the pool's
+      // per-entry truth saying live.
+      if (this.stopLifetime || this.isDisconnecting) {
+        return;
+      }
       this.instructions = this.client.getInstructions();
       bindInvocationContextPolicy(this.client, this.transport);
 
       this.updateStatus(MCPServerStatus.CONNECTED);
     } catch (error) {
+      this.connectingTransport = undefined;
       this.instructions = undefined;
       if (
         hasNetworkTransport(this.serverConfig) &&
@@ -883,6 +902,12 @@ export class McpClient {
     // intent there would tell the abort repair standing next to it that the
     // lost connection was on purpose (issue #12160).
     const deliberate = opts.deliberate ?? true;
+    // Remember that this stop interrupts a connect still in flight, so its
+    // late completion cannot write CONNECTED back.
+    if (this.connectingTransport !== undefined) {
+      this.stopLifetime = true;
+      this.connectingTransport = undefined;
+    }
     // Set the local status BEFORE flipping `isDisconnecting`. A concurrent
     // `discover()` reading `this.status` would otherwise see the stale
     // CONNECTED value and try to register tools that we're about to drop.
@@ -1011,6 +1036,9 @@ export class McpClient {
 
   private updateStatus(status: MCPServerStatus): void {
     this.status = status;
+    if (status === MCPServerStatus.CONNECTING) {
+      this.stopLifetime = false;
+    }
     // Record the per-connection truth alongside the name-keyed write: the
     // registry is shared by every connection for a name, so an abort repair
     // holding this client must be able to tell its own transport's drop from

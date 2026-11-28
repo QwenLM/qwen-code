@@ -70,7 +70,10 @@ import {
   removeMCPStatusChangeListener,
   updateMCPServerStatus,
 } from './mcp-client.js';
-import { isMCPServerTeardownIntent } from './mcp-status.js';
+import {
+  getMCPConnectionStatus,
+  isMCPServerTeardownIntent,
+} from './mcp-status.js';
 import type { DiscoveredMCPTool } from './mcp-tool.js';
 import type { ToolRegistry } from './tool-registry.js';
 
@@ -1396,6 +1399,40 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       await expect(client.discover(cfgWithResources())).rejects.toThrow(
         'No prompts, tools, or resources found on the server.',
       );
+    });
+
+    it('a completion after a stop does not mark the stopped connect live', async () => {
+      // A stop can run while `connect()` is still awaiting the SDK. The
+      // completion that arrives afterwards belongs to a lifetime the owner
+      // ended: it must not write CONNECTED back locally, into the
+      // per-connection registry, or (via `getStatus()`) admit `discover()`.
+      let finishConnect!: () => void;
+      const connectGate = new Promise<void>((resolve) => {
+        finishConnect = resolve;
+      });
+      const sdkClient = mockStdioClient(
+        { connect: vi.fn(() => connectGate), close: vi.fn() },
+        { close: vi.fn(() => Promise.resolve()) },
+      );
+      const serverName = `late-connect-after-stop-${Date.now()}`;
+      const client = newClient(serverName);
+
+      const connecting = client.connect();
+      await vi.waitFor(() =>
+        expect(sdkClient.connect).toHaveBeenCalledTimes(1),
+      );
+      await client.disconnect();
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+
+      finishConnect();
+      await connecting;
+
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+      expect(getMCPConnectionStatus(client['client'])).toBe(
+        MCPServerStatus.DISCONNECTED,
+      );
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
+      removeMCPServerStatus(serverName);
     });
 
     it('flips status to DISCONNECTED when discover() throws', async () => {
