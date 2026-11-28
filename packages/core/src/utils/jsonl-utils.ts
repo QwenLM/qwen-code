@@ -539,7 +539,9 @@ export async function writeLine(
         } else {
           // Inspect and write through the same append-only handle. A read
           // probe is unnecessary here and could consume a FIFO's payload.
-          appendHandle = await fs.promises.open(filePath, 'a');
+          // 0o600 keeps a recreated file owner-only; Node ignores mode when
+          // the file already exists, so this only affects creation.
+          appendHandle = await fs.promises.open(filePath, 'a', 0o600);
           existing = appendHandle;
           const stats = await appendHandle.stat();
           appendHandleReady = true;
@@ -553,7 +555,7 @@ export async function writeLine(
           // Recovery runs inside the catch, so its own descriptor errors would
           // otherwise escape without the file context the rethrow above adds.
           try {
-            appendHandle = await fs.promises.open(filePath, 'a');
+            appendHandle = await fs.promises.open(filePath, 'a', 0o600);
             existing = appendHandle;
             const stats = await appendHandle.stat();
             appendHandleReady = true;
@@ -578,11 +580,16 @@ export async function writeLine(
       // FileHandle.appendFile does not honor flush:true on this path;
       // explicitly match the per-record fsync below it.
       try {
+        // 0o600 also covers the race where the file disappears between the
+        // tail probe above and this append: the append would then recreate
+        // it from the pathname, and without the mode the new file falls back
+        // to 0o666 & ~umask. Ignored when openAppender is an fd.
         await fs.promises.appendFile(
           openAppender ?? filePath,
           Buffer.from(prefix + line, 'utf8'),
           {
             flush: true,
+            mode: 0o600,
           },
         );
         await openAppender?.sync();
@@ -645,7 +652,9 @@ export function writeLineSync(filePath: string, data: unknown): void {
     } else {
       // Inspect and write through the same append-only handle. A read probe
       // is unnecessary here and could consume a FIFO's payload.
-      appendDescriptor = fs.openSync(filePath, 'a');
+      // 0o600 keeps a recreated file owner-only; Node ignores mode when
+      // the file already exists, so this only affects creation.
+      appendDescriptor = fs.openSync(filePath, 'a', 0o600);
       descriptor = appendDescriptor;
       const stats = fs.fstatSync(appendDescriptor);
       appendDescriptorReady = true;
@@ -659,7 +668,7 @@ export function writeLineSync(filePath: string, data: unknown): void {
       // Recovery runs inside the catch, so its own descriptor errors would
       // otherwise escape without the file context the rethrow above adds.
       try {
-        appendDescriptor = fs.openSync(filePath, 'a');
+        appendDescriptor = fs.openSync(filePath, 'a', 0o600);
         descriptor = appendDescriptor;
         const stats = fs.fstatSync(appendDescriptor);
         appendDescriptorReady = true;
@@ -678,11 +687,14 @@ export function writeLineSync(filePath: string, data: unknown): void {
   }
   const openAppender = appendDescriptorReady ? appendDescriptor : undefined;
   try {
+    // 0o600 covers the same post-probe deletion race as the async variant.
+    // Ignored when openAppender is an fd.
     fs.appendFileSync(
       openAppender ?? filePath,
       Buffer.from(prefix + line, 'utf8'),
       {
         flush: true,
+        mode: 0o600,
       },
     );
   } finally {

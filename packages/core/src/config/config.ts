@@ -5193,18 +5193,35 @@ export class Config {
   }
 
   /**
-   * Whether the transcript holds records and its head shows no Managed
-   * evidence, which makes it a Legacy session's. A missing or empty
-   * transcript is a new session, and an unreadable head tells nothing.
+   * Ownership evidence for an existing transcript, read without taking the
+   * writer lease.
+   *
+   * `absent` covers a missing or empty transcript, which is a new session.
+   * `unknown` is owner-shaped but unverifiable (unsupported version or
+   * payload, or an unreadable head): a Managed activation must stop before
+   * the lease, because cleanup keeps a lease held on `undefined` and the next
+   * acquisition would then conflict.
    */
-  private isLegacyTranscript(): boolean {
+  private existingTranscriptOwnership():
+    | 'absent'
+    | 'legacy'
+    | 'managed'
+    | 'unknown' {
     const transcriptPath = this.getTranscriptPath();
     try {
-      if (fs.statSync(transcriptPath).size === 0) return false;
-    } catch {
-      return false;
+      if (fs.statSync(transcriptPath).size === 0) return 'absent';
+    } catch (error) {
+      // Only a missing transcript is a new session; one that exists but
+      // cannot be stated (EACCES, ELOOP, transient EIO) is unverifiable, and
+      // proceeding would strand the writer lease on activation failure.
+      return (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? 'absent'
+        : 'unknown';
     }
-    return readManagedExecutionEvidenceSync(transcriptPath) === false;
+    const evidence = readManagedExecutionEvidenceSync(transcriptPath);
+    if (evidence === true) return 'managed';
+    if (evidence === false) return 'legacy';
+    return 'unknown';
   }
 
   /**
@@ -5322,14 +5339,27 @@ export class Config {
     if (!this.chatRecordingEnabled || !this.sessionWriterLeaseEnabled) {
       return;
     }
-    if (managed && this.isLegacyTranscript()) {
-      // Refused before the lease is taken: a certified takeover would retire
-      // a Legacy session's seal, and the owner check after it could refuse
-      // the restore only once that seal was gone.
-      throw new SessionExecutionEngineError(
-        this.sessionId,
-        'belongs to legacy, cannot execute with managed',
-      );
+    if (managed) {
+      const ownership = this.existingTranscriptOwnership();
+      if (ownership === 'unknown') {
+        // Owner-shaped but unverifiable (unsupported version or payload, or
+        // an unreadable head). Refuse before the lease is taken: the cleanup
+        // keeps a lease held on `undefined`, and a second acquisition would
+        // then conflict.
+        throw new SessionExecutionEngineError(
+          this.sessionId,
+          'ownership could not be verified',
+        );
+      }
+      if (ownership === 'legacy') {
+        // Refused before the lease is taken: a certified takeover would
+        // retire a Legacy session's seal, and the owner check after it could
+        // refuse the restore only once that seal was gone.
+        throw new SessionExecutionEngineError(
+          this.sessionId,
+          'belongs to legacy, cannot execute with managed',
+        );
+      }
     }
     if (this.sessionWriterShutdownRequested) {
       throw new SessionWriterShutdownError();

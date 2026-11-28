@@ -27,6 +27,7 @@ import {
   readManagedExecutionEvidenceSync,
 } from '../utils/sessionStorageUtils.js';
 import { withoutCompactionTranscriptHint } from './compaction-transcript-hint.js';
+import { appendLegacySessionTranscriptLine } from './legacy-session-transcript-writer.js';
 import {
   SessionExecutionEngineError,
   type SessionExecutionEngine,
@@ -45,7 +46,6 @@ import type {
 import { createModelContent, createUserContent } from '../core/genai-compat.js';
 import { getToolCallFingerprint } from '../core/toolCallIdUtils.js';
 import { canonicalToolName } from '../tools/tool-names.js';
-import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -1661,7 +1661,14 @@ export class ChatRecordingService {
 
   private createConversationFile(filePath: string): void {
     try {
-      fs.writeFileSync(filePath, '', { flag: 'wx', encoding: 'utf8' });
+      // Transcripts persist tool output verbatim, which can embed
+      // credentials; omitting mode lets Node apply 0o666 & ~umask, leaving the
+      // log world-readable under the common 022 umask.
+      fs.writeFileSync(filePath, '', {
+        flag: 'wx',
+        encoding: 'utf8',
+        mode: 0o600,
+      });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         const message = error instanceof Error ? error.message : String(error);
@@ -2867,7 +2874,11 @@ export class ChatRecordingService {
               this.createConversationFile(legacyConversationFile);
               this.cacheConversationFile(legacyConversationFile);
             }
-            await jsonl.writeLine(legacyConversationFile, record);
+            await appendLegacySessionTranscriptLine(
+              legacyConversationFile,
+              record.sessionId,
+              record,
+            );
             lock.assertHeld();
             this.recordUuidForPrefixBloom(record);
             if (changesPromptTime) {

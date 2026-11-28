@@ -13,6 +13,7 @@ import {
   extractLastJsonStringField,
   extractLastJsonStringFields,
   LITE_READ_BUF_SIZE,
+  readManagedExecutionEvidenceSync,
   extractJsonStringFieldFromLastMatchingLine,
   readLastMatchingLineFieldSync,
   readLastJsonStringFieldSync,
@@ -71,6 +72,153 @@ function appendOnFirstRead(p: string, line: string) {
     return originalReadSync(...args);
   }) as typeof fs.readSync);
 }
+
+describe('readManagedExecutionEvidenceSync', () => {
+  const file = useTmpFiles('managed-evidence-');
+  const owner = (engine: string, version: number) =>
+    JSON.stringify({
+      type: 'system',
+      subtype: 'session_execution_engine',
+      systemPayload: { version, engine },
+    });
+
+  it('reports no positive evidence for a parsed v2 owner, not proof of Legacy', () => {
+    expect(
+      readManagedExecutionEvidenceSync(file('v2', `${owner('legacy', 2)}\n`)),
+    ).toBe(false);
+    expect(
+      readManagedExecutionEvidenceSync(
+        file('future', `${owner('future', 2)}\n`),
+      ),
+    ).toBe(false);
+  });
+
+  it('finds positive managed evidence anywhere in the head and in a long first record', () => {
+    const header = JSON.stringify({
+      type: 'system',
+      subtype: 'managed_session_header_v1',
+    });
+    expect(
+      readManagedExecutionEvidenceSync(
+        file('head', `${owner('legacy', 2)}\n${header}\n`),
+      ),
+    ).toBe(true);
+    const longOwner = JSON.stringify({
+      padding: 'x'.repeat(LITE_READ_BUF_SIZE),
+      type: 'system',
+      subtype: 'session_execution_engine',
+      systemPayload: { version: 2, engine: 'managed' },
+    });
+    expect(
+      readManagedExecutionEvidenceSync(file('long', `${longOwner}\n`)),
+    ).toBe(true);
+  });
+
+  it.each([1, 2])(
+    'reports no positive evidence when a v%s owner shares its physical line with other records',
+    (version) => {
+      const user = JSON.stringify({
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'hi' }] },
+      });
+      const header = JSON.stringify({
+        type: 'system',
+        subtype: 'managed_session_header_v1',
+      });
+      // A line that fully parses carries no positive Managed evidence,
+      // whatever else shares the line — `false` releases the lease instead of
+      // stranding it. Positive Managed evidence on the line still wins.
+      expect(
+        readManagedExecutionEvidenceSync(
+          file(`glued-${version}`, `${owner('legacy', version)}${user}\n`),
+        ),
+      ).toBe(false);
+      expect(
+        readManagedExecutionEvidenceSync(
+          file(
+            `glued-${version}-many`,
+            `${owner('legacy', version)}${user}${user}\n`,
+          ),
+        ),
+      ).toBe(false);
+      expect(
+        readManagedExecutionEvidenceSync(
+          file(
+            `glued-${version}-first`,
+            `${user}${owner('legacy', version)}\n`,
+          ),
+        ),
+      ).toBe(false);
+      expect(
+        readManagedExecutionEvidenceSync(
+          file(
+            `glued-${version}-managed`,
+            `${owner('legacy', version)}${header}\n`,
+          ),
+        ),
+      ).toBe(true);
+      expect(
+        readManagedExecutionEvidenceSync(
+          file(
+            `glued-${version}-managed-owner`,
+            `${user}${owner('managed', version)}\n`,
+          ),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it('reports no positive evidence for a healthy transcript of any first record', () => {
+    const user = JSON.stringify({
+      type: 'user',
+      message: { role: 'user', parts: [{ text: 'hi' }] },
+    });
+    const escaped = JSON.stringify({
+      type: 'system',
+      subtype: 'session_execution_engine',
+      systemPayload: { version: 2, engine: 'legacy' },
+    }).replace(
+      '"session_execution_engine"',
+      '"session\\u005fexecution\\u005fengine"',
+    );
+    expect(
+      readManagedExecutionEvidenceSync(file('user-first', `${user}\n`)),
+    ).toBe(false);
+    expect(
+      readManagedExecutionEvidenceSync(file('escaped-v2', `${escaped}\n`)),
+    ).toBe(false);
+  });
+
+  it('keeps ownership unavailable when a line only partly parses', () => {
+    const user = JSON.stringify({
+      type: 'user',
+      message: { role: 'user', parts: [{ text: 'hi' }] },
+    });
+    // A torn owner plus a trailing fragment recovers the owner but reports
+    // the line incomplete: ownership cannot be decided from torn bytes.
+    expect(
+      readManagedExecutionEvidenceSync(
+        file('torn-glued', `${owner('legacy', 2)}${user.slice(0, -12)}`),
+      ),
+    ).toBe(undefined);
+  });
+
+  it('distinguishes missing or empty files from unreadable entries and reads', () => {
+    expect(readManagedExecutionEvidenceSync(file('missing'))).toBe(false);
+    expect(readManagedExecutionEvidenceSync(file('empty', ''))).toBe(false);
+    const target = file('target', owner('legacy', 2));
+    const link = file('link');
+    fs.symlinkSync(target, link);
+    expect(readManagedExecutionEvidenceSync(link)).toBeUndefined();
+    expect(
+      readManagedExecutionEvidenceSync(path.dirname(target)),
+    ).toBeUndefined();
+    vi.spyOn(fs, 'readSync').mockImplementation(() => {
+      throw Object.assign(new Error('read failed'), { code: 'EIO' });
+    });
+    expect(readManagedExecutionEvidenceSync(target)).toBeUndefined();
+  });
+});
 
 describe('sessionStorageUtils', () => {
   const GOAL = '"subtype":"goal_state"';
