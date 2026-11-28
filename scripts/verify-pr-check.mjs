@@ -105,8 +105,12 @@ const TABLE_COUNT_HEADER_RE =
   /^(?:count|total|found|findings|数量|个数|条数)$/i;
 const STANDALONE_BLOCKING_SEVERITY_RE = /^(?:P0|P1|Critical|Blocker)$/i;
 const ZERO_OR_NONE_CELL_RE = /^(?:0|none|n\/a|无|-|—)?$/i;
+const NUMERIC_OR_ZERO_COUNT_CELL_RE = /^(?:\d+|none|n\/a|无|-|—)?$/i;
 const LIST_ITEM_RE = /^(\s*(?:>\s*)?)(?:[-*+]\s+|\d+[.)]\s+)/;
 const TABLE_SEPARATOR_CELL_RE = /^:?-{1,}:?$/;
+const REVIEW_ANCHOR_TOKEN_RE =
+  /(?:issuecomment-|discussion_r|pullrequestreview-)\d+/g;
+const GENERIC_SEVERITY_TOKENS = new Set(['p0', 'p1', 'critical', 'blocker']);
 
 /**
  * Who caused a failed assertion. `pr` is the only one that can stamp a defect
@@ -2161,13 +2165,29 @@ function extractBlockingFindingsFromSection(body) {
           }
           const cells = splitMarkdownTableRow(rowLine);
           if (!cells) break;
-          const isZeroCountSummary =
+          const rowHasCountValues =
             countCols.length > 0 &&
+            countCols.every((c) =>
+              NUMERIC_OR_ZERO_COUNT_CELL_RE.test(
+                normalizeTableCellToken(cells[c] ?? ''),
+              ),
+            );
+          const isZeroCountSummary =
+            rowHasCountValues &&
             countCols.every((c) =>
               ZERO_OR_NONE_CELL_RE.test(
                 normalizeTableCellToken(cells[c] ?? ''),
               ),
             );
+          const hasDescriptionCell = cells.some(
+            (cell, idx) =>
+              !severityCols.includes(idx) &&
+              !countCols.includes(idx) &&
+              normalizeTableCellToken(cell) !== '' &&
+              !NUMERIC_OR_ZERO_COUNT_CELL_RE.test(
+                normalizeTableCellToken(cell),
+              ),
+          );
           const hasSeverityCell = severityCols.some((c) =>
             STANDALONE_BLOCKING_SEVERITY_RE.test(
               normalizeTableCellToken(cells[c] ?? ''),
@@ -2181,8 +2201,10 @@ function extractBlockingFindingsFromSection(body) {
             );
           });
           if (!isZeroCountSummary && (hasSeverityCell || hasInlineTagInRow)) {
-            const entry = { excerpt: compactFindingExcerpt(rowLine) };
-            if (countCols.length > 0 && !hasInlineTagInRow) {
+            const entry = buildFindingRecord(rowLine);
+            const isCountSummaryRow =
+              rowHasCountValues && !hasDescriptionCell && !hasInlineTagInRow;
+            if (isCountSummaryRow) {
               summaryTableFindings.push(entry);
             } else {
               findings.push(entry);
@@ -2199,10 +2221,14 @@ function extractBlockingFindingsFromSection(body) {
 
     // 2. Bare blocking section heading (e.g. "**Blockers**", "### Critical"):
     // skip if immediately followed by None/0, else extract each top-level list
-    // item under it as a distinct finding.
+    // item under it as a distinct finding, keeping indented continuation
+    // paragraphs, sub-bullets, and fenced code blocks within list scope.
     if (BARE_BLOCKING_HEADING_RE.test(stripped)) {
       let nextIdx = i + 1;
-      while (nextIdx < lines.length && lines[nextIdx].trim() === '') {
+      while (
+        nextIdx < lines.length &&
+        lines[nextIdx].replace(/^\s*(?:>\s*)+/, '').trim() === ''
+      ) {
         nextIdx++;
       }
       if (nextIdx < lines.length && NONE_ONLY_LINE_RE.test(lines[nextIdx])) {
@@ -2215,26 +2241,83 @@ function extractBlockingFindingsFromSection(body) {
         const baseIndent = lineIndentWidth(firstListMatch[1]);
         const listFindings = [];
         let cursor = nextIdx;
+        let itemFenceChar = null;
+        let itemFenceLen = 0;
+        let currentItemLines = null;
+        const flushCurrentItem = () => {
+          if (currentItemLines && currentItemLines.length > 0) {
+            listFindings.push(
+              buildFindingRecord(currentItemLines.join('\n'), {
+                excerptLine: currentItemLines[0],
+              }),
+            );
+            currentItemLines = null;
+          }
+        };
         while (cursor < lines.length) {
           const curLine = lines[cursor];
-          if (curLine.trim() === '') {
+          if (itemFenceChar !== null) {
+            const closeMatch = /^(\s*(?:>\s*)?)(`{3,}|~{3,})/.exec(curLine);
+            if (
+              closeMatch &&
+              closeMatch[2][0] === itemFenceChar &&
+              closeMatch[2].length >= itemFenceLen &&
+              curLine.slice(closeMatch[0].length).trim() === ''
+            ) {
+              itemFenceChar = null;
+              itemFenceLen = 0;
+            }
+            if (currentItemLines) currentItemLines.push(curLine);
+            cursor++;
+            continue;
+          }
+          if (curLine.replace(/^\s*(?:>\s*)+/, '').trim() === '') {
             let peek = cursor + 1;
-            while (peek < lines.length && lines[peek].trim() === '') peek++;
-            const peekMatch =
-              peek < lines.length ? LIST_ITEM_RE.exec(lines[peek]) : null;
-            if (peekMatch && lineIndentWidth(peekMatch[1]) <= baseIndent + 1) {
+            while (
+              peek < lines.length &&
+              lines[peek].replace(/^\s*(?:>\s*)+/, '').trim() === ''
+            ) {
+              peek++;
+            }
+            if (peek >= lines.length) break;
+            const peekLine = lines[peek];
+            const peekListMatch = LIST_ITEM_RE.exec(peekLine);
+            if (peekListMatch) {
+              cursor = peek;
+              continue;
+            }
+            const peekLeading = /^(\s*(?:>\s*)?)/.exec(peekLine)?.[1] ?? '';
+            if (lineIndentWidth(peekLeading) >= baseIndent + 2) {
               cursor = peek;
               continue;
             }
             break;
           }
-          if (/^(\s*(?:>\s*)?)(`{3,}|~{3,})/.test(curLine)) break;
+          const fenceMatch = /^(\s*(?:>\s*)?)(`{3,}|~{3,})/.exec(curLine);
+          if (fenceMatch) {
+            const fenceIndent = lineIndentWidth(fenceMatch[1]);
+            const rest = curLine.slice(fenceMatch[0].length);
+            if (
+              fenceIndent >= baseIndent + 2 &&
+              (fenceMatch[2][0] !== '`' || !rest.includes('`'))
+            ) {
+              itemFenceChar = fenceMatch[2][0];
+              itemFenceLen = fenceMatch[2].length;
+              if (currentItemLines) currentItemLines.push(curLine);
+              cursor++;
+              continue;
+            }
+            if (fenceIndent <= baseIndent) break;
+          }
           const itemMatch = LIST_ITEM_RE.exec(curLine);
           if (itemMatch) {
             if (lineIndentWidth(itemMatch[1]) <= baseIndent + 1) {
+              flushCurrentItem();
               if (!NONE_ONLY_LINE_RE.test(curLine)) {
-                listFindings.push({ excerpt: compactFindingExcerpt(curLine) });
+                currentItemLines = [curLine];
               }
+            } else if (currentItemLines) {
+              currentItemLines.push(curLine);
             }
             cursor++;
             continue;
@@ -2242,15 +2325,17 @@ function extractBlockingFindingsFromSection(body) {
           // Stop at non-indented prose or next section heading.
           const leading = /^(\s*(?:>\s*)?)/.exec(curLine)?.[1] ?? '';
           if (lineIndentWidth(leading) <= baseIndent) break;
+          if (currentItemLines) currentItemLines.push(curLine);
           cursor++;
         }
+        flushCurrentItem();
         if (listFindings.length > 0) {
           findings.push(...listFindings);
           i = cursor - 1;
           continue;
         }
       }
-      findings.push({ excerpt: compactFindingExcerpt(line) });
+      findings.push(buildFindingRecord(line));
       continue;
     }
 
@@ -2262,26 +2347,155 @@ function extractBlockingFindingsFromSection(body) {
       (LINE_LEADING_BLOCKING_TAG_RE.test(line) &&
         !ZERO_OR_NONE_BLOCKING_LINE_RE.test(line))
     ) {
-      findings.push({ excerpt: compactFindingExcerpt(line) });
+      findings.push(buildFindingRecord(line));
     }
   }
 
   return findings.length > 0 ? findings : summaryTableFindings;
 }
 
+function buildFindingRecord(rawText, { excerptLine = null } = {}) {
+  const firstLine = excerptLine ?? rawText.split('\n')[0] ?? rawText;
+  const severityMatch = /\b(P0|P1|Critical|Blocker)\b/i.exec(firstLine);
+  const severity = severityMatch ? severityMatch[1].toUpperCase() : null;
+  const numMatch = /^\s*(?:>\s*)?(\d+)[.)]\s+/.exec(firstLine);
+  const listNumber = numMatch ? Number(numMatch[1]) : null;
+
+  const tokens = new Set();
+  for (const m of rawText.matchAll(/`([^`\n]+)`/g)) {
+    const tok = m[1].trim().toLowerCase();
+    if (tok && !GENERIC_SEVERITY_TOKENS.has(tok)) tokens.add(tok);
+  }
+  for (const m of rawText.matchAll(/#(\d{2,})\b/g)) {
+    tokens.add(`#${m[1]}`);
+  }
+  for (const m of rawText.matchAll(
+    /\b[A-Za-z0-9]+(?:[._/-][A-Za-z0-9]+)+\b/g,
+  )) {
+    const tok = m[0].toLowerCase();
+    if (!GENERIC_SEVERITY_TOKENS.has(tok)) tokens.add(tok);
+  }
+  for (const m of rawText.matchAll(/\b\d{2,}\b/g)) {
+    tokens.add(m[0]);
+  }
+  for (const m of rawText.matchAll(/\b[A-Z]\d+(?:-[A-Z]\d+)?\b/g)) {
+    const tok = m[0].toLowerCase();
+    if (!GENERIC_SEVERITY_TOKENS.has(tok)) tokens.add(tok);
+  }
+
+  return {
+    excerpt: compactFindingExcerpt(firstLine),
+    severity,
+    listNumber,
+    tokens,
+  };
+}
+
+function tokenOverlapCount(a, b) {
+  let count = 0;
+  for (const tok of a) {
+    if (b.has(tok)) count++;
+  }
+  return count;
+}
+
+function severitiesCompatible(a, b) {
+  return (
+    a.severity === null || b.severity === null || a.severity === b.severity
+  );
+}
+
+function mergeBilingualFindings(mainFindings, translationFindings) {
+  if (translationFindings.length === 0) return mainFindings;
+  if (mainFindings.length === 0) return translationFindings;
+
+  const matchedMain = new Set();
+  const matchedTrans = new Set();
+
+  // Pass 1: greedy 1-to-1 match by shared language-independent technical tokens.
+  const candidates = [];
+  for (let tIdx = 0; tIdx < translationFindings.length; tIdx++) {
+    const t = translationFindings[tIdx];
+    for (let mIdx = 0; mIdx < mainFindings.length; mIdx++) {
+      const m = mainFindings[mIdx];
+      if (!severitiesCompatible(m, t)) continue;
+      const overlap = tokenOverlapCount(m.tokens, t.tokens);
+      if (overlap > 0) {
+        const numBonus =
+          m.listNumber !== null && m.listNumber === t.listNumber ? 1 : 0;
+        candidates.push({
+          mIdx,
+          tIdx,
+          overlap,
+          numBonus,
+          dist: Math.abs(mIdx - tIdx),
+        });
+      }
+    }
+  }
+  candidates.sort(
+    (a, b) =>
+      b.overlap - a.overlap ||
+      b.numBonus - a.numBonus ||
+      a.dist - b.dist ||
+      a.tIdx - b.tIdx,
+  );
+  for (const c of candidates) {
+    if (matchedMain.has(c.mIdx) || matchedTrans.has(c.tIdx)) continue;
+    matchedMain.add(c.mIdx);
+    matchedTrans.add(c.tIdx);
+  }
+
+  // Pass 2: positional 1-to-1 mirror match for pure-prose translations without
+  // conflicting technical tokens; never merges two items with disjoint tokens,
+  // and never absorbs extra items beyond the main list.
+  for (let tIdx = 0; tIdx < translationFindings.length; tIdx++) {
+    if (matchedTrans.has(tIdx)) continue;
+    if (tIdx >= mainFindings.length || matchedMain.has(tIdx)) continue;
+    const m = mainFindings[tIdx];
+    const t = translationFindings[tIdx];
+    if (!severitiesCompatible(m, t)) continue;
+    if (
+      m.listNumber !== null &&
+      t.listNumber !== null &&
+      m.listNumber !== t.listNumber
+    ) {
+      continue;
+    }
+    if (
+      m.tokens.size > 0 &&
+      t.tokens.size > 0 &&
+      tokenOverlapCount(m.tokens, t.tokens) === 0
+    ) {
+      continue;
+    }
+    matchedMain.add(tIdx);
+    matchedTrans.add(tIdx);
+  }
+
+  const merged = [...mainFindings];
+  for (let tIdx = 0; tIdx < translationFindings.length; tIdx++) {
+    if (!matchedTrans.has(tIdx)) merged.push(translationFindings[tIdx]);
+  }
+  return merged;
+}
+
 /**
  * Extracts each distinct blocking finding (P0, P1, Critical, Blocker) from a
  * Markdown review/comment body outside fenced code blocks and HTML comments,
- * avoiding double-counting mirrored bilingual `<details><summary>中文说明</summary>`
- * blocks while still falling back to them if findings appear only there.
+ * merging 1-to-1 bilingual translations inside `<details><summary>中文说明</summary>`
+ * while preserving any additional or disjoint findings unique to the fold.
  */
 export function extractBlockingFindings(body) {
   if (typeof body !== 'string' || body.trim() === '') return [];
   const visible = stripHtmlCommentsOutsideFences(body);
   const { mainBody, translationBody } = splitTranslationDetailsBlocks(visible);
   const mainFindings = extractBlockingFindingsFromSection(mainBody);
-  if (mainFindings.length > 0) return mainFindings;
-  return extractBlockingFindingsFromSection(translationBody);
+  const translationFindings =
+    extractBlockingFindingsFromSection(translationBody);
+  return mergeBilingualFindings(mainFindings, translationFindings).map(
+    ({ excerpt }) => ({ excerpt }),
+  );
 }
 
 export function hasBlockingSeverityTag(body) {
@@ -2474,17 +2688,231 @@ export function checkReviewThreads(
   return extractBlockingReviewItems(parsed, { coordinates });
 }
 
-function reportMentionsReviewUrl(reportText, url) {
+function reviewUrlTokens(url) {
+  const hashIndex = url.indexOf('#');
+  const fragment = hashIndex === -1 ? '' : url.slice(hashIndex + 1);
+  const digitMatch = /(\d{6,})$/.exec(fragment);
+  return {
+    url,
+    fragment,
+    digits: digitMatch ? digitMatch[1] : null,
+  };
+}
+
+function textMentionsReviewTokens(text, tokens) {
+  if (text.includes(tokens.url)) return true;
+  if (tokens.fragment && text.includes(tokens.fragment)) return true;
+  if (tokens.digits) {
+    return new RegExp(`(?<![0-9])${tokens.digits}(?![0-9])`).test(text);
+  }
+  return false;
+}
+
+function lineMentionsOtherReviewAnchor(line, ownTokens) {
+  const matches = line.match(REVIEW_ANCHOR_TOKEN_RE);
+  if (matches && matches.some((token) => token !== ownTokens.fragment)) {
+    return true;
+  }
+  if (ownTokens.digits) {
+    const idMatches = line.match(
+      /(?<![0-9A-Za-z_#/.:-])#?\d{7,}(?![0-9A-Za-z_])/g,
+    );
+    if (
+      idMatches &&
+      idMatches.some((raw) => raw.replace(/^#/, '') !== ownTokens.digits)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseFindingNumberSpec(spec, intervals) {
+  const parts = spec.split(/(?:[,、，&+]|\band\b|和|与|及)/i);
+  for (const rawPart of parts) {
+    const part = rawPart.trim();
+    if (!part) continue;
+    const rangeMatch =
+      /^(?:第\s*|#)?(\d+)\s*[-–—~～]\s*(?:第\s*|#)?(\d+)$/.exec(part);
+    if (rangeMatch) {
+      const lo = Number(rangeMatch[1]);
+      const hi = Number(rangeMatch[2]);
+      if (
+        Number.isSafeInteger(lo) &&
+        Number.isSafeInteger(hi) &&
+        lo >= 1 &&
+        hi >= lo &&
+        hi - lo <= 50
+      ) {
+        intervals.push([lo, hi]);
+      }
+      continue;
+    }
+    const singleMatch = /^(?:第\s*|#)?(\d+)$/.exec(part);
+    if (singleMatch) {
+      const n = Number(singleMatch[1]);
+      if (Number.isSafeInteger(n) && n >= 1) {
+        intervals.push([n, n]);
+      }
+    }
+  }
+}
+
+function extractReferencedFindingIntervals(text) {
+  const intervals = [];
+  const patterns = [
+    /#finding-(\d+)\b/gi,
+    /\b(?:findings?|items?|points?|issues?)\s*#?(\d+(?:\s*(?:[-–—~～]\s*#?\d+|(?:[,、&+]|\band\b)\s*#?\d+))*)/gi,
+    /第\s*(\d+(?:\s*(?:[-–—~～]\s*第?\s*\d+|(?:[,、，&+]|和|与|及)\s*第?\s*\d+))*)\s*(?:项|条|个|点|处|问|题)/g,
+    /(?:发现|问题|阻塞项|缺陷)\s*#?(\d+(?:\s*(?:[-–—~～]\s*#?\d+|(?:[,、，&+]|和|与|及)\s*#?\d+))*)/g,
+    /\(\s*#(\d+(?:\s*(?:[-–—~～]\s*#?\d+|(?:[,、&+]|\band\b|和|与|及)\s*#?\d+))*)\s*\)/gi,
+  ];
+  for (const re of patterns) {
+    for (const m of text.matchAll(re)) {
+      parseFindingNumberSpec(m[1], intervals);
+    }
+  }
+  return intervals;
+}
+
+function isolateClauseForReviewAnchor(line, ownTokens) {
+  if (!lineMentionsOtherReviewAnchor(line, ownTokens)) return line;
+  const clauses = line.split(/[;；。]/);
+  const matching = clauses.filter((clause) =>
+    textMentionsReviewTokens(clause, ownTokens),
+  );
+  return matching.length > 0 ? matching.join(' ') : line;
+}
+
+function scopedCitationBlockForLine(lines, idx, ownTokens) {
+  const line = lines[idx];
+  // 1. Markdown table row: keep scope strictly to that row (isolated if multiple anchors).
+  if (splitMarkdownTableRow(line) !== null) {
+    return isolateClauseForReviewAnchor(line, ownTokens);
+  }
+  // 2. If the same line mentions another review anchor, isolate only this anchor's clause.
+  if (lineMentionsOtherReviewAnchor(line, ownTokens)) {
+    return isolateClauseForReviewAnchor(line, ownTokens);
+  }
+  // 3. Markdown heading (e.g. "### issuecomment-7231584332"): include its body
+  // until the next heading of equal or higher level or a different review anchor.
+  const headingMatch = /^\s*(#{1,6})\s+/.exec(line);
+  if (headingMatch) {
+    const level = headingMatch[1].length;
+    const block = [line];
+    for (let j = idx + 1; j < lines.length; j++) {
+      const next = lines[j];
+      const nextHeading = /^\s*(#{1,6})\s+/.exec(next);
+      if (nextHeading && nextHeading[1].length <= level) break;
+      if (lineMentionsOtherReviewAnchor(next, ownTokens)) break;
+      block.push(next);
+    }
+    return block.join('\n');
+  }
+  // 3. Normal paragraph or list item (plus an immediately following sub-list
+  // when the anchor line ends with a colon introducing per-finding bullets).
+  let start = idx;
+  if (!LIST_ITEM_RE.test(line)) {
+    while (start > 0) {
+      const prev = lines[start - 1];
+      if (
+        prev.trim() === '' ||
+        /^\s*#{1,6}\s+/.test(prev) ||
+        splitMarkdownTableRow(prev) !== null ||
+        lineMentionsOtherReviewAnchor(prev, ownTokens)
+      ) {
+        break;
+      }
+      start--;
+      if (LIST_ITEM_RE.test(prev)) break;
+    }
+  }
+  const startListMatch = LIST_ITEM_RE.exec(lines[start]);
+  const startIndent = startListMatch
+    ? lineIndentWidth(startListMatch[1])
+    : null;
+  let end = idx;
+  while (end + 1 < lines.length) {
+    const next = lines[end + 1];
+    if (
+      next.trim() === '' ||
+      /^\s*#{1,6}\s+/.test(next) ||
+      splitMarkdownTableRow(next) !== null ||
+      lineMentionsOtherReviewAnchor(next, ownTokens)
+    ) {
+      break;
+    }
+    const nextList = LIST_ITEM_RE.exec(next);
+    if (nextList) {
+      if (
+        startIndent !== null &&
+        lineIndentWidth(nextList[1]) <= startIndent + 1
+      ) {
+        break;
+      }
+    }
+    end++;
+  }
+  const block = lines.slice(start, end + 1);
+  // If this paragraph introduces a per-finding bullet list (ends with `:` / `：`),
+  // include those bullets while they belong to this comment.
+  if (
+    startIndent === null &&
+    /[:：]\s*$/.test(lines[end].trim()) &&
+    end + 1 < lines.length
+  ) {
+    let j = end + 1;
+    while (j < lines.length && lines[j].trim() === '') j++;
+    if (j < lines.length && LIST_ITEM_RE.test(lines[j])) {
+      while (j < lines.length) {
+        const cur = lines[j];
+        if (cur.trim() === '') {
+          let peek = j + 1;
+          while (peek < lines.length && lines[peek].trim() === '') peek++;
+          if (
+            peek < lines.length &&
+            LIST_ITEM_RE.test(lines[peek]) &&
+            !lineMentionsOtherReviewAnchor(lines[peek], ownTokens)
+          ) {
+            j = peek;
+            continue;
+          }
+          break;
+        }
+        if (
+          /^\s*#{1,6}\s+/.test(cur) ||
+          lineMentionsOtherReviewAnchor(cur, ownTokens)
+        ) {
+          break;
+        }
+        block.push(cur);
+        j++;
+      }
+    }
+  }
+  return block.join('\n');
+}
+
+export function reportMentionsReviewFinding(
+  reportText,
+  url,
+  finding = 1,
+  findingCount = 1,
+) {
   if (typeof reportText !== 'string' || reportText.trim() === '') return false;
   const visible = stripHtmlCommentsOutsideFences(reportText);
-  if (visible.includes(url)) return true;
-  const hashIndex = url.indexOf('#');
-  if (hashIndex === -1) return false;
-  const fragment = url.slice(hashIndex + 1);
-  if (fragment && visible.includes(fragment)) return true;
-  const digitMatch = /(\d{6,})$/.exec(fragment);
-  if (digitMatch) {
-    return new RegExp(`(?<![0-9])${digitMatch[1]}(?![0-9])`).test(visible);
+  const tokens = reviewUrlTokens(url);
+  if (!textMentionsReviewTokens(visible, tokens)) return false;
+  if (findingCount <= 1) return true;
+
+  const lines = normalizeNewlines(visible).split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (!textMentionsReviewTokens(lines[i], tokens)) continue;
+    const block = scopedCitationBlockForLine(lines, i, tokens);
+    const intervals = extractReferencedFindingIntervals(block);
+    if (intervals.some(([lo, hi]) => finding >= lo && finding <= hi)) {
+      return true;
+    }
   }
   return false;
 }
@@ -2623,14 +3051,33 @@ function checkReviewCoverage(
         entry.status === 'not-reproduced' &&
         verdict === 'merge-ready'
       ) {
-        if (!reportMentionsReviewUrl(reportText, item.url)) {
+        const citationHint =
+          findingCount > 1
+            ? ` (cite both the comment URL/ID and finding ${finding}, e.g. "finding ${finding}" or "第 ${finding} 项")`
+            : '';
+        if (
+          !reportMentionsReviewFinding(
+            reportText,
+            item.url,
+            finding,
+            findingCount,
+          )
+        ) {
           errors.push(
-            `report.md does not reference verified blocking ${item.kind} ${item.url}${findingSuffix} recorded as not-reproduced in assertions.json reviewCoverage`,
+            `report.md does not reference verified blocking ${item.kind} ${item.url}${findingSuffix} recorded as not-reproduced in assertions.json reviewCoverage${citationHint}`,
           );
         }
-        if (hasCommentText && !reportMentionsReviewUrl(commentText, item.url)) {
+        if (
+          hasCommentText &&
+          !reportMentionsReviewFinding(
+            commentText,
+            item.url,
+            finding,
+            findingCount,
+          )
+        ) {
           errors.push(
-            `comment.md does not reference verified blocking ${item.kind} ${item.url}${findingSuffix} recorded as not-reproduced in assertions.json reviewCoverage`,
+            `comment.md does not reference verified blocking ${item.kind} ${item.url}${findingSuffix} recorded as not-reproduced in assertions.json reviewCoverage${citationHint}`,
           );
         }
       }

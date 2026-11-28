@@ -3099,10 +3099,12 @@ the report what the count holds.
    required for `not-measured` and `no-defect-claimed`, such as an author's
    fix-summary reply quoting `[P1]`): `verify-pr-check.mjs` refuses
    `merge-ready` when any blocking finding is omitted, marked `reproduced` or
-   `not-measured`, or lacks a matching URL/comment-ID reference in both
-   `report.md` and `comment.md` (when present) when marked `not-reproduced`,
-   and also refuses `merge-ready` when host `pr.json` recorded `reviewSha256`
-   as `null` (review fetch failed).
+   `not-measured`, or lacks a matching URL/comment-ID reference — plus the
+   explicit finding number (for example `finding 2` or `第 2 项`, or a compact
+   combined list such as `findings 1, 2` / `第 1、2 项`) when one comment has
+   multiple blockers — in both `report.md` and `comment.md` (when present) when
+   marked `not-reproduced`, and also refuses `merge-ready` when host `pr.json`
+   recorded `reviewSha256` as `null` (review fetch failed).
 5. **Corrections**, when an earlier review round or bot comment described
    the code inaccurately (a wrong ARIA role, a wrong mechanism, a
    misattributed cause). State the correct fact with its evidence and label

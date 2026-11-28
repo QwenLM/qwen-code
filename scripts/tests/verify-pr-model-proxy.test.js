@@ -10593,7 +10593,10 @@ describe('local container recipe pins', () => {
       'optional positive integer `finding` (required per finding whenever one comment lists multiple distinct blockers)',
     );
     expect(flat).toContain(
-      'reference in both `report.md` and `comment.md` (when present) when marked `not-reproduced`',
+      'in both `report.md` and `comment.md` (when present) when marked `not-reproduced`',
+    );
+    expect(flat).toContain(
+      'plus the explicit finding number (for example `finding 2` or `第 2 项`',
     );
   });
 });

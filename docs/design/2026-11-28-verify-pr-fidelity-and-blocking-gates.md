@@ -121,13 +121,18 @@ the certified head `2490bb3f` using real `e2fsprogs`:
       replay).
     - Detect every distinct blocking finding (`P0`, `P1`, `Critical`, `Blocker`)
       outside Markdown fenced code blocks — including standalone severity cells
-      in Markdown tables (distinguishing per-finding severity columns such as
-      `优先级`/`Severity` from zero-count summary tables like `| Critical | 0 |`),
-      heading-led blocker bullet lists (`**Blockers**`), and multiple numbered
-      or bulleted blockers within a single comment — while ignoring inline
-      backtick mentions in prose (such as `` `[P1]` ``), zero/none headings
-      (`**Blockers**: None`, `### Critical (0)`, `### Blockers\nNone`), and
-      ordinary prose.
+      in Markdown tables (using both column headers and cell values so tables
+      like `Severity | Findings` with prose descriptions are kept per-row while
+      numeric count-summary tables like `| Critical | 0 |` or `| Critical | 2 |`
+      are classified accurately), heading-led blocker bullet lists
+      (`**Blockers**`, preserving scope across indented continuation paragraphs,
+      sub-bullets, and indented fenced code blocks), and multiple numbered or
+      bulleted blockers within a single comment — merging 1-to-1 bilingual
+      translations inside `<details><summary>中文说明</summary>` while
+      preserving any extra or disjoint findings unique to the fold, and ignoring
+      inline backtick mentions in prose (such as `` `[P1]` ``), closed HTML
+      comments, zero/none headings (`**Blockers**: None`, `### Critical (0)`,
+      `### Blockers\nNone`), and ordinary prose.
     - Collect open blocking inline threads (`resolved !== true` or parent review
       in standing `changeRequests`), blocking standing `changeRequests` bodies,
       and blocking top-level `OWNER`/`MEMBER`/`COLLABORATOR` `issueComments`
@@ -147,8 +152,10 @@ the certified head `2490bb3f` using real `e2fsprogs`:
       cannot cover a multi-finding comment).
     - Refuse `merge-ready` if any open blocking finding is omitted, marked
       `reproduced` or `not-measured`, or marked `not-reproduced` without a
-      matching URL/fragment/comment-ID citation in **both `report.md` and
-      `comment.md` (when present)**.
+      matching visible URL/fragment/comment-ID citation — plus explicit
+      per-finding number disclosure (for example `finding 2`, `findings 1, 2`,
+      or `第 1、2 项`) when a comment carries multiple findings — in **both
+      `report.md` and `comment.md` (when present)**.
     - Downgrade omissions on non-`merge-ready` verdicts (`inconclusive`,
       `findings`, `blocked`) to warnings so partial or failing rounds can still
       publish.

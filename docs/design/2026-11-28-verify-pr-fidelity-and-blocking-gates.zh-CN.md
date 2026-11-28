@@ -99,11 +99,15 @@
     - 对畸形 JSON/结构，以及与可信 `--context` 坐标不匹配的跨 PR URL fail-closed
       拒绝（防止跨 PR 重放）。
     - 在 Markdown 代码围栏之外提取每一条独立的阻塞发现（`P0`、`P1`、`Critical`、
-      `Blocker`），涵盖 Markdown 表格严重度列中的独立单元格（区分 `优先级`/
-      `Severity` 逐项表与 `| Critical | 0 |` 计数汇总表）、以标题引导的阻塞列表
-      （`**Blockers**`）以及同一评论内的多个编号/列表阻塞项，同时忽略正文行内反引
-      号提及（如 `` `[P1]` ``）、零项/无项标题（`**Blockers**: None`、
-      `### Critical (0)`、`### Blockers\nNone`）与普通叙述语句。
+      `Blocker`），涵盖 Markdown 表格严重度列中的独立单元格（结合列名与单元格是否
+      为计数综合判定，保证 `Severity | Findings` 等含文字描述的逐项表全部保留，同
+      时准确识别 `| Critical | 0 |` / `| Critical | 2 |` 计数汇总表）、以标题引导
+      的阻塞列表（`**Blockers**`，在缩进续段、子列表项与缩进代码块后保持同一标题作
+      用域）以及同一评论内的多个编号/列表阻塞项；对 `<details><summary>中文说明
+      </summary>` 执行一对一对应合并，仅折叠与外层对应的翻译而保留折叠区内独有或主
+      题不重合的额外发现，同时忽略正文行内反引号提及（如 `` `[P1]` ``）、闭合 HTML
+      注释、零项/无项标题（`**Blockers**: None`、`### Critical (0)`、
+      `### Blockers\nNone`）与普通叙述语句。
     - 收集未决阻塞行内线程（`resolved !== true` 或所属评审位于未解除
       `changeRequests` 中）、带阻塞标签的未解除 `changeRequests` 正文，以及带阻塞
       标签的 `OWNER`/`MEMBER`/`COLLABORATOR` 顶层 `issueComments`（单条评论含多个
@@ -120,7 +124,9 @@
       录，单条不带 `finding` 的 `{ url }` 无法放行多发现评论。
     - 若 `verdict` 为 `merge-ready`，任何未决阻塞发现被遗漏、标为 `reproduced` 或
       `not-measured`、或标为 `not-reproduced` 却未在 **`report.md` 与 `comment.md`
-      （存在时）两处同时**引用其 URL/片段/评论 ID，均 fail-closed 报错拒绝。
+      （存在时）两处可见正文中同时**引用其 URL/片段/评论 ID（多发现评论还须按发
+      现编号核对披露，如 `finding 2`、`findings 1, 2` 或 `第 1、2 项`），均
+      fail-closed 报错拒绝。
     - 若 `verdict` 非 `merge-ready`（`inconclusive`、`findings`、`blocked`），遗漏
       项降级为告警，避免阻塞部分完成或失败轮次的报告发布。
 

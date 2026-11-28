@@ -44,6 +44,7 @@ import {
   extractBlockingReviewItems,
   hasBlockingSeverityTag,
   isFilesystemRoot,
+  reportMentionsReviewFinding,
 } from '../../scripts/verify-pr-check.mjs';
 
 const SCRIPT = fileURLToPath(
@@ -7666,8 +7667,8 @@ describe('container boundary-gate.json uid check and --review-threads blocking-r
       ]),
     );
 
-    // 4b. Hiding the comment citation inside an invisible HTML comment must not satisfy comment.md check.
-    const htmlHiddenComment = `PR #18581 (${HEAD_OID}) — **Verdict: merge-ready**\n\n## Methodology\n\n**Boundary.** Container.\n\n<!-- issuecomment-7231584332 -->\n\n_— claude-opus-4-7 via Qwen Code /verify-pr (v0.29.0; skill 123456789abc)_`;
+    // 4b. Hiding the comment citation AND finding numbers inside an invisible HTML comment must not satisfy comment.md check.
+    const htmlHiddenComment = `PR #18581 (${HEAD_OID}) — **Verdict: merge-ready**\n\n## Methodology\n\n**Boundary.** Container.\n\n<!-- issuecomment-7231584332 findings 1 and 2 -->\n\n_— claude-opus-4-7 via Qwen Code /verify-pr (v0.29.0; skill 123456789abc)_`;
     const hiddenInComment = checkArtifacts({
       files: makePassingFiles({
         report: baseReport,
@@ -7934,5 +7935,214 @@ describe('container boundary-gate.json uid check and --review-threads blocking-r
     } finally {
       rmSync(baseDir, { recursive: true, force: true });
     }
+  });
+
+  it('keeps blocker-list scope across indented continuation paragraphs/code blocks, preserves Severity|Findings description tables, keeps unique Chinese-fold findings, and enforces per-finding citations', () => {
+    // 1. Indented continuation paragraph and indented fenced code block inside ### Blockers must not drop item 2.
+    const blockersWithRepro = [
+      '### Blockers',
+      '',
+      '1. First blocker title',
+      '',
+      '   Repro paragraph indented by three spaces.',
+      '',
+      '   ```bash',
+      '   node scripts/verify-pr-check.mjs /tmp/demo',
+      '   ```',
+      '',
+      '2. Second blocker title',
+      '',
+      '### Non-blocking',
+      '',
+      '1. Minor wording nit',
+    ].join('\n');
+    const listFindings = extractBlockingFindings(blockersWithRepro);
+    expect(listFindings).toHaveLength(2);
+    expect(listFindings[0].excerpt).toContain('First blocker title');
+    expect(listFindings[1].excerpt).toContain('Second blocker title');
+
+    // Quoted blocker list with empty `>` blank line + indented continuation also keeps both items.
+    const quotedListFindings = extractBlockingFindings(
+      '> ### Blockers\n>\n> 1. Quoted first\n>\n>    Indented continuation\n>\n> 2. Quoted second',
+    );
+    expect(quotedListFindings).toHaveLength(2);
+
+    // 2. Severity | Findings table with prose descriptions + external [P1] keeps ALL 3 findings.
+    const findingsColTable = [
+      '| Severity | Findings |',
+      '| --- | --- |',
+      '| P1 | Drops FIFOs silently |',
+      '| P1 | Splits hard links |',
+      '',
+      '- **[P1]** External third blocker outside the table.',
+    ].join('\n');
+    expect(extractBlockingFindings(findingsColTable)).toHaveLength(3);
+    // Numeric zero count in a `Findings` column still skips as a summary row.
+    expect(
+      extractBlockingFindings(
+        '| Severity | Findings |\n| --- | --- |\n| Critical | 0 |',
+      ),
+    ).toEqual([]);
+    // Severity | Count | Description table with prose description column keeps every row.
+    expect(
+      extractBlockingFindings(
+        '| Severity | Count | Description |\n| --- | --- | --- |\n| P1 | 1 | Drops xattrs |\n\n1. **[P1]** External finding.',
+      ),
+    ).toHaveLength(2);
+
+    // 3. Extra independent P1 inside <details><summary>中文说明</summary> is preserved alongside the main P1.
+    const extraInChineseFold = [
+      '1. **[P1] `verify-pr-prepare.mjs` omits container uid.**',
+      '',
+      '<details>',
+      '<summary>中文说明</summary>',
+      '',
+      '1. **[P1] `verify-pr-prepare.mjs` 遗漏容器 uid。**',
+      '2. **[P1] `verify-pr-check.mjs` 仅在中文补充区记录的独立阻塞项。**',
+      '',
+      '</details>',
+    ].join('\n');
+    const mergedExtra = extractBlockingFindings(extraInChineseFold);
+    expect(mergedExtra).toHaveLength(2);
+    expect(mergedExtra[1].excerpt).toContain('独立阻塞项');
+
+    // Disjoint technical-token P1s (1 in EN, 1 different topic in 中文说明) are NOT falsely merged.
+    const disjointBilingual = [
+      '1. **[P1] `verify-pr-prepare.mjs` leaks nonce.**',
+      '',
+      '<details>',
+      '<summary>中文说明</summary>',
+      '',
+      '1. **[P1] `verify-pr-guard.mjs` misses mid-fetch push.**',
+      '',
+      '</details>',
+    ].join('\n');
+    expect(extractBlockingFindings(disjointBilingual)).toHaveLength(2);
+
+    // 4. Per-finding citation checks in both report.md and comment.md.
+    const multiUrl =
+      'https://github.com/QwenLM/qwen-code/pull/18609#issuecomment-7231584332';
+    // Citing only "第 1 项" with the shared URL satisfies finding 1 but MUST NOT satisfy finding 2.
+    const onlyFinding1Comment = `PR #18581 (${HEAD_OID}) — **Verdict: merge-ready**\n\n## Methodology\n\n**Boundary.** Container.\n\n第 1 项已核实，见 ${multiUrl}。\n\n_— claude-opus-4-7 via Qwen Code /verify-pr (v0.29.0; skill 123456789abc)_`;
+    expect(
+      reportMentionsReviewFinding(onlyFinding1Comment, multiUrl, 1, 2),
+    ).toBe(true);
+    expect(
+      reportMentionsReviewFinding(onlyFinding1Comment, multiUrl, 2, 2),
+    ).toBe(false);
+
+    // "finding 1/2" means finding 1 of 2 and MUST NOT satisfy finding 2.
+    expect(
+      reportMentionsReviewFinding(
+        `Verified ${multiUrl} (finding 1/2).`,
+        multiUrl,
+        2,
+        2,
+      ),
+    ).toBe(false);
+
+    // Compact combined disclosure ("第 1、2 项" / "findings 1, 2" / "findings 1-2") satisfies both.
+    const combinedChineseComment = `PR #18581 (${HEAD_OID}) — **Verdict: merge-ready**\n\n## Methodology\n\n**Boundary.** Container.\n\n第 1、2 项均已核实，见 ${multiUrl}。\n\n_— claude-opus-4-7 via Qwen Code /verify-pr (v0.29.0; skill 123456789abc)_`;
+    expect(
+      reportMentionsReviewFinding(combinedChineseComment, multiUrl, 1, 2),
+    ).toBe(true);
+    expect(
+      reportMentionsReviewFinding(combinedChineseComment, multiUrl, 2, 2),
+    ).toBe(true);
+    expect(
+      reportMentionsReviewFinding(
+        `Verified issuecomment-7231584332 (findings 1-2).`,
+        multiUrl,
+        2,
+        2,
+      ),
+    ).toBe(true);
+
+    // Cross-comment isolation: finding 2 mentioned for ANOTHER comment must NOT satisfy this comment.
+    const crossCommentDoc = [
+      '- Verified issuecomment-1111111 (findings 1 and 2).',
+      '- Verified issuecomment-7231584332 (finding 1 only).',
+    ].join('\n');
+    expect(reportMentionsReviewFinding(crossCommentDoc, multiUrl, 1, 2)).toBe(
+      true,
+    );
+    expect(reportMentionsReviewFinding(crossCommentDoc, multiUrl, 2, 2)).toBe(
+      false,
+    );
+    // Same-line bare numeric comment IDs must also stay isolated per clause.
+    expect(
+      reportMentionsReviewFinding(
+        'Verified 7239376491 (findings 1 and 2); 7231584332 (finding 1 only).',
+        multiUrl,
+        2,
+        2,
+      ),
+    ).toBe(false);
+
+    // End-to-end checkArtifacts: report.md cites both findings, comment.md cites only "第 1 项" -> fails closed!
+    const reviewText = JSON.stringify({
+      threads: [],
+      changeRequests: [],
+      issueComments: [
+        {
+          author: 'wenshao',
+          association: 'OWNER',
+          url: multiUrl,
+          body: '1. **[P1] Shared start snapshot**\n2. **[P1] Missed mid-fetch push**',
+        },
+      ],
+    });
+    const fullAssertions = JSON.stringify({
+      pass: 10,
+      fail: 0,
+      total: 10,
+      reviewCoverage: [
+        {
+          url: multiUrl,
+          finding: 1,
+          status: 'not-reproduced',
+          evidence: 'per-round dirs isolated',
+        },
+        {
+          url: multiUrl,
+          finding: 2,
+          status: 'not-reproduced',
+          evidence: 'post-pagination head recheck caught push',
+        },
+      ],
+    });
+    const fullReport = `PR #18581 (${HEAD_OID}) — **Verdict: merge-ready**\n\n## Methodology\n\n**Boundary.** Container.\n\nVerified ${multiUrl} (findings 1 and 2).`;
+
+    const missingFinding2InComment = checkArtifacts({
+      files: makePassingFiles({
+        report: fullReport,
+        comment: onlyFinding1Comment,
+        assertions: fullAssertions,
+      }),
+      evidence: ['01-ab.png'],
+      expectedHead: HEAD_OID,
+      coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 18609 },
+      reviewThreadsText: reviewText,
+    });
+    expect(missingFinding2InComment.errors).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /comment\.md does not reference verified blocking .*finding 2 of 2/,
+        ),
+      ]),
+    );
+
+    const bothDisclosedInComment = checkArtifacts({
+      files: makePassingFiles({
+        report: fullReport,
+        comment: combinedChineseComment,
+        assertions: fullAssertions,
+      }),
+      evidence: ['01-ab.png'],
+      expectedHead: HEAD_OID,
+      coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 18609 },
+      reviewThreadsText: reviewText,
+    });
+    expect(bothDisclosedInComment.errors).toEqual([]);
   });
 });
