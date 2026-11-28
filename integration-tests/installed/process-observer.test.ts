@@ -49,8 +49,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
-const [modulePath, widthArg, mode] = (process.env['OBSERVER_PROBE'] ?? '').split('|');
+const [modulePath, widthArg, mode, sweepArg] = (process.env['OBSERVER_PROBE'] ?? '').split('|');
 const width = Number(widthArg);
+const sweepMs = Number(sweepArg);
 const { observe } = await import(pathToFileURL(modulePath).href);
 const payload = [
   "const { spawn } = require('node:child_process');",
@@ -67,8 +68,11 @@ const child = spawn(process.execPath, ['-e', payload], { stdio: 'ignore', detach
 fs.writeFileSync(pidFile, String(child.pid));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const observer = observe(pidFile);
-const finished = observer.cleanup();
-observer.cleanup = () => finished;
+// Memoize cleanup WITHOUT running it: cleanup() opens with clearInterval, so
+// calling it here would stop the very timer the 'tick' mode measures.
+const realCleanup = observer.cleanup;
+let cleaning;
+observer.cleanup = () => (cleaning ??= realCleanup());
 for (let i = 0; i < 60 && observer.snapshot().length < width + 1; i++) {
   observer.poll();
   await sleep(50);
@@ -76,32 +80,46 @@ for (let i = 0; i < 60 && observer.snapshot().length < width + 1; i++) {
 const captured = observer.snapshot().length;
 assert.ok(captured >= width + 1, 'tree observed: ' + captured);
 if (mode === 'tick') {
-  const before = observer.timing();
+  // sweeps, not polls: polls counts every tick, gated ones included.
+  const before = observer.timing().sweeps;
   await sleep(3000);
-  const after = observer.timing();
+  const after = observer.timing().sweeps;
   observer.stop();
   try { process.kill(-child.pid, 'SIGKILL'); } catch {}
-  console.log(JSON.stringify({ captured, polls: after.polls - before.polls }));
+  console.log(JSON.stringify({ captured, sweeps: after - before }));
 } else if (mode === 'busy') {
   observer.stop();
+  // Open the throttle first: it is measured from the previous sweep's
+  // completion, so a timed poll inside the window would time a no-op.
+  await sleep(sweepMs + 50);
+  const before = observer.timing().sweeps;
   const started = performance.now();
   observer.poll();
-  const sweepMs = Math.round(performance.now() - started);
+  const elapsed = Math.round(performance.now() - started);
+  const swept = observer.timing().sweeps - before;
   try { process.kill(-child.pid, 'SIGKILL'); } catch {}
-  console.log(JSON.stringify({ captured, sweepMs }));
+  console.log(JSON.stringify({ captured, sweepMs: elapsed, swept }));
 } else {
+  const sweepsAtExit = observer.timing().sweeps;
   try { process.kill(-child.pid, 'SIGKILL'); } catch {}
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline && observer.snapshot().length === captured)
-    await sleep(100);
+  // The root is gone, so the walk must stop sweeping. captured is append-only
+  // on purpose (cleanup needs every row), so the count can never shrink; the
+  // observable is that no further sweep runs.
+  await sleep(sweepMs * 2 + 200);
+  const sweepsAfterExit = observer.timing().sweeps;
   const afterExit = observer.snapshot().length;
   observer.stop();
   await observer.cleanup();
-  console.log(JSON.stringify({ captured, afterExit }));
+  console.log(JSON.stringify({ captured, afterExit, sweepsAtExit, sweepsAfterExit }));
 }
 `;
 
-function runProbe(modulePath: string, width: number, mode: string) {
+function runProbe(
+  modulePath: string,
+  width: number,
+  mode: string,
+  intervalMs = sweepMs,
+) {
   const result = execFileSync(
     process.execPath,
     ['--import', tsx, '--input-type=module', '-e', probe],
@@ -111,15 +129,23 @@ function runProbe(modulePath: string, width: number, mode: string) {
       timeout: 120_000,
       env: {
         ...process.env,
-        OBSERVER_PROBE: [modulePath, String(width), mode].join('|'),
+        OBSERVER_PROBE: [
+          modulePath,
+          String(width),
+          mode,
+          String(intervalMs),
+        ].join('|'),
       },
     },
   );
   return JSON.parse(result.trim().split('\n').at(-1)!) as {
     captured: number;
-    polls?: number;
+    sweeps?: number;
+    swept?: number;
     sweepMs?: number;
     afterExit?: number;
+    sweepsAtExit?: number;
+    sweepsAfterExit?: number;
   };
 }
 
@@ -140,6 +166,9 @@ it('keeps the launcher sweep well inside the tick it runs on', () => {
     `SWEEP_PROBES (${sweepCap}) covers the ${launcherTree}-process launcher tree`,
   );
   const facts = runProbe(observerCopy(), launcherTree / 2, 'busy');
+  // The timed call must actually be a sweep: inside the throttle window it
+  // would be a no-op, and the budget below would bound nothing.
+  assert.equal(facts.swept, 1, 'the timed poll performed one sweep');
   assert.ok(
     facts.sweepMs! < probeBudgetMs,
     `${facts.sweepMs}ms per sweep for ${facts.captured} processes`,
@@ -149,17 +178,29 @@ it('keeps the launcher sweep well inside the tick it runs on', () => {
 it('walks once per sweep interval, not on the 100ms tick', () => {
   const facts = runProbe(observerCopy(), 2, 'tick');
   const expected = Math.ceil(3000 / sweepMs) + 1;
+  // Lower bound first: a timer that never ran (or was cleared before the
+  // window) sweeps 0 times and would satisfy the upper bound alone.
+  assert.ok(facts.sweeps! >= 1, 'the interval swept at all in 3s');
   assert.ok(
-    facts.polls! <= expected,
-    `${facts.polls} walks in 3s for ${facts.captured} processes, expected <= ${expected}`,
+    facts.sweeps! <= expected,
+    `${facts.sweeps} sweeps in 3s for ${facts.captured} processes, expected <= ${expected}`,
   );
 });
 
-it('records the exit of the tree once the root is gone', () => {
+it('stops sweeping once the root is gone', () => {
   const exited = runProbe(observerCopy(), 6, 'exit');
   assert.ok(exited.captured >= 7);
-  assert.ok(
-    exited.afterExit! < exited.captured,
-    `walk still counted ${exited.afterExit} after the root exited`,
+  // `captured` is append-only by construction — cleanup needs every row — so
+  // its length cannot shrink and a "< before" assertion could never hold.
+  assert.equal(
+    exited.afterExit,
+    exited.captured,
+    `the exit must not add rows (${exited.afterExit} vs ${exited.captured})`,
+  );
+  // What is actually guaranteed: a dead root ends the sweep.
+  assert.equal(
+    exited.sweepsAfterExit,
+    exited.sweepsAtExit,
+    `the walk swept ${exited.sweepsAfterExit! - exited.sweepsAtExit!} more times after the root exited`,
   );
 });
