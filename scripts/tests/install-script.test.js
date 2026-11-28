@@ -61,6 +61,19 @@ if (process.env.CI && process.platform !== 'win32' && !zipAvailable) {
 const itWithZip = zipAvailable ? it : it.skip;
 const itOnUnixWithZip = zipAvailable ? itOnUnix : it.skip;
 
+function writeSupportedGlibcStub(fakeBin) {
+  writeFileSync(
+    path.join(fakeBin, 'getconf'),
+    [
+      '#!/usr/bin/env sh',
+      'if [ "$1" = "GNU_LIBC_VERSION" ]; then echo "glibc 2.39"; exit 0; fi',
+      'exit 1',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(path.join(fakeBin, 'getconf'), 0o755);
+}
+
 describe('installation scripts', () => {
   it('keeps the Linux/macOS installer lightweight', () => {
     const script = readScript(
@@ -3731,6 +3744,7 @@ describe('Linux/macOS installer end-to-end', () => {
         const home = path.join(tmpDir, 'home');
 
         mkdirSync(fakeBin, { recursive: true });
+        writeSupportedGlibcStub(fakeBin);
         writeFileSync(
           path.join(fakeBin, 'uname'),
           [
@@ -3838,6 +3852,7 @@ describe('Linux/macOS installer end-to-end', () => {
         const home = path.join(tmpDir, 'home');
 
         mkdirSync(fakeBin, { recursive: true });
+        writeSupportedGlibcStub(fakeBin);
         writeFileSync(
           path.join(fakeBin, 'uname'),
           [
@@ -4444,6 +4459,7 @@ describe('Linux/macOS installer end-to-end', () => {
         const home = path.join(tmpDir, 'home');
 
         mkdirSync(fakeBin, { recursive: true });
+        writeSupportedGlibcStub(fakeBin);
         writeFileSync(
           path.join(fakeBin, 'uname'),
           [
@@ -4758,6 +4774,7 @@ describe('Linux/macOS installer end-to-end', () => {
         const home = path.join(tmpDir, 'home');
         const npmLog = path.join(tmpDir, 'npm-args.txt');
         mkdirSync(fakeBin, { recursive: true });
+        writeSupportedGlibcStub(fakeBin);
         mkdirSync(home, { recursive: true });
 
         writeFileSync(
@@ -4841,6 +4858,7 @@ describe('Linux/macOS installer end-to-end', () => {
       const home = path.join(tmpDir, 'home');
       const npmLog = path.join(tmpDir, 'npm-args.txt');
       mkdirSync(fakeBin, { recursive: true });
+      writeSupportedGlibcStub(fakeBin);
       mkdirSync(home, { recursive: true });
 
       writeFileSync(path.join(fakeBin, 'curl'), '#!/usr/bin/env sh\nexit 22\n');
@@ -4913,6 +4931,7 @@ describe('Linux/macOS installer end-to-end', () => {
     try {
       const fakeBin = path.join(tmpDir, 'bin');
       mkdirSync(fakeBin, { recursive: true });
+      writeSupportedGlibcStub(fakeBin);
       writeFileSync(path.join(fakeBin, 'curl'), '#!/usr/bin/env sh\nexit 22\n');
       // Shadow any system Node on PATH (e.g. /usr/bin/node on self-hosted
       // runners) with a stub that fails version detection, so the npm fallback
