@@ -33,7 +33,6 @@ export interface ManagedLocalState {
   capabilityDigest: string;
   javaPort: number;
   harnessPort: number;
-  brokerPort: number;
 }
 
 const HEX_SECRETS = [
@@ -62,19 +61,20 @@ export function validateManagedLocalState(value: unknown): ManagedLocalState {
     !/^[A-Za-z0-9+/]{43}=$/u.test(state['runtimeCredentialKey']) ||
     typeof state['capabilityDigest'] !== 'string' ||
     !/^sha256:[0-9a-f]{64}$/u.test(state['capabilityDigest']) ||
-    ['javaPort', 'harnessPort', 'brokerPort'].some(
+    ['javaPort', 'harnessPort'].some(
       (key) =>
         !Number.isInteger(state[key]) ||
         Number(state[key]) < 1 ||
         Number(state[key]) > 65535,
     ) ||
-    new Set([state['javaPort'], state['harnessPort'], state['brokerPort']])
-      .size !== 3
+    new Set([state['javaPort'], state['harnessPort']]).size !== 2
   )
     throw new Error(
       'Invalid local state; restore the original state.json and data together.',
     );
-  return value as ManagedLocalState;
+  const { brokerPort: _legacyBrokerPort, ...current } =
+    value as ManagedLocalState & { brokerPort?: unknown };
+  return current;
 }
 
 async function freePort(): Promise<number> {
@@ -168,12 +168,8 @@ export async function openManagedLocalState(
         );
       }
       const ports = new Set<number>();
-      while (ports.size < 3) ports.add(await freePort());
-      const [javaPort, harnessPort, brokerPort] = [...ports] as [
-        number,
-        number,
-        number,
-      ];
+      while (ports.size < 2) ports.add(await freePort());
+      const [javaPort, harnessPort] = [...ports] as [number, number];
       const secret = () => randomBytes(32).toString('hex');
       state = {
         schemaVersion: 1,
@@ -187,7 +183,6 @@ export async function openManagedLocalState(
         capabilityDigest: `sha256:${secret()}`,
         javaPort,
         harnessPort,
-        brokerPort,
       };
       const temporary = path.join(canonical, `state-${randomUUID()}.tmp`);
       await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, {

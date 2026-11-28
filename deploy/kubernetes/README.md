@@ -2,8 +2,9 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-This experimental Helm chart installs a signed Managed Agent API, a private
-Hosted Harness in the same Pod, and MySQL 8.4 with a persistent volume. One Helm
+This experimental Helm chart installs a signed Managed Agent API and two
+private Hosted Harness pool members in one application Pod, plus MySQL 8.4
+with a persistent volume. One Helm
 command installs the stack after you provide images and model configuration.
 The default supports text Sessions. Optional settings add trusted single-node
 Workspace files and foreground Shell, and a Managed WebShell gateway. K2 CSI
@@ -20,7 +21,7 @@ provisioning remains a separate deployment.
   CPU architecture. Publicly published Managed Agent images are not assumed.
 - An OpenAI-compatible model endpoint, model ID and API key.
 
-The default application Pod requests 500m CPU and 1 GiB memory in total; MySQL requests
+The default application Pod requests 750m CPU and 1.5 GiB memory in total. MySQL requests
 another 250m CPU and 512 MiB. Resource requests and limits are configurable in
 [values.yaml](chart/values.yaml). The application requires no Kubernetes API
 permissions and does not mount a service-account token.
@@ -130,7 +131,11 @@ initialization grants the application user its database privileges and SELECT on
 `performance_schema.user_variables_by_thread`, required by Flyway's boot probe.
 
 Only the signed public API is exposed on the ClusterIP Service's port 8080.
-Harness port 4170 and the Session Store listener on port 8081 bind to loopback.
+The Harness pool members `harness` and `harness-b` use loopback ports 4170 and 4172. The private Session Store uses loopback port 8081. When `runtime.enabled` is true, the Runtime Broker shares that same internal origin: each Harness receives `QWEN_MANAGED_RUNTIME_BROKER_URL=http://127.0.0.1:8081`, and no dedicated Broker listener is exposed. With `runtime.enabled` false, the Harnesses receive neither a Broker URL nor a Broker token, preserving text-only Sessions. The control plane
+routes Sessions to their recorded owners, and SQL wake dispatch enables
+placement release after clean suspension. Pod readiness covers all containers,
+so a restarting Harness can temporarily remove the API endpoint from the
+Service.
 There is no unauthenticated public bind, LoadBalancer or Ingress. Remote clients
 use a separately configured TLS ingress or trusted gateway while retaining API
 signatures; tenant and actor headers alone do not authenticate a caller.
@@ -255,7 +260,8 @@ Turn IDs as JSON. It makes a real provider call using the configured account.
 On failure it reports the Session ID and leaves that Session for inspection; it
 does not replay an uncertain input. Logs can be read with
 `kubectl -n qwen-managed-agent logs deployment/managed-agent -c server` or
-`-c harness`. The default timeout is 120 seconds; `--timeout-ms` overrides it.
+`-c harness` and `-c harness-b` for the pool members. The default timeout is
+120 seconds and can be overridden with `--timeout-ms`.
 
 To check idle persistence, first run the smoke with `--keep-session`. Record its
 Session ID, restart the application, then resume the smoke using that ID:
@@ -283,6 +289,18 @@ MySQL and optional Runtime/Workspace PVCs and credentials. Repeat the installati
 new images and run the Session smoke before restoring traffic. The application
 uses one replica and Recreate, so upgrades have downtime. Do not scale it to
 multiple replicas.
+
+Upgrade a release whose Harnesses still use the dedicated Broker URL
+`http://127.0.0.1:4182` with the new chart and matching server and Harness
+images together. The new template replaces that value with the shared Session
+Store origin `http://127.0.0.1:8081`. A rollback to the dedicated-listener
+release must restore its previous chart and matched images together, including
+the old 4182 URL; do not combine shared-listener Harness configuration with an
+older dedicated-listener server.
+
+Once the pool assigns Sessions, their writer credentials include the member
+and epoch. To return to a release with the unpooled connector, restore a
+matching pre-upgrade database and application backup before accepting writes.
 
 Do not use `--atomic` or automatically roll back a schema-changing upgrade.
 Flyway migrations run before readiness; an older binary is not guaranteed to
@@ -320,3 +338,6 @@ and did not support Shell. The chart does not enable K2. Design:
 tools and WebShell:
 [English](../../docs/design/2026-10-25-managed-agent-kubernetes-tools.md) |
 [简体中文](../../docs/design/2026-10-25-managed-agent-kubernetes-tools.zh-CN.md).
+Harness pool design
+[English](../../docs/design/2026-11-26-managed-agent-helm-harness-pool.md) |
+[简体中文](../../docs/design/2026-11-26-managed-agent-helm-harness-pool.zh-CN.md).

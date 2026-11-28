@@ -24,6 +24,7 @@ import type {
   DefaultHookOutput,
   HookPhase,
   FileChangeEvent,
+  UserPromptSource,
 } from './types.js';
 import { createHookOutput, PermissionMode, HookEventName } from './types.js';
 import type {
@@ -82,6 +83,7 @@ export class HookSystem {
   private fileWatchingEndedSession?: { sessionId: string };
   private fileWatcherClosing: Promise<void> = Promise.resolve();
   private closed = false;
+  private readonly configWarnings = new Set<string>();
 
   constructor(
     private readonly config: Config,
@@ -91,7 +93,9 @@ export class HookSystem {
     const allowedHttpUrls = config.getAllowedHttpHookUrls();
 
     // Initialize components
-    this.hookRegistry = new HookRegistry(config);
+    this.hookRegistry = new HookRegistry(config, {
+      emitFeedback: (_type, message) => this.configWarnings.add(message),
+    });
     this.hookRunner = new HookRunner(allowedHttpUrls, config); // Pass config for prompt hooks
     this.hookAggregator = new HookAggregator();
     this.hookPlanner = new HookPlanner(this.hookRegistry);
@@ -116,6 +120,7 @@ export class HookSystem {
    */
   async initialize(options?: { skipFileWatching?: boolean }): Promise<void> {
     if (this.managedDispatcher) return;
+    this.configWarnings.clear();
     await this.hookRegistry.initialize();
     this.fileWatchingAllowed = !options?.skipFileWatching;
     this.fileWatchingSessionId = this.config.getSessionId();
@@ -125,9 +130,15 @@ export class HookSystem {
 
   async reload(): Promise<void> {
     if (this.managedDispatcher) return;
+    this.configWarnings.clear();
     await this.hookRegistry.reloadConfiguredHooks();
     await this.refreshFileWatching();
     debugLogger.debug('Hook system reloaded successfully');
+  }
+
+  /** Hooks from settings and extensions that were skipped or partly ignored. */
+  getConfigWarnings(): string[] {
+    return [...this.configWarnings];
   }
 
   /**
@@ -375,11 +386,13 @@ export class HookSystem {
     prompt: string,
     signal?: AbortSignal,
     submittedPrompt?: string,
+    source?: UserPromptSource,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.fireUserPromptSubmitEvent(
       prompt,
       signal,
       submittedPrompt,
+      source,
     );
     return result.finalOutput
       ? createHookOutput('UserPromptSubmit', result.finalOutput)

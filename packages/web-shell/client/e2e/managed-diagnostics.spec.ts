@@ -88,7 +88,11 @@ for (const width of [1280, 390]) {
     const trigger = page.getByRole('button', { name: 'Session diagnostics' });
     await expect(trigger).toBeVisible();
     await expect(page.getByRole('alert')).toHaveCount(0);
-    expect(diagnosticRequests).toEqual([]);
+    // The composer's usage chip reads session-stats in the background on
+    // mount; the dialog itself must not read any snapshot until it opens.
+    expect(
+      diagnosticRequests.filter((name) => name !== 'session-stats'),
+    ).toEqual([]);
     await trigger.click();
     const dialog = page.getByRole('dialog');
     if (width === 390) {
@@ -155,12 +159,20 @@ for (const width of [1280, 390]) {
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
     await expect(trigger).toBeFocused();
-    expect(diagnosticRequests).toEqual([
+    // The usage chip's background reads and the Statistics tab read all land
+    // on session-stats, so pin the lazy snapshots separately: each is read
+    // exactly once, in tab order, while stats is read by both the chip and
+    // the tab (the chip may refresh again mid-tour).
+    expect(
+      diagnosticRequests.filter((name) => name !== 'session-stats'),
+    ).toEqual([
       'session-context-usage',
-      'session-stats',
       'session-resources',
       'session-agent-trace',
     ]);
+    expect(
+      diagnosticRequests.filter((name) => name === 'session-stats').length,
+    ).toBeGreaterThanOrEqual(2);
     expect(unexpected).toEqual([]);
     expect(errors).toEqual([]);
   });

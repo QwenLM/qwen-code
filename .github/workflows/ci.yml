@@ -102,8 +102,8 @@ env:
   # step re-runs every suite after `npm ci`, and a push to main always
   # classifies `full` (classify_pr computes a profile only for pull_request),
   # so what the fast lane skips is still re-checked post-merge.
-  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/autofix-check-evidence.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-host-load.test.mjs .github/scripts/ci/reap-isolated-home.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/autofix-check-evidence.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-host-load.test.mjs .github/scripts/ci/reap-isolated-home.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
+  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/pr-safety-precheck.workflow.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/autofix-check-evidence.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-host-load.test.mjs .github/scripts/ci/reap-isolated-home.test.mjs .github/scripts/ci/run-in-isolated-netns.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/pr-safety-precheck.workflow.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/autofix-check-evidence.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-host-load.test.mjs .github/scripts/ci/reap-isolated-home.test.mjs .github/scripts/ci/run-in-isolated-netns.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -1252,8 +1252,8 @@ jobs:
           echo "npm cache: ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
-      # The install-script packaging suite needs zip/unzip, and throws on a
-      # CI host that ships neither, so a silent skip there is impossible.
+      # The install-script packaging suite throws on CI if zip or unzip is
+      # unavailable. The next step can provision them without root.
       # tmux is PRE-LANDED for #8388: that PR's capture-tui carries a
       # describe.skipIf(!hasTmux)-gated real-tmux suite which, on a runner
       # without tmux (the hosted ubuntu-latest image ships none), would
@@ -1279,27 +1279,53 @@ jobs:
             # symlink, missing lib) must not fail the required Test check
             # before a single test has run.
             tmux -V || echo '::warning::tmux present but not answering; real-tmux capture tests will be skipped.'
-            zip -v > /dev/null 2>&1 || echo '::warning::zip present but not answering; the zip-packaging suite will throw on CI.'
-            unzip -v > /dev/null 2>&1 || echo '::warning::unzip present but not answering; the zip-packaging suite will throw on CI.'
+            zip -v > /dev/null 2>&1 || echo '::warning::zip present but not answering; user-local provisioning will retry.'
+            unzip -v > /dev/null 2>&1 || echo '::warning::unzip present but not answering; user-local provisioning will retry.'
           elif [ "$(id -u)" = '0' ] && command -v apt-get > /dev/null 2>&1; then
             # Root-container lanes have no sudo (and need none): apt-get
             # runs as-is. Advisory, not a gate: an apt hiccup must not red
             # this step before a single test has run — the suites carry
             # their own signal (the real-tmux suite skips; the zip suite
             # throws on CI). ::warning:: (not a plain echo) so a lane
-            # where the install PERMANENTLY fails shows the loss in the
-            # check UI instead of hiding it in a multi-thousand-line log.
+            # where the install fails shows the issue in the check UI.
             timeout 140 apt-get update -qq && timeout 140 apt-get install -y -qq --no-install-recommends tmux zip unzip \
-              || echo '::warning::tmux/zip install failed; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+              || echo '::warning::System tmux/zip install failed; user-local provisioning will check zip and unzip.'
           elif sudo -n true > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
             # Same advisory contract as the root branch; sudo -n here so a
             # runner without passwordless sudo fails fast instead of
             # hanging on a password prompt toward the step's bound.
             timeout 140 sudo -n apt-get update -qq && timeout 140 sudo -n apt-get install -y -qq --no-install-recommends tmux zip unzip \
-              || echo '::warning::tmux/zip install failed; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+              || echo '::warning::System tmux/zip install failed; user-local provisioning will check zip and unzip.'
           else
-            echo '::warning::tmux/zip unavailable; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
+            echo '::warning::System tmux/zip install unavailable; user-local provisioning will check zip and unzip.'
           fi
+
+      - name: 'Provision user-local zip and unzip'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}"
+        timeout-minutes: 5
+        continue-on-error: true
+        run: |-
+          if zip -v > /dev/null 2>&1 && unzip -v > /dev/null 2>&1; then
+            exit 0
+          fi
+          archive_dir="$(mktemp -d "${RUNNER_TEMP}/qwen-zip.XXXXXX")"
+          cd "$archive_dir"
+          trap 'rm -rf -- lists apt.conf ./*.deb' EXIT
+          mkdir -p lists/partial
+          # Keep the host's signed package sources and skip system update hooks.
+          cat > apt.conf <<'EOF'
+          #clear APT::Update::Pre-Invoke;
+          #clear APT::Update::Post-Invoke;
+          #clear APT::Update::Post-Invoke-Success;
+          EOF
+          apt_options=(-c apt.conf -o "Dir::State::lists=${archive_dir}/lists")
+          apt-get "${apt_options[@]}" -o Acquire::Languages=none update -qq
+          apt-get "${apt_options[@]}" download zip unzip
+          dpkg-deb --extract ./zip_*.deb .
+          dpkg-deb --extract ./unzip_*.deb .
+          ./usr/bin/zip -v > /dev/null
+          ./usr/bin/unzip -v > /dev/null
+          printf '%s\n' "${archive_dir}/usr/bin" >> "$GITHUB_PATH"
 
       - name: 'Provision linters for real-binary tests'
         # The script-lint real-binary regressions (the #15974 unloadable
@@ -1646,6 +1672,18 @@ jobs:
       # and RUNNER_TEMP survives across jobs, so publish a run-unique HOME via
       # GITHUB_ENV. Rationale: docs/design/2026-10-31-lint-static-ecs-routing.md.
       - name: 'Create isolated HOME'
+        env:
+          # pnpm's store check detects corruption; it is NOT a trust boundary.
+          # verifyFile() skips the digest read when size and mtime still match
+          # the index, so an equal-length write that restores mtime is adopted
+          # silently — measured on 11.24.0 across in-place, truncate and atomic
+          # replace. pnpm's own source says verification "does not make a store
+          # writable by untrusted users safe". So the store may only be shared
+          # where every writer is already trusted: the persistent fleet, which
+          # pick_runner reaches only for same-repo/trusted-author PRs, push and
+          # merge_group. Untrusted forks go to the ephemeral pool and keep a
+          # per-run data home.
+          SHARED_STORE_ELIGIBLE: "${{ runner.environment == 'self-hosted' && !contains(needs.classify_pr.outputs.lint_runner, 'ephemeral') }}"
         run: |-
           home="${RUNNER_TEMP}/qwen-lint-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           rm -rf -- "$home"
@@ -1655,6 +1693,15 @@ jobs:
           # them is safe; corepack does NOT re-verify extracted entries on hit,
           # so its home stays per-run (a shared one is a poisoning channel).
           printf 'XDG_CACHE_HOME=%s\n' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" >> "${GITHUB_ENV}"
+          # pnpm resolves its store through XDG_DATA_HOME. Under the run-unique
+          # HOME it was empty every run, so each run refetched all ~2300
+          # packages and the tail overran the install step's 30-minute cap
+          # (PR #18543, job 140553347054). Recover that cost on the trusted
+          # persistent fleet only — see SHARED_STORE_ELIGIBLE above.
+          if [ "${SHARED_STORE_ELIGIBLE}" = "true" ]; then
+            mkdir -p "${RUNNER_TOOL_CACHE}/qwen-ci-data"
+            printf 'XDG_DATA_HOME=%s\n' "${RUNNER_TOOL_CACHE}/qwen-ci-data" >> "${GITHUB_ENV}"
+          fi
           printf 'COREPACK_HOME=%s\n' "${home}/.cache/node/corepack" >> "${GITHUB_ENV}"
 
       # Pre-checkout cleanup: a previous containerised job (e.g. qwen-triage
@@ -2627,10 +2674,21 @@ jobs:
         env:
           # Avoid the pool's shared /tmp tmpfs for Chromium temporary files.
           TMPDIR: '${{ runner.temp }}'
+          # Explicit because GitHub Actions does not export runner.environment.
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         # Two workers is the hosted default (half of 4 vCPUs). Unpinned, a pool
         # job would start browsers for half the host's cores while the host
-        # runs its other jobs.
-        run: 'npm run test:e2e:smoke --workspace=packages/web-shell -- --shard=${{ matrix.shard }}/2 --workers=2'
+        # runs its other jobs. On self-hosted runners, wrap in an isolated
+        # loopback-only netns so sibling Docker veth churn cannot trigger
+        # Chromium net::ERR_NETWORK_CHANGED aborts. The `-f` guard keeps open
+        # PRs whose checked-out head.sha predates the script from failing with
+        # ENOENT before they merge main.
+        run: |-
+          if [ ! -f .github/scripts/ci/run-in-isolated-netns.sh ]; then
+            echo '::warning::run-in-isolated-netns.sh not present in this checkout (PR head predates it); running smoke without netns isolation'
+            exec npm run test:e2e:smoke --workspace=packages/web-shell -- --shard=${{ matrix.shard }}/2 --workers=2
+          fi
+          exec bash .github/scripts/ci/run-in-isolated-netns.sh -- npm run test:e2e:smoke --workspace=packages/web-shell -- --shard=${{ matrix.shard }}/2 --workers=2
 
       - name: 'Upload web-shell Playwright artifacts'
         if: '${{ always() }}'
@@ -3119,12 +3177,20 @@ jobs:
       # (corepack does not re-verify entries on cache hit — a shared home is
       # a cross-job poisoning channel). The gate step's key scrub stays.
       - name: 'Create isolated HOME'
+        env:
+          # Same trust gate as lint_and_static; see the rationale there. pnpm's
+          # store check is a corruption check, not a trust boundary.
+          SHARED_STORE_ELIGIBLE: "${{ runner.environment == 'self-hosted' && !contains(needs.classify_pr.outputs.lint_runner, 'ephemeral') }}"
         run: |-
           home="${RUNNER_TEMP}/qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           rm -rf -- "$home"
           mkdir -p "$home" "${RUNNER_TOOL_CACHE}/qwen-ci-cache"
           printf 'HOME=%s\nUSERPROFILE=%s\n' "$home" "$home" >> "${GITHUB_ENV}"
           printf 'XDG_CACHE_HOME=%s\n' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" >> "${GITHUB_ENV}"
+          if [ "${SHARED_STORE_ELIGIBLE}" = "true" ]; then
+            mkdir -p "${RUNNER_TOOL_CACHE}/qwen-ci-data"
+            printf 'XDG_DATA_HOME=%s\n' "${RUNNER_TOOL_CACHE}/qwen-ci-data" >> "${GITHUB_ENV}"
+          fi
           printf 'COREPACK_HOME=%s\n' "${home}/.cache/node/corepack" >> "${GITHUB_ENV}"
 
       - name: 'Restore workspace ownership'
@@ -3277,9 +3343,10 @@ jobs:
         if: "${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
 
-      # HOME is per-run (isolated above), so this cache dies with the job —
-      # the name must not promise persistence. The cold install is the
-      # accepted cost (review round-3); a shared pnpm store is a follow-up.
+      # HOME is per-run (isolated above), so this npm cache dies with the job —
+      # the name must not promise persistence. On the trusted persistent fleet
+      # the install reuses the shared pnpm store (see the isolation step above);
+      # an untrusted fork keeps a per-run store and still pays the cold fetch.
       - name: 'Configure per-run npm cache (self-hosted)'
         if: "${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: |-

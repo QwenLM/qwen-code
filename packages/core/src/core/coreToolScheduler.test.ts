@@ -53,8 +53,10 @@ import * as fsSync from 'node:fs';
 import { writeFile as fsWriteFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
+import { captureFixedPolicyHookStopReporter } from '../omni/policy/fixed-policy-hook-stop.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { SyntheticOutputTool } from '../tools/syntheticOutput.js';
 import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
 import { createMemoryScopedAgentConfig } from '../memory/memory-scoped-agent-config.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
@@ -976,6 +978,7 @@ describe('CoreToolScheduler', () => {
           expect.any(Number),
         );
         return hookResponse('post-stop', {
+          decision: 'block',
           continue: false,
           stopReason: 'post hook stopped',
         });
@@ -1331,6 +1334,7 @@ describe('CoreToolScheduler', () => {
     approvalMode?: ApprovalMode;
     getApprovalMode?: () => ApprovalMode;
     getPermissionsDeny?: () => string[] | undefined;
+    persistPermissionRule?: ReturnType<typeof vi.fn>;
     messageBus?: { request: ReturnType<typeof vi.fn> };
     hookSystem?: { runtimeId?: string; firePermissionDeniedEvent: Mock };
     disableHooks?: boolean;
@@ -1364,7 +1368,10 @@ describe('CoreToolScheduler', () => {
       Partial<
         Pick<
           PermissionManager,
-          'hasRelevantRules' | 'hasMatchingAskRule' | 'evaluate'
+          | 'hasRelevantRules'
+          | 'hasMatchingAskRule'
+          | 'evaluate'
+          | 'addSessionAllowRule'
         >
       >;
     deferredHiddenNames?: ReadonlySet<string>;
@@ -1415,6 +1422,7 @@ describe('CoreToolScheduler', () => {
           setApprovalMode: options.setApprovalMode ?? vi.fn(),
           getPermissionsDeny: options.getPermissionsDeny ?? (() => undefined),
           getPermissionManager: () => options.permissionManager,
+          getOnPersistPermissionRule: () => options.persistPermissionRule,
           getEffectiveInputModalities: () =>
             options.visionBridge || options.visionAgent ? {} : { image: true },
           getDefaultVisionBridgeModel: () =>
@@ -5818,24 +5826,37 @@ describe('CoreToolScheduler', () => {
         ['an allow', { behavior: 'allow' }, { value: 'a' }],
         [
           'an allow with a replacement',
-          { behavior: 'allow', updatedInput: { value: 'c' } },
+          {
+            behavior: 'allow',
+            updatedInput: { value: 'c' },
+            updatedPermissions: [
+              {
+                type: 'addRules',
+                rules: [{ toolName: 'WebFetch' }],
+                behavior: 'allow',
+                destination: 'projectSettings',
+              },
+            ],
+          },
           { value: 'c' },
         ],
       ])(
         'still asks the user after %s',
         async (_label, decision, expectedArgs) => {
           const execute = vi.fn().mockResolvedValue(textResult('ran'));
+          const persistPermissionRule = vi.fn().mockResolvedValue(undefined);
           const messageBus = rewriteHookBus(ask, decision);
           const { onToolCallsUpdate, onAllToolCallsComplete } = await runOne(
             askTool(execute),
             messageBus,
             { value: 'a' },
-            { approvalMode: ApprovalMode.YOLO },
+            { approvalMode: ApprovalMode.YOLO, persistPermissionRule },
           );
 
           const waiting = await waitForApproval(onToolCallsUpdate);
           expect(waiting.request.args).toEqual(expectedArgs);
           expect(execute).not.toHaveBeenCalled();
+          expect(persistPermissionRule).not.toHaveBeenCalled();
           await waiting.confirmationDetails.onConfirm(
             ToolConfirmationOutcome.ProceedOnce,
           );
@@ -5844,6 +5865,7 @@ describe('CoreToolScheduler', () => {
             'success',
           );
           expect(execute.mock.calls).toEqual([[expectedArgs]]);
+          expect(persistPermissionRule).not.toHaveBeenCalled();
           expect(hookEvents(messageBus, 'PreToolUse')).toHaveLength(1);
           expect(hookEvents(messageBus, 'PermissionRequest')).toHaveLength(1);
         },
@@ -6841,6 +6863,63 @@ describe('CoreToolScheduler', () => {
     expect(setAutoModeDenialState).toHaveBeenCalledWith(denialState());
     expect(execute).toHaveBeenCalledOnce();
   });
+
+  it.each([false, true])(
+    'adds the rules a PermissionRequest hook returns with its allow (replacement: %s)',
+    async (replaceInput) => {
+      const addSessionAllowRule = vi.fn();
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+
+      await scheduleAndSettle(
+        createSchedulerForLegacyToolTests({
+          toolsByName: toolMap(
+            askingTool({
+              kind: Kind.Execute,
+              getConfirmationDetails: vi
+                .fn()
+                .mockResolvedValue(
+                  execDetails(
+                    'Run command',
+                    'npm test',
+                    'npm',
+                    vi.fn().mockResolvedValue(undefined),
+                  ),
+                ),
+              execute,
+            }),
+          ),
+          approvalMode: ApprovalMode.DEFAULT,
+          permissionManager: {
+            isToolEnabled: vi.fn().mockResolvedValue(true),
+            findMatchingDenyRule: () => undefined,
+            hasRelevantRules: () => false,
+            evaluate: vi.fn().mockResolvedValue('default'),
+            hasMatchingAskRule: () => false,
+            addSessionAllowRule,
+          },
+          messageBus: permissionRequestHookBus({
+            behavior: 'allow',
+            ...(replaceInput && { updatedInput: { command: 'npm test' } }),
+            updatedPermissions: [
+              {
+                type: 'addRules',
+                rules: [{ toolName: 'Bash', ruleContent: 'npm test' }],
+                behavior: 'allow',
+                destination: 'session',
+              },
+            ],
+          }),
+          disableHooks: false,
+        }),
+        shellRequest('hook-permission-updates', 'npm test'),
+      );
+
+      expect(addSessionAllowRule).toHaveBeenCalledExactlyOnceWith(
+        'Bash(npm test)',
+      );
+      expect(execute).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each(['permission-request', 'execution-guard'] as const)(
     'blocks a current-workspace ask added at %s',
@@ -8105,7 +8184,7 @@ describe('CoreToolScheduler', () => {
           beta: executeB,
         }),
         messageBus: postToolBatchBus({
-          continue: false,
+          decision: 'block',
           stopReason: 'halt',
           hookSpecificOutput: {
             hookEventName: 'PostToolBatch',
@@ -8177,6 +8256,34 @@ describe('CoreToolScheduler', () => {
     expect(stoppedToolSpan?.ended).toBe(true);
   });
 
+  it('keeps the results and ends the turn on a PostToolBatch continue: false', async () => {
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: readToolMap({
+          alpha: vi.fn().mockResolvedValue(textResult('alpha output')),
+          beta: vi.fn().mockResolvedValue(textResult('beta output')),
+        }),
+        messageBus: postToolBatchBus({
+          continue: false,
+          stopReason: 'halt',
+        }),
+        disableHooks: false,
+      });
+
+    await scheduleBatch(
+      scheduler,
+      valueRequest('alpha', 'a', 'prompt-batch-end'),
+      valueRequest('beta', 'b', 'prompt-batch-end'),
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    const [alphaCall, betaCall] = firstBatch(onAllToolCallsComplete);
+    expectStatus(alphaCall, 'success');
+    expectStatus(betaCall, 'success');
+    expect(alphaCall.response.hookStopReason).toBeUndefined();
+    expect(betaCall.response.hookStopReason).toBe('halt');
+  });
+
   it.each<ToolExecutionStatus | undefined>([
     'not_started',
     'success',
@@ -8189,7 +8296,7 @@ describe('CoreToolScheduler', () => {
       const tool = new MockTool({ name: 'alpha', kind: Kind.Read });
       const messageBus = hookBus(async () =>
         hookResponse('PostToolBatch-hook', {
-          continue: false,
+          decision: 'block',
           stopReason: 'halt',
           hookSpecificOutput: { hookEventName: 'PostToolBatch' },
         }),
@@ -10957,6 +11064,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
     interactive?: boolean;
     ideMode?: boolean;
     permissionManager?: unknown;
+    persistPermissionRule?: ReturnType<typeof vi.fn>;
     messageBus?: MessageBus;
     disableHooks?: boolean;
     avoidPermissionPrompts?: boolean;
@@ -10994,7 +11102,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
           getDisableAllHooks: () => options.disableHooks ?? true,
           getShouldAvoidPermissionPrompts: () =>
             options.avoidPermissionPrompts ?? false,
-          getOnPersistPermissionRule: () => undefined,
+          getOnPersistPermissionRule: () => options.persistPermissionRule,
           getToolInvocationGuard: () => options.toolInvocationGuard,
         },
       ),
@@ -11531,6 +11639,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
   it('rejects PermissionRequest hook parameter rewrites', async () => {
     const onConfirm = vi.fn().mockResolvedValue(undefined);
     const execute = vi.fn();
+    const persistPermissionRule = vi.fn().mockResolvedValue(undefined);
     const messageBus = {
       request: vi.fn().mockResolvedValue(
         hookResponse('permission-hook', {
@@ -11538,6 +11647,14 @@ describe('CoreToolScheduler Plan shell routing', () => {
             decision: {
               behavior: 'allow',
               updatedInput: { command: 'touch changed.txt' },
+              updatedPermissions: [
+                {
+                  type: 'addRules',
+                  rules: [{ toolName: 'WebFetch' }],
+                  behavior: 'allow',
+                  destination: 'projectSettings',
+                },
+              ],
             },
           },
         }) satisfies HookExecutionResponse,
@@ -11550,6 +11667,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
         ],
         messageBus,
         disableHooks: false,
+        persistPermissionRule,
       },
       request('hook-rewrite', PYTHON),
     );
@@ -11559,6 +11677,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
       expect.stringContaining('exact invocation changed'),
     );
     expect(execute).not.toHaveBeenCalled();
+    expect(persistPermissionRule).not.toHaveBeenCalled();
   });
 
   it('revalidates Plan shell context after a pending permission hook', async () => {
@@ -12059,24 +12178,102 @@ describe('CoreToolScheduler telemetry spans', () => {
     truncateSpy.mockImplementation((s) => s);
   });
 
-  it('marks post-hook stop with a sanitized failure kind', async () => {
+  it('marks a blocking post-hook stop with a sanitized failure kind', async () => {
     const { spanRecord, call } = await runSingleTool({
       hooks: sequencedHookBus(
         hookResponse('pre-hook', { decision: 'allow' }),
         hookResponse('post-hook', {
-          decision: 'allow',
+          decision: 'block',
           continue: false,
           stopReason: 'sensitive /secret/path',
         }),
       ),
     });
 
-    expect(call.status).toBe('error');
+    expectStatus(call, 'error');
+    expect(call.response.hookStopReason).toBeUndefined();
     expectSanitizedFailure(
       spanRecord,
       'Tool execution stopped by hook',
       'post_hook_stopped',
     );
+  });
+
+  it('keeps the result and ends the turn on a PostToolUse continue: false', async () => {
+    const { spanRecord, call } = await runSingleTool({
+      hooks: eventHookBus((eventName) =>
+        eventName === 'PostToolUse'
+          ? { continue: false, stopReason: 'enough reading' }
+          : { decision: 'allow' },
+      ),
+    });
+
+    expectStatus(call, 'success');
+    expect(call.response.error).toBeUndefined();
+    expect(call.response.hookStopReason).toBe('enough reading');
+    expect(spanRecord.spanAttributes['tool.failure_kind']).toBeUndefined();
+  });
+
+  it('does not run the call and ends the turn on a PreToolUse continue: false', async () => {
+    const execute = vi.fn();
+    const { call } = await runSingleTool({
+      execute,
+      hooks: eventHookBus((eventName) =>
+        eventName === 'PreToolUse'
+          ? { continue: false, stopReason: 'budget spent' }
+          : {},
+      ),
+    });
+
+    expect(execute).not.toHaveBeenCalled();
+    expectStatus(call, 'error');
+    expect(call.response.executionStatus).toBe('not_started');
+    expect(call.response.error?.message).toBe('budget spent');
+    expect(call.response.hookStopReason).toBe('budget spent');
+  });
+
+  it('ends the turn on a PostToolUseFailure continue: false', async () => {
+    const { call } = await runSingleTool({
+      execute: executeToolError('boom'),
+      hooks: eventHookBus((eventName) =>
+        eventName === 'PostToolUseFailure'
+          ? { continue: false, stopReason: 'same failure again' }
+          : { decision: 'allow' },
+      ),
+    });
+
+    expectStatus(call, 'error');
+    expect(call.response.error?.message).toContain('boom');
+    expect(call.response.hookStopReason).toBe('same failure again');
+    expect(definedHookSpan('PostToolUseFailure').hookMetadata).toMatchObject({
+      shouldStop: true,
+      blockType: 'stop',
+    });
+  });
+
+  it('carries the first fixed-policy hook stop on the owning tool result', async () => {
+    let report: ReturnType<typeof captureFixedPolicyHookStopReporter>;
+    const { call } = await runSingleTool({
+      execute: async () => {
+        report = captureFixedPolicyHookStopReporter();
+        expect(report?.('first media')).toBe(true);
+        expect(report?.('second media')).toBe(true);
+        return textResult('both results');
+      },
+    });
+    expectStatus(call, 'success');
+    expect(call.response.hookStopReason).toBe('first media');
+    expect(JSON.stringify(call.response.responseParts)).toContain(
+      'both results',
+    );
+    const next = await runSingleTool({
+      execute: async () => {
+        expect(report?.('late')).toBe(false);
+        return textResult('next');
+      },
+    });
+    expectStatus(next.call, 'success');
+    expect(next.call.response.hookStopReason).toBeUndefined();
   });
 
   it('marks toolResult.error with a sanitized failure kind', async () => {
@@ -15375,7 +15572,7 @@ describe('Fire hook functions integration', () => {
       expect((await fire(bus())).shouldStop).toBe(false);
     });
 
-    it('should return shouldStop: true when hook indicates stop', async () => {
+    it('should end the turn when hook returns continue: false', async () => {
       respondWith({
         decision: 'allow',
         continue: false,
@@ -15384,7 +15581,8 @@ describe('Fire hook functions integration', () => {
 
       const result = await fire(bus());
 
-      expect(result.shouldStop).toBe(true);
+      expect(result.shouldStop).toBe(false);
+      expect(result.endsTurn).toBe(true);
       expect(result.stopReason).toBe('Completed');
     });
 
@@ -16371,6 +16569,30 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(await send(invalid('c2'))).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
     // Turn 3: same bad params — should trigger directive
     expect(await send(invalid('c3'))).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('counts malformed structured output retries across different payloads', async () => {
+    const send = createRetryScheduler([
+      new SyntheticOutputTool({
+        type: 'object',
+        properties: { docs: { type: 'object' } },
+      }),
+    ]);
+    const malformed = (id: string, field: string) =>
+      makeRequest(id, ToolNames.STRUCTURED_OUTPUT, {
+        docs: `{"${field}":1,}`,
+      });
+
+    const first = await send(malformed('c1', 'private_first'));
+    expect(first).toContain('not valid JSON at position');
+    expect(first).not.toContain('private_first');
+    expect(first).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+    expect(await send(malformed('c2', 'private_second'))).not.toContain(
+      RETRY_LOOP_STOP_DIRECTIVE,
+    );
+    expect(await send(malformed('c3', 'private_third'))).toContain(
+      RETRY_LOOP_STOP_DIRECTIVE,
+    );
   });
 
   it.each([

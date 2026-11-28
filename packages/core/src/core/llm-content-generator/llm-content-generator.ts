@@ -12,6 +12,7 @@ import type {
   GenerateContentConfig,
   ThinkingLevel,
   Content,
+  FunctionResponsePart,
   Part,
   HttpOptions,
 } from '@google/genai';
@@ -122,6 +123,8 @@ function installIsolatedTransport(
       url,
       signal,
     ) => {
+      // The SDK only observes abort events after it starts building the request.
+      signal?.throwIfAborted();
       const hasExplicitNativeHeader = Object.keys(options.headers ?? {}).some(
         (name) => name.toLowerCase() === 'x-goog-api-key',
       );
@@ -577,20 +580,89 @@ export class LlmContentGenerator implements ContentGenerator {
       delete result.thoughtSignature;
     }
 
-    // Handle functionResponse parts (which may contain nested media parts)
-    // Convert unsupported media types (audio, video) to text for Gemini API
+    // Gemini's FunctionResponsePart schema only permits `inlineData` and
+    // `fileData` (oneof data, without displayName or unknown fields) — never
+    // `text`. Convert unsupported audio/video to notes and move all text
+    // entries (including compaction placeholders / disclosures) into
+    // `functionResponse.response` so no invalid field reaches the wire in
+    // `function_response.parts`.
     if (result.functionResponse?.parts) {
-      const processedParts = result.functionResponse.parts.map((p) => {
-        // First convert unsupported media to text (before stripping displayName)
-        const converted = this.convertUnsupportedMediaToText(p);
-        // Then strip unsupported fields from remaining parts
-        return this.stripPartFields(converted);
-      });
+      const retainedParts: FunctionResponsePart[] = [];
+      const extractedTexts: string[] = [];
 
-      result.functionResponse = {
-        ...result.functionResponse,
-        parts: processedParts,
+      for (const nestedPart of result.functionResponse.parts as ReadonlyArray<
+        Part | string
+      >) {
+        if (typeof nestedPart === 'string') {
+          if (nestedPart.length > 0) extractedTexts.push(nestedPart);
+          continue;
+        }
+        const converted = this.convertUnsupportedMediaToText(nestedPart);
+        if (typeof converted.text === 'string' && converted.text.length > 0) {
+          extractedTexts.push(converted.text);
+        }
+        if (converted.inlineData) {
+          const { mimeType, data } = converted.inlineData;
+          retainedParts.push({
+            inlineData: {
+              ...(mimeType !== undefined ? { mimeType } : {}),
+              ...(data !== undefined ? { data } : {}),
+            },
+          });
+        }
+        if (converted.fileData) {
+          const { fileUri, mimeType } = converted.fileData;
+          retainedParts.push({
+            fileData: {
+              ...(fileUri !== undefined ? { fileUri } : {}),
+              ...(mimeType !== undefined ? { mimeType } : {}),
+            },
+          });
+        }
+      }
+
+      const { parts: _unusedParts, ...restFunctionResponse } =
+        result.functionResponse;
+      const nextFunctionResponse = {
+        ...restFunctionResponse,
+        ...(retainedParts.length > 0 ? { parts: retainedParts } : {}),
       };
+
+      if (extractedTexts.length > 0) {
+        const joinedText = extractedTexts.join('\n');
+        const existingResponse = nextFunctionResponse.response ?? {};
+        if (typeof existingResponse['output'] === 'string') {
+          nextFunctionResponse.response = {
+            ...existingResponse,
+            output: existingResponse['output']
+              ? `${existingResponse['output']}\n${joinedText}`
+              : joinedText,
+          };
+        } else if (existingResponse['output'] === undefined) {
+          nextFunctionResponse.response = {
+            ...existingResponse,
+            output: joinedText,
+          };
+        } else {
+          let noteKey = 'notes';
+          while (
+            existingResponse[noteKey] !== undefined &&
+            typeof existingResponse[noteKey] !== 'string'
+          ) {
+            noteKey = `_${noteKey}`;
+          }
+          const existingNote = existingResponse[noteKey];
+          nextFunctionResponse.response = {
+            ...existingResponse,
+            [noteKey]:
+              typeof existingNote === 'string' && existingNote
+                ? `${existingNote}\n${joinedText}`
+                : joinedText,
+          };
+        }
+      }
+
+      result.functionResponse = nextFunctionResponse;
     }
 
     return result;
@@ -602,12 +674,14 @@ export class LlmContentGenerator implements ContentGenerator {
   private convertUnsupportedMediaToText(part: Part): Part {
     if (typeof part === 'string') return part;
 
-    const inlineMimeType = part.inlineData?.mimeType || '';
-    const fileMimeType = part.fileData?.mimeType || '';
+    const inlineMimeType = (part.inlineData?.mimeType || '').trim();
+    const fileMimeType = (part.fileData?.mimeType || '').trim();
+    const normalizedInlineMime = inlineMimeType.toLowerCase();
+    const normalizedFileMime = fileMimeType.toLowerCase();
 
     if (
-      inlineMimeType.startsWith('audio/') ||
-      inlineMimeType.startsWith('video/')
+      normalizedInlineMime.startsWith('audio/') ||
+      normalizedInlineMime.startsWith('video/')
     ) {
       const displayName = (part.inlineData as { displayName?: string })
         ?.displayName;
@@ -618,8 +692,8 @@ export class LlmContentGenerator implements ContentGenerator {
     }
 
     if (
-      fileMimeType.startsWith('audio/') ||
-      fileMimeType.startsWith('video/')
+      normalizedFileMime.startsWith('audio/') ||
+      normalizedFileMime.startsWith('video/')
     ) {
       const displayName = (part.fileData as { displayName?: string })
         ?.displayName;

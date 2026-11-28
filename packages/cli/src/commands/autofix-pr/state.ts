@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import {
@@ -32,8 +33,9 @@ import {
   isOwnerRepo,
   normalizeGhHostForUrl,
 } from '../review/lib/gh.js';
-import { git, gitOpt, repoRoot } from '../review/lib/git.js';
+import { GIT_TIMEOUT_MS, git, gitOpt, repoRoot } from '../review/lib/git.js';
 import { normalizeSegment } from '../review/lib/remote-match.js';
+import { sanitizedGitEnv } from '../review/lib/worktree.js';
 import { AutofixPrRefusal } from './refusal.js';
 
 export const REPLY_MARKER = '<!-- qwen-autofix-pr:v1 -->';
@@ -56,9 +58,13 @@ export interface AutofixPrState {
   worktreePath: string;
   /** `prepare --in-place`: the watch fixes in the user's own checkout of
    * the head branch — `worktreePath` is that checkout and `branch` the head
-   * branch itself. Attended, one round per start; no scheduled task, no
-   * background fix, and no helper ever discards what the checkout holds. */
+   * branch itself. Attended, foreground only, and no helper ever discards what
+   * the checkout holds; one-shot unless `inPlaceWatch` / `watch` records
+   * scheduled rounds. */
   inPlace?: true;
+  /** `prepare --in-place --watch`: records that the start consented to
+   * scheduled in-place rounds so `schedule` refuses one-shot in-place states. */
+  inPlaceWatch?: true;
   viewer: string;
   prAuthor: string;
   lastKnownHeadSha: string;
@@ -982,6 +988,12 @@ export function stateDefect(state: AutofixPrState): string | null {
   ) {
     return 'failingChecks';
   }
+  if (state.inPlace !== undefined && state.inPlace !== true) {
+    return 'inPlace';
+  }
+  if (state.inPlaceWatch !== undefined && state.inPlaceWatch !== true) {
+    return 'inPlaceWatch';
+  }
   return null;
 }
 
@@ -1474,7 +1486,170 @@ export function requireState(
       `PR #${prNumber} is not prepared here; run \`qwen autofix-pr prepare ${prNumber} --repo <owner>/<repo>\` first.`,
     );
   }
+  if (state.prNumber !== prNumber) {
+    throw new Error(
+      `PR #${prNumber}'s state file (${statePath}) records PR #${state.prNumber}; delete ${statePath} and run prepare again.`,
+    );
+  }
   return state;
+}
+
+const WATCH_TRACK_MAX_BUFFER = 64 * 1024 * 1024;
+
+function watchTrackGitEnv(): NodeJS.ProcessEnv {
+  return {
+    ...sanitizedGitEnv(),
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_LITERAL_PATHSPECS: '0',
+    GIT_GLOB_PATHSPECS: '0',
+    GIT_NOGLOB_PATHSPECS: '0',
+  };
+}
+
+export function watchFilePathspecs(prNumber: number): string[] {
+  return [
+    `:(icase,glob).qwen/tmp/autofix-pr-${prNumber}-*`,
+    `:(icase,glob).qwen/tmp/autofix-pr-${prNumber}.lock*`,
+    `:(icase).qwen/tmp/autofix-pr-${prNumber}`,
+  ];
+}
+
+function isWatchFilePath(entry: string, prNumber: number): boolean {
+  const lower = entry.toLowerCase();
+  const base = `.qwen/tmp/autofix-pr-${prNumber}`;
+  return (
+    lower.startsWith(`${base}-`) ||
+    lower.startsWith(`${base}.lock`) ||
+    lower === base ||
+    lower.startsWith(`${base}/`)
+  );
+}
+
+function throwTrackedWatchFiles(
+  checkout: string,
+  prNumber: number,
+  tracked: string[],
+): never {
+  const shown =
+    tracked.length > 3
+      ? `${tracked.slice(0, 3).join(', ')}, +${tracked.length - 3} more`
+      : tracked.join(', ');
+  throw new Error(
+    `PR #${prNumber}'s watch file(s) are tracked by git in ${checkout} (${shown}); remove them from the branch before starting --in-place.`,
+  );
+}
+
+/**
+ * Refuse when any watch file of this PR is tracked in the local git index
+ * (state, history, gate cursor, instructions, replies, lock/lock-break, or
+ * worktree entry under `.qwen/tmp/autofix-pr-<n>*`). Uses sanitized git env,
+ * explicit pathspec-magic env resets, and `GIT_TIMEOUT_MS`; fails closed on
+ * any git error.
+ */
+export function assertWatchFilesNotTracked(
+  checkout: string,
+  prNumber: number,
+): void {
+  const res = spawnSync(
+    'git',
+    ['-C', checkout, 'ls-files', '-z', '--', ...watchFilePathspecs(prNumber)],
+    {
+      encoding: 'utf8',
+      maxBuffer: WATCH_TRACK_MAX_BUFFER,
+      timeout: GIT_TIMEOUT_MS,
+      env: watchTrackGitEnv(),
+    },
+  );
+  if (res.error || res.status !== 0) {
+    throw new Error(
+      `git cannot check whether PR #${prNumber}'s watch files are tracked in ${checkout}; fix the repository before starting --in-place.`,
+    );
+  }
+  const tracked = (res.stdout ?? '').split('\0').filter((e) => e !== '');
+  if (tracked.length > 0) {
+    throwTrackedWatchFiles(checkout, prNumber, tracked);
+  }
+}
+
+function listTreeEntries(
+  checkout: string,
+  treeish: string,
+  prNumber: number,
+  pathPrefix?: string,
+  recursive = false,
+): Array<{ type: string; name: string }> {
+  const args = ['-C', checkout, 'ls-tree'];
+  if (recursive) args.push('-r');
+  args.push('-z', treeish);
+  if (pathPrefix !== undefined) args.push('--', pathPrefix);
+  const res = spawnSync('git', args, {
+    encoding: 'utf8',
+    maxBuffer: WATCH_TRACK_MAX_BUFFER,
+    timeout: GIT_TIMEOUT_MS,
+    env: watchTrackGitEnv(),
+  });
+  if (res.error || res.status !== 0) {
+    throw new Error(
+      `git cannot check whether PR #${prNumber}'s head (${treeish}) tracks watch files in ${checkout}; fix the repository before continuing --in-place.`,
+    );
+  }
+  const entries: Array<{ type: string; name: string }> = [];
+  for (const record of (res.stdout ?? '').split('\0')) {
+    if (!record) continue;
+    const tab = record.indexOf('\t');
+    if (tab === -1) continue;
+    const meta = record.slice(0, tab).split(' ');
+    entries.push({ type: meta[1] ?? '', name: record.slice(tab + 1) });
+  }
+  return entries;
+}
+
+/**
+ * Refuse when the fetched PR head tree tracks any watch file of this PR.
+ * Walks root -> `.qwen/` -> `tmp/` case-insensitively without `ls-tree`
+ * pathspec magic (which git `ls-tree` rejects), so a behind checkout or an
+ * in-place fast-forward can never materialize a forged watch file from the
+ * PR branch.
+ */
+export function assertTreeHasNoWatchFiles(
+  checkout: string,
+  prNumber: number,
+  treeish: string,
+): void {
+  const top = listTreeEntries(checkout, treeish, prNumber);
+  const qwenDirs = top.filter(
+    (e) => e.type === 'tree' && e.name.toLowerCase() === '.qwen',
+  );
+  if (qwenDirs.length === 0) return;
+  const tracked: string[] = [];
+  for (const qwen of qwenDirs) {
+    const insideQwen = listTreeEntries(
+      checkout,
+      treeish,
+      prNumber,
+      `${qwen.name}/`,
+    );
+    const tmpDirs = insideQwen.filter(
+      (e) => e.type === 'tree' && basename(e.name).toLowerCase() === 'tmp',
+    );
+    for (const tmp of tmpDirs) {
+      const files = listTreeEntries(
+        checkout,
+        treeish,
+        prNumber,
+        `${tmp.name}/`,
+        true,
+      );
+      for (const f of files) {
+        if (isWatchFilePath(f.name, prNumber)) {
+          tracked.push(f.name);
+        }
+      }
+    }
+  }
+  if (tracked.length > 0) {
+    throwTrackedWatchFiles(checkout, prNumber, tracked);
+  }
 }
 
 /** `--task` of a round's helpers: the scheduled task that woke the round. */
@@ -1525,16 +1700,39 @@ export function ghNotFound(err: unknown): boolean {
   return /\(HTTP 404\)/.test(typeof stderr === 'string' ? stderr : '');
 }
 
+export function isTakeOver(
+  state: Pick<AutofixPrState, 'sessionId'>,
+  takeOver?: boolean,
+): boolean {
+  return takeOver === true && state.sessionId !== currentSessionId();
+}
+
+export function repositoryMismatchMessage(
+  state: Pick<AutofixPrState, 'host' | 'owner' | 'repo'>,
+  prNumber: number,
+  host: string,
+  repo: string,
+): string {
+  const watched = `${state.host}/${state.owner}/${state.repo}`;
+  return (
+    `PR #${prNumber} here is a watch of ${watched}, not ${host}/${repo}. ` +
+    `Run \`qwen autofix-pr cleanup ${prNumber}\` first.`
+  );
+}
+
 export function assertOwnedBySession(state: AutofixPrState): void {
   const sessionId = currentSessionId();
   if (state.sessionId !== sessionId) {
+    const takeOverCommand = state.watch
+      ? `\`/autofix-pr resume ${state.prNumber}\``
+      : state.inPlace
+        ? `\`/autofix-pr ${state.prNumber} --in-place --watch\``
+        : `\`/autofix-pr ${state.prNumber}\``;
     throw new AutofixPrRefusal(
       'watched_elsewhere',
       `PR #${state.prNumber} is watched by another session ` +
         `(${state.sessionId || 'no session'}). Take it over with ` +
-        (state.watch
-          ? `\`/autofix-pr resume ${state.prNumber}\``
-          : `\`/autofix-pr ${state.prNumber}\``) +
+        takeOverCommand +
         `, end it keeping its work with ` +
         `\`qwen autofix-pr cleanup ${state.prNumber} --take-over\` (what ` +
         `\`/autofix-pr stop ${state.prNumber}\` runs), or discard it with ` +

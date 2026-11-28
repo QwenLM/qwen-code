@@ -36,9 +36,12 @@ import {
   type DaemonSessionActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
+  isDaemonRewindUserBlock,
+  type DaemonInputAnnotation,
   type DaemonSessionArtifact,
   type DaemonSessionMonitorTaskStatus,
   type DaemonSessionSummary,
+  type DaemonTranscriptBlock,
   type DaemonWorkspaceCapability,
   type ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
@@ -87,7 +90,10 @@ import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
 import { base64ToBlob } from '../utils/base64';
-import { isDefinitelyRejectedPromptAdmission } from '../utils/promptAdmission';
+import {
+  createPromptIdempotencyKey,
+  isDefinitelyRejectedPromptAdmission,
+} from '../utils/promptAdmission';
 import {
   getActiveTodosForPlanRevision,
   isExitPlanApprovalRequest,
@@ -127,17 +133,25 @@ import {
   useSessionCatalogController,
   useDaemonActivePromptBridge,
 } from '../session-catalog/session-catalog-hooks';
+import type {
+  Admission,
+  PendingApproval,
+  PendingQuestion,
+} from '../chat-core/contract';
+import { ChatSurface } from '../chat-core/ChatSurface';
+import { useDaemonChatControllerFromState } from '../daemon/useDaemonChatController';
 import type { MessageListHandle } from './MessageList';
-import { TranscriptViewport } from './TranscriptViewport';
 import { StreamingStatus } from './StreamingStatus';
-import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import type { ComposerToolbarAction } from './ChatEditor';
+import { DAEMON_COMPOSER_INTEGRATIONS } from './composer/daemon-composer-integrations';
+import { DaemonTranscriptViewport } from './DaemonTranscriptViewport';
+import { DaemonStatusCardsContext } from './messages/daemon-status-cards-context';
+import { DAEMON_STATUS_CARD_RENDERERS } from './messages/daemon-status-cards';
 import { SessionRecoveryBanner } from './SessionRecoveryBanner';
 import { ComposerStatusStack } from './ComposerStatusStack';
 import { GoalEditDialog } from './dialogs/GoalEditDialog';
 import { nextApprovalMode, parsePlanCommand } from '../utils/planMode';
 import { useApprovalModes } from '../hooks/useApprovalModes';
-import { ToolApproval } from './messages/ToolApproval';
-import { AskUserQuestion } from './messages/AskUserQuestion';
 import { createContextUsageMessageData } from './messages/ContextUsageMessage';
 import type {
   TurnOutputKind,
@@ -195,10 +209,47 @@ export type PaneHeaderActionsRenderer = (
   info: PaneHeaderActionsInfo,
 ) => ReactNode;
 
-interface UnknownPromptAdmission {
+interface PaneFailedPrompt {
   owner: { sessionId: string | undefined };
-  commitAccepted?: ComposerSubmitCommit;
-  payloadAvailable: boolean;
+  sessionId: string | undefined;
+  messageId: string;
+  block: DaemonTranscriptBlock;
+  text: string;
+  submittedPrompt?: string;
+  images?: PromptImage[];
+  files?: PromptFile[];
+  inputAnnotations?: DaemonInputAnnotation[];
+  idempotencyKey: string;
+  reason: 'failed' | 'uncertain';
+}
+
+function getLatestPaneUserBlock(
+  blocks: readonly DaemonTranscriptBlock[],
+): DaemonTranscriptBlock | undefined {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (isDaemonRewindUserBlock(block)) {
+      return block;
+    }
+  }
+  return undefined;
+}
+
+function matchesPaneUserBlock(
+  block: DaemonTranscriptBlock | undefined,
+  target: DaemonTranscriptBlock,
+): boolean {
+  if (!block || block.kind !== 'user' || target.kind !== 'user') return false;
+  if (block === target || block.id === target.id) return true;
+  const expectedRecords = target.sourceRecordIds;
+  const currentRecords = block.sourceRecordIds;
+  return (
+    expectedRecords !== undefined &&
+    expectedRecords.length > 0 &&
+    currentRecords !== undefined &&
+    currentRecords.length === expectedRecords.length &&
+    currentRecords.every((record, index) => record === expectedRecords[index])
+  );
 }
 
 export interface ChatPaneProps {
@@ -561,44 +612,84 @@ export function ChatPane({
     streamingState,
   ]);
   const firstPromptAdmittedRef = useRef(false);
-  const [unknownPromptAdmission, setUnknownPromptAdmission] =
-    useState<UnknownPromptAdmission | null>(null);
+  const blocksRef = useRef(blocks);
+  blocksRef.current = blocks;
+  const readCurrentBlocks = useCallback(
+    (): readonly DaemonTranscriptBlock[] =>
+      (
+        store as {
+          getSnapshot?: () => { blocks: readonly DaemonTranscriptBlock[] };
+        }
+      ).getSnapshot?.().blocks ?? blocksRef.current,
+    [store],
+  );
+  const [failedPrompt, setFailedPrompt] = useState<PaneFailedPrompt | null>(
+    null,
+  );
+  const failedPromptRef = useRef<PaneFailedPrompt | null>(null);
+  const updateFailedPrompt = useCallback((next: PaneFailedPrompt | null) => {
+    failedPromptRef.current = next;
+    setFailedPrompt(next);
+  }, []);
   const admissionOwnerRef = useRef({ sessionId: connection.sessionId });
   if (admissionOwnerRef.current.sessionId !== connection.sessionId) {
     admissionOwnerRef.current = { sessionId: connection.sessionId };
   }
   useEffect(() => {
     firstPromptAdmittedRef.current = false;
-    setUnknownPromptAdmission(null);
-  }, [connection.sessionId]);
-  const admissionPayloadLocked =
-    unknownPromptAdmission?.payloadAvailable === true;
-  const discardUnknownPromptPayload = useCallback(() => {
-    const current = unknownPromptAdmission;
-    if (!current?.payloadAvailable) return;
-    if (admissionOwnerRef.current !== current.owner) {
-      setUnknownPromptAdmission(null);
+    updateFailedPrompt(null);
+  }, [connection.sessionId, updateFailedPrompt]);
+  useEffect(() => {
+    const failed = failedPromptRef.current;
+    if (!failed) return;
+    if (failed.sessionId !== connection.sessionId) {
+      updateFailedPrompt(null);
       return;
     }
-    current.commitAccepted?.();
-    setUnknownPromptAdmission({
-      owner: current.owner,
-      payloadAvailable: false,
-    });
-  }, [unknownPromptAdmission]);
-  const continueEditingUnknownPrompt = useCallback(() => {
-    if (!window.confirm(t('queue.continueEditingConfirm'))) return;
-    const current = unknownPromptAdmission;
-    if (!current?.payloadAvailable) return;
-    if (admissionOwnerRef.current !== current.owner) {
-      setUnknownPromptAdmission(null);
+    const snapshotBlocks = readCurrentBlocks();
+    const currentMatch = [...snapshotBlocks]
+      .reverse()
+      .find((block) => matchesPaneUserBlock(block, failed.block));
+    if (!currentMatch) {
+      updateFailedPrompt(null);
       return;
     }
-    setUnknownPromptAdmission({
-      owner: current.owner,
-      payloadAvailable: false,
-    });
-  }, [t, unknownPromptAdmission]);
+    const renderedMatch = [...blocks]
+      .reverse()
+      .find((block) => matchesPaneUserBlock(block, failed.block));
+    if (!renderedMatch) return;
+    if (renderedMatch.promptId) {
+      updateFailedPrompt(null);
+      return;
+    }
+    const renderedIndex = blocks.indexOf(renderedMatch);
+    if (
+      renderedIndex >= 0 &&
+      blocks
+        .slice(renderedIndex + 1)
+        .some(
+          (block) =>
+            isDaemonRewindUserBlock(block) ||
+            (block.kind === 'assistant' &&
+              block.meta?.['source'] !== 'background_notification') ||
+            block.kind === 'thought' ||
+            block.kind === 'tool',
+        )
+    ) {
+      updateFailedPrompt(null);
+      return;
+    }
+    if (
+      failed.messageId !== renderedMatch.id ||
+      failed.block !== renderedMatch
+    ) {
+      updateFailedPrompt({
+        ...failed,
+        messageId: renderedMatch.id,
+        block: renderedMatch,
+      });
+    }
+  }, [blocks, connection.sessionId, readCurrentBlocks, updateFailedPrompt]);
   const reloadTranscript = useCallback(
     async (signal: AbortSignal) => {
       if (!connection.sessionId) return;
@@ -1022,8 +1113,7 @@ export function ChatPane({
       let trimmed = text.trim();
       if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
         return false;
-      if (admissionPayloadLocked || planPreparationRef.current?.isCurrent())
-        return false;
+      if (planPreparationRef.current?.isCurrent()) return false;
       if (connectionRef.current.loadingTranscript) return false;
       // Same fence as App's composer: a stopped runtime keeps the draft in
       // the composer (the pane banner offers Resume); a submit here would
@@ -1178,6 +1268,7 @@ export function ChatPane({
         !sessionHasActivePromptRef.current
       ) {
         const admissionOwner = admissionOwnerRef.current;
+        const submissionIdempotencyKey = createPromptIdempotencyKey();
         let admissionStarted = false;
         let admitted = false;
         const submit = () => {
@@ -1191,9 +1282,26 @@ export function ChatPane({
             );
             return;
           }
-          return actions
+          const previousUserBlock = getLatestPaneUserBlock(readCurrentBlocks());
+          let capturedUserBlock: DaemonTranscriptBlock | undefined;
+          let composerCommitted = false;
+          const captureAppendedUserBlock = () => {
+            if (capturedUserBlock) return capturedUserBlock;
+            const latest = getLatestPaneUserBlock(readCurrentBlocks());
+            if (latest && latest !== previousUserBlock) {
+              capturedUserBlock = latest;
+              if (!composerCommitted) {
+                composerCommitted = true;
+                clearFollowup();
+                commitAccepted?.();
+              }
+            }
+            return capturedUserBlock;
+          };
+          const result = actions
             .sendPrompt(trimmed, {
               submittedPrompt: text,
+              idempotencyKey: submissionIdempotencyKey,
               ...(images && images.length ? { images } : {}),
               ...(files && files.length ? { files } : {}),
               ...(inputAnnotations ? { inputAnnotations } : {}),
@@ -1211,33 +1319,56 @@ export function ChatPane({
                 admitted = true;
                 notifyFirstPromptAdmitted();
                 clearFollowup();
-                commitAccepted?.();
+                if (!composerCommitted) {
+                  composerCommitted = true;
+                  commitAccepted?.();
+                }
               },
             })
             .catch((error: unknown) => {
               if (admissionOwnerRef.current !== admissionOwner) return;
               const definitelyRejected =
                 isDefinitelyRejectedPromptAdmission(error);
-              if (admitted || !admissionStarted || definitelyRejected) {
-                reportError(error, 'Failed to send prompt');
+              const admissionUncertain =
+                !admitted && admissionStarted && !definitelyRejected;
+              const failedBlock = captureAppendedUserBlock();
+              if (!admitted && failedBlock) {
+                updateFailedPrompt({
+                  owner: admissionOwner,
+                  sessionId: connectionRef.current.sessionId,
+                  messageId: failedBlock.id,
+                  block: failedBlock,
+                  text: trimmed,
+                  submittedPrompt: text,
+                  images: images ? [...images] : undefined,
+                  files: files ? [...files] : undefined,
+                  inputAnnotations: inputAnnotations
+                    ? [...inputAnnotations]
+                    : undefined,
+                  idempotencyKey: submissionIdempotencyKey,
+                  reason: admissionUncertain ? 'uncertain' : 'failed',
+                });
+              }
+              if (admissionUncertain) {
+                if (catalogOwnerCwd) {
+                  sessionCatalogController.promptAdmissionUncertain(
+                    catalogOwnerCwd,
+                  );
+                }
+                onImageIngestionNotice?.(
+                  'warning',
+                  t('userMessage.deliveryUncertain'),
+                );
+                console.warn(
+                  '[ChatPane] prompt admission outcome is unknown',
+                  error,
+                );
                 return;
               }
-              if (catalogOwnerCwd) {
-                sessionCatalogController.promptAdmissionUncertain(
-                  catalogOwnerCwd,
-                );
-              }
-              setUnknownPromptAdmission({
-                owner: admissionOwner,
-                commitAccepted,
-                payloadAvailable: true,
-              });
-              onImageIngestionNotice?.('warning', t('queue.admissionUnknown'));
-              console.warn(
-                '[ChatPane] prompt admission outcome is unknown',
-                error,
-              );
+              reportError(error, 'Failed to send prompt');
             });
+          captureAppendedUserBlock();
+          return result;
         };
         if (planOperation) {
           const owner = sessionOwnerGuard.capture();
@@ -1303,7 +1434,6 @@ export function ChatPane({
       planMode,
       setComposerMode,
       sessionOwnerGuard,
-      admissionPayloadLocked,
       catalogOwnerCwd,
       clearFollowup,
       connection.goalState,
@@ -1316,23 +1446,145 @@ export function ChatPane({
       onFirstPromptAdmitted,
       onImageIngestionNotice,
       onOpenGoals,
+      readCurrentBlocks,
       reportError,
       sessionCatalogController,
       store,
       t,
+      updateFailedPrompt,
     ],
   );
 
-  const handleConfirm = useCallback(
-    async (
-      id: string,
-      selectedOption: string,
-      answers?: Record<string, string>,
-    ) => {
+  const handleFailedPromptRetry = useCallback(() => {
+    if (
+      streamingStateRef.current !== 'idle' ||
+      sessionHasActivePromptRef.current
+    ) {
+      return;
+    }
+    const failed = failedPromptRef.current;
+    if (!failed || failed.sessionId !== connectionRef.current.sessionId) {
+      updateFailedPrompt(null);
+      return;
+    }
+    const retryOwner = failed.owner;
+    if (admissionOwnerRef.current !== retryOwner) {
+      updateFailedPrompt(null);
+      return;
+    }
+    updateFailedPrompt(null);
+    let admissionStarted = false;
+    let admitted = false;
+    void actions
+      .sendPrompt(failed.text, {
+        submittedPrompt: failed.submittedPrompt ?? failed.text,
+        optimisticUserMessage: false,
+        bindBlockId: failed.messageId,
+        idempotencyKey: failed.idempotencyKey,
+        ...(failed.images?.length ? { images: failed.images } : {}),
+        ...(failed.files?.length ? { files: failed.files } : {}),
+        ...(failed.inputAnnotations?.length
+          ? { inputAnnotations: failed.inputAnnotations }
+          : {}),
+        onAdmissionStarted: () => {
+          admissionStarted = true;
+        },
+        onAdmitted: () => {
+          if (admissionOwnerRef.current !== retryOwner) return;
+          admitted = true;
+          if (connectionRef.current.sessionId && catalogOwnerCwd) {
+            sessionCatalogController.promptAdmitted(
+              catalogOwnerCwd,
+              connectionRef.current.sessionId,
+            );
+          }
+        },
+      })
+      .catch((error: unknown) => {
+        if (admissionOwnerRef.current !== retryOwner) return;
+        const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
+        const admissionUncertain =
+          !admitted && admissionStarted && !definitelyRejected;
+        if (!admitted) {
+          updateFailedPrompt({
+            ...failed,
+            reason: admissionUncertain ? 'uncertain' : 'failed',
+          });
+        }
+        if (admissionUncertain) {
+          if (catalogOwnerCwd) {
+            sessionCatalogController.promptAdmissionUncertain(catalogOwnerCwd);
+          }
+          onImageIngestionNotice?.(
+            'warning',
+            t('userMessage.deliveryUncertain'),
+          );
+          console.warn(
+            '[ChatPane] prompt retry admission outcome is unknown',
+            error,
+          );
+          return;
+        }
+        reportError(error, 'Failed to send prompt');
+      });
+  }, [
+    actions,
+    catalogOwnerCwd,
+    onImageIngestionNotice,
+    reportError,
+    sessionCatalogController,
+    t,
+    updateFailedPrompt,
+  ]);
+
+  const visibleFailedPromptBlock = useMemo(() => {
+    if (!failedPrompt || failedPrompt.sessionId !== connection.sessionId) {
+      return undefined;
+    }
+    return [...blocks]
+      .reverse()
+      .find((block) => matchesPaneUserBlock(block, failedPrompt.block));
+  }, [blocks, connection.sessionId, failedPrompt]);
+
+  // Carries the specific host diagnostic across ChatSurface's generic
+  // approval-rejection error sink so transport errors and mode-lock refusals
+  // preserve their cause without double-reporting.
+  const pendingPermissionFailureRef = useRef<{
+    error: unknown;
+    fallback: string;
+  } | null>(null);
+  useEffect(() => {
+    pendingPermissionFailureRef.current = null;
+  }, [connection.sessionId]);
+
+  const handleSurfaceError = useCallback(
+    (error: unknown, fallback: string) => {
+      const pending = pendingPermissionFailureRef.current;
+      if (
+        pending &&
+        (fallback === t('chat.approvalNotAccepted') ||
+          fallback === t('askUser.submitFailed'))
+      ) {
+        pendingPermissionFailureRef.current = null;
+        reportError(pending.error, pending.fallback);
+        return;
+      }
+      reportError(error, fallback);
+    },
+    [reportError, t],
+  );
+
+  const submitPanePermission = useCallback(
+    async (id: string, selectedOption: string): Promise<Admission> => {
+      pendingPermissionFailureRef.current = null;
       const request = pendingToolApprovalRef.current;
       const isPlan = request?.id === id && isExitPlanApprovalRequest(request);
       if (isPlan && modeTransitionRef.current?.owner.isCurrent()) {
-        throw new Error('Approval mode or plan confirmation is still pending');
+        pendingPermissionFailureRef.current = {
+          error: new Error(t('mode.changePending')),
+          fallback: 'Failed to submit permission choice',
+        };
+        return 'rejected';
       }
       const owner = sessionOwnerGuard.capture();
       const option = request?.options.find(
@@ -1360,35 +1612,35 @@ export function ChatPane({
         setModeControlsBusy(true);
       }
       try {
-        if (approvesPlan && connection.planExecutionMode !== undefined) {
-          await actions.respondToPermission(id, {
-            outcome: { outcome: 'selected', optionId: selectedOption },
-            expectedPlanExecutionMode: connection.planExecutionMode,
-          });
-        } else {
-          await actions.submitPermission(id, selectedOption, answers);
+        const applied =
+          approvesPlan && connection.planExecutionMode !== undefined
+            ? await actions.respondToPermission(id, {
+                outcome: { outcome: 'selected', optionId: selectedOption },
+                expectedPlanExecutionMode: connection.planExecutionMode,
+              })
+            : await actions.submitPermission(id, selectedOption);
+        if (transition && (!approvesPlan || !applied)) {
+          releaseModeTransition(transition);
         }
-        if (transition && !approvesPlan) releaseModeTransition(transition);
+        return applied ? 'accepted' : 'rejected';
       } catch (error) {
         if (transition) releaseModeTransition(transition);
-        if (owner.isCurrent())
-          reportError(error, 'Failed to submit permission choice');
-        throw error;
+        if (owner.isCurrent()) {
+          pendingPermissionFailureRef.current = {
+            error,
+            fallback: 'Failed to submit permission choice',
+          };
+        }
+        return 'unknown';
       }
     },
     [
       actions,
-      reportError,
       sessionOwnerGuard,
       releaseModeTransition,
       connection.planExecutionMode,
+      t,
     ],
-  );
-
-  const handleAskUserConfirm = useCallback(
-    (id: string, selectedOption: string, answers?: Record<string, string>) =>
-      actions.submitPermission(id, selectedOption, answers),
-    [actions],
   );
 
   const handleCancel = useCallback(() => {
@@ -1398,6 +1650,43 @@ export function ChatPane({
         reportError(error, 'Failed to cancel request'),
       );
   }, [actions, reportError]);
+
+  const pendingApprovals = useMemo<readonly PendingApproval[]>(
+    () =>
+      pendingToolApproval
+        ? [
+            {
+              id: pendingToolApproval.id,
+              status: 'pending',
+              request: pendingToolApproval,
+            },
+          ]
+        : [],
+    [pendingToolApproval],
+  );
+  const pendingQuestions = useMemo<readonly PendingQuestion[]>(
+    () =>
+      pendingAskUserApproval
+        ? [{ id: pendingAskUserApproval.id, request: pendingAskUserApproval }]
+        : [],
+    [pendingAskUserApproval],
+  );
+  const pendingSignature = pendingToolApproval
+    ? `a:${pendingToolApproval.id}`
+    : pendingAskUserApproval
+      ? `q:${pendingAskUserApproval.id}`
+      : '';
+  const surfaceController = useDaemonChatControllerFromState({
+    connection,
+    actions,
+    transcriptHistory,
+    messages,
+    pendingApprovals,
+    pendingQuestions,
+    pendingSignature,
+    transcriptState: connection.loadingTranscript ? 'loading' : 'ready',
+    submitPermission: submitPanePermission,
+  });
 
   const reviewSourceRef = useRef({ messages, artifactsByTurn });
   reviewSourceRef.current = { messages, artifactsByTurn };
@@ -1708,7 +1997,6 @@ export function ChatPane({
     busy: streamingState !== 'idle' || sessionHasActivePrompt,
     writeBlocked:
       Boolean(connection.loadingTranscript) ||
-      admissionPayloadLocked ||
       approvalActive ||
       modeControlsBusy,
   });
@@ -1891,74 +2179,61 @@ export function ChatPane({
         </div>
       )}
 
-      <div className={styles.body}>
-        <OptionalMonitorDetailsProvider
-          enabled={monitorDetailsSupported}
-          onOpen={openMonitorDetails}
+      <OptionalMonitorDetailsProvider
+        enabled={monitorDetailsSupported}
+        onOpen={openMonitorDetails}
+      >
+        <SubagentDetailsProvider
+          onOpen={openSubagentDetails}
+          onOpenBackground={
+            onRightPanelOpen && connection.sessionId
+              ? (turn) => {
+                  if (!connection.sessionId) return;
+                  onRightPanelOpen({
+                    id: `background:${connection.sessionId}:${turn.taskId}`,
+                    kind: 'background_task',
+                    title: turn.label ?? turn.kind,
+                    turnId: turn.turnId,
+                    backgroundTurn: turn,
+                    sourceSessionId: connection.sessionId,
+                    workspaceCwd: connection.workspaceCwd ?? workspaceCwd,
+                  });
+                }
+              : undefined
+          }
         >
-          <SubagentDetailsProvider
-            onOpen={openSubagentDetails}
-            onOpenBackground={
-              onRightPanelOpen && connection.sessionId
-                ? (turn) => {
-                    if (!connection.sessionId) return;
-                    onRightPanelOpen({
-                      id: `background:${connection.sessionId}:${turn.taskId}`,
-                      kind: 'background_task',
-                      title: turn.label ?? turn.kind,
-                      turnId: turn.turnId,
-                      backgroundTurn: turn,
-                      sourceSessionId: connection.sessionId,
-                      workspaceCwd: connection.workspaceCwd ?? workspaceCwd,
-                    });
-                  }
-                : undefined
-            }
+          <McpAppVisibilityContext.Provider
+            value={parentSurfaceVisible && !hidden}
           >
-            <McpAppVisibilityContext.Provider
-              value={parentSurfaceVisible && !hidden}
-            >
-              <McpAppReadOnlyContext.Provider value={readOnly}>
+            <McpAppReadOnlyContext.Provider value={readOnly}>
+              <DaemonStatusCardsContext.Provider
+                value={DAEMON_STATUS_CARD_RENDERERS}
+              >
                 <WorkflowDetailsProvider tasks={sessionTasks}>
-                  <TranscriptViewport
-                    ref={transcriptViewportRef}
-                    messages={messages}
-                    sourceSessionId={connection.sessionId}
-                    pendingApproval={pendingToolApproval}
-                    loadingTranscript={connection.loadingTranscript}
-                    catchingUp={connection.catchingUp}
-                    hasOlderHistory={transcriptHistory.hasMore}
-                    loadingOlderHistory={transcriptHistory.loading}
-                    historyCapacityReached={transcriptHistory.capacityReached}
-                    historyPaginationError={transcriptHistory.paginationError}
-                    onLoadOlderHistory={transcriptHistory.loadMore}
-                    transcriptBlockCount={blocks.length}
-                    transcriptActivity={store}
-                    onReloadTranscript={
-                      transcriptReloadSupported ? reloadTranscript : undefined
-                    }
-                    isResponding={isResponding}
-                    workspaceCwd={connection.workspaceCwd || ''}
-                    hideSessionTimeline
-                    turnFileChanges={
-                      visibleTurnOutputKinds.has('file')
-                        ? fileChangesByTurn
-                        : undefined
-                    }
-                    turnArtifacts={
-                      visibleTurnOutputKinds.has('artifact')
-                        ? artifactsByTurn
-                        : undefined
-                    }
-                    turnScheduledTasks={
-                      visibleTurnOutputKinds.has('scheduled_task')
-                        ? scheduledTasksByTurn
-                        : undefined
-                    }
-                    onTurnOutputOpen={handleRightPanelOpen}
-                    onImagePreview={handleImagePreview}
-                    onAttachmentPreview={handleAttachmentPreview}
-                    onError={reportError}
+                  <ChatSurface
+                    controller={surfaceController}
+                    className={styles.surface}
+                    transcriptClassName={styles.body}
+                    footerClassName={styles.footer}
+                    decisionClassName={styles.approval}
+                    decisionTestId="pane-approval"
+                    transcriptRef={transcriptViewportRef}
+                    sessionViewportEnabled
+                    workspaceFeaturesEnabled
+                    commands={commands}
+                    visibleToolbarActions={paneToolbarActions}
+                    atWorkspaceCwd={paneWorkspaceCwd}
+                    onError={handleSurfaceError}
+                    showBrowserNotifications
+                    approvalDisabled={isExitPlanApproval && modeControlsBusy}
+                    planExecutionMode={connection.planExecutionMode}
+                    planTodos={planTodos}
+                    // Several panes can show approvals at once; don't auto-focus
+                    // one pane's approval (it would steal focus from the pane the
+                    // user is in). Keyboard handling is focus-scoped, so each
+                    // pane's approval is still fully keyboard-operable once
+                    // clicked/tabbed into.
+                    approvalKeyboardActive={false}
                     generateContent={
                       connection.capabilities?.features.includes(
                         'session_generation',
@@ -1966,246 +2241,247 @@ export function ChatPane({
                         ? actions.generateSessionContent
                         : undefined
                     }
+                    askUserFreeTextLabel={askUserFreeTextLabel}
+                    transcriptProps={{
+                      sessionViewportComponent: DaemonTranscriptViewport,
+                      sourceSessionId: connection.sessionId,
+                      catchingUp: connection.catchingUp,
+                      transcriptBlockCount: blocks.length,
+                      transcriptActivity: store,
+                      onReloadTranscript: transcriptReloadSupported
+                        ? reloadTranscript
+                        : undefined,
+                      isResponding,
+                      workspaceCwd: connection.workspaceCwd || '',
+                      hideSessionTimeline: true,
+                      turnFileChanges: visibleTurnOutputKinds.has('file')
+                        ? fileChangesByTurn
+                        : undefined,
+                      turnArtifacts: visibleTurnOutputKinds.has('artifact')
+                        ? artifactsByTurn
+                        : undefined,
+                      turnScheduledTasks: visibleTurnOutputKinds.has(
+                        'scheduled_task',
+                      )
+                        ? scheduledTasksByTurn
+                        : undefined,
+                      onTurnOutputOpen: handleRightPanelOpen,
+                      onImagePreview: handleImagePreview,
+                      onAttachmentPreview: handleAttachmentPreview,
+                      onError: reportError,
+                      failedPromptMessageId:
+                        readOnly ||
+                        isResponding ||
+                        sessionHasActivePrompt ||
+                        !visibleFailedPromptBlock
+                          ? undefined
+                          : visibleFailedPromptBlock.id,
+                      failedPromptStatus:
+                        readOnly ||
+                        isResponding ||
+                        sessionHasActivePrompt ||
+                        !visibleFailedPromptBlock
+                          ? undefined
+                          : failedPrompt?.reason,
+                      onRetryFailedPrompt: readOnly
+                        ? undefined
+                        : handleFailedPromptRetry,
+                      generateContent:
+                        connection.capabilities?.features.includes(
+                          'session_generation',
+                        )
+                          ? actions.generateSessionContent
+                          : undefined,
+                    }}
+                    panels={
+                      !readOnly && capacityRecovery.intent ? (
+                        <CapacityRecoveryDialog
+                          intent={capacityRecovery.intent}
+                          onClose={capacityRecovery.dismiss}
+                        />
+                      ) : undefined
+                    }
+                    composerStatus={
+                      <>
+                        {connection.runtimeStopped && (
+                          <div
+                            role="status"
+                            data-testid="workspace-runtime-stopped"
+                          >
+                            <span>
+                              {t('capacityChoice.stopped')}{' '}
+                              {connection.runtimeStopPersistenceUnconfirmed
+                                ? t('capacityChoice.persistenceUnconfirmed')
+                                : ''}
+                            </span>
+                            {!readOnly && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (connection.sessionId)
+                                    void actions
+                                      .loadSession(connection.sessionId, {
+                                        sessionContext:
+                                          connection.sessionContext,
+                                      })
+                                      .catch((error: unknown) =>
+                                        reportError(
+                                          error,
+                                          'Failed to resume session',
+                                        ),
+                                      );
+                                }}
+                              >
+                                {t('capacityChoice.resume')}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        {/* Panes keep the composer status compact: spinner + elapsed
+                          time + token count + cancel hint, but no rotating "witty"
+                          loading phrase. */}
+                        <StreamingStatus
+                          showResponseTokensPerSecond={
+                            showResponseTokensPerSecond && !approvalActive
+                          }
+                          startedAt={activeTurnStartedAt}
+                          showPhrase={false}
+                          hasActivePrompt={sessionHasActivePrompt}
+                          backgroundLabel={
+                            connection.backgroundTurn?.label ??
+                            connection.backgroundTurn?.kind
+                          }
+                        />
+                        {showComposerStatus && (
+                          <ComposerStatusStack
+                            queued={{
+                              prompts: queuedPrompts,
+                              t,
+                              canMutateMidTurn,
+                              canInsertMidTurn:
+                                streamingState !== 'idle' ||
+                                sessionHasActivePrompt,
+                              onDelete: removeQueuedPrompt,
+                              canSendMidTurnNow,
+                              onInsert: insertQueuedPrompt,
+                              onSendNow: sendQueuedPromptNow,
+                              onEdit: editQueuedPrompt,
+                              onImagePreview: handleImagePreview,
+                              onAttachmentPreview: handleAttachmentPreview,
+                            }}
+                            goal={
+                              liveGoalSnapshot?.goal
+                                ? {
+                                    snapshot: liveGoalSnapshot,
+                                    busy: goalControlBusy,
+                                    onEdit: () => {
+                                      setGoalEditError(null);
+                                      setGoalEditOpen(true);
+                                    },
+                                    onPause: () => runGoalControl('pause'),
+                                    onResume: () => runGoalControl('resume'),
+                                    onClear: () => runGoalControl('clear'),
+                                    onOpenGoals,
+                                  }
+                                : undefined
+                            }
+                          />
+                        )}
+                        <SessionRecoveryBanner
+                          blocked={
+                            readOnly || approvalActive || sessionHasActivePrompt
+                          }
+                        />
+                      </>
+                    }
+                    composerEditorVisible={!readOnly}
+                    composerRef={editorRef}
+                    onComposerCancel={handleCancel}
+                    onComposerSubmit={handleSubmit}
+                    composerProps={{
+                      sessionId: connection.sessionId,
+                      isRunning: isResponding || sessionHasActivePrompt,
+                      skills,
+                      queuedMessages: queuedTexts,
+                      onPopQueuedMessages: editLastQueuedPrompt,
+                      onClearQueuedMessages: clearQueuedPrompts,
+                      tokenCount: contextUsageAvailable
+                        ? (connection.tokenCount ?? 0)
+                        : 0,
+                      contextWindow: contextUsageAvailable
+                        ? (connection.contextWindow ?? 0)
+                        : 0,
+                      onShowContextUsage: contextUsageAvailable
+                        ? handleShowContextUsage
+                        : undefined,
+                      contextUsageControls: onOpenContextUsage
+                        ? contextUsageControls
+                        : undefined,
+                      onOpenContextUsage:
+                        contextUsageAvailable && onOpenContextUsage
+                          ? handleOpenContextUsage
+                          : undefined,
+                      workspaceName: showWorkspaceChip
+                        ? workspaceLabel
+                        : undefined,
+                      workspaceTitle: paneWorkspaceCwd,
+                      workspaceColor: workspaceAccent,
+                      currentMode: executionMode,
+                      availableModes: availableApprovalModes,
+                      onCycleMode: handleCycleMode,
+                      modeControlsDisabled: modeControlsBusy,
+                      planMode,
+                      onTogglePlan: handleTogglePlan,
+                      sessionWorkflowEnabled,
+                      currentModel: connection.currentModel ?? '',
+                      modelRefresh,
+                      availableModels,
+                      modelPickerScope,
+                      unavailableModels,
+                      mountUnavailableModelTooltip,
+                      onSelectMode: handleSelectMode,
+                      onSelectModel: handleSelectModel,
+                      workflowMode: connection.workflowMode,
+                      workflowModeStatus:
+                        connection.loadingTranscript ||
+                        connection.catchingUp ||
+                        connection.status !== 'connected'
+                          ? 'syncing'
+                          : (connection.workflowModeStatus ?? 'unknown'),
+                      workflowModePending: connection.workflowModePending,
+                      onWorkflowModeChange: handleWorkflowModeChange,
+                      reasoning: connection.reasoning,
+                      onSelectReasoningEffort: handleSelectReasoningEffort,
+                      disabled: approvalActive,
+                      voiceTarget: hidden ? undefined : voiceTarget,
+                      voiceStatusRevision,
+                      composerIntegrations: DAEMON_COMPOSER_INTEGRATIONS,
+                      followupState,
+                      onAcceptFollowup,
+                      onDismissFollowup,
+                      onImageIngestionNotice,
+                      onImagePreview: handleImagePreview,
+                      onAttachmentPreview: handleAttachmentPreview,
+                      placeholderText: t('splitView.composerPlaceholder'),
+                    }}
+                    composerFooter={
+                      CustomComposerFooter ? (
+                        <CustomComposerFooter
+                          disabled={approvalActive}
+                          isRunning={isResponding || sessionHasActivePrompt}
+                          currentMode={connection.currentMode ?? 'default'}
+                          currentModel={connection.currentModel ?? ''}
+                          sessionName={connection.displayName}
+                        />
+                      ) : undefined
+                    }
                   />
                 </WorkflowDetailsProvider>
-              </McpAppReadOnlyContext.Provider>
-            </McpAppVisibilityContext.Provider>
-          </SubagentDetailsProvider>
-        </OptionalMonitorDetailsProvider>
-      </div>
-
-      <div className={styles.footer}>
-        {pendingToolApproval && (
-          <div className={styles.approval} data-testid="pane-approval">
-            <ToolApproval
-              showBrowserNotifications
-              disabled={isExitPlanApproval && modeControlsBusy}
-              planExecutionMode={connection.planExecutionMode}
-              request={pendingToolApproval}
-              onConfirm={handleConfirm}
-              variant="floating"
-              planTodos={planTodos}
-              generateContent={
-                connection.capabilities?.features.includes('session_generation')
-                  ? actions.generateSessionContent
-                  : undefined
-              }
-              // Several panes can show approvals at once; don't auto-focus one
-              // pane's approval (it would steal focus from the pane the user is
-              // in). Keyboard handling is focus-scoped, so each pane's approval
-              // is still fully keyboard-operable once clicked/tabbed into.
-              keyboardActive={false}
-            />
-          </div>
-        )}
-        {pendingAskUserApproval && (
-          <div className={styles.approval} data-testid="pane-approval">
-            <AskUserQuestion
-              request={pendingAskUserApproval}
-              onConfirm={handleAskUserConfirm}
-              onError={reportError}
-              variant="floating"
-              keyboardActive={false}
-              customInputLabel={askUserFreeTextLabel}
-            />
-          </div>
-        )}
-        {!readOnly && capacityRecovery.intent && (
-          <CapacityRecoveryDialog
-            intent={capacityRecovery.intent}
-            onClose={capacityRecovery.dismiss}
-          />
-        )}
-        <div className={approvalActive ? styles.composerHidden : undefined}>
-          {connection.runtimeStopped && (
-            <div role="status" data-testid="workspace-runtime-stopped">
-              <span>
-                {t('capacityChoice.stopped')}{' '}
-                {connection.runtimeStopPersistenceUnconfirmed
-                  ? t('capacityChoice.persistenceUnconfirmed')
-                  : ''}
-              </span>
-              {!readOnly && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (connection.sessionId)
-                      void actions
-                        .loadSession(connection.sessionId, {
-                          sessionContext: connection.sessionContext,
-                        })
-                        .catch((error: unknown) =>
-                          reportError(error, 'Failed to resume session'),
-                        );
-                  }}
-                >
-                  {t('capacityChoice.resume')}
-                </button>
-              )}
-            </div>
-          )}
-          {/* Panes keep the composer status compact: spinner + elapsed time +
-              token count + cancel hint, but no rotating "witty" loading
-              phrase. */}
-          <StreamingStatus
-            showResponseTokensPerSecond={
-              showResponseTokensPerSecond && !approvalActive
-            }
-            startedAt={activeTurnStartedAt}
-            showPhrase={false}
-            hasActivePrompt={sessionHasActivePrompt}
-            backgroundLabel={
-              connection.backgroundTurn?.label ??
-              connection.backgroundTurn?.kind
-            }
-          />
-          {showComposerStatus && (
-            <ComposerStatusStack
-              queued={{
-                prompts: queuedPrompts,
-                t,
-                canMutateMidTurn,
-                canInsertMidTurn:
-                  streamingState !== 'idle' || sessionHasActivePrompt,
-                onDelete: removeQueuedPrompt,
-                canSendMidTurnNow,
-                onInsert: insertQueuedPrompt,
-                onSendNow: sendQueuedPromptNow,
-                onEdit: editQueuedPrompt,
-                onImagePreview: handleImagePreview,
-                onAttachmentPreview: handleAttachmentPreview,
-              }}
-              goal={
-                liveGoalSnapshot?.goal
-                  ? {
-                      snapshot: liveGoalSnapshot,
-                      busy: goalControlBusy,
-                      onEdit: () => {
-                        setGoalEditError(null);
-                        setGoalEditOpen(true);
-                      },
-                      onPause: () => runGoalControl('pause'),
-                      onResume: () => runGoalControl('resume'),
-                      onClear: () => runGoalControl('clear'),
-                      onOpenGoals,
-                    }
-                  : undefined
-              }
-            />
-          )}
-          {unknownPromptAdmission && (
-            <div
-              className={styles.admissionUnknown}
-              role="status"
-              data-testid="pane-prompt-admission-unknown"
-            >
-              <span>{t('queue.admissionUnknown')}</span>
-              {!readOnly && unknownPromptAdmission.payloadAvailable && (
-                <span className={styles.admissionUnknownActions}>
-                  <button type="button" onClick={continueEditingUnknownPrompt}>
-                    {t('queue.continueEditing')}
-                  </button>
-                  <button type="button" onClick={discardUnknownPromptPayload}>
-                    {t('queue.discardUnknown')}
-                  </button>
-                </span>
-              )}
-            </div>
-          )}
-          <SessionRecoveryBanner
-            blocked={
-              readOnly ||
-              approvalActive ||
-              admissionPayloadLocked ||
-              sessionHasActivePrompt
-            }
-          />
-          {!readOnly && (
-            <ChatEditor
-              ref={editorRef}
-              onSubmit={handleSubmit}
-              onCancel={handleCancel}
-              isRunning={isResponding || sessionHasActivePrompt}
-              commands={commands}
-              skills={skills}
-              queuedMessages={queuedTexts}
-              onPopQueuedMessages={editLastQueuedPrompt}
-              onClearQueuedMessages={clearQueuedPrompts}
-              visibleToolbarActions={paneToolbarActions}
-              tokenCount={
-                contextUsageAvailable ? (connection.tokenCount ?? 0) : 0
-              }
-              contextWindow={
-                contextUsageAvailable ? (connection.contextWindow ?? 0) : 0
-              }
-              onShowContextUsage={
-                contextUsageAvailable ? handleShowContextUsage : undefined
-              }
-              contextUsageControls={
-                onOpenContextUsage ? contextUsageControls : undefined
-              }
-              onOpenContextUsage={
-                contextUsageAvailable && onOpenContextUsage
-                  ? handleOpenContextUsage
-                  : undefined
-              }
-              workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
-              workspaceTitle={paneWorkspaceCwd}
-              workspaceColor={workspaceAccent}
-              currentMode={executionMode}
-              availableModes={availableApprovalModes}
-              onCycleMode={handleCycleMode}
-              modeControlsDisabled={modeControlsBusy}
-              planMode={planMode}
-              onTogglePlan={handleTogglePlan}
-              sessionWorkflowEnabled={sessionWorkflowEnabled}
-              currentModel={connection.currentModel ?? ''}
-              modelRefresh={modelRefresh}
-              availableModels={availableModels}
-              modelPickerScope={modelPickerScope}
-              unavailableModels={unavailableModels}
-              mountUnavailableModelTooltip={mountUnavailableModelTooltip}
-              onSelectMode={handleSelectMode}
-              onSelectModel={handleSelectModel}
-              workflowMode={connection.workflowMode}
-              workflowModeStatus={
-                connection.loadingTranscript ||
-                connection.catchingUp ||
-                connection.status !== 'connected'
-                  ? 'syncing'
-                  : (connection.workflowModeStatus ?? 'unknown')
-              }
-              workflowModePending={connection.workflowModePending}
-              onWorkflowModeChange={handleWorkflowModeChange}
-              reasoning={connection.reasoning}
-              onSelectReasoningEffort={handleSelectReasoningEffort}
-              dialogOpen={approvalActive}
-              disabled={approvalActive || admissionPayloadLocked}
-              submitDisabled={connection.loadingTranscript}
-              voiceTarget={hidden ? undefined : voiceTarget}
-              voiceStatusRevision={voiceStatusRevision}
-              followupState={followupState}
-              onAcceptFollowup={onAcceptFollowup}
-              onDismissFollowup={onDismissFollowup}
-              onImageIngestionNotice={onImageIngestionNotice}
-              sessionId={connection.sessionId}
-              onImagePreview={handleImagePreview}
-              onAttachmentPreview={handleAttachmentPreview}
-              atWorkspaceCwd={paneWorkspaceCwd}
-              placeholderText={t('splitView.composerPlaceholder')}
-            />
-          )}
-          {!readOnly && CustomComposerFooter && (
-            <CustomComposerFooter
-              disabled={approvalActive || admissionPayloadLocked}
-              isRunning={isResponding || sessionHasActivePrompt}
-              currentMode={connection.currentMode ?? 'default'}
-              currentModel={connection.currentModel ?? ''}
-              sessionName={connection.displayName}
-            />
-          )}
-        </div>
-      </div>
+              </DaemonStatusCardsContext.Provider>
+            </McpAppReadOnlyContext.Provider>
+          </McpAppVisibilityContext.Provider>
+        </SubagentDetailsProvider>
+      </OptionalMonitorDetailsProvider>
     </section>
   );
 }

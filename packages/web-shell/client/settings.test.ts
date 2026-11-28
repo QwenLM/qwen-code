@@ -172,6 +172,7 @@ describe('settings presentation aliases', () => {
     );
     for (const id of [
       'builtin:chat-width',
+      'builtin:arrow-key-history',
       'builtin:browser-notifications',
       'builtin:live-setup',
       'builtin:local-control',
@@ -241,6 +242,7 @@ describe('settings presentation aliases', () => {
       'setting:git-pr-co-author': 'general.gitCoAuthor.pr',
       'setting:language': 'general.language',
       'setting:output-language': 'general.outputLanguage',
+      'setting:display-language': 'general.displayLanguage',
       'setting:prevent-system-sleep': 'general.preventSystemSleep',
       'setting:review-attribution': 'review.attribution',
       'setting:review-sandbox': 'review.sandbox',
@@ -303,6 +305,7 @@ describe('settings presentation aliases', () => {
         'experimental.modelAvailabilityTracking',
       'setting:voice-model': 'voiceModel',
       'setting:image-model': 'imageModel',
+      'setting:worktree-retention': 'worktree.maxRetained',
     } satisfies Record<string, string>;
     const settingIds = WEB_SHELL_SETTING_ITEM_IDS.filter((id) =>
       id.startsWith('setting:'),

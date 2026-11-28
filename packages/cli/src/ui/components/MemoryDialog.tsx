@@ -12,8 +12,6 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
-  getAutoMemoryRoot,
-  getAutoMemoryProjectStateDir,
   getUserAutoMemoryRoot,
   AUTO_MEMORY_INDEX_FILENAME,
 } from '@qwen-code/qwen-code-core/memory/paths.js';
@@ -154,24 +152,14 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
       ),
     [],
   );
-  const projectMemoryPath = useMemo(
-    () =>
-      path.join(
-        config.getWorkingDir(),
-        getAllMemoryFilenames()[0] ?? 'QWEN.md',
-      ),
-    [config],
+  const projectMemoryPath = path.join(
+    config.getWorkingDir(),
+    getAllMemoryFilenames()[0] ?? 'QWEN.md',
   );
-  const managedMemoryPath = useMemo(
-    () => getAutoMemoryRoot(config.getProjectRoot()),
-    [config],
-  );
+  const managedMemoryPath = config.getProjectAutoMemoryRoot();
   const managedUserMemoryPath = useMemo(() => getUserAutoMemoryRoot(), []);
 
-  const memoryStatePath = useMemo(
-    () => getAutoMemoryProjectStateDir(config.getProjectRoot()),
-    [config],
-  );
+  const memoryStatePath = path.dirname(managedMemoryPath);
 
   const items = useMemo<DialogItem[]>(() => {
     if (config.isManagedMemoryAvailable()) {

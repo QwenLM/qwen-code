@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -287,7 +288,7 @@ public final class RuntimeAdmissionFences {
     }
 
     public static String storageAliasKey(String tenantId, String storageId) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("qwen-csi-alias/1", tenantId, storageId);
+        return ManagedSchemaKeys.key("qwen-csi-alias/1", tenantId, storageId);
     }
 
     static String storageFence(Connection connection, String tenantId, String storageId) throws SQLException {

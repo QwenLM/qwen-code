@@ -5,11 +5,13 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.Rec
 import com.alibaba.qwen.code.managedagent.contracts.harness.HostedHarnessRecoveryDeclinedException;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.TurnExecutionStore;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -44,6 +46,10 @@ class SessionRecoveryServiceTest {
     private final HarnessConnector harness = mock(HarnessConnector.class);
     private final SessionRecord session = new SessionRecord("tenant", "session",
             "qwen-code", "title", "ACTIVE", "boot", "epoch", 1, 1, 1, 1, null, 1);
+    private final SessionRecord externalSession = new SessionRecord("tenant", "session", "qwen-code", null,
+            "title", "ACTIVE", "boot", "epoch", 1, 1, 0, 1, 1, null, 1,
+            new ContextBinding("tenant", "workspace", 1, "external", ".", "context", 1),
+            "yolo", WorkspaceToolProfiles.EXTERNAL_FILES);
     private JdbcTemplate jdbc;
     private SessionRecoveryService service;
 
@@ -56,9 +62,10 @@ class SessionRecoveryServiceTest {
                 + " head_kind VARCHAR, recovery_status VARCHAR, recovery_detail_code VARCHAR,"
                 + " state VARCHAR, activation_phase VARCHAR, activation_head_revision BIGINT,"
                 + " journal_revision BIGINT, is_wake_pending INT, wake_head_revision BIGINT,"
-                + " wake_seal_revision BIGINT, wake_seal_background INT)");
-        jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                "tenant", "session", "MANAGED_SESSION", "READY", null, "ACTIVE", null, null, 0L, 0, 0L, null, 0);
+                + " wake_seal_revision BIGINT, wake_seal_background INT, wake_seal_parked_owner VARCHAR)");
+        jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "tenant", "session", "MANAGED_SESSION", "READY", null, "ACTIVE", null, null, 0L, 0, 0L, null, 0,
+                null);
         // The obligation projections the sealed-head proof reads. Empty by
         // default: a cleanly suspended Session owes nothing.
         jdbc.execute("CREATE TABLE ma_turn (tenant_id VARCHAR, session_id VARCHAR, status VARCHAR,"
@@ -233,6 +240,22 @@ class SessionRecoveryServiceTest {
         verifyNoInteractions(harness, coordinator);
     }
 
+    // S4 (#18149): a parked wake-started Turn has no Turn row, and the wake
+    // scan resumes it at its due time; its own owed cleanup is certified work.
+    @Test
+    void aWakeParkedSealIsReadyWhileItsTurnOwesCleanup() {
+        sealCleanly();
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = 1, wake_seal_revision = 5,"
+                + " wake_seal_parked_owner = 'wake'");
+        oweBackgroundWork();
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("ready");
+        verifyNoInteractions(harness, coordinator);
+
+        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 4");
+        assertThat(service.query("tenant", "actor", "session").nextTurnAllowed()).isFalse();
+    }
+
     @Test
     void anUncertifiedSealStillBlocksOnTheSameBackgroundWork() {
         sealCleanly();
@@ -275,9 +298,8 @@ class SessionRecoveryServiceTest {
         assertThat(recovery.nextTurnAllowed()).isTrue();
     }
 
-    // #17538: only the replica holding the attachment reads live evidence.
-    // Every other replica reads null, which must not turn a Turn the Harness
-    // already settled in its journal into an operator failure.
+    // #17538: when a replica has no live evidence, a native terminal can
+    // still prove that the Harness settled this Turn.
     private void terminalEvent(String sourceKey) {
         jdbc.update("INSERT INTO ma_public_event VALUES ('tenant', 'session', 'turn', 'SESSION', 1, ?)",
                 sourceKey);
@@ -343,6 +365,22 @@ class SessionRecoveryServiceTest {
         }
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.state()).isEqualTo("operator_required");
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"throw", "foreign"})
+    void unreadableUnattachedStatusCannotUseTheNativeTerminalFallback(String mode) {
+        turn("COMPLETED", null);
+        terminalEvent("boot:epoch:7");
+        var read = when(harness.inspectUnattachedRecovery(session, "private-prompt"));
+        if ("throw".equals(mode)) {
+            read.thenThrow(new IllegalStateException("unavailable"));
+        } else {
+            read.thenReturn(new RecoveryStatus("ready", null, "another-prompt", true, true, true));
+        }
+        var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
         assertThat(recovery.nextTurnAllowed()).isFalse();
     }
@@ -499,36 +537,37 @@ class SessionRecoveryServiceTest {
         assertThat(recovery.nextRecheckAt()).isEqualTo(10_000);
         assertThat(recovery.nextTurnAllowed()).isFalse();
         assertThat(recovery.actions().recheck()).isTrue();
-        verify(harness).inspectRecovery("tenant", "session", "private-prompt");
-        verifyNoInteractions(coordinator);
+        verifyNoInteractions(harness, coordinator);
     }
 
     @Test
-    void aStoppedHarnessExposesItsUnsettledInputInsteadOfRunningWork() {
+    void activeRecoveryViewAgreesOnColdAndWarmReplicas() {
         turn("RUNNING", AgentStateStore.HARNESS_RECOVERY_BLOCKED);
+        var cold = service.projection(session, "actor");
         when(harness.inspectRecovery("tenant", "session", "private-prompt"))
                 .thenReturn(new RecoveryStatus("awaiting_evidence", "inputs_unsettled",
                         "private-prompt", false, false, false));
         var recovery = service.projection(session, "actor");
-        assertThat(recovery).isNotNull();
+        assertThat(recovery).isEqualTo(cold);
         assertThat(recovery.state()).isEqualTo("awaiting_evidence");
-        assertThat(recovery.reasonCode()).isEqualTo("inputs_unsettled");
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
         assertThat(recovery.nextTurnAllowed()).isFalse();
         assertThat(recovery.actions().recheck()).isFalse();
         assertThat(recovery.actions().cancel()).isTrue();
-        verifyNoInteractions(coordinator);
+        verifyNoInteractions(harness, coordinator);
     }
 
-    @Test
-    void aHarnessResultStillWaitsForTheOriginalControlPlaneTurnToSettle() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aHarnessResultStillWaitsForTheOriginalControlPlaneTurnToSettle(boolean external) {
         turn("RUNNING", AgentStateStore.HARNESS_RECOVERY_BLOCKED);
-        when(harness.inspectRecovery("tenant", "session", "private-prompt"))
-                .thenReturn(new RecoveryStatus("ready", null, "private-prompt", true, true, true));
+        terminalEvent("boot:epoch:7");
+        when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(external ? externalSession : session);
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.state()).isEqualTo("recovering");
         assertThat(recovery.reasonCode()).isEqualTo("turn_settlement_pending");
         assertThat(recovery.nextTurnAllowed()).isFalse();
-        verifyNoInteractions(coordinator);
+        verifyNoInteractions(harness, coordinator);
     }
 
     @ParameterizedTest
@@ -539,7 +578,8 @@ class SessionRecoveryServiceTest {
                 .thenReturn(new RecoveryStatus("recovering", "turn_active", "private-prompt", false, false, false));
         var recovery = service.projection(session, "actor");
         assertThat(recovery).isNotNull();
-        assertThat(recovery.reasonCode()).isEqualTo("harness_work_active");
+        assertThat(recovery.reasonCode()).isEqualTo("RUNNING".equals(status)
+                ? "recovery_evidence_unavailable" : "harness_work_active");
         assertThat(recovery.nextTurnAllowed()).isFalse();
     }
 
@@ -601,11 +641,12 @@ class SessionRecoveryServiceTest {
     @Test
     void nativeReadyStillWaitsForTheActiveJavaTurnToSettle() {
         turn("CANCELLING", null);
-        when(harness.inspectRecovery("tenant", "session", "private-prompt"))
-                .thenReturn(new RecoveryStatus("ready", "ready", "private-prompt", true, true, true));
+        terminalEvent("boot:epoch:7");
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.state()).isEqualTo("recovering");
+        assertThat(recovery.reasonCode()).isEqualTo("turn_settlement_pending");
         assertThat(recovery.nextTurnAllowed()).isFalse();
+        verifyNoInteractions(harness);
     }
 
     @Test
@@ -644,6 +685,36 @@ class SessionRecoveryServiceTest {
     }
 
     @Test
+    void attachedAndUnattachedReadsAgreeForAHistoricalFailure() {
+        turn("FAILED", "failure");
+        var ready = new RecoveryStatus("ready", null, "private-prompt", true, true, true);
+        when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(externalSession);
+        when(harness.inspectRecovery("tenant", "session", "private-prompt")).thenReturn(ready, (RecoveryStatus) null);
+        when(harness.inspectUnattachedRecovery(externalSession, "private-prompt")).thenReturn(ready);
+
+        var attached = service.query("tenant", "actor", "session");
+        var unattached = service.projection(externalSession, "actor");
+        assertThat(unattached).isEqualTo(attached);
+        assertThat(unattached.nextTurnAllowed()).isTrue();
+        assertThat(unattached.reasonCode()).isEqualTo("ready");
+        verify(harness).inspectUnattachedRecovery(externalSession, "private-prompt");
+        verifyNoInteractions(coordinator);
+    }
+
+    @Test
+    void anActiveExternalTurnUsesDurableRecoveryWithoutQueryingTheHarness() {
+        turn("RUNNING", AgentStateStore.RUNTIME_RECOVERY_BLOCKED);
+        when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(externalSession);
+
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(service.projection(externalSession, "actor")).isEqualTo(recovery);
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+        assertThat(recovery.actions().recheck()).isTrue();
+        verifyNoInteractions(harness, coordinator);
+    }
+
+    @Test
     void readerCanInspectButCannotRecheckOrCancel() {
         turn("RUNNING", AgentStateStore.RUNTIME_RECOVERY_BLOCKED);
         doThrow(new ManagedAgentException(403,
@@ -674,6 +745,7 @@ class SessionRecoveryServiceTest {
         var recovery = service.recheck("tenant", "actor", "session", "turn");
         assertThat(recovery.nextTurnAllowed()).isFalse();
         verify(coordinator).recheckRecovery("tenant", "session", "turn");
+        verify(harness, never()).inspectUnattachedRecovery(session, "private-prompt");
         verify(harness, never()).recheckRecoveryCleanup(anyString(), anyString(), anyString());
     }
 
@@ -706,6 +778,18 @@ class SessionRecoveryServiceTest {
         assertThat(service.recheck("tenant", "actor", "session", "turn")).isEqualTo(recovery);
         verify(harness, never()).inspectRecovery("tenant", "session", "private-prompt");
         verify(harness, never()).recheckRecoveryCleanup(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void cleanupStatusOnAReplicaDoesNotAdvertiseAnAttachmentBackedRecheck() {
+        cancelBeforeAdmission();
+        when(harness.inspectUnattachedRecovery(session, null)).thenReturn(
+                new RecoveryStatus("cleanup_pending", "runtime_cleanup_pending", "prior-prompt", true, true, false));
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("cleanup_pending");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+        assertThat(recovery.actions().recheck()).isFalse();
+        verifyNoInteractions(coordinator);
     }
 
     @Test

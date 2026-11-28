@@ -32,8 +32,6 @@ import {
   type EditorType,
 } from '@qwen-code/qwen-code-core/utils/editor.js';
 import {
-  getAutoMemoryRoot,
-  getAutoMemoryProjectStateDir,
   getUserAutoMemoryRoot,
   AUTO_MEMORY_INDEX_FILENAME,
 } from '@qwen-code/qwen-code-core/memory/paths.js';
@@ -98,7 +96,6 @@ function readOwner({ config, settings, host }: Props) {
     host,
     session: config.getSessionId(),
     cwd: config.getWorkingDir(),
-    project: config.getProjectRoot(),
     target: settings.workspace.path,
     trusted: settings.isTrusted,
     bare: config.getBareMode(),
@@ -107,7 +104,7 @@ function readOwner({ config, settings, host }: Props) {
     names: getAllMemoryFilenames().join('\0'),
     user: Storage.getGlobalQwenDir(),
     managedUser: getUserAutoMemoryRoot(),
-    managedProject: getAutoMemoryRoot(config.getProjectRoot()),
+    managedProject: config.getProjectAutoMemoryRoot(),
   };
 }
 type Owner = NonNullable<ReturnType<typeof readOwner>>;
@@ -265,7 +262,7 @@ function MemoryView({
     let cancelled = false;
     void fs
       .readFile(
-        path.join(getAutoMemoryProjectStateDir(owner.project), 'meta.json'),
+        path.join(path.dirname(owner.managedProject), 'meta.json'),
         'utf8',
       )
       .then((content) => {
@@ -280,7 +277,7 @@ function MemoryView({
     return () => {
       cancelled = true;
     };
-  }, [owner.project, active]);
+  }, [owner.managedProject, active]);
   const assertOwner = () => {
     if (!active())
       throw new Error('Memory owner changed. Close and reopen this dialog.');

@@ -1,0 +1,366 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type {
+  DaemonCapabilities,
+  DaemonWorkspaceCapability,
+  WorkspaceDaemonClient,
+} from '@qwen-code/sdk/daemon';
+import type {
+  DaemonDirectoryListing,
+  DaemonFileStat,
+  DaemonWorkspaceActions,
+  DaemonWorkspaceContextValue,
+} from '@qwen-code/web-shell/daemon-react-sdk';
+import { useEffect, useMemo, useRef } from 'react';
+import type { FileUploadClient } from '../../hooks/useFileUpload';
+
+export type ArtifactWorkspaceActions = Pick<
+  DaemonWorkspaceActions,
+  | 'readWorkspaceFile'
+  | 'readFileBytes'
+  | 'stat'
+  | 'listDirectory'
+  | 'listScheduledTasks'
+  | 'updateScheduledTask'
+  | 'deleteScheduledTask'
+> &
+  Partial<Pick<WorkspaceDaemonClient, 'deleteWorkspaceFile'>> &
+  Partial<FileUploadClient> & {
+    createFile?(path: string): Promise<void>;
+    createDirectory?(path: string): Promise<void>;
+    deleteDirectory?(path: string): Promise<void>;
+  };
+
+export interface ArtifactWorkspaceOwner {
+  cwd: string;
+  id?: string;
+  primary: boolean;
+}
+
+interface ArtifactWorkspaceAuthority {
+  owner: ArtifactWorkspaceOwner;
+}
+
+export interface ArtifactWorkspaceTarget {
+  workspaceCwd: string;
+  workspaceId?: string;
+  primary?: boolean;
+  actions: ArtifactWorkspaceActions;
+}
+
+export function resolveArtifactWorkspaceOwner(
+  capabilities: DaemonCapabilities | undefined,
+  workspaceCwd: string | undefined,
+): ArtifactWorkspaceOwner | undefined {
+  if (!capabilities || !workspaceCwd) return undefined;
+  const advertised = capabilities.workspaces;
+  if (advertised) {
+    const matches = advertised.filter((entry) => entry.cwd === workspaceCwd);
+    const match = matches[0];
+    if (matches.length !== 1 || !match?.id || match.trusted !== true) {
+      return undefined;
+    }
+    if (advertised.filter((entry) => entry.id === match.id).length !== 1) {
+      return undefined;
+    }
+    if (match.primary !== (match.cwd === capabilities.workspaceCwd)) {
+      return undefined;
+    }
+    return workspaceOwner(match);
+  }
+  if (capabilities.workspaceCwd !== workspaceCwd) return undefined;
+  return {
+    cwd: workspaceCwd,
+    primary: true,
+  };
+}
+
+function workspaceOwner(
+  workspace: DaemonWorkspaceCapability,
+): ArtifactWorkspaceOwner {
+  return {
+    cwd: workspace.cwd,
+    id: workspace.id,
+    primary: workspace.primary,
+  };
+}
+
+function isSameWorkspaceOwner(
+  current: ArtifactWorkspaceOwner | undefined,
+  expected: ArtifactWorkspaceOwner,
+): current is ArtifactWorkspaceOwner {
+  return (
+    current?.cwd === expected.cwd &&
+    current.id === expected.id &&
+    current.primary === expected.primary
+  );
+}
+
+export function useArtifactWorkspaceTargetFromRuntime(
+  workspace:
+    | Pick<DaemonWorkspaceContextValue, 'capabilities' | 'client'>
+    | undefined,
+  primaryActions: DaemonWorkspaceActions | undefined,
+  workspaceCwd: string | undefined,
+): ArtifactWorkspaceTarget | undefined {
+  const capabilities = workspace?.capabilities;
+  const workspaceClient = workspace?.client;
+  const owner = useMemo(
+    () => resolveArtifactWorkspaceOwner(capabilities, workspaceCwd),
+    [capabilities, workspaceCwd],
+  );
+  const localOwner =
+    import.meta.env.MODE !== 'transcript' &&
+    Boolean(
+      owner?.id &&
+        capabilities?.features?.includes('workspace_qualified_rest_core') &&
+        !capabilities?.workspaces?.find((entry) => entry.id === owner.id)?.ssh,
+    );
+  const canDelete =
+    localOwner &&
+    Boolean(capabilities?.features?.includes('workspace_file_delete'));
+  const deleteAllowedRef = useRef(canDelete);
+  deleteAllowedRef.current = canDelete;
+  const canCreateFile =
+    localOwner &&
+    Boolean(capabilities?.features?.includes('workspace_file_write'));
+  const canCreateDirectory =
+    localOwner &&
+    Boolean(capabilities?.features?.includes('workspace_directory_create'));
+  const canDeleteDirectory =
+    localOwner &&
+    Boolean(capabilities?.features?.includes('workspace_directory_delete'));
+  const deletionAllowedRef = useRef(canDeleteDirectory);
+  deletionAllowedRef.current = canDeleteDirectory;
+  const creationAllowedRef = useRef({
+    file: canCreateFile,
+    directory: canCreateDirectory,
+  });
+  creationAllowedRef.current = {
+    file: canCreateFile,
+    directory: canCreateDirectory,
+  };
+  const canUpload =
+    import.meta.env.MODE !== 'transcript' &&
+    Boolean(
+      owner?.id &&
+        capabilities?.features?.includes('workspace_file_upload') &&
+        capabilities?.features?.includes('workspace_qualified_rest_core'),
+    );
+  const uploadAllowedRef = useRef(canUpload);
+  uploadAllowedRef.current = canUpload;
+  const authorityRef = useRef<ArtifactWorkspaceAuthority | undefined>(
+    undefined,
+  );
+  if (!owner || !workspaceClient || !primaryActions) {
+    authorityRef.current = undefined;
+  } else if (!isSameWorkspaceOwner(authorityRef.current?.owner, owner)) {
+    authorityRef.current = { owner };
+  }
+  const authority = authorityRef.current;
+  const authorityLifetimeRef = useRef<object | undefined>(undefined);
+  useEffect(() => {
+    if (!authority) {
+      authorityLifetimeRef.current = undefined;
+      return undefined;
+    }
+    const lifetime = {};
+    authorityLifetimeRef.current = lifetime;
+    return () => {
+      // StrictMode immediately replays setup after cleanup. Defer revocation so
+      // that replay can replace the lifetime token; a real unmount still
+      // revokes the authority as soon as that replay window closes.
+      queueMicrotask(() => {
+        if (
+          authorityLifetimeRef.current === lifetime &&
+          authorityRef.current === authority
+        ) {
+          authorityRef.current = undefined;
+        }
+      });
+    };
+  }, [authority]);
+
+  const actions = useMemo<ArtifactWorkspaceActions | undefined>(() => {
+    if (!authority || !workspaceClient || !primaryActions) return undefined;
+    const expectedAuthority = authority;
+    const requireOwner = () => {
+      const current = authorityRef.current;
+      if (current !== expectedAuthority) {
+        throw new Error('Workspace artifact owner is no longer available');
+      }
+      return current.owner;
+    };
+    const requireScheduledTaskOwner = (workspaceId: string | undefined) => {
+      const current = requireOwner();
+      const matchesPrimaryRoute = current.primary && workspaceId === undefined;
+      if (!matchesPrimaryRoute && current.id !== workspaceId) {
+        throw new Error('Scheduled task workspace owner no longer matches');
+      }
+      return current;
+    };
+    const create = async (kind: 'file' | 'directory', path: string) => {
+      const requireCreationOwner = () => {
+        const current = requireOwner();
+        if (!creationAllowedRef.current[kind])
+          throw new Error('Workspace creation is no longer available');
+        return current;
+      };
+      const current = requireCreationOwner();
+      const client = workspaceClient.workspaceByCwd(current.cwd);
+      if (kind === 'file')
+        await client.writeWorkspaceFile({ path, content: '', mode: 'create' });
+      else await client.createWorkspaceDirectory(path);
+      requireCreationOwner();
+    };
+    return {
+      ...(canDelete
+        ? {
+            async deleteWorkspaceFile(path: string) {
+              const current = requireOwner();
+              if (!deleteAllowedRef.current)
+                throw new Error(
+                  'Workspace file deletion is no longer available',
+                );
+              await workspaceClient
+                .workspaceByCwd(current.cwd)
+                .deleteWorkspaceFile(path);
+              requireOwner();
+              if (!deleteAllowedRef.current)
+                throw new Error(
+                  'Workspace file deletion is no longer available',
+                );
+            },
+          }
+        : {}),
+      ...(canCreateFile
+        ? { createFile: (path: string) => create('file', path) }
+        : {}),
+      ...(canCreateDirectory
+        ? { createDirectory: (path: string) => create('directory', path) }
+        : {}),
+      ...(canDeleteDirectory
+        ? {
+            async deleteDirectory(path: string) {
+              const requireDeletionOwner = () => {
+                const current = requireOwner();
+                if (!deletionAllowedRef.current)
+                  throw new Error('Workspace deletion is no longer available');
+                return current;
+              };
+              const current = requireDeletionOwner();
+              await workspaceClient
+                .workspaceByCwd(current.cwd)
+                .deleteWorkspaceDirectory(path);
+              requireDeletionOwner();
+            },
+          }
+        : {}),
+      ...(canUpload
+        ? ({
+            async uploadWorkspaceFile(req, clientId) {
+              const current = requireOwner();
+              if (!uploadAllowedRef.current) {
+                throw new Error('Workspace file upload is no longer available');
+              }
+              const result = await workspaceClient
+                .workspaceByCwd(current.cwd)
+                .uploadWorkspaceFile(req, clientId);
+              requireOwner();
+              if (!uploadAllowedRef.current) {
+                throw new Error('Workspace file upload is no longer available');
+              }
+              return result;
+            },
+          } satisfies FileUploadClient)
+        : {}),
+      async listDirectory(path) {
+        const current = requireOwner();
+        const result = await (current.id
+          ? (workspaceClient
+              .workspaceByCwd(current.cwd)
+              .dirList(path) as Promise<DaemonDirectoryListing>)
+          : primaryActions.listDirectory(path));
+        requireOwner();
+        return result;
+      },
+      async readWorkspaceFile(filePath, opts) {
+        const current = requireOwner();
+        const result = await (current.primary
+          ? primaryActions.readWorkspaceFile(filePath, opts)
+          : workspaceClient
+              .workspaceByCwd(current.cwd)
+              .readWorkspaceFile(filePath, opts));
+        requireOwner();
+        return result;
+      },
+      async readFileBytes(filePath, options) {
+        const current = requireOwner();
+        const result = await (current.primary
+          ? primaryActions.readFileBytes(filePath, options)
+          : workspaceClient
+              .workspaceByCwd(current.cwd)
+              .readWorkspaceFileBytes(filePath, options));
+        requireOwner();
+        return result;
+      },
+      async stat(filePath) {
+        const current = requireOwner();
+        const result = await (current.primary
+          ? primaryActions.stat(filePath)
+          : (workspaceClient
+              .workspaceByCwd(current.cwd)
+              .fileStat(filePath) as Promise<DaemonFileStat>));
+        requireOwner();
+        return result;
+      },
+      async listScheduledTasks(workspaceId) {
+        requireScheduledTaskOwner(workspaceId);
+        const result = await primaryActions.listScheduledTasks(workspaceId);
+        requireScheduledTaskOwner(workspaceId);
+        return result;
+      },
+      async updateScheduledTask(id, update, workspaceId, expectedSessionId) {
+        requireScheduledTaskOwner(workspaceId);
+        const result = await primaryActions.updateScheduledTask(
+          id,
+          update,
+          workspaceId,
+          expectedSessionId,
+        );
+        requireScheduledTaskOwner(workspaceId);
+        return result;
+      },
+      async deleteScheduledTask(id, workspaceId, expectedSessionId) {
+        requireScheduledTaskOwner(workspaceId);
+        await primaryActions.deleteScheduledTask(
+          id,
+          workspaceId,
+          expectedSessionId,
+        );
+        requireScheduledTaskOwner(workspaceId);
+      },
+    };
+  }, [
+    authority,
+    primaryActions,
+    workspaceClient,
+    canDelete,
+    canCreateFile,
+    canCreateDirectory,
+    canDeleteDirectory,
+    canUpload,
+  ]);
+
+  if (!authority || !actions) return undefined;
+  return {
+    workspaceCwd: authority.owner.cwd,
+    ...(authority.owner.id ? { workspaceId: authority.owner.id } : {}),
+    primary: authority.owner.primary,
+    actions,
+  };
+}

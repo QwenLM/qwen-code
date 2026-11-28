@@ -71,6 +71,7 @@ const observed = vi.hoisted(() => ({
 }));
 vi.mock('../daemon/session/DaemonSessionProvider', () => ({
   useDaemonHistoryNavigationStore: () => observed.store,
+  useOptionalDaemonHistoryNavigationStore: () => observed.store,
 }));
 vi.mock('../i18n', () => {
   const t = (key: string) => key;
@@ -88,6 +89,7 @@ vi.mock('../hooks/useAssistantFeedback', async (importOriginal) => {
   };
 });
 const { TranscriptViewport } = await import('./TranscriptViewport');
+const { DaemonTranscriptViewport } = await import('./DaemonTranscriptViewport');
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 afterEach(() => {
@@ -232,7 +234,10 @@ async function setup(
                 : undefined
             }
           >
-            <TranscriptViewport {...props} />
+            <TranscriptViewport
+              {...props}
+              sessionViewportComponent={DaemonTranscriptViewport}
+            />
           </McpAppGeneratedUiContext.Provider>
         </McpAppToolsContext.Provider>
       </McpAppHostContext.Provider>,

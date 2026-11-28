@@ -41,9 +41,18 @@ class ManagedSessionStoreControllerTest {
             assertThat(advertised.wakeDispatch()).isTrue();
             assertThat(advertised.runtimeObservation()).isTrue();
             assertThat(advertised.actionParking()).isTrue();
+            assertThat(advertised.backgroundActionParking()).isTrue();
+            assertThat(advertised.wakeActionParking()).isTrue();
+            assertThat(advertised.suspensionPlacementRelease()).isTrue();
         }
+        ReflectionTestUtils.setField(controller, "wakeDispatch", false);
+        assertThat(controller.acquire(tenant, "session", "token", null, new HttpHeaders())
+                .suspensionPlacementRelease()).isFalse();
         assertThat(grant.wakeDispatch()).isFalse();
         assertThat(grant.runtimeObservation()).isFalse();
         assertThat(grant.actionParking()).isFalse();
+        assertThat(grant.backgroundActionParking()).isFalse();
+        assertThat(grant.wakeActionParking()).isFalse();
+        assertThat(grant.suspensionPlacementRelease()).isFalse();
     }
 }

@@ -19,7 +19,7 @@ jobs:
     name: 'Sync Release Assets to Aliyun OSS'
     runs-on: 'ubuntu-latest'
     if: |-
-      ${{ github.repository == 'QwenLM/qwen-code' }}
+      ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')) }}
     environment:
       name: 'production-release'
     permissions:

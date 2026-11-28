@@ -7,11 +7,13 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedToolDetailsStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -33,7 +35,7 @@ public class JdbcManagedToolDetailsStore
         this.json = json;
     }
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    @Autowired(required = false)
     void setJournalPacks(JdbcJournalPacks packs) { this.packs = packs; }
 
     public WebShellToolDetails read(String tenant, String workspace,
@@ -298,7 +300,7 @@ public class JdbcManagedToolDetailsStore
     private JsonNode parse(byte[] bytes) {
         try {
             return json.readTree(bytes);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Stored tool details are invalid", error);
         }
     }

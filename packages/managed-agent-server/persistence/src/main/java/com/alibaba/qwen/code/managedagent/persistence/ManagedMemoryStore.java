@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
@@ -101,7 +102,7 @@ public class ManagedMemoryStore implements MemoryRepository {
         // bounded, well-formed identity without trailing spaces, never a
         // PAD SPACE fold of a stored id.
         try {
-            com.alibaba.qwen.code.runtimebroker.BrokerValues.requireShortId(store, "memoryStoreId");
+            BrokerValues.requireShortId(store, "memoryStoreId");
         } catch (IllegalArgumentException invalid) {
             throw unavailable();
         }

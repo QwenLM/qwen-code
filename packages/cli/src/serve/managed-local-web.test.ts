@@ -288,6 +288,7 @@ describe('Managed local front door', () => {
       ],
       ['GET', '/v1/agents/sessions/session-1/artifacts'],
       ['GET', '/internal/managed-session-store/v1/write'],
+      ['GET', '/internal/runtime-broker/v1/runtimes'],
       ['GET', '/v1/agents'],
       ['GET', '/api/agent/web-shell/v10/sessions/query'],
     ]) {

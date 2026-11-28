@@ -24,10 +24,12 @@ import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 @Service
@@ -60,16 +62,16 @@ public class ManagedSessionResourcesService {
         return new Query(tenant, sessionId).get(session);
     }
 
-    java.util.Optional<List<WebShellSkill>> installedSkills(SessionRecord session) {
+    Optional<List<WebShellSkill>> installedSkills(SessionRecord session) {
         var query = new Query(session.tenantId(), session.sessionId());
         query.attempt("configCoverage", () -> query.configuration(true));
         if (!"complete".equals(query.result.path("configCoverage").asText())) {
             throw new ManagedAgentException(409, "session_skills_unavailable", "The installed Skill catalog could not be read.");
         }
         if (query.result.path("activeConfigRevision").asLong(0) == 0) {
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
-        var visible = new java.util.ArrayList<WebShellSkill>();
+        var visible = new ArrayList<WebShellSkill>();
         for (JsonNode skill : query.skillItems) {
             // Bundle commands share the skill item list but are not Skills;
             // admitting them here would show them as Skills and count them
@@ -78,7 +80,7 @@ public class ManagedSessionResourcesService {
                 visible.add(new WebShellSkill(skill.get("name").textValue(), skill.get("description").textValue()));
             }
         }
-        return java.util.Optional.of(visible);
+        return Optional.of(visible);
     }
 
     private final class Query {

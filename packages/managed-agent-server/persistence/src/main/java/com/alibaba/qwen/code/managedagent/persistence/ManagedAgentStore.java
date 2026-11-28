@@ -1,12 +1,14 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.event.CommittedEventPublisher;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.ContextCompressionState;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.CwdChangeOutcome;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.TaskCancelOutcome;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection;
@@ -35,6 +37,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionKey;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
@@ -55,10 +58,15 @@ import org.springframework.context.annotation.Lazy;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -76,6 +84,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private final AgentLifecycleOperations lifecycleOperations;
     private final AgentSessionAdmissions sessionAdmissions;
     private final AgentTurnExecution turnExecution;
+    private final AgentTurnHandOff turnHandOff;
     private final AgentActionParking actionParking;
     private final AgentExecutionOperations executionOperations;
 
@@ -90,9 +99,9 @@ public class ManagedAgentStore implements AgentStateStore {
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,
             Clock clock, CommittedEventPublisher eventPublisher,
             JdbcManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
-            com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
+            WorktreeFiles worktreeFiles,
             JdbcManagedSessionSkills creationSkills,
-            com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
+            ExtensionPackages extensionPackages,
             JdbcWorkspaceLifecycleStore lifecycle, JdbcManagedAgentDefinitionStore definitions,
             JdbcSessionWorktreeStore sessionWorktrees,
             JdbcManagedExtensionRecordStore configRecords) {
@@ -104,9 +113,9 @@ public class ManagedAgentStore implements AgentStateStore {
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,
             Clock clock, CommittedEventPublisher eventPublisher,
             JdbcManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
-            com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
+            WorktreeFiles worktreeFiles,
             JdbcManagedSessionSkills creationSkills,
-            com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
+            ExtensionPackages extensionPackages,
             JdbcWorkspaceLifecycleStore lifecycle, JdbcManagedAgentDefinitionStore definitions,
             JdbcSessionWorktreeStore sessionWorktrees,
             JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs) {
@@ -119,9 +128,9 @@ public class ManagedAgentStore implements AgentStateStore {
     public ManagedAgentStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper objectMapper,
             @Qualifier("managedAgentClock") Clock clock, CommittedEventPublisher eventPublisher,
             JdbcManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
-            com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
+            WorktreeFiles worktreeFiles,
             JdbcManagedSessionSkills creationSkills,
-            com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
+            ExtensionPackages extensionPackages,
             @Nullable JdbcWorkspaceLifecycleStore lifecycle, @Nullable JdbcManagedAgentDefinitionStore definitions,
             @Nullable JdbcSessionWorktreeStore sessionWorktrees,
             @Lazy @Nullable JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs,
@@ -152,6 +161,7 @@ public class ManagedAgentStore implements AgentStateStore {
         this.lifecycleOperations = new AgentLifecycleOperations(eventJournal, sessionCommands, sessionPolicies, sessionQueries, storeRows, jdbc, lifecycle, objectMapper, clock, workspaces, workspaceFilesEnabled, lifecycleHandoffMillis);
         this.sessionAdmissions = new AgentSessionAdmissions(eventJournal, sessionCommands, sessionPolicies, storeRows, configRecords, jdbc, clock, approvalMode, workspaces, agentRevision, modelCatalog, definitions, creationSkills, sessionWorktrees, extensionPackages, workspaceFilesEnabled, workspaceShellEnabled, workspaceChildAgentsEnabled, managedExtensionExecutionEnabled, workspaceMounts, createdRoots, modelConfigs);
         this.turnExecution = new AgentTurnExecution(eventJournal, messageProjection, sessionCommands, storeRows, jdbc, objectMapper, clock, journalPacks);
+        this.turnHandOff = new AgentTurnHandOff(turnExecution, jdbc, clock);
         this.actionParking = new AgentActionParking(storeRows, jdbc, clock);
         this.executionOperations = new AgentExecutionOperations(eventJournal, lifecycleOperations, sessionPolicies, sessionQueries, storeRows, worktreeFiles, jdbc, clock, workspaces, workspaceFilesEnabled, journalPacks);
     }
@@ -246,7 +256,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public Admission insertPublicChildSessionCommand(String tenantId, String parentSessionId,
             String idempotencyKey, String requestDigest, String title, List<Map<String, Object>> input,
-            String payloadDigest, StoreModels.SessionLineage lineage, com.fasterxml.jackson.databind.JsonNode snapshot) {
+            String payloadDigest, StoreModels.SessionLineage lineage, JsonNode snapshot) {
         return sessionAdmissions.insertPublicChildSessionCommand(tenantId, parentSessionId, idempotencyKey, requestDigest, title, input, payloadDigest, lineage, snapshot);
     }
 
@@ -287,7 +297,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.MANDATORY)
+    @Transactional(propagation = Propagation.MANDATORY)
     public void requireMcpSettingsCommit(String tenantId, String workspaceId, String sessionId) {
         sessionPolicies.requireMcpSettingsCommit(tenantId, workspaceId, sessionId);
     }
@@ -302,7 +312,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public boolean canApplyExtensions(SessionRecord session) { return sessionPolicies.canApplyExtensions(session); }
 
     @Override
-    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.MANDATORY)
+    @Transactional(propagation = Propagation.MANDATORY)
     public void requireConfigurationCommit(String tenantId, String workspaceId, String sessionId, JsonNode body) {
         sessionPolicies.requireConfigurationCommit(tenantId, workspaceId, sessionId, body);
     }
@@ -565,7 +575,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public Set<String> sessionsWithExecutionRegistryFacts(String tenantId, java.util.Collection<String> sessionIds) {
+    public Set<String> sessionsWithExecutionRegistryFacts(String tenantId, Collection<String> sessionIds) {
         return sessionQueries.sessionsWithExecutionRegistryFacts(tenantId, sessionIds);
     }
 
@@ -789,6 +799,10 @@ public class ManagedAgentStore implements AgentStateStore {
         return eventJournal.findEvents(tenantId, sessionId, afterSequence, limit);
     }
 
+    public Map<SessionKey, Long> findEventTails(Collection<SessionKey> sessions) {
+        return eventJournal.findEventTails(sessions);
+    }
+
     public Map<String, EventRecord> findLatestEnvironmentEvents(
             String tenantId, Map<String, TurnSummary> latestTurns) {
         return eventJournal.findLatestEnvironmentEvents(tenantId, latestTurns);
@@ -804,14 +818,14 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional(transactionManager = "managedAgentTransactionManager", readOnly = true,
-            isolation = org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
+            isolation = Isolation.REPEATABLE_READ)
     public StoreModels.MessagePage findMessagePage(String tenantId, String sessionId, String cursor, int limit, boolean backward) {
         return messageProjection.findMessagePage(tenantId, sessionId, cursor, limit, backward, 0);
     }
 
     @Override
     @Transactional(transactionManager = "managedAgentTransactionManager", readOnly = true,
-            isolation = org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
+            isolation = Isolation.REPEATABLE_READ)
     public StoreModels.MessagePage findMessagePage(String tenantId, String sessionId, String cursor, int limit, boolean backward, long afterSequence) {
         return messageProjection.findMessagePage(tenantId, sessionId, cursor, limit, backward, afterSequence);
     }
@@ -953,6 +967,15 @@ public class ManagedAgentStore implements AgentStateStore {
         turnExecution.recordAdmission(tenantId, sessionId, turnId, owner, eventEpoch, lastEventId);
     }
 
+    @Override
+    @Transactional
+    public boolean recordAdmissionHandOff(String tenantId, String sessionId,
+            String turnId, String owner, String eventEpoch, long lastEventId,
+            String harnessOwner, Duration leaseDuration) {
+        return turnHandOff.recordAdmissionHandOff(tenantId, sessionId, turnId, owner,
+                eventEpoch, lastEventId, harnessOwner, leaseDuration);
+    }
+
     @Transactional
     public void recordRecoveryAdmission(String tenantId, String sessionId,
             String turnId, String owner, String expectedTurnEventEpoch,
@@ -1040,8 +1063,8 @@ public class ManagedAgentStore implements AgentStateStore {
         return sessionQueries.requireSession(tenantId, sessionId);
     }
 
-    public static ContextBinding readBinding(java.sql.ResultSet result)
-            throws java.sql.SQLException {
+    public static ContextBinding readBinding(ResultSet result)
+            throws SQLException {
         return AgentStoreRows.readBinding(result);
     }
 

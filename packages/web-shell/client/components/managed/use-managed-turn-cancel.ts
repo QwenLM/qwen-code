@@ -1,9 +1,15 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
 import { managedRequestId } from './managed-session-storage';
 import type {
+  ManagedAgentOperationObserver,
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
 } from './managed-agent-provider';
+
+export interface ManagedTurnCancelObserver
+  extends ManagedAgentOperationObserver {
+  readonly onError?: (error: unknown) => void;
+}
 
 interface CancelIntent {
   sessionId: string;
@@ -48,8 +54,11 @@ export function useManagedTurnCancel(
   summary: ManagedAgentSessionSummary | undefined,
   interactive: boolean,
   refreshSummary: () => Promise<ManagedAgentSessionSummary | undefined>,
+  observer?: ManagedTurnCancelObserver,
 ) {
   const [, render] = useReducer((value: number) => value + 1, 0);
+  const observerRef = useRef(observer);
+  observerRef.current = observer;
   const scope = useMemo(() => {
     const key = `qwen-managed-turn-cancel:${JSON.stringify([provider.storageKey, sessionId])}`;
     return {
@@ -88,6 +97,7 @@ export function useManagedTurnCancel(
         if (abort.signal.aborted) return;
         if (!receipt.operationId)
           throw new Error('Cancellation operation identity missing');
+        observerRef.current?.onAccepted?.(receipt);
         scope.intent = {
           ...original,
           operationId: receipt.operationId,
@@ -108,6 +118,14 @@ export function useManagedTurnCancel(
         operation.type !== 'cancel'
       )
         throw new Error('Cancellation identity mismatch');
+      if (
+        operation.status === 'completed' ||
+        operation.status === 'failed' ||
+        operation.status === 'cancelled' ||
+        operation.status === 'recovery_blocked'
+      ) {
+        observerRef.current?.onSettlement?.(operation);
+      }
       if (operation.status === 'completed') {
         scope.intent = undefined;
         scope.status = undefined;
@@ -125,6 +143,9 @@ export function useManagedTurnCancel(
       }
       await refreshRef.current();
     } catch (error) {
+      if (!abort.signal.aborted) {
+        observerRef.current?.onError?.(error);
+      }
       if (!abort.signal.aborted && scope.intent) {
         scope.status = 'unconfirmed';
         scope.error = String(error);
