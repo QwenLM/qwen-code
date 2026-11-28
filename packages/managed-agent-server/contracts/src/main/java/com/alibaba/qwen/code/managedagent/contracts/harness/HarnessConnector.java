@@ -114,6 +114,8 @@ public interface HarnessConnector extends AutoCloseable {
 
     public default boolean supportsClientFiles() { return false; }
 
+    public default boolean supportsTurnHostActions() { return false; }
+
     /**
      * Session-aware client-files admission: must answer the same question the
      * register route answers, so the capability is never advertised for a

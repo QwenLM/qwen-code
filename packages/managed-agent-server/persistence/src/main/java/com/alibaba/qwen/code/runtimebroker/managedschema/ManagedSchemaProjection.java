@@ -194,7 +194,7 @@ public enum ManagedSchemaProjection {
                     + "dispatch_lease_until, error_code, error_message, gmt_create, gmt_modified, "
                     + "completed_at, version, retry_count, consecutive_failures, "
                     + "budget_exempt_failures, retry_after, model_id, model_revision, "
-                    + "approval_mode, approval_revision, is_plan_enabled, permission_rules_json");
+                    + "approval_mode, approval_revision, is_plan_enabled, permission_rules_json, host_actions_json");
 
     private final String columns;
 

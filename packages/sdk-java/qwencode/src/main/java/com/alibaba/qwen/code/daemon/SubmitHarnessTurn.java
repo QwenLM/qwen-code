@@ -23,6 +23,7 @@ public final class SubmitHarnessTurn {
     private final Long deadlineMillis;
     private final Map<String, Object> modelSelection;
     private final Map<String, Object> approvalSelection;
+    private final List<Map<String, Object>> hostActions;
 
     private SubmitHarnessTurn(Builder builder) {
         if (builder.session == null) {
@@ -50,6 +51,7 @@ public final class SubmitHarnessTurn {
         this.deadlineMillis = builder.deadlineMillis;
         this.modelSelection = builder.modelSelection;
         this.approvalSelection = builder.approvalSelection;
+        this.hostActions = builder.hostActions;
     }
 
     public static Builder builder() {
@@ -124,6 +126,8 @@ public final class SubmitHarnessTurn {
 
     Map<String, Object> getApprovalSelection() { return approvalSelection; }
 
+    public List<Map<String, Object>> getHostActions() { return hostActions; }
+
     List<Map<String, Object>> getPromptContent() { return promptContent; }
 
     Map<String, Object> toJson() {
@@ -140,6 +144,9 @@ public final class SubmitHarnessTurn {
         if (approvalSelection != null) {
             result.put("approvalSelection", approvalSelection);
         }
+        if (hostActions != null) {
+            result.put("hostActions", hostActions);
+        }
         return result;
     }
 
@@ -152,6 +159,7 @@ public final class SubmitHarnessTurn {
         private Long deadlineMillis;
         private Map<String, Object> modelSelection;
         private Map<String, Object> approvalSelection;
+        private List<Map<String, Object>> hostActions;
 
         private Builder() {
         }
@@ -249,6 +257,23 @@ public final class SubmitHarnessTurn {
                         "deadline must be between 1 and 2147483647 milliseconds");
             }
             this.deadlineMillis = millis;
+            return this;
+        }
+
+        public Builder hostActions(List<Map<String, Object>> actions) {
+            if (actions == null || actions.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "hostActions must not be empty");
+            }
+            List<Map<String, Object>> copied = new ArrayList<>(actions.size());
+            for (Map<String, Object> action : actions) {
+                if (action == null || action.isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "hostAction entry must not be empty");
+                }
+                copied.add(JsonSupport.immutableObject(action));
+            }
+            this.hostActions = Collections.unmodifiableList(copied);
             return this;
         }
 

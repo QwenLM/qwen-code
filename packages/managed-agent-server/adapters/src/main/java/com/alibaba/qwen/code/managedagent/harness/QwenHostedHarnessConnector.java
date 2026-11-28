@@ -21,6 +21,7 @@ import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HostedHarnessRecoveryDeclinedException;
+import com.alibaba.qwen.code.managedagent.contracts.hostaction.HostTurnActionStore;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
@@ -115,6 +116,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     public void configureSessionSkills(ManagedSessionSkills skills) {
         this.sessionSkills = skills;
+    }
+
+    private HostTurnActionStore hostActions;
+
+    public void configureHostActions(HostTurnActionStore store) {
+        this.hostActions = store;
     }
 
     <T> T withPlacement(PoolCall call, Supplier<T> action) {
@@ -1191,6 +1198,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         return sessionStore.isEnabled() && feature(HarnessFeature.MODEL_CONFIGURATION);
     }
 
+    @Override
+    public boolean supportsTurnHostActions() {
+        return feature(HarnessFeature.TURN_HOST_ACTIONS);
+    }
+
     private String modelConfigDigest(SessionRecord session) {
         if (session.modelConfigDigest() != null && !supportsModelConfiguration()) {
             throw new IllegalStateException("Hosted Session model configuration is unavailable");
@@ -1231,6 +1243,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (input.stream().anyMatch(block -> "image".equals(block.get("type")) || "resource".equals(block.get("type")))
                 && !supportsInputAttachments()) {
             throw new IllegalStateException("Hosted input attachments are unavailable");
+        }
+        var turnHostActions = hostActions == null
+                ? null
+                : hostActions.wireActionsForPrompt(tenantId, sessionId, promptId);
+        if (turnHostActions != null && !turnHostActions.isEmpty()) {
+            if (!WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                    || !supportsTurnHostActions()) {
+                throw new IllegalStateException("Hosted Turn host actions are unavailable");
+            }
+            builder.hostActions(turnHostActions);
         }
         input.forEach(builder::addContent);
         PromptReceipt receipt = turnAdmission(tenantId, sessionId, ref,

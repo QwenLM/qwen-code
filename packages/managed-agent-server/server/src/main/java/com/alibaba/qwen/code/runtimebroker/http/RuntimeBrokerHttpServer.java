@@ -56,6 +56,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
     private final byte[] authorization;
     private final HttpServer server;
     private final ExecutorService executor;
+    private volatile BiFunction<String, Map<String, Object>, CompletionStage<Map<String, Object>>> hostActionHandler;
 
     public RuntimeBrokerHttpServer(InetSocketAddress address, String token,
             RuntimeBrokerService service) throws IOException {
@@ -106,6 +107,11 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         server.start();
     }
 
+    public void configureHostActions(
+            BiFunction<String, Map<String, Object>, CompletionStage<Map<String, Object>>> handler) {
+        this.hostActionHandler = handler;
+    }
+
     public URI getBaseUri() {
         InetSocketAddress address = server.getAddress();
         String host = address.getAddress().getHostAddress();
@@ -151,6 +157,32 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 exchange.getResponseHeaders().set("Cache-Control", "no-store");
                 complete(exchange, service.extensionControl(sessionId, binding, generation,
                         requiredObject(body, "operation", "extension metadata control")), result -> result);
+                return;
+            }
+            if ("POST".equals(exchange.getRequestMethod()) && relative.startsWith("/harness-sessions/")
+                    && relative.endsWith("/host-actions/execute")) {
+                String harnessSessionId = pathId(relative.substring("/harness-sessions/".length(),
+                        relative.length() - "/host-actions/execute".length()));
+                Map<String, Object> body = requestBody(exchange, "host action execute request");
+                requireProtocol(body);
+                JsonCodec.requiredString(body, "requestId", "host action execute request");
+                String bodySessionId = JsonCodec.requiredString(
+                        body, "harnessSessionId", "host action execute request");
+                if (!harnessSessionId.equals(bodySessionId)
+                        || lifecycleAuthority(exchange) != null
+                        || !Set.of("protocolVersion", "requestId", "harnessSessionId", "tenantId",
+                                "workspaceId", "writerId", "writerGeneration", "promptId", "callId",
+                                "actionName", "arguments", "argsDigest").containsAll(body.keySet())) {
+                    throw new RuntimeBrokerException(400, "runtime_request_invalid",
+                            "host action execute request is invalid", false);
+                }
+                var handler = this.hostActionHandler;
+                if (handler == null) {
+                    throw new RuntimeBrokerException(503, "host_action_executor_unavailable",
+                            "Host action execution is unavailable", false);
+                }
+                exchange.getResponseHeaders().set("Cache-Control", "no-store");
+                complete(exchange, handler.apply(harnessSessionId, body), result -> result);
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod()) && relative.startsWith("/harness-sessions/")

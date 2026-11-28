@@ -85,6 +85,11 @@ import {
 } from '../hosted-tool-approval.js';
 import { oweHostedTurnCleanup } from '../hosted-turn-cleanup.js';
 import {
+  type HostedTurnHostActionSpec,
+  parseHostedTurnHostActions,
+  readHostedTurnHostActions,
+} from '../hosted-turn-host-actions.js';
+import {
   isExcludedHostedRecord,
   normalizeHostedTurnRecords,
 } from '../hosted-turn-history.js';
@@ -804,6 +809,10 @@ export async function executeHostedTurn(
         // #13803: a workflow Turn owns no tool turn — its work is the
         // runner's own dispatch, and the Session's broker-backed tool
         // surface belongs to model turns.
+        const turnHostActions =
+          workflowLaunch === undefined
+            ? await readHostedTurnHostActions(session.managed, promptId)
+            : undefined;
         toolTurn =
           workflowLaunch === undefined &&
           ((session.toolProfile && brokerOptions) || session.memory)
@@ -827,6 +836,16 @@ export async function executeHostedTurn(
                   memoryOnly: !session.toolProfile,
                   mcp: session.mcp,
                   clientFiles: session.clientFiles,
+                  hostActions: turnHostActions
+                    ? {
+                        actions: turnHostActions,
+                        ...(session.stores
+                          ? {
+                              writer: () => session.stores!.publication.owner(),
+                            }
+                          : {}),
+                      }
+                    : undefined,
                   hooks: session.hooks,
                   skills: session.skills,
                   extensionConfig: session.extensionBundle
@@ -1299,6 +1318,17 @@ export function registerHostedPromptRoute({
     } catch {
       return error(res, 400, 'invalid_hosted_model_selection');
     }
+    let hostActions: readonly HostedTurnHostActionSpec[] | undefined;
+    try {
+      hostActions = parseHostedTurnHostActions(body?.['hostActions']);
+      if (
+        hostActions !== undefined &&
+        session.toolProfile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
+      )
+        throw new Error('Turn host actions require external Files profile.');
+    } catch {
+      return error(res, 400, 'invalid_hosted_turn_host_actions');
+    }
     const workflowLaunch =
       Array.isArray(prompt) && prompt.length === 1
         ? parseHostedWorkflowLaunchBlock(prompt[0])
@@ -1309,7 +1339,11 @@ export function registerHostedPromptRoute({
     // replay answers through the ordinary dedup machinery; every other
     // shape keeps the pre-change refusal.
     if (workflowLaunch !== undefined) {
-      if (modelSelection !== undefined || approvalSelection !== undefined)
+      if (
+        modelSelection !== undefined ||
+        approvalSelection !== undefined ||
+        hostActions !== undefined
+      )
         return error(res, 400, 'invalid_hosted_model_selection');
       const journaledInputs = session.managed.authority
         .eventsInSequenceRange(1, session.managed.authority.committedSequence)
@@ -1380,6 +1414,10 @@ export function registerHostedPromptRoute({
           !isDeepStrictEqual(
             await readHostedTurnApprovalSelection(session.managed, promptId),
             approvalSelection,
+          ) ||
+          !isDeepStrictEqual(
+            await readHostedTurnHostActions(session.managed, promptId),
+            hostActions,
           )
         )
           return error(res, 409, 'hosted_prompt_conflict');
@@ -1549,6 +1587,12 @@ export function registerHostedPromptRoute({
                     acceptedAdmission?.['approvalSelection'],
                   ),
                   approvalSelection,
+                ) ||
+                !isDeepStrictEqual(
+                  parseHostedTurnHostActions(
+                    acceptedAdmission?.['hostActions'],
+                  ),
+                  hostActions,
                 )
               ) {
                 if (!res.headersSent) error(res, 409, 'hosted_prompt_conflict');
@@ -1705,6 +1749,7 @@ export function registerHostedPromptRoute({
               digest,
               ...(modelSelection ? { modelSelection } : {}),
               ...(approvalSelection ? { approvalSelection } : {}),
+              ...(hostActions ? { hostActions } : {}),
             }),
           ),
         );

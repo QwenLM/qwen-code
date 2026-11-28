@@ -94,7 +94,8 @@ public class RuntimeBrokerConfiguration {
             org.springframework.beans.factory.ObjectProvider<com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient> externalRuntime,
             org.springframework.beans.factory.ObjectProvider<com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport> externalRuntimeTransport,
             com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService extensions,
-            com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionCommandVerifier extensionCommands) {
+            com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionCommandVerifier extensionCommands,
+            org.springframework.beans.factory.ObjectProvider<com.alibaba.qwen.code.managedagent.contracts.hostaction.HostTurnActionStore> hostActions) {
         var broker = new EmbeddedRuntimeBroker(store, properties,
                 bindingRepository, sessionRepository, executionRepository,
                 workspaceExecutionStore, publications.getIfAvailable(),
@@ -102,6 +103,7 @@ public class RuntimeBrokerConfiguration {
                 externalRuntimeTransport.getIfAvailable());
         broker.configureExtensions(extensions);
         broker.service().configureExtensionCommandVerifier(extensionCommands);
+        broker.configureHostActions(hostActions.getIfAvailable());
         return broker;
     }
 

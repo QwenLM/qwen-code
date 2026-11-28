@@ -105,7 +105,8 @@ public final class ManagedSchemaContract {
         EXTERNAL_WORKSPACE,
         MEMORY,
         SIDE_QUERY,
-        RESOURCE_ALLOCATE
+        RESOURCE_ALLOCATE,
+        HOST_TURN_ACTION
     }
 
     public enum ReceiptScope {

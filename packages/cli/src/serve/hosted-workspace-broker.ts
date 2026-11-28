@@ -570,6 +570,97 @@ export class HostedWorkspaceBroker {
     }
   }
 
+  async executeHostAction(
+    params: {
+      readonly promptId: string;
+      readonly callId: string;
+      readonly actionName: string;
+      readonly arguments: Record<string, unknown>;
+      readonly argsDigest: string;
+      readonly writer?: {
+        readonly writerId: string;
+        readonly writerGeneration: number;
+      };
+    },
+    signal?: AbortSignal,
+  ): Promise<{
+    readonly turnId: string;
+    readonly promptId: string;
+    readonly callId: string;
+    readonly actionName: string;
+    readonly isError: boolean;
+    readonly text?: string;
+    readonly output: Record<string, unknown>;
+  }> {
+    const payload: Record<string, unknown> = {
+      tenantId: this.key.tenantId,
+      workspaceId: this.key.workspaceId,
+      promptId: params.promptId,
+      callId: params.callId,
+      actionName: params.actionName,
+      arguments: params.arguments,
+      argsDigest: params.argsDigest,
+      ...(params.writer
+        ? {
+            writerId: params.writer.writerId,
+            writerGeneration: params.writer.writerGeneration,
+          }
+        : {}),
+    };
+    const path = `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/host-actions/execute`;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      signal?.throwIfAborted();
+      try {
+        const response = await this.harnessRequest(path, payload);
+        const turnId = response['turnId'];
+        const promptId = response['promptId'];
+        const callId = response['callId'];
+        const actionName = response['actionName'];
+        const isError = response['isError'];
+        const rawOutput = response['output'];
+        if (
+          typeof turnId !== 'string' ||
+          !turnId ||
+          promptId !== params.promptId ||
+          callId !== params.callId ||
+          actionName !== params.actionName ||
+          typeof isError !== 'boolean' ||
+          !rawOutput ||
+          typeof rawOutput !== 'object' ||
+          Array.isArray(rawOutput)
+        ) {
+          throw new Error(
+            'Runtime Broker returned an invalid host action response.',
+          );
+        }
+        return {
+          turnId,
+          promptId,
+          callId,
+          actionName,
+          isError,
+          ...(typeof response['text'] === 'string'
+            ? { text: response['text'] }
+            : {}),
+          output: rawOutput as Record<string, unknown>,
+        };
+      } catch (cause) {
+        lastError = cause;
+        const retryable =
+          !(cause instanceof HostedWorkspaceBrokerRejection) ||
+          cause.status >= 500;
+        if (!retryable || attempt === 2 || signal?.aborted) {
+          throw cause;
+        }
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 100 * (attempt + 1)).unref();
+        });
+      }
+    }
+    throw lastError;
+  }
+
   async prepare(
     callId: string,
     digest: string,

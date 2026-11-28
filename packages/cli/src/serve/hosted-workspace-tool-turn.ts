@@ -87,6 +87,12 @@ import {
   type HostedWorkspaceToolProfile,
 } from './hosted-workspace-profiles.js';
 import {
+  type HostedTurnHostActionLane,
+  type HostedTurnHostActionSpec,
+  hostedTurnHostActionDeclarations,
+  validateHostedTurnHostActionArgs,
+} from './hosted-turn-host-actions.js';
+import {
   LoopWakeupError,
   type HostedLoopSession,
 } from './hosted-loop-session.js';
@@ -2077,6 +2083,7 @@ interface HostedPreparedRequest {
   inputDigest?: string;
   mcp: boolean;
   clientFiles?: boolean;
+  hostAction?: boolean;
   payloadJson: string;
   inputBytes: Buffer;
   digest: string;
@@ -2120,7 +2127,8 @@ function skipsRuntimeBroker(request: HostedPreparedRequest): boolean {
       request.cronDelete ||
       request.memory ||
       request.workflow ||
-      request.clientFiles,
+      request.clientFiles ||
+      request.hostAction,
   );
 }
 
@@ -2280,6 +2288,8 @@ export class HostedWorkspaceToolTurn {
   private readonly hookAllowed = new Set<string>();
   private readonly mcp?: HostedMcpSession;
   private readonly clientFiles?: HostedClientFilesSession;
+  private readonly hostActions?: HostedTurnHostActionLane;
+  private readonly hostActionMap: ReadonlyMap<string, HostedTurnHostActionSpec>;
   // Client-files tool names captured when declarations were built, so a call
   // to a since-revoked registration is refused even though resolve() now
   // returns nothing (the declarations snapshot still advertises the name).
@@ -2374,6 +2384,7 @@ export class HostedWorkspaceToolTurn {
       memoryOnly?: boolean;
       mcp?: HostedMcpSession;
       clientFiles?: HostedClientFilesSession;
+      hostActions?: HostedTurnHostActionLane;
       hooks?: HostedHookSession;
       profile?: string;
       context?: HostedWorkspaceContextSlot;
@@ -2464,6 +2475,11 @@ export class HostedWorkspaceToolTurn {
           ? 'External Shell profile requires a publication and no other lanes.'
           : 'External files profile does not support optional lanes.',
       );
+    if (
+      extras?.hostActions !== undefined &&
+      extras?.profile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
+    )
+      throw new Error('Turn host actions require the external files profile.');
     this.configuredOptions = options;
     this.memory = extras?.memory;
     this.memoryOnly = extras?.memoryOnly === true;
@@ -2473,6 +2489,13 @@ export class HostedWorkspaceToolTurn {
     this.foregroundOnly = extras?.foregroundOnly === true;
     this.mcp = this.foregroundOnly ? undefined : extras?.mcp;
     this.clientFiles = this.foregroundOnly ? undefined : extras?.clientFiles;
+    this.hostActions =
+      this.foregroundOnly || !extras?.hostActions?.actions.length
+        ? undefined
+        : extras.hostActions;
+    this.hostActionMap = new Map(
+      (this.hostActions?.actions ?? []).map((spec) => [spec.name, spec]),
+    );
     this.hooks = this.foregroundOnly ? undefined : extras?.hooks;
     this.profile = extras?.profile;
     this.context = extras?.context;
@@ -2750,6 +2773,9 @@ export class HostedWorkspaceToolTurn {
           !this.fileBackupsEnabled,
         ),
         ...(skill ? [skill] : []),
+        ...(this.hostActions
+          ? hostedTurnHostActionDeclarations(this.hostActions.actions)
+          : []),
       ];
       return this.advertised;
     }
@@ -3357,7 +3383,7 @@ export class HostedWorkspaceToolTurn {
                 'edit',
                 'glob',
                 ...(this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
-                  ? []
+                  ? [...this.hostActionMap.keys()]
                   : ['web_fetch']),
               ].includes(item.toolName),
           ) &&
@@ -3366,10 +3392,11 @@ export class HostedWorkspaceToolTurn {
               [
                 'read_file',
                 'glob',
-                ...(isHostedWorkspaceReadProfile(this.profile) ||
-                this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
+                ...(isHostedWorkspaceReadProfile(this.profile)
                   ? []
-                  : ['web_fetch']),
+                  : this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
+                    ? [...this.hostActionMap.keys()]
+                    : ['web_fetch']),
               ].includes(item.toolName),
             )) &&
           (await canSettleHostedFileHistory(this.session, {
@@ -4869,6 +4896,10 @@ export class HostedWorkspaceToolTurn {
           mcpInput === undefined
             ? this.clientFiles?.resolve(call.name)
             : undefined;
+        const hostActionSpec =
+          mcpInput === undefined && clientFilesTool === undefined
+            ? this.hostActionMap.get(call.name)
+            : undefined;
         const isShell = call.name === 'run_shell_command';
         const skill =
           mcpInput === undefined &&
@@ -4977,6 +5008,13 @@ export class HostedWorkspaceToolTurn {
           input = { ...mcpInput.input };
         } else if (clientFilesTool) {
           input = { ...call.args };
+        } else if (hostActionSpec) {
+          const checked = validateHostedTurnHostActionArgs(
+            hostActionSpec,
+            call.args,
+          );
+          input = checked.input;
+          if (checked.error) validationError = checked.error;
         } else if (this.clientFilesDeclaredNames.has(call.name)) {
           // The declarations snapshot still advertises this client-files tool,
           // but the registration was revoked before the call ran. Refuse it
@@ -5724,6 +5762,7 @@ export class HostedWorkspaceToolTurn {
           inputDigest,
           mcp: mcpInput !== undefined,
           clientFiles: clientFilesTool !== undefined,
+          hostAction: hostActionSpec !== undefined,
           ...encoded,
           argsDigest,
           publicationId:
@@ -5859,6 +5898,7 @@ export class HostedWorkspaceToolTurn {
           !request.todo &&
           !request.memory &&
           !request.clientFiles &&
+          !request.hostAction &&
           !request.loop &&
           !request.cronCreate &&
           !request.cronList &&
@@ -5888,6 +5928,7 @@ export class HostedWorkspaceToolTurn {
           !request.todo &&
           !request.memory &&
           request.clientFiles !== true &&
+          request.hostAction !== true &&
           !request.loop &&
           !request.cronCreate &&
           !request.cronList &&
@@ -7137,6 +7178,12 @@ export class HostedWorkspaceToolTurn {
         if (request.clientFiles) {
           responses.push(
             ...(await this.acceptClientFiles(request, model, signal)),
+          );
+          continue;
+        }
+        if (request.hostAction) {
+          responses.push(
+            ...(await this.acceptHostAction(request, model, signal)),
           );
           continue;
         }
@@ -10213,6 +10260,7 @@ export class HostedWorkspaceToolTurn {
           // cron_create rides the same arm-time review for its schedule.
           request.loop ||
           request.cronCreate ||
+          request.hostAction === true ||
           !hostedApprovalAsks(settings, request.call.name, globProfile)
         )
           continue;
@@ -10893,6 +10941,94 @@ export class HostedWorkspaceToolTurn {
     if (!this.messageFitsInline('tool_result', parts, model))
       throw new Error(
         'Hosted client files result exceeds the inline Session Store limit.',
+      );
+    await this.commit('tool_result', parts, model);
+    return parts;
+  }
+
+  private async acceptHostAction(
+    request: HostedPreparedRequest,
+    model: string,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    const spec = this.hostActionMap.get(request.call.name);
+    let parts: Part[];
+    let executionStatus: 'success' | 'error' = 'error';
+    let attribution: Record<string, unknown> = {
+      callId: request.call.callId,
+    };
+    if (!spec || !request.argsDigest) {
+      parts = convertToFunctionErrorResponse(
+        request.call.name,
+        request.call.callId,
+        [],
+        'The host action is not authorized for this Turn.',
+      );
+    } else {
+      try {
+        signal.throwIfAborted();
+        const writer = await this.hostActions?.writer?.();
+        const result = await this.broker.executeHostAction(
+          {
+            promptId: this.promptId,
+            callId: request.call.callId,
+            actionName: spec.name,
+            arguments: request.input,
+            argsDigest: request.argsDigest,
+            ...(writer ? { writer } : {}),
+          },
+          signal,
+        );
+        signal.throwIfAborted();
+        const summaryText = result.text ?? JSON.stringify(result.output);
+        attribution = {
+          ...result.output,
+          turnId: result.turnId,
+          callId: result.callId,
+        };
+        if (result.isError) {
+          parts = convertToFunctionErrorResponse(
+            request.call.name,
+            request.call.callId,
+            summaryText ? [{ text: summaryText }] : [],
+            result.text ?? 'The host action reported an error.',
+          );
+        } else {
+          parts = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [{ text: summaryText }],
+          );
+          executionStatus = 'success';
+        }
+      } catch (cause) {
+        if (signal.aborted) throw cause;
+        const message =
+          cause instanceof HostedWorkspaceBrokerRejection
+            ? (cause.reason ?? cause.message)
+            : cause instanceof Error
+              ? cause.message
+              : 'The host action failed.';
+        parts = convertToFunctionErrorResponse(
+          request.call.name,
+          request.call.callId,
+          [],
+          message,
+        );
+      }
+    }
+    for (const part of parts) {
+      if (part.functionResponse) {
+        part.functionResponse.response = {
+          ...part.functionResponse.response,
+          ...attribution,
+          executionStatus,
+        };
+      }
+    }
+    if (!this.messageFitsInline('tool_result', parts, model))
+      throw new Error(
+        'Hosted turn host action result exceeds the inline Session Store limit.',
       );
     await this.commit('tool_result', parts, model);
     return parts;

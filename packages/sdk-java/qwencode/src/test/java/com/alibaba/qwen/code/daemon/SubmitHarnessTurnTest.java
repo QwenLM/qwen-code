@@ -7,6 +7,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class SubmitHarnessTurnTest {
@@ -46,5 +47,25 @@ class SubmitHarnessTurnTest {
         var next = List.<Map<String, Object>>of(Map.of("type", "resource", "resource",
                 Map.of("uri", "managed-input:///a.txt", "mimeType", "text/plain", "text", "second")));
         assertNotEquals(SubmitHarnessTurn.computePayloadDigest(first), SubmitHarnessTurn.computePayloadDigest(next));
+    }
+
+    @Test
+    void carriesTurnScopedHostActionsAndPreservesLegacyWireShapeWhenOmitted() {
+        var withoutActions = turn().build();
+        assertNull(withoutActions.getHostActions());
+        assertEquals(false, withoutActions.toJson().containsKey("hostActions"));
+
+        var action = Map.<String, Object>of(
+                "name", "post_pr_comment",
+                "description", "Post a pull request comment",
+                "inputSchema", Map.of(
+                        "type", "object",
+                        "properties", Map.of("body", Map.of("type", "string")),
+                        "required", List.of("body"),
+                        "additionalProperties", false));
+        var withActions = turn().hostActions(List.of(action)).build();
+        assertEquals(List.of(action), withActions.getHostActions());
+        assertEquals(List.of(action), withActions.toJson().get("hostActions"));
+        assertThrows(IllegalArgumentException.class, () -> turn().hostActions(List.of()));
     }
 }
