@@ -30,6 +30,10 @@ import {
 } from './workspace-route-runtime.js';
 import { createWorkspaceRuntimeSessionService } from './workspace-runtime-storage.js';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
+import {
+  setupManagedWorktreeFixture,
+  createManagedWorktreeSession,
+} from '../test-utils/managed-worktree-fixture.js';
 
 function fakeReq(cwd?: unknown): Request {
   return { query: cwd !== undefined ? { cwd } : {} } as Request;
@@ -164,82 +168,29 @@ describe('resolveContainedCwdOrFail', () => {
 });
 
 describe('resolveSessionManagedGitCwd', () => {
-  let repo: string;
-  let runtimeBase: string;
+  let repo = '';
+  let runtimeBase = '';
   const sessionId = '11111111-1111-4111-8111-111111111111';
 
   beforeEach(() => {
-    repo = fs.mkdtempSync(path.join(os.tmpdir(), 'managed-git-cwd-'));
-    runtimeBase = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'managed-git-runtime-'),
-    );
-    execFileSync('git', ['init', '-q'], { cwd: repo });
-    execFileSync('git', ['config', 'user.email', 'test@example.com'], {
-      cwd: repo,
-    });
-    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo });
-    execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: repo });
-    execFileSync(
-      'git',
-      ['config', 'core.hooksPath', path.join(runtimeBase, 'empty-hooks')],
-      { cwd: repo },
-    );
-    fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n');
-    execFileSync('git', ['add', '.'], { cwd: repo });
-    execFileSync('git', ['commit', '-q', '-m', 'base'], { cwd: repo });
+    ({ repo, runtimeBase } = setupManagedWorktreeFixture());
   });
 
   afterEach(() => {
+    // Skip teardown when the fixture failed: it cleans up after its own
+    // failed setup, and these bindings were never assigned.
+    if (repo === '' || runtimeBase === '') {
+      return;
+    }
     fs.rmSync(repo, { recursive: true, force: true });
     fs.rmSync(runtimeBase, { recursive: true, force: true });
   });
 
   it('authorizes only the live session that owns the managed worktree', async () => {
-    const worktree = path.join(repo, '.qwen', 'worktrees', 'branch-a');
-    fs.mkdirSync(path.dirname(worktree), { recursive: true });
-    execFileSync(
-      'git',
-      ['worktree', 'add', '-q', '-b', 'worktree-branch-a', worktree, 'HEAD'],
-      { cwd: repo },
-    );
-    fs.writeFileSync(path.join(worktree, '.qwen-session'), sessionId);
-    const runtime = {
-      workspaceId: 'primary',
-      workspaceCwd: repo,
-      sessionRuntimeBaseDir: runtimeBase,
-      primary: true,
-      trusted: true,
-      env: { mode: 'parent-process', overlayKeys: [] },
-      bridge: {
-        getSessionExecutionSnapshot: () => ({
-          workspaceCwd: repo,
-          effectiveCwd: worktree,
-          worktree: {
-            slug: 'branch-a',
-            path: worktree,
-            branch: 'worktree-branch-a',
-          },
-        }),
-      },
-    } as unknown as WorkspaceRuntime;
-    const sidecarPath =
-      createWorkspaceRuntimeSessionService(runtime).getWorktreeSessionPath(
-        sessionId,
-      );
-    fs.mkdirSync(path.dirname(sidecarPath), { recursive: true });
-    fs.writeFileSync(
-      sidecarPath,
-      JSON.stringify({
-        slug: 'branch-a',
-        worktreePath: worktree,
-        worktreeBranch: 'worktree-branch-a',
-        originalCwd: repo,
-        originalBranch: 'main',
-        originalHeadCommit: execFileSync('git', ['rev-parse', 'HEAD'], {
-          cwd: repo,
-          encoding: 'utf8',
-        }).trim(),
-      }),
+    const { worktree, runtime, sidecarPath } = createManagedWorktreeSession(
+      repo,
+      runtimeBase,
+      sessionId,
     );
 
     const owned = {

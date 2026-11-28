@@ -540,6 +540,7 @@ async function resolveGitCommonDir(cwd: string): Promise<string | null> {
         encoding: 'utf8',
         timeout: 30_000,
         env: gitEnv(),
+        windowsHide: true,
       },
     ));
   } catch (error) {
@@ -562,6 +563,7 @@ async function resolveAbsoluteGitDir(cwd: string): Promise<string | null> {
         encoding: 'utf8',
         timeout: 30_000,
         env: gitEnv(),
+        windowsHide: true,
       },
     ));
   } catch (error) {
@@ -654,7 +656,13 @@ async function isLinkedWorktreeOrUnknown(cwd: string): Promise<boolean> {
     ({ stdout } = await execFileAsync(
       'git',
       ['rev-parse', '--git-common-dir', '--absolute-git-dir'],
-      { cwd, encoding: 'utf8', timeout: 30_000, env: gitEnv() },
+      {
+        cwd,
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: gitEnv(),
+        windowsHide: true,
+      },
     ));
   } catch (error) {
     if (await isGitInfrastructureFault(error, cwd)) throw error;
@@ -700,6 +708,7 @@ export async function resolveSessionManagedGitCwd(
       encoding: 'utf8',
       timeout: 30_000,
       env: gitEnv(),
+      windowsHide: true,
     }));
   } catch (error) {
     if (isGitProbeInfrastructureError(error)) throw error;
