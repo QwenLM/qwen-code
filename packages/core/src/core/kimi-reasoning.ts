@@ -16,7 +16,7 @@ const KIMI_K3_REASONING =
 export function getBuiltinKimiK3Reasoning(
   config: Partial<ContentGeneratorConfig>,
 ): ResolvedReasoning | undefined {
-  const model = normalize(config.model ?? '');
+  const model = normalize(config.model ?? '', config.baseUrl);
   if (config.authType !== AuthType.USE_OPENAI || !KIMI_K3_REASONING.test(model))
     return undefined;
   return {

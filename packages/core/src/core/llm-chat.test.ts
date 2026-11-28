@@ -32,7 +32,7 @@ import type {
   SendMessageParameters,
   Tool,
 } from '@google/genai';
-import { ApiError } from '@google/genai';
+import { ApiError, FunctionCallingConfigMode } from '@google/genai';
 import {
   AuthType,
   type ContentGenerator,
@@ -8158,6 +8158,1282 @@ describe('LlmChat', async () => {
       );
     });
 
+    const hfBaseUrl = 'https://router.huggingface.co/v1';
+    const digitalOceanModel = 'MiniMaxAI/MiniMax-M2.5:digitalocean';
+    const glmModel = 'zai-org/GLM-5.3-Flash:deepinfra';
+    const widePrimary = {
+      model: glmModel,
+      authType: AuthType.USE_OPENAI,
+      baseUrl: hfBaseUrl,
+      contextWindowSize: 1_048_576,
+    };
+    const narrowPrimary = {
+      ...widePrimary,
+      model: digitalOceanModel,
+      contextWindowSize: 65_536,
+    };
+    const unverifiedModel = 'deepseek-ai/DeepSeek-V4.1-Flash:fastest';
+    it.each([
+      {
+        name: 'the effective Hugging Face model',
+        target: {
+          baseUrl: hfBaseUrl,
+          extra_body: { model: digitalOceanModel },
+        },
+        expected: 14_286,
+      },
+      {
+        name: 'a smaller caller limit',
+        target: {
+          baseUrl: hfBaseUrl,
+          extra_body: { model: digitalOceanModel },
+        },
+        callerLimit: 8_000,
+        expected: 8_000,
+      },
+      {
+        name: 'a smaller configured fallback limit',
+        target: {
+          baseUrl: hfBaseUrl,
+          extra_body: { model: digitalOceanModel },
+          samplingParams: { max_tokens: 6_000 },
+        },
+        expected: 6_000,
+      },
+      {
+        name: 'a smaller ordinary fallback from a Hugging Face primary',
+        target: {
+          baseUrl: 'https://compatible.example/v1',
+          contextWindowSize: 65_536,
+        },
+        expected: 14_286,
+      },
+      {
+        name: 'the automatic limit of an unverified fallback',
+        target: { baseUrl: hfBaseUrl, extra_body: { model: unverifiedModel } },
+        expected: 32_000,
+      },
+      {
+        name: 'a wider verified fallback',
+        primary: narrowPrimary,
+        target: { baseUrl: hfBaseUrl, extra_body: { model: glmModel } },
+        primaryLimit: 14_286,
+        expected: 64_000,
+      },
+      {
+        name: 'a raw output budget on the wider fallback',
+        primary: narrowPrimary,
+        target: {
+          baseUrl: hfBaseUrl,
+          extra_body: { model: glmModel, max_completion_tokens: 180_000 },
+        },
+        primaryLimit: 14_286,
+        expected: 180_000,
+      },
+      {
+        name: 'the caller ceiling when the primary window could not fit it',
+        primary: narrowPrimary,
+        target: { baseUrl: hfBaseUrl, extra_body: { model: glmModel } },
+        callerLimit: 48_000,
+        primaryLimit: 14_286,
+        expected: 48_000,
+      },
+    ])(
+      'sizes the fallback request against $name',
+      async ({
+        target,
+        primary = widePrimary,
+        callerLimit,
+        primaryLimit = callerLimit ?? 64_000,
+        expected,
+      }) => {
+        const fallbackModel = 'fallback-model';
+        const fallback = vi
+          .fn()
+          .mockImplementation(async () => textStream('fallback answer'));
+        wireFallbacks(
+          [fallbackModel],
+          vi.fn().mockResolvedValue(
+            fallbackRoute(fallbackModel, fallback, {
+              model: fallbackModel,
+              authType: AuthType.USE_OPENAI,
+              ...target,
+            }),
+          ),
+          primary,
+        );
+        streamMock().mockRejectedValueOnce(tpmCapacityError());
+
+        await drain(
+          await chat.sendMessageStream(
+            primary.model,
+            {
+              message: ' cat'.repeat(21_250),
+              config: { maxOutputTokens: callerLimit },
+            },
+            'fallback-output-window',
+          ),
+        );
+
+        expect(streamMock().mock.calls[0][0].config?.maxOutputTokens).toBe(
+          primaryLimit,
+        );
+        expect(fallback.mock.calls[0][0]).toMatchObject({
+          model: fallbackModel,
+          config: { maxOutputTokens: expected },
+        });
+        expect(chat.getLastRequestMaxOutputTokens()).toBe(expected);
+      },
+    );
+
+    it.each([
+      { name: 'the same window', primaryWindow: 65_536, keepUsage: true },
+      { name: 'a larger window', primaryWindow: 61_000, keepUsage: true },
+      {
+        name: 'new dense follow-up',
+        primaryWindow: 65_536,
+        appendedDense: true,
+      },
+      {
+        name: 'a refreshed memory catalog',
+        primaryWindow: 65_536,
+        appendedDense: true,
+        refreshedCatalog: true,
+      },
+      {
+        name: 'restored Japanese history',
+        primaryWindow: 65_536,
+        resumed: true,
+        japaneseHistory: true,
+      },
+      {
+        name: 'shadowed sampling tools',
+        primaryWindow: 65_536,
+        keepUsage: true,
+        shadowedTools: true,
+      },
+      {
+        name: 'fixed raw messages',
+        primaryWindow: 65_536,
+        keepUsage: true,
+        staticPrompt: true,
+      },
+      {
+        name: 'restored dense history',
+        primaryWindow: 65_536,
+        keepUsage: false,
+        resumed: true,
+      },
+      {
+        name: 'different prepared media',
+        primaryWindow: 65_536,
+        keepUsage: false,
+        image: true,
+      },
+      {
+        name: 'different raw messages',
+        primaryWindow: 65_536,
+        keepUsage: false,
+        messages: [{ role: 'user', content: 'Short alternate prompt' }],
+      },
+    ])(
+      'fits a warmed same-wire fallback with $name',
+      async ({
+        primaryWindow,
+        keepUsage,
+        image,
+        messages,
+        shadowedTools,
+        staticPrompt,
+        resumed,
+        appendedDense,
+        refreshedCatalog,
+        japaneseHistory,
+      }) => {
+        const fallbackModel = 'another-minimax-account';
+        const fixedMessages = staticPrompt
+          ? [{ role: 'user', content: 'Use this fixed prompt' }]
+          : undefined;
+        const fallbackMessages = messages ?? fixedMessages;
+        const promptTokenCount = resumed
+          ? 41_000
+          : appendedDense
+            ? 15_000
+            : 35_000;
+        const firstMessage = japaneseHistory
+          ? 'const label = "ひらがなの見出しに使うことばです";\n'.repeat(2_800)
+          : resumed
+            ? '嗰陣'.repeat(16_000)
+            : '嗰陣啱啱落雨，我哋喺街口等咗一陣。'.repeat(600);
+        const fallback = vi
+          .fn()
+          .mockImplementation(async () => textStream('fallback answer'));
+        wireFallbacks(
+          [fallbackModel],
+          vi.fn().mockResolvedValue(
+            fallbackRoute(fallbackModel, fallback, {
+              ...narrowPrimary,
+              model: fallbackModel,
+              ...(shadowedTools && {
+                samplingParams: {
+                  tools: [
+                    { type: 'function', function: { name: 'shadowed_tool' } },
+                  ],
+                },
+              }),
+              extra_body: {
+                model: digitalOceanModel,
+                ...(fallbackMessages && { messages: fallbackMessages }),
+              },
+            }),
+          ),
+          {
+            ...narrowPrimary,
+            contextWindowSize: primaryWindow,
+            ...(fixedMessages && { extra_body: { messages: fixedMessages } }),
+          },
+        );
+        vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
+          (model = digitalOceanModel) => model,
+        );
+        vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({
+          image: true,
+        });
+        if (shadowedTools) {
+          chat.setTools([
+            { functionDeclarations: [{ name: 'generated_tool' }] },
+          ]);
+        }
+        let catalog = EMPTY_AUTO_MEMORY_CATALOG;
+        if (refreshedCatalog) mockConfig.getAutoMemoryContext = () => catalog;
+        mockCompress(noop());
+        streamMock().mockResolvedValueOnce(
+          textStream('acknowledged', {
+            promptTokenCount,
+            candidatesTokenCount: 3,
+            totalTokenCount: promptTokenCount + 3,
+          }),
+        );
+        await drain(
+          await chat.sendMessageStream(
+            digitalOceanModel,
+            {
+              message: firstMessage,
+              config: { maxOutputTokens: 1_000 },
+            },
+            'warm-fallback-first',
+          ),
+        );
+        expect(chat.getLastPromptTokenCount()).toBe(promptTokenCount);
+        if (resumed) {
+          chat = newChat({ history: chat.getHistory() });
+          chat.seedResumeTokenCounts(promptTokenCount, 3);
+        }
+        const denseFollowUp = '嗰陣'.repeat(11_000);
+        catalog = denseFollowUp;
+        streamMock().mockRejectedValueOnce(tpmCapacityError());
+
+        await drain(
+          await chat.sendMessageStream(
+            digitalOceanModel,
+            {
+              message: image
+                ? [{ text: 'What happened next?' }, inline('image/png', 'abc')]
+                : 'What happened next?' +
+                  (staticPrompt ? ' cat'.repeat(2_000) : '') +
+                  (appendedDense && !refreshedCatalog ? denseFollowUp : ''),
+            },
+            'warm-fallback-second',
+          ),
+        );
+
+        const primaryRequest = streamMock().mock.calls[1][0];
+        const fallbackRequest = fallback.mock.calls[0][0];
+        if (staticPrompt) {
+          expect(fallbackRequest.config.maxOutputTokens).toBe(
+            65_536 - 35_000 - 10_000,
+          );
+        } else if (resumed || appendedDense) {
+          expect(fallbackRequest.contents).toEqual(primaryRequest.contents);
+          if (refreshedCatalog) {
+            expect(
+              findLatestAutoMemorySnapshot(fallbackRequest.contents)?.text,
+            ).toContain(denseFollowUp);
+          }
+          const measuredInput = appendedDense ? 43_000 : promptTokenCount;
+          expect(
+            fallbackRequest.config.maxOutputTokens + measuredInput,
+          ).toBeLessThanOrEqual(65_536);
+          expect(fallbackRequest.config.maxOutputTokens).toBeGreaterThan(4_000);
+        } else if (keepUsage) {
+          expect(fallbackRequest.contents).toEqual(primaryRequest.contents);
+          expect(fallbackRequest.config.maxOutputTokens).toBe(
+            primaryRequest.config!.maxOutputTokens! + 65_536 - primaryWindow,
+          );
+        } else {
+          if (image) {
+            expect(fallbackRequest.contents).not.toEqual(
+              primaryRequest.contents,
+            );
+          } else {
+            expect(fallbackRequest.contents).toEqual(primaryRequest.contents);
+          }
+          expect(fallbackRequest.config.maxOutputTokens).toBeGreaterThan(
+            primaryRequest.config!.maxOutputTokens!,
+          );
+        }
+      },
+    );
+
+    const mongolianLine = 'ᠰᠠᠢᠨ ᠪᠠᠢᠨ᠎ᠠ ᠤᠤ᠂ ᠪᠢᠴᠢᠭ᠌ ᠪᠠᠷᠢᠮᠲᠠ ᠤᠩᠰᠢᠵᠤ ᠪᠠᠢᠨ᠎ᠠ᠃\n';
+
+    it.each([
+      { name: 'an equal window', window: 65_536 },
+      { name: 'a smaller window', window: 52_000, output: 4_000 },
+      {
+        name: 'a larger window',
+        primaryWindow: 33_000,
+        window: 65_536,
+        output: 28_487,
+      },
+      {
+        name: 'a caller limit in a larger window',
+        primaryWindow: 33_000,
+        window: 65_536,
+        callerLimit: 12_500,
+        output: 12_500,
+      },
+      {
+        name: 'different raw messages in a larger window',
+        primaryWindow: 33_000,
+        window: 65_536,
+        rawMessages: [{ role: 'user', content: 'Use this fixed prompt.' }],
+        output: 4_000,
+      },
+      {
+        name: 'new Mongolian text',
+        window: 65_536,
+        followUp: mongolianLine.repeat(240),
+        measuredInput: 48_380,
+      },
+      {
+        name: 'new Mongolian text near the window',
+        window: 65_536,
+        followUp: mongolianLine.repeat(310),
+        measuredInput: 56_640,
+      },
+      {
+        name: 'new Mongolian text with less than the default output floor',
+        window: 65_536,
+        followUp: mongolianLine.repeat(520),
+        measuredInput: 63_420,
+        primaryLimit: 1_000,
+        warmPromptTokens: 2_038,
+      },
+      { name: 'a different system prompt', window: 36_000, otherSystem: true },
+      {
+        name: 'a raw message override',
+        window: 36_000,
+        rawMessages: [{ role: 'user', content: 'Use this fixed prompt.' }],
+      },
+    ])(
+      'keeps a warmed compatible fallback within budget for $name',
+      async ({
+        window,
+        primaryWindow = 65_536,
+        callerLimit,
+        output,
+        otherSystem,
+        rawMessages,
+        followUp,
+        measuredInput,
+        primaryLimit = 8_000,
+        warmPromptTokens = 20_038,
+      }) => {
+        const fallbackModel = 'compatible-minimax';
+        const fallback = vi.fn().mockResolvedValue(textStream('completed'));
+        const differentPrompt = otherSystem || rawMessages !== undefined;
+        const fallbackSystem = 'Short fallback instructions.';
+        if (otherSystem) {
+          chat.setSystemInstructionResolver((model) =>
+            model === digitalOceanModel
+              ? 'primary '.repeat(20_000)
+              : fallbackSystem,
+          );
+        }
+        wireFallbacks(
+          [fallbackModel],
+          vi.fn().mockResolvedValue(
+            fallbackRoute(fallbackModel, fallback, {
+              ...narrowPrimary,
+              model: fallbackModel,
+              baseUrl: 'https://compatible.example/v1',
+              contextWindowSize: window,
+              extra_body: {
+                model: otherSystem ? fallbackModel : digitalOceanModel,
+                ...(rawMessages && { messages: rawMessages }),
+              },
+            }),
+          ),
+          {
+            ...narrowPrimary,
+            contextWindowSize: primaryWindow,
+            ...(followUp && { extra_body: { max_tokens: primaryLimit } }),
+          },
+        );
+        mockCompress(noop());
+        const promptTokenCount = followUp
+          ? warmPromptTokens
+          : primaryWindow === 33_000
+            ? 27_038
+            : 41_038;
+        streamMock().mockResolvedValueOnce(
+          textStream('acknowledged', {
+            promptTokenCount,
+            totalTokenCount: promptTokenCount + 3,
+          }),
+        );
+        await drain(
+          await chat.sendMessageStream(
+            digitalOceanModel,
+            {
+              message: differentPrompt
+                ? 'First question'
+                : '嗰陣啱啱落雨，我哋喺街口等咗一陣。'.repeat(600),
+              config: { maxOutputTokens: 1_000 },
+            },
+            'warm-compatible-first',
+          ),
+        );
+        streamMock().mockRejectedValueOnce(tpmCapacityError());
+        await drain(
+          await chat.sendMessageStream(
+            digitalOceanModel,
+            {
+              message: followUp
+                ? 'Use the preceding conversation to answer this follow-up. ' +
+                  followUp
+                : 'What happened next?',
+              config: { maxOutputTokens: callerLimit },
+            },
+            'warm-compatible-second',
+          ),
+        );
+        const primaryRequest = streamMock().mock.calls[1][0];
+        const fallbackRequest = fallback.mock.calls[0][0];
+        expect(fallbackRequest.contents).toEqual(primaryRequest.contents);
+        if (otherSystem) {
+          expect(fallbackRequest.config.systemInstruction).toBe(fallbackSystem);
+        }
+        if (measuredInput !== undefined) {
+          const outputTokens = fallbackRequest.config.maxOutputTokens;
+          expect(primaryRequest.config?.maxOutputTokens).toBe(primaryLimit);
+          expect(outputTokens + measuredInput).toBeLessThanOrEqual(window);
+          expect(outputTokens).toBeGreaterThanOrEqual(
+            Math.min(primaryLimit, 4_000),
+          );
+        } else if (differentPrompt && output === undefined) {
+          expect(fallbackRequest.config.maxOutputTokens).toBeGreaterThan(5_000);
+        } else {
+          expect(fallbackRequest.config.maxOutputTokens).toBe(
+            output ?? primaryRequest.config?.maxOutputTokens,
+          );
+        }
+      },
+    );
+
+    const reportTemplateArgs = { report_context: 'The same report context' };
+    const miniMaxRoute = {
+      wireModel: digitalOceanModel,
+      primaryWindow: 32_000,
+      warmPromptTokens: 20_045,
+      primaryOutput: 4_000,
+    };
+    const kimiRoute = {
+      wireModel: 'moonshotai/Kimi-K3:fireworks',
+      primaryWindow: 38_000,
+      warmPromptTokens: 12_458,
+      primaryOutput: 15_542,
+    };
+    const reportResponseFormat = {
+      type: 'json_schema',
+      json_schema: {
+        name: 'report',
+        schema: { type: 'object' },
+      },
+    };
+    const nestedReportFormat = {
+      chat_template_kwargs: { response_format: reportResponseFormat },
+    };
+    const jsonObjectResponseFormat = { type: 'json_object' };
+    const nestedJsonObjectFormat = {
+      chat_template_kwargs: { response_format: jsonObjectResponseFormat },
+    };
+    const textResponseFormat = { type: 'text' };
+    const strictReportFormat = {
+      ...reportResponseFormat,
+      json_schema: { ...reportResponseFormat.json_schema, strict: true },
+    };
+    const nestedUnnamedReportFormat = {
+      chat_template_kwargs: {
+        response_format: {
+          type: 'json_schema',
+          json_schema: { schema: reportResponseFormat.json_schema.schema },
+        },
+      },
+    };
+    const reportTools = [
+      { type: 'function', function: { name: 'submit_report' } },
+    ];
+    const namedReportTool = {
+      type: 'function',
+      function: { name: 'submit_report' },
+    };
+    const requireReportTool = {
+      tools: [{ functionDeclarations: [{ name: 'submit_report' }] }],
+      toolConfig: {
+        functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+      },
+    };
+    const responseAwareTemplate =
+      '{{ response_format | default("none") }}{{ messages }}';
+    it.each<{
+      name: string;
+      primary?: typeof miniMaxRoute;
+      primaryBody?: Record<string, unknown>;
+      body?: Record<string, unknown>;
+      sampling?: Record<string, unknown>;
+      generation?: Pick<GenerateContentConfig, 'tools' | 'toolConfig'>;
+      fallbackWindow?: number;
+      output?: number;
+      measuredInput?: number;
+    }>([
+      {
+        name: 'extra body template arguments',
+        body: { chat_template_kwargs: reportTemplateArgs },
+        output: 4_000,
+      },
+      {
+        name: 'sampling template arguments',
+        sampling: { chat_template_kwargs: reportTemplateArgs },
+        output: 4_000,
+      },
+      {
+        name: 'a replacement chat template',
+        body: { chat_template: '{{ messages }}' },
+        output: 4_000,
+      },
+      {
+        name: 'documents injected by the chat template',
+        body: { documents: [{ title: 'Report', text: 'Additional context' }] },
+        output: 4_000,
+      },
+      {
+        name: 'null template arguments clearing sampling arguments',
+        sampling: { chat_template_kwargs: reportTemplateArgs },
+        body: { chat_template_kwargs: null },
+        output: 32_000,
+      },
+      {
+        name: 'empty template arguments clearing sampling arguments',
+        sampling: { chat_template_kwargs: reportTemplateArgs },
+        body: { chat_template_kwargs: {} },
+        output: 32_000,
+      },
+      {
+        name: 'matching template arguments after the body override',
+        primaryBody: { chat_template_kwargs: reportTemplateArgs },
+        sampling: { chat_template_kwargs: { report_context: 'Ignored' } },
+        body: { chat_template_kwargs: reportTemplateArgs },
+        output: 32_000,
+      },
+      {
+        name: 'the default generation prompt after the body override',
+        sampling: { add_generation_prompt: false },
+        body: { add_generation_prompt: true },
+        output: 32_000,
+      },
+      {
+        name: 'the default final-message continuation',
+        sampling: { continue_final_message: false },
+        output: 32_000,
+      },
+      {
+        name: 'the default special-token setting',
+        body: { add_special_tokens: false },
+        output: 32_000,
+      },
+      {
+        name: 'a disabled generation prompt',
+        body: { add_generation_prompt: false },
+        output: 4_000,
+      },
+      {
+        name: 'a continued final message',
+        primaryBody: { add_generation_prompt: false },
+        body: { add_generation_prompt: false, continue_final_message: true },
+        output: 4_000,
+      },
+      {
+        name: 'additional special tokens',
+        body: { add_special_tokens: true },
+        output: 4_000,
+      },
+      {
+        name: 'a null chat template',
+        body: { chat_template: null },
+        output: 32_000,
+      },
+      {
+        name: 'null documents',
+        sampling: { documents: null },
+        output: 32_000,
+      },
+      {
+        name: 'null multimodal processor arguments',
+        body: { mm_processor_kwargs: null },
+        output: 32_000,
+      },
+      {
+        name: 'a null prompt truncation limit',
+        body: { truncate_prompt_tokens: null },
+        output: 32_000,
+      },
+      {
+        name: 'null truncation clearing the sampling limit',
+        sampling: { truncate_prompt_tokens: 20_000 },
+        body: { truncate_prompt_tokens: null },
+        output: 32_000,
+      },
+      {
+        name: 'an actual prompt truncation limit',
+        body: { truncate_prompt_tokens: 20_000 },
+        output: 4_000,
+      },
+      {
+        name: 'empty multimodal processor arguments',
+        body: { mm_processor_kwargs: {} },
+        output: 32_000,
+      },
+      {
+        name: 'empty multimodal arguments clearing sampling arguments',
+        sampling: { mm_processor_kwargs: { num_crops: 8 } },
+        body: { mm_processor_kwargs: {} },
+        output: 32_000,
+      },
+      {
+        name: 'nonempty multimodal processor arguments',
+        body: { mm_processor_kwargs: { num_crops: 8 } },
+        output: 4_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a Kimi response schema in the body',
+        body: { response_format: reportResponseFormat },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a Kimi response schema in sampling',
+        sampling: { response_format: reportResponseFormat },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a different Kimi response schema',
+        primaryBody: { response_format: reportResponseFormat },
+        body: {
+          response_format: {
+            ...reportResponseFormat,
+            json_schema: {
+              ...reportResponseFormat.json_schema,
+              schema: { type: 'object', additionalProperties: false },
+            },
+          },
+        },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a matching Kimi response schema after the body override',
+        primaryBody: { response_format: reportResponseFormat },
+        sampling: { response_format: { type: 'json_object' } },
+        body: { response_format: reportResponseFormat },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a null response format clearing the sampling schema',
+        sampling: { response_format: reportResponseFormat },
+        body: { response_format: null },
+        output: 32_000,
+      },
+      {
+        name: 'the default text response format',
+        body: { response_format: textResponseFormat },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'redundant top-level text after the template override',
+        primaryBody: {
+          chat_template_kwargs: { response_format: textResponseFormat },
+        },
+        sampling: {
+          chat_template_kwargs: { response_format: reportResponseFormat },
+        },
+        body: {
+          chat_template_kwargs: { response_format: textResponseFormat },
+          response_format: textResponseFormat,
+        },
+        output: 32_000,
+      },
+      {
+        name: 'an explicit text format with a custom template',
+        primaryBody: { chat_template: responseAwareTemplate },
+        body: {
+          chat_template: responseAwareTemplate,
+          response_format: textResponseFormat,
+        },
+        output: 4_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a Kimi text format without a known nested format',
+        primaryBody: { response_format: textResponseFormat },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a text format overriding the template response schema',
+        primaryBody: {
+          chat_template_kwargs: { response_format: reportResponseFormat },
+        },
+        body: {
+          chat_template_kwargs: { response_format: reportResponseFormat },
+          response_format: textResponseFormat,
+        },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        name: 'a repeated MiniMax response schema',
+        primaryBody: nestedReportFormat,
+        body: {
+          ...nestedReportFormat,
+          response_format: structuredClone(reportResponseFormat),
+        },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a repeated Kimi response schema after the body override',
+        primaryBody: nestedReportFormat,
+        sampling: { response_format: { type: 'json_object' } },
+        body: {
+          ...nestedReportFormat,
+          response_format: structuredClone(reportResponseFormat),
+        },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'strictness added only to a repeated Kimi schema',
+        primaryBody: nestedReportFormat,
+        body: {
+          ...nestedReportFormat,
+          response_format: strictReportFormat,
+        },
+        output: 32_000,
+      },
+      {
+        name: 'a name added only to a repeated MiniMax schema',
+        primaryBody: nestedUnnamedReportFormat,
+        body: {
+          ...nestedUnnamedReportFormat,
+          response_format: reportResponseFormat,
+        },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'the same Kimi schema with different nested wrapper fields',
+        primaryBody: nestedReportFormat,
+        body: {
+          chat_template_kwargs: { response_format: strictReportFormat },
+        },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a required tool choice after warming Kimi with auto',
+        primaryBody: { tools: reportTools, tool_choice: 'auto' },
+        body: { tools: reportTools, tool_choice: 'required' },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        name: 'the named sole MiniMax tool',
+        primaryBody: { tools: reportTools, tool_choice: 'auto' },
+        body: { tools: reportTools, tool_choice: namedReportTool },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'the named sole Kimi tool',
+        primaryBody: { tools: reportTools },
+        body: { tools: reportTools, tool_choice: namedReportTool },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'the named sole generated Kimi tool',
+        generation: { tools: requireReportTool.tools },
+        body: { tool_choice: namedReportTool },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'auto fallback after a named Kimi tool choice',
+        primaryBody: { tools: reportTools, tool_choice: namedReportTool },
+        body: { tools: reportTools, tool_choice: 'auto' },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a named Kimi tool overriding a nested required choice',
+        primaryBody: {
+          tools: reportTools,
+          chat_template_kwargs: { tool_choice: 'required' },
+        },
+        body: {
+          tools: reportTools,
+          tool_choice: namedReportTool,
+          chat_template_kwargs: { tool_choice: 'required' },
+        },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        primary: {
+          ...kimiRoute,
+          primaryWindow: 32_750,
+          warmPromptTokens: 28_744,
+          primaryOutput: 4_000,
+        },
+        name: 'a required tool choice in a 32768-token compatible window',
+        primaryBody: { tools: reportTools, tool_choice: 'auto' },
+        body: { tools: reportTools, tool_choice: 'required' },
+        fallbackWindow: 32_768,
+        measuredInput: 28_780,
+      },
+      {
+        primary: {
+          ...kimiRoute,
+          primaryWindow: 32_000,
+          warmPromptTokens: 28_744,
+          primaryOutput: 3_256,
+        },
+        name: 'a required tool choice in a 32032-token compatible window',
+        primaryBody: { tools: reportTools, tool_choice: 'auto' },
+        body: { tools: reportTools, tool_choice: 'required' },
+        fallbackWindow: 32_032,
+        measuredInput: 28_780,
+      },
+      {
+        primary: {
+          ...kimiRoute,
+          primaryWindow: 32_000,
+          warmPromptTokens: 28_744,
+          primaryOutput: 3_256,
+        },
+        name: 'a required tool choice after a named tool in a compatible window',
+        primaryBody: { tools: reportTools, tool_choice: namedReportTool },
+        body: { tools: reportTools, tool_choice: 'required' },
+        fallbackWindow: 32_032,
+        measuredInput: 28_780,
+      },
+      {
+        primary: { ...kimiRoute, wireModel: 'moonshotai/Kimi-K3' },
+        name: 'the default tool choice on an unpinned Kimi route',
+        primaryBody: { tools: reportTools },
+        sampling: { max_tokens: 32_000 },
+        body: { tools: reportTools, tool_choice: 'auto' },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'the default tool choice without tools',
+        generation: { tools: [] },
+        body: { tool_choice: 'none' },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a generated Kimi tool choice overriding sampling',
+        primaryBody: { tools: reportTools },
+        sampling: { tool_choice: 'none' },
+        body: { tools: reportTools },
+        generation: requireReportTool,
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a Kimi body override of the generated tool choice',
+        generation: requireReportTool,
+        body: { tool_choice: 'none' },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        name: 'a repeated MiniMax JSON object format',
+        primaryBody: nestedJsonObjectFormat,
+        body: {
+          ...nestedJsonObjectFormat,
+          response_format: { ...jsonObjectResponseFormat },
+        },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a repeated Kimi JSON object format after the body override',
+        primaryBody: nestedJsonObjectFormat,
+        sampling: { response_format: reportResponseFormat },
+        body: {
+          ...nestedJsonObjectFormat,
+          response_format: { ...jsonObjectResponseFormat },
+        },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a response schema overriding the nested Kimi JSON object format',
+        primaryBody: nestedJsonObjectFormat,
+        body: {
+          ...nestedJsonObjectFormat,
+          response_format: reportResponseFormat,
+        },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a Kimi JSON object format without an explicit nested format',
+        body: { response_format: jsonObjectResponseFormat },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a different response schema overriding the nested schema',
+        primaryBody: nestedReportFormat,
+        body: {
+          ...nestedReportFormat,
+          response_format: {
+            ...reportResponseFormat,
+            json_schema: {
+              ...reportResponseFormat.json_schema,
+              schema: { type: 'object', additionalProperties: false },
+            },
+          },
+        },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        name: 'a repeated response schema with a custom template',
+        primaryBody: {
+          ...nestedReportFormat,
+          chat_template: responseAwareTemplate,
+        },
+        body: {
+          ...nestedReportFormat,
+          chat_template: responseAwareTemplate,
+          response_format: reportResponseFormat,
+        },
+        output: 4_000,
+      },
+    ])(
+      'matches warmed fallback usage against $name',
+      async ({
+        primary = miniMaxRoute,
+        primaryBody,
+        body,
+        sampling,
+        generation,
+        fallbackWindow,
+        output,
+        measuredInput,
+      }) => {
+        const { wireModel, primaryWindow, warmPromptTokens, primaryOutput } =
+          primary;
+        const messages = [{ role: 'user', content: 'Summarize the report.' }];
+        const fallbackModel = 'compatible-backup';
+        const fallback = vi.fn().mockResolvedValue(textStream('completed'));
+        wireFallbacks(
+          [fallbackModel],
+          vi.fn().mockResolvedValue(
+            fallbackRoute(fallbackModel, fallback, {
+              ...narrowPrimary,
+              model: fallbackModel,
+              baseUrl: 'https://compatible.example/v1',
+              samplingParams: sampling,
+              ...(fallbackWindow && { contextWindowSize: fallbackWindow }),
+              extra_body: { model: wireModel, messages, ...body },
+            }),
+          ),
+          {
+            ...narrowPrimary,
+            model: wireModel,
+            contextWindowSize: primaryWindow,
+            extra_body: { messages, ...primaryBody },
+          },
+        );
+        mockCompress(noop());
+        streamMock().mockResolvedValueOnce(
+          textStream('ready', {
+            promptTokenCount: warmPromptTokens,
+            totalTokenCount: warmPromptTokens + 6,
+          }),
+        );
+        await drain(
+          await chat.sendMessageStream(
+            wireModel,
+            {
+              message: 'Read the report.',
+              config: { ...generation, maxOutputTokens: 1_000 },
+            },
+            'warm-template-first',
+          ),
+        );
+        streamMock().mockRejectedValueOnce(tpmCapacityError());
+        await drain(
+          await chat.sendMessageStream(
+            wireModel,
+            { message: 'Answer from the report.', config: generation },
+            'warm-template-second',
+          ),
+        );
+        expect(streamMock().mock.calls[1][0].config?.maxOutputTokens).toBe(
+          primaryOutput,
+        );
+        const fallbackOutput = fallback.mock.calls[0][0].config.maxOutputTokens;
+        if (measuredInput !== undefined && fallbackWindow !== undefined) {
+          expect(fallbackOutput + measuredInput).toBeLessThanOrEqual(
+            fallbackWindow,
+          );
+          expect(fallbackOutput).toBeGreaterThan(3_000);
+        } else {
+          expect(fallbackOutput).toBe(output);
+        }
+      },
+    );
+
+    it.each(['extra_body', 'samplingParams'] as const)(
+      'sizes the primary Hugging Face request from fixed messages in %s',
+      async (field) => {
+        const messages = [{ role: 'user', content: mongolianLine.repeat(270) }];
+        mockGeneratorConfig({ ...narrowPrimary, [field]: { messages } });
+        mockCompress(noop());
+        const declaration = {
+          functionDeclarations: [
+            {
+              name: 'read_report',
+              description: 'Read the report.',
+              parametersJsonSchema: { type: 'object', properties: {} },
+            },
+          ],
+        };
+        streamMock().mockResolvedValueOnce(textStream('completed'));
+
+        await drain(
+          await chat.sendMessageStream(
+            digitalOceanModel,
+            {
+              message: 'Summarize the report.',
+              config: { tools: [declaration] },
+            },
+            'primary-fixed-messages',
+          ),
+        );
+
+        const config = streamMock().mock.calls[0][0].config;
+        const outputTokens = config?.maxOutputTokens ?? 0;
+        expect(outputTokens).toBeGreaterThan(4_000);
+        // The MiniMax tokenizer counts 32,029 input tokens with this tool.
+        expect(outputTokens + 32_029).toBeLessThanOrEqual(65_536);
+        expect(config?.tools).toEqual([declaration]);
+      },
+    );
+
+    it('retains a usable fixed-message budget for long separators and reuses measured input', async () => {
+      const text =
+        'Summarize this run of the partition loader and extract events that need follow-up.\n\n' +
+        Array.from(
+          { length: 1_050 },
+          (_, index) =>
+            '='.repeat(80) +
+            `\nPartition job ${index} completed for ledger-apne2-20261127 with no unexpected missing input records.\n`,
+        ).join('');
+      mockGeneratorConfig({
+        ...narrowPrimary,
+        extra_body: {
+          messages: [{ role: 'user', content: text }],
+          max_tokens: 32_000,
+        },
+      });
+      mockCompress(noop());
+      const measuredInput = 25_304;
+      streamMock().mockImplementation(async () =>
+        textStream('completed', {
+          promptTokenCount: measuredInput,
+          totalTokenCount: measuredInput + 5,
+        }),
+      );
+      for (let turn = 1; turn <= 2; turn++) {
+        await drain(
+          await chat.sendMessageStream(
+            digitalOceanModel,
+            {
+              message: 'Generate the incident summary for this report replay.',
+            },
+            `fixed-partition-log-${turn}`,
+          ),
+        );
+      }
+
+      const first = streamMock().mock.calls[0][0].config?.maxOutputTokens ?? 0;
+      expect(first).toBeGreaterThan(4_000);
+      expect(first + measuredInput).toBeLessThanOrEqual(65_536);
+      expect(streamMock().mock.calls[1][0].config?.maxOutputTokens).toBe(
+        65_536 - measuredInput - 10_000,
+      );
+    });
+
+    it.each([
+      {
+        name: 'fixed Khmer messages',
+        rawText:
+          'សួស្តី ពិភពលោក! តើអ្នកសុខសប្បាយទេ? យើងកំពុងពិនិត្យឯកសារនេះ។\n'.repeat(
+            260,
+          ),
+        measuredInput: 29_678,
+      },
+      {
+        name: 'fixed Mongolian messages',
+        rawText: mongolianLine.repeat(240),
+        measuredInput: 28_358,
+      },
+      { name: 'a discarded tool default' },
+    ])(
+      'prices the cold fallback wire input with $name',
+      async ({ rawText, measuredInput }) => {
+        const fallbackModel = 'another-minimax-account';
+        const fallback = vi.fn().mockResolvedValue(textStream('completed'));
+        const toolWithDefault = {
+          functionDeclarations: [
+            {
+              name: 'load_template',
+              parametersJsonSchema: {
+                type: 'object',
+                properties: {
+                  template: {
+                    type: 'string',
+                    default: '嗰陣啱啱落雨，我哋喺街口等咗一陣。'.repeat(1_900),
+                  },
+                },
+              },
+            },
+          ],
+        };
+        wireFallbacks(
+          [fallbackModel],
+          vi.fn().mockResolvedValue(
+            fallbackRoute(fallbackModel, fallback, {
+              ...narrowPrimary,
+              model: fallbackModel,
+              schemaCompliance: 'openapi_30',
+              extra_body: {
+                model: digitalOceanModel,
+                ...(rawText && {
+                  messages: [{ role: 'user', content: rawText }],
+                }),
+              },
+            }),
+          ),
+          narrowPrimary,
+        );
+        streamMock().mockRejectedValueOnce(tpmCapacityError());
+        await drain(
+          await chat.sendMessageStream(
+            digitalOceanModel,
+            {
+              message: 'Summarize the report.',
+              config: { tools: rawText ? [] : [toolWithDefault] },
+            },
+            'cold-effective-prompt',
+          ),
+        );
+        const outputTokens = fallback.mock.calls[0][0].config.maxOutputTokens;
+        if (measuredInput !== undefined) {
+          expect(measuredInput + outputTokens).toBeLessThanOrEqual(65_536);
+        }
+        expect(outputTokens).toBeGreaterThanOrEqual(25_000);
+      },
+    );
+
+    it('does not reuse prior fallback usage for a different wire prompt', async () => {
+      const priorFallback = vi
+        .fn()
+        .mockResolvedValueOnce(
+          textStream('acknowledged', {
+            promptTokenCount: 35_000,
+            totalTokenCount: 35_003,
+          }),
+        )
+        .mockRejectedValue(tpmCapacityError());
+      const nextFallback = vi.fn().mockResolvedValue(textStream('completed'));
+      const routes = {
+        'prior-fallback': fallbackRoute('prior-fallback', priorFallback, {
+          ...narrowPrimary,
+          model: 'prior-fallback',
+          extra_body: {
+            model: digitalOceanModel,
+            messages: [{ role: 'user', content: 'Overridden prior prompt' }],
+          },
+        }),
+        'next-fallback': fallbackRoute('next-fallback', nextFallback, {
+          ...narrowPrimary,
+          model: 'next-fallback',
+          extra_body: { model: digitalOceanModel },
+        }),
+      };
+      wireFallbacks(
+        Object.keys(routes),
+        vi.fn(async (model: keyof typeof routes) => routes[model]),
+        narrowPrimary,
+      );
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
+        (model = digitalOceanModel) => model,
+      );
+      mockCompress(noop());
+      streamMock().mockRejectedValue(tpmCapacityError());
+      await drain(
+        await chat.sendMessageStream(
+          digitalOceanModel,
+          { message: 'First question', config: { maxOutputTokens: 1_000 } },
+          'fallback-usage-first',
+        ),
+      );
+      expect(chat.getLastPromptTokenCount()).toBe(35_000);
+      await drain(
+        await chat.sendMessageStream(
+          digitalOceanModel,
+          { message: 'What happened next?' },
+          'fallback-usage-second',
+        ),
+      );
+      const primaryRequest = streamMock().mock.calls[1][0];
+      const fallbackRequest = nextFallback.mock.calls[0][0];
+      expect(fallbackRequest.contents).toEqual(primaryRequest.contents);
+      expect(fallbackRequest.config.maxOutputTokens).toBeGreaterThan(
+        primaryRequest.config!.maxOutputTokens!,
+      );
+    });
+
     /** The primary fails with `error`; the fallback chain stays untouched. */
     async function expectNoFallback(
       error: Error,
@@ -15594,6 +16870,120 @@ describe('LlmChat', async () => {
       expectStreamCalls(2);
       expect(lastText()).toBe('Hello ending.');
     });
+
+    it.each([
+      ['deepseek-ai/DeepSeek-V4.1-Flash:featherless', 32_768],
+      ['deepseek-ai/DeepSeek-V4.1-Flash:fastest', 32_000],
+    ])(
+      'keeps Hugging Face output recovery within the %s ceiling',
+      async (model, limit) => {
+        mockGeneratorConfig({
+          authType: AuthType.USE_OPENAI,
+          model,
+          baseUrl: 'https://router.huggingface.co/v1',
+        });
+        serveStreams(truncated('Hello'), textStream(' ending.'));
+
+        const events = await collect(
+          await sendOn(model, 'write a long essay', 'hf-recovery'),
+        );
+
+        expectStreamCalls(2);
+        expect(
+          streamMock().mock.calls.map(
+            ([request]) => request.config?.maxOutputTokens,
+          ),
+        ).toEqual([limit, limit]);
+        expect(
+          eventsOfType(events, StreamEventType.RETRY).map(continuationOf),
+        ).toEqual([true]);
+      },
+    );
+
+    it('budgets the output for the Hugging Face model selected by a request override', async () => {
+      const model = 'deepseek-ai/DeepSeek-V4.1-Flash:featherless';
+      mockGeneratorConfig({
+        authType: AuthType.USE_OPENAI,
+        model,
+        baseUrl: 'https://router.huggingface.co/v1',
+        extra_body: { model: 'deepseek-ai/DeepSeek-V4.1-Flash:fastest' },
+      });
+      serveStreams(textStream('done'));
+
+      await drain(await sendOn(model, 'write an essay', 'hf-wire-model'));
+
+      expect(requestAt(0).config?.maxOutputTokens).toBe(32_000);
+    });
+
+    it.each([
+      {
+        name: 'raw max_tokens',
+        extraBody: { max_tokens: 180_000 },
+        expected: 180_000,
+      },
+      {
+        name: 'raw max_completion_tokens',
+        extraBody: { max_completion_tokens: 180_000 },
+        expected: 180_000,
+      },
+      {
+        name: 'sampling max_new_tokens',
+        samplingParams: { max_new_tokens: 180_000 },
+        expected: 180_000,
+      },
+      {
+        name: 'a raw budget above the provider maximum',
+        extraBody: { max_tokens: 1_000_000 },
+        expected: 943_718,
+      },
+      {
+        name: 'a raw budget above the remaining window',
+        extraBody: { max_tokens: 180_000 },
+        window: 65_536,
+        message: ' cat'.repeat(21_250),
+        expected: 14_286,
+      },
+      {
+        name: 'a smaller caller budget',
+        extraBody: { max_tokens: 180_000 },
+        callerMax: 90_000,
+        expected: 90_000,
+      },
+    ])(
+      'budgets a verified Hugging Face Chat request with $name',
+      async ({
+        extraBody,
+        samplingParams,
+        window,
+        message,
+        callerMax,
+        expected,
+      }) => {
+        const model = 'zai-org/GLM-5.3-Flash:deepinfra';
+        mockGeneratorConfig({
+          authType: AuthType.USE_OPENAI,
+          model,
+          baseUrl: 'https://router.huggingface.co/v1',
+          contextWindowSize: window ?? 1_048_576,
+          extra_body: extraBody,
+          samplingParams,
+        });
+        serveStreams(textStream('done'));
+
+        await drain(
+          await chat.sendMessageStream(
+            model,
+            {
+              message: message ?? 'write an essay',
+              config: { maxOutputTokens: callerMax },
+            },
+            'hf-configured-output',
+          ),
+        );
+
+        expect(requestAt(0).config?.maxOutputTokens).toBe(expected);
+      },
+    );
 
     it('retries protocol-tag leaks during direct output recovery', async () => {
       vi.useFakeTimers();

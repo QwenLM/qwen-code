@@ -48,6 +48,8 @@ export interface VisionBridgeModelSelection {
   id: string;
   baseUrl?: string;
   agentCapable?: true;
+  /** The pinned route would strip image input before dispatch. */
+  imageUnsupported?: true;
 }
 
 /**
@@ -59,7 +61,8 @@ export interface VisionBridgeModelSelection {
 export function isImageCapable(model: VisionModelCandidate): boolean {
   return (
     model.isVision === true ||
-    (model.modalities ?? defaultModalities(model.id)).image === true
+    (model.modalities ?? defaultModalities(model.id, model.baseUrl)).image ===
+      true
   );
 }
 
@@ -535,6 +538,14 @@ export async function runVisionBridge(params: {
     );
   }
   const modelEndpoint = hostOf(baseUrl);
+  if (selection?.imageUnsupported) {
+    return failure(
+      'the configured vision model does not accept images',
+      parts,
+      omittedCount,
+      { modelId, ...(modelEndpoint && { modelEndpoint }) },
+    );
+  }
   if (toConvert.length === 0) {
     return failure(
       validImages.length > 0

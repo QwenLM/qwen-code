@@ -100,6 +100,142 @@ const expectTimeout = (
 describe('modelConfigResolver', () => {
   describe('resolveModelConfig', () => {
     describe('OpenAI auth type', () => {
+      it.each([
+        [
+          'https://router.huggingface.co/v1',
+          'zai-org/GLM-5.3-Flash:deepinfra',
+          1_048_576,
+          true,
+        ],
+        [
+          'https://router.huggingface.co/v1',
+          'zai-org/GLM-5.3-Flash:zai-org',
+          200_000,
+          true,
+        ],
+        [
+          'https://router.huggingface.co.example.com/v1',
+          'zai-org/GLM-5.3-Flash:deepinfra',
+          undefined,
+          undefined,
+        ],
+        [
+          'blob:https://router.huggingface.co/v1',
+          'zai-org/GLM-5.3-Flash:deepinfra',
+          undefined,
+          undefined,
+        ],
+        [
+          'https://infer.flow7.org/v1',
+          'infer/gemini-3.1-pro-preview:low-cost',
+          undefined,
+          undefined,
+        ],
+        [
+          'https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1',
+          'zai-org/GLM-5.3-Flash:peft:262144',
+          undefined,
+          undefined,
+        ],
+      ])(
+        'uses the actual endpoint %s to infer model defaults',
+        (baseUrl, model, context, image) => {
+          const { config } = resolve({
+            env: { OPENAI_BASE_URL: baseUrl, OPENAI_MODEL: model },
+          });
+
+          expect(config.model).toBe(model);
+          expect(config.contextWindowSize).toBe(context);
+          expect(config.modalities?.image).toBe(image);
+        },
+      );
+
+      it.each([
+        [undefined, 262_144],
+        [240_000, 240_000],
+      ])(
+        'applies the Featherless context fallback with configured window %s',
+        (contextWindowSize, expected) => {
+          const model = 'deepseek-ai/DeepSeek-V4.1-Flash:featherless';
+          const { config } = resolve({
+            env: {
+              OPENAI_BASE_URL: 'https://router.huggingface.co/v1',
+              OPENAI_MODEL: model,
+            },
+            settings: {
+              generationConfig: { contextWindowSize },
+            },
+          });
+
+          expect(config.model).toBe(model);
+          expect(config.contextWindowSize).toBe(expected);
+        },
+      );
+
+      it.each([
+        [
+          'deepseek-ai/DeepSeek-V4.1-Flash:deepinfra',
+          'deepseek-ai/DeepSeek-V4.1-Flash:featherless',
+          {},
+          262_144,
+          undefined,
+        ],
+        [
+          'zai-org/GLM-5.3-Flash:deepinfra',
+          'Qwen/Qwen3-Coder-30B-A3B-Instruct',
+          {},
+          262_144,
+          undefined,
+        ],
+        [
+          'zai-org/GLM-5.3-Flash:deepinfra',
+          'Qwen/Qwen3-Coder-30B-A3B-Instruct',
+          { contextWindowSize: 128_000, modalities: { image: true } },
+          128_000,
+          true,
+        ],
+      ])(
+        'uses the Hugging Face wire model %s -> %s for inferred capabilities',
+        (model, wireModel, explicit, window, image) => {
+          const { config } = resolve({
+            env: {
+              OPENAI_BASE_URL: 'https://router.huggingface.co/v1',
+              OPENAI_MODEL: model,
+            },
+            settings: {
+              generationConfig: {
+                extra_body: { model: wireModel },
+                ...explicit,
+              },
+            },
+          });
+
+          expect(config.model).toBe(model);
+          expect(config.contextWindowSize).toBe(window);
+          expect(config.modalities?.image).toBe(image);
+        },
+      );
+
+      it.each([undefined, { image: true, video: true }])(
+        'filters inferred media for a bare Hugging Face wire override with explicit modalities %j',
+        (modalities) => {
+          const { config } = resolve({
+            env: {
+              OPENAI_BASE_URL: 'https://router.huggingface.co/v1',
+              OPENAI_MODEL: 'deepseek-ai/DeepSeek-V4.1-Flash:featherless',
+            },
+            settings: {
+              generationConfig: {
+                extra_body: { model: 'moonshotai/Kimi-K2.5' },
+                ...(modalities && { modalities }),
+              },
+            },
+          });
+
+          expect(config.modalities).toEqual(modalities ?? { image: true });
+        },
+      );
+
       it('resolves from CLI with highest priority', () => {
         const result = resolve({
           cli: {

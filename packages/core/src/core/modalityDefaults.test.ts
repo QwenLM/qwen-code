@@ -16,6 +16,8 @@ import {
 } from './modalityDefaults.js';
 import type { InputModalities } from './contentGenerator.js';
 
+const HF_ROUTER_URL = 'https://router.huggingface.co/v1';
+
 type Check = (model: string) => void;
 
 /** The model's modalities equal `expected` exactly (one assertion). */
@@ -116,6 +118,13 @@ describe('defaultModalities', () => {
       ['gpt-4o', IMAGE],
       ['o3', IMAGE],
     ]);
+
+    it('returns text-only for GPT-OSS and its HF router ID', () => {
+      TEXT_ONLY('gpt-oss-120b');
+      expect(
+        defaultModalities('openai/gpt-oss-120b:cerebras', HF_ROUTER_URL),
+      ).toEqual({});
+    });
   });
 
   describe('Anthropic Claude', () => {
@@ -209,6 +218,12 @@ describe('defaultModalities', () => {
       ['glm-5.3-flash', IMAGE_NO_PDF],
     ]);
 
+    it('returns image for the GLM-5.3-Flash HF router ID', () => {
+      expect(
+        defaultModalities('zai-org/GLM-5.3-Flash:zai-org', HF_ROUTER_URL).image,
+      ).toBe(true);
+    });
+
     casesFor('returns text-only for', [
       ['glm-5', TEXT_ONLY],
       ['glm-4.7', TEXT_ONLY],
@@ -238,6 +253,20 @@ describe('defaultModalities', () => {
     it('returns image only for the K3 256K variant', () => {
       expect(defaultModalities('k3-256k')).toEqual({ image: true });
       expect(defaultModalities('kimi-k3-256k')).toEqual({ image: true });
+    });
+
+    it.each([
+      'moonshotai/Kimi-K3:amazon-bedrock',
+      'moonshotai/Kimi-K2.5:fastest',
+    ])('infers image without video on the Hugging Face route %s', (model) => {
+      expect(defaultModalities(model, HF_ROUTER_URL)).toEqual({ image: true });
+    });
+
+    it('keeps the Kimi family defaults for a bare model ID', () => {
+      expect(defaultModalities('moonshotai/Kimi-K3', HF_ROUTER_URL)).toEqual({
+        image: true,
+        video: true,
+      });
     });
 
     it('returns text-only for kimi-k2', () => {

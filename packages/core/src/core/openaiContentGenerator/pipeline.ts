@@ -29,6 +29,10 @@ import { getBuiltinKimiK3Reasoning } from '../kimi-reasoning.js';
 import { getRequestModel } from '../request-model.js';
 import { isOpenRouterHostname } from './provider/openrouter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
+import {
+  getWireOutputBudget,
+  PROVIDER_OUTPUT_BUDGET_KEYS,
+} from './output-budget.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { PipelineConfig, RequestContext } from './types.js';
@@ -38,6 +42,7 @@ import { createChildAbortController } from '../../utils/abortController.js';
 import {
   QWEN4_NON_THINKING_OUTPUT_CAP,
   reconcileMaxTokens,
+  getHuggingFaceRoute,
 } from '../tokenLimits.js';
 import { markToolCallArgumentsIncomplete } from '../incomplete-tool-call-args.js';
 import {
@@ -81,6 +86,7 @@ import { markRequestDispatched } from '../loggingContentGenerator/request-dispat
 import {
   ensureReasoningContentOnAssistantMessage,
   filterIsolatedModelOverrides,
+  mapOpenAIToolChoice,
 } from './provider/utils.js';
 import {
   getEffectiveReasoning,
@@ -199,6 +205,7 @@ function profileReasoning(
 function applyConfiguredReasoningEffort(
   request: OpenAI.Chat.ChatCompletionCreateParams,
   capabilities: ResolvedReasoning | undefined,
+  baseUrl: string | undefined,
 ): OpenAI.Chat.ChatCompletionCreateParams {
   if (capabilities?.profile) {
     const loose = request as unknown as Record<string, unknown>;
@@ -247,7 +254,7 @@ function applyConfiguredReasoningEffort(
     );
   }
   // GPT flattens after raw overrides merge in the provider.
-  if (effort && getGptReasoningCapabilities(loose['model'] as string))
+  if (effort && getGptReasoningCapabilities(loose['model'] as string, baseUrl))
     return request;
   const { effort: _drop, ...rest } = reasoning;
   const next = { ...loose };
@@ -534,44 +541,12 @@ export class NonSSEResponseError extends Error {
   }
 }
 
-/**
- * Provider-specific output-budget keys that stand in for `max_tokens` on the
- * wire (e.g. GPT-5 / o-series use `max_completion_tokens`). When a user's
- * samplingParams already carries one of these, the window clamp must not also
- * inject `max_tokens`: sending the pair double-specifies the output budget and
- * some endpoints reject it.
- */
-const PROVIDER_OUTPUT_BUDGET_KEYS = ['max_completion_tokens', 'max_new_tokens'];
-
 function hasProviderOutputBudgetKey(samplingParams: {
   [key: string]: unknown;
 }): boolean {
   return PROVIDER_OUTPUT_BUDGET_KEYS.some(
     (key) => samplingParams[key] !== undefined,
   );
-}
-
-/**
- * Effective output-token ceiling carried by a wire request, whichever key the
- * budget travels under (`max_tokens` or a provider-specific stand-in).
- * Undefined when the request caps output by neither (e.g. a samplingParams
- * opt-out), in which case the converter's truncation corroboration check is
- * inconclusive and keeps its legacy inference.
- */
-function getWireOutputBudget(
-  request: OpenAI.Chat.ChatCompletionCreateParams,
-): number | undefined {
-  if (typeof request.max_tokens === 'number' && request.max_tokens > 0) {
-    return request.max_tokens;
-  }
-  const wire = request as unknown as Record<string, unknown>;
-  for (const key of PROVIDER_OUTPUT_BUDGET_KEYS) {
-    const value = wire[key];
-    if (typeof value === 'number' && value > 0) {
-      return value;
-    }
-  }
-  return undefined;
 }
 
 /**
@@ -1495,6 +1470,7 @@ export class ContentGenerationPipeline {
       baseRequest = applyConfiguredReasoningEffort(
         baseRequest,
         reasoningCapabilities,
+        this.contentGeneratorConfig.baseUrl,
       );
     }
 
@@ -1515,13 +1491,9 @@ export class ContentGenerationPipeline {
       // classifier's respond_in_schema) can force the model to emit a tool
       // call instead of free-texting. Without this, thinking-heavy models
       // may consume the tiny output budget on reasoning and skip the tool.
-      const fcMode = request.config?.toolConfig?.functionCallingConfig?.mode;
-      if (fcMode === 'ANY') {
-        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
-          'required';
-      } else if (fcMode === 'NONE') {
-        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
-          'none';
+      const toolChoice = mapOpenAIToolChoice(request.config.toolConfig);
+      if (toolChoice !== undefined) {
+        baseRequest.tool_choice = toolChoice;
       }
     }
 
@@ -1576,10 +1548,13 @@ export class ContentGenerationPipeline {
       reasoningCapabilities?.canDisable === false ||
       this.requiresThinking(model);
     const profile = reasoningCapabilities?.profile;
+    const gptReasoning = getGptReasoningCapabilities(
+      model,
+      this.contentGeneratorConfig.baseUrl,
+    );
     const thinkingMandatory =
       explicitThinkingMandatory ||
-      (!profile &&
-        getGptReasoningCapabilities(model)?.thinkingMandatory === true);
+      (!profile && gptReasoning?.thinkingMandatory === true);
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
@@ -1701,7 +1676,6 @@ export class ContentGenerationPipeline {
       if ('reasoning_effort' in typed && typed['reasoning_effort'] !== 'none') {
         delete typed['reasoning_effort'];
       }
-      const gptReasoning = getGptReasoningCapabilities(model);
       if (
         gptReasoning &&
         !reasoningCapabilities &&
@@ -1946,6 +1920,35 @@ export class ContentGenerationPipeline {
       }
       delete typed['max_output_tokens'];
     }
+    const hfOutputLimit = getHuggingFaceRoute(
+      providerRequest.model,
+      this.client.baseURL,
+    )?.limits?.output;
+    if (hfOutputLimit !== undefined) {
+      const limit = Math.min(hfOutputLimit, requestLimit ?? hfOutputLimit);
+      const maxTokens = providerRequest.max_tokens;
+      const normalBudget =
+        typeof maxTokens === 'number' && maxTokens > 0 ? maxTokens : undefined;
+      const budget = Math.min(limit, normalBudget ?? limit);
+      // An unset alternate can suppress max_tokens when building samplingParams.
+      let removedAlternate = false;
+      for (const key of PROVIDER_OUTPUT_BUDGET_KEYS) {
+        const value = typed[key];
+        if (value !== undefined && !(typeof value === 'number' && value > 0)) {
+          delete typed[key];
+          removedAlternate = true;
+        }
+      }
+      if (hasProviderOutputBudgetKey(typed)) {
+        delete providerRequest.max_tokens;
+        clampProviderOutputBudgetKeys(typed, budget);
+      } else if (
+        normalBudget !== undefined ||
+        (removedAlternate && requestLimit !== undefined)
+      ) {
+        providerRequest.max_tokens = budget;
+      }
+    }
     return providerRequest;
   }
 
@@ -2049,6 +2052,7 @@ export class ContentGenerationPipeline {
       const samplingParams =
         getGptReasoningCapabilities(
           request.model || this.contentGeneratorConfig.model,
+          this.contentGeneratorConfig.baseUrl,
         ) &&
         configSamplingParams['reasoning'] === undefined &&
         (isReasoningEffortPlaceholder(
@@ -2345,6 +2349,10 @@ export class ContentGenerationPipeline {
       this.contentGeneratorConfig,
       request.model || this.contentGeneratorConfig.model,
     );
+    const nominalModalities =
+      effectiveModel === this.contentGeneratorConfig.model
+        ? this.contentGeneratorConfig.nominalModelCapabilities?.modalities
+        : undefined;
     const providerOverrides =
       this.config.provider.getRequestContextOverrides?.() ?? {};
     const toolCallParser = isStreaming
@@ -2359,7 +2367,8 @@ export class ContentGenerationPipeline {
 
     return {
       model: effectiveModel,
-      modalities: this.contentGeneratorConfig.modalities ?? {},
+      modalities:
+        nominalModalities ?? this.contentGeneratorConfig.modalities ?? {},
       imageDetail: this.contentGeneratorConfig.imageDetail,
       startTime: Date.now(),
       splitToolMedia:

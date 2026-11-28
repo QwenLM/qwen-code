@@ -5,7 +5,7 @@
  */
 
 import type { InputModalities } from './contentGenerator.js';
-import { normalize } from './tokenLimits.js';
+import { getHuggingFaceRoute, normalize } from './tokenLimits.js';
 import { lookupModelCatalog } from '../models/model-catalog.js';
 import { parseModelReasoningCapabilities } from './reasoning-effort.js';
 
@@ -28,8 +28,9 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^gemini-/, FULL_MULTIMODAL],
 
   // -------------------
-  // OpenAI — image by default for all gpt/o-series models
+  // OpenAI — GPT-OSS is text-only. The GPT and o-series fallback allows images.
   // -------------------
+  [/^gpt-oss(?:-|$)/, {}],
   [/^gpt-5/, { image: true }],
   [/^gpt-/, { image: true }],
   [/^o\d/, { image: true }],
@@ -150,16 +151,24 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
  * family. A model neither source knows stays text-only (empty object) to avoid
  * sending unsupported media types that would cause unrecoverable API errors.
  */
-export function defaultModalities(model: string): InputModalities {
-  const norm = normalize(model);
+export function defaultModalities(
+  model: string,
+  baseUrl?: string,
+): InputModalities {
+  const route = getHuggingFaceRoute(model, baseUrl);
+  const norm = normalize(route?.model ?? model);
   const fromCatalog = { ...lookupModelCatalog(norm)?.modalities };
   delete fromCatalog.pdf;
-  for (const [regex, modalities] of MODALITY_PATTERNS) {
-    if (regex.test(norm)) {
-      return { ...fromCatalog, ...modalities };
-    }
-  }
-  return fromCatalog;
+  const family = MODALITY_PATTERNS.find(([regex]) => regex.test(norm))?.[1];
+  const modalities = { ...fromCatalog, ...family };
+  return route ? huggingFaceChatModalities(modalities) : modalities;
+}
+
+// HF Chat Completions specifies text and image message parts.
+export function huggingFaceChatModalities({
+  image,
+}: InputModalities): InputModalities {
+  return image === undefined ? {} : { image };
 }
 
 /**

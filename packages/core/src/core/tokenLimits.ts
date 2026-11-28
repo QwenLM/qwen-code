@@ -64,7 +64,7 @@ export function outputClampMargin(contextWindowSize: number): TokenCount {
 /**
  * Size an output request to the room actually left in the context window:
  * `min(ceiling, window − prompt − margin)`, floored at
- * `min(MIN_CLAMPED_OUTPUT_TOKENS, window − prompt)`. Makes
+ * `min(MIN_CLAMPED_OUTPUT_TOKENS, outputFloorLimit, window − prompt)`. Makes
  * `prompt + max_tokens ≤ window` an invariant on every main-turn request
  * whose prompt still fits the window (issue #5950 becomes structurally
  * impossible), which is what lets compaction thresholds run against the
@@ -80,11 +80,13 @@ export function outputClampMargin(contextWindowSize: number): TokenCount {
  * @param promptTokens - Estimated prompt size; use the API-authoritative
  *   count where available (a fresh chars/4 estimate under-counts CJK and
  *   tool-heavy prompts, which is the one way a residual 400 could return).
+ * @param outputFloorLimit - Optional cap on the minimum output budget.
  */
 export function clampOutputTokensToWindow(
   outputCeiling: number,
   contextWindowSize: number,
   promptTokens: number,
+  outputFloorLimit = MIN_CLAMPED_OUTPUT_TOKENS,
 ): TokenCount {
   const room =
     contextWindowSize - promptTokens - outputClampMargin(contextWindowSize);
@@ -97,7 +99,11 @@ export function clampOutputTokensToWindow(
   // window.
   const floor = Math.max(
     1,
-    Math.min(MIN_CLAMPED_OUTPUT_TOKENS, contextWindowSize - promptTokens),
+    Math.min(
+      MIN_CLAMPED_OUTPUT_TOKENS,
+      outputFloorLimit,
+      contextWindowSize - promptTokens,
+    ),
   );
   // Floor the ROOM, then cap by the ceiling — never the other way around: an
   // explicit ceiling below the floor (e.g.
@@ -144,9 +150,69 @@ const LIMITS = {
   '16k': 16_384,
 } as const;
 
+// HF publishes context lengths per provider. Its OpenRouter partner publishes
+// the separate completion limits in /api/v1/models/:author/:slug/endpoints.
+const HUGGING_FACE_ROUTE_LIMITS = new Map<
+  string,
+  Record<TokenLimitType, TokenCount>
+>([
+  [
+    'deepseek-ai/deepseek-v4.1-flash:deepinfra',
+    { input: 1_048_576, output: 393_216 },
+  ],
+  [
+    'deepseek-ai/deepseek-v4.1-flash:featherless',
+    { input: LIMITS['256k'], output: 32_768 },
+  ],
+  ['minimaxai/minimax-m2.5:digitalocean', { input: 65_536, output: 58_982 }],
+  ['moonshotai/kimi-k3:fireworks', { input: 1_048_576, output: 943_718 }],
+  ['qwen/qwen3.8-27b:cerebras', { input: 65_536, output: 32_768 }],
+  ['zai-org/glm-5.3-flash:deepinfra', { input: 1_048_576, output: 943_718 }],
+]);
+
+export function isHuggingFaceRouterUrl(baseUrl?: string): boolean {
+  if (!baseUrl) return false;
+  try {
+    const url = new URL(baseUrl);
+    return url.protocol === 'https:' && url.host === 'router.huggingface.co';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The Hugging Face router uses a single provider or policy suffix. Suffixes on
+ * other endpoints can describe distinct models, and catalog keys have no URL.
+ */
+export function getHuggingFaceRoute(
+  model: string,
+  baseUrl?: string,
+):
+  | { model: string; limits?: Readonly<Record<TokenLimitType, TokenCount>> }
+  | undefined {
+  if (
+    typeof model !== 'string' ||
+    !model.includes(':') ||
+    !isHuggingFaceRouterUrl(baseUrl)
+  ) {
+    return undefined;
+  }
+
+  const trimmed = model.trim();
+  const id = /(?:^|[|:])([^|:]*\/[^/:|\s]+:(?!batch$)[^/:|\s]+)$/i.exec(
+    trimmed,
+  )?.[1];
+  if (!id) return undefined;
+  return {
+    model: trimmed.slice(0, trimmed.lastIndexOf(':')),
+    limits: HUGGING_FACE_ROUTE_LIMITS.get(id.toLowerCase()),
+  };
+}
+
 /** Robust normalizer: strips provider prefixes, pipes/colons, date/version suffixes, etc. */
-export function normalize(model: string): string {
+export function normalize(model: string, baseUrl?: string): string {
   let s = (model ?? '').toLowerCase().trim();
+  s = getHuggingFaceRoute(s, baseUrl)?.model ?? s;
 
   // keep final path segment (strip provider prefixes), handle pipe/colon
   s = s.replace(/^.*\//, '');
@@ -451,15 +517,39 @@ function findTokenLimit(
  * Whether a curated output limit caps explicit requests. Catalog-only limits
  * supply defaults, but must not clamp a user's endpoint-specific override.
  */
-export function hasExplicitOutputLimit(model: Model): boolean {
-  return curatedOutputLimit(normalize(model)) !== undefined;
+export function hasExplicitOutputLimit(
+  model: Model,
+  baseUrl?: string,
+): boolean {
+  const route = getHuggingFaceRoute(model, baseUrl);
+  return route
+    ? route.limits !== undefined
+    : curatedOutputLimit(normalize(model)) !== undefined;
 }
 
 export function knownTokenLimit(
   model: Model,
   type: TokenLimitType = 'input',
+  baseUrl?: string,
 ): TokenCount | undefined {
-  return findTokenLimit(model, type);
+  const route = getHuggingFaceRoute(model, baseUrl);
+  if (!route) return findTokenLimit(model, type);
+  const providerLimit = route.limits?.[type];
+  if (providerLimit !== undefined) return providerLimit;
+  if (type === 'output') {
+    const ceiling = Math.min(
+      findTokenLimit(model, type) ?? DEFAULT_OUTPUT_TOKEN_LIMIT,
+      DEFAULT_OUTPUT_TOKEN_LIMIT,
+    );
+    return Math.min(findTokenLimit(route.model, type) ?? ceiling, ceiling);
+  }
+
+  // A family window can narrow the default when the selected provider's
+  // window is unknown.
+  return Math.min(
+    findTokenLimit(route.model, 'input') ?? DEFAULT_TOKEN_LIMIT,
+    DEFAULT_TOKEN_LIMIT,
+  );
 }
 
 /**
@@ -475,14 +565,16 @@ export function knownTokenLimit(
  *
  * @param model - The model name to get the token limit for
  * @param type - The type of token limit ('input' for context window, 'output' for generation)
+ * @param baseUrl - The resolved request endpoint, when available
  * @returns The maximum number of tokens allowed for this model and type
  */
 export function tokenLimit(
   model: Model,
   type: TokenLimitType = 'input',
+  baseUrl?: string,
 ): TokenCount {
   return (
-    knownTokenLimit(model, type) ??
+    knownTokenLimit(model, type, baseUrl) ??
     (type === 'output' ? DEFAULT_OUTPUT_TOKEN_LIMIT : DEFAULT_TOKEN_LIMIT)
   );
 }
@@ -493,9 +585,19 @@ export function tokenLimit(
  * place that policy lives — the send path and both provider layers call it
  * so a model advertising >64K output is clamped consistently everywhere.
  */
-export function defaultOutputCeiling(model: Model): TokenCount {
-  const outputLimit = tokenLimit(model, 'output');
-  const normalized = normalize(model);
+export function defaultOutputCeiling(
+  model: Model,
+  baseUrl?: string,
+): TokenCount {
+  const route = getHuggingFaceRoute(model, baseUrl);
+  // A verified provider's maximum can exceed the automatic family budget.
+  const outputLimit = route?.limits
+    ? Math.min(
+        route.limits.output,
+        findTokenLimit(route.model, 'output') ?? route.limits.output,
+      )
+    : tokenLimit(model, 'output', baseUrl);
+  const normalized = normalize(route?.model ?? model);
   if (
     CLAUDE_OPUS_EXTENDED.test(normalized) ||
     QWEN4_OUTPUT_EXTENDED.test(normalized)

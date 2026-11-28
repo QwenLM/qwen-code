@@ -43,7 +43,10 @@ export const REASONING_EFFORT_RANKS: Record<ReasoningEffort, number> = {
   max: 70,
 };
 
-export function getGptReasoningCapabilities(model: string | undefined):
+export function getGptReasoningCapabilities(
+  model: string | undefined,
+  baseUrl?: string,
+):
   | {
       efforts: readonly ReasoningEffort[];
       defaultEffort: ReasoningEffort;
@@ -53,6 +56,7 @@ export function getGptReasoningCapabilities(model: string | undefined):
   | undefined {
   const normalized = normalize(
     (model ?? '').trim().replace(/:batch(?=:|$)/gi, ''),
+    baseUrl,
   )
     .replace(/-\d{4}-\d{2}-\d{2}$/, '')
     .replace(/^(gpt-5\.\d+)(?:\.\d+)+(?=-|$)/, '$1');

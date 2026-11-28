@@ -159,6 +159,32 @@ describe('ModelRegistry', () => {
         models.find((m) => m.id === 'gpt-3.5-turbo')?.registryBaseUrl,
       ).toBeUndefined();
     });
+
+    it('reports the window for the Hugging Face Chat wire model', () => {
+      const baseUrl = 'https://router.huggingface.co/v1';
+      const model = 'deepseek-ai/DeepSeek-V4.1-Flash:featherless';
+      const [available] = openaiListed({
+        id: 'deepseek-ai/DeepSeek-V4.1-Flash:deepinfra',
+        baseUrl,
+        generationConfig: {
+          samplingParams: { model: 'MiniMaxAI/MiniMax-M2.5:digitalocean' },
+          extra_body: { model },
+        },
+      });
+      expect(available.contextWindowSize).toBe(262_144);
+    });
+
+    it('preserves an explicit Hugging Face Chat model window', () => {
+      const [available] = openaiListed({
+        id: 'deepseek-ai/DeepSeek-V4.1-Flash:deepinfra',
+        baseUrl: 'https://router.huggingface.co/v1',
+        generationConfig: {
+          samplingParams: { model: 'MiniMaxAI/MiniMax-M2.5:digitalocean' },
+          contextWindowSize: 42_000,
+        },
+      });
+      expect(available.contextWindowSize).toBe(42_000);
+    });
   });
 
   describe('getModel', () => {

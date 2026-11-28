@@ -40,6 +40,7 @@ import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
+import { getRequestModel } from './request-model.js';
 import {
   resolveSlimmingConfig,
   slimCompactionInput,
@@ -51,6 +52,7 @@ import {
 import {
   defaultOutputCeiling,
   hasExplicitOutputLimit,
+  isHuggingFaceRouterUrl,
   parsePositiveIntegerEnvValue,
   tokenLimit,
 } from './tokenLimits.js';
@@ -217,9 +219,17 @@ function budgetOutputTokensForWindow(
   contentGeneratorConfig: ContentGeneratorConfig | undefined,
   resolvedContextWindowSize: number | undefined,
   imageTokenEstimate: number,
-  tools?: Tool[],
+  options?: { tools?: Tool[]; isolatedRequest?: boolean },
 ): GenerateContentConfig {
   if (requestConfig.maxOutputTokens !== undefined) return requestConfig;
+
+  const baseUrl = contentGeneratorConfig?.baseUrl;
+  const budgetModel =
+    contentGeneratorConfig &&
+    !options?.isolatedRequest &&
+    isHuggingFaceRouterUrl(baseUrl)
+      ? getRequestModel(contentGeneratorConfig, model)
+      : model;
 
   // The env override is an operator ceiling, not a licence to emit above the
   // model's own output maximum. Two wires apply no output clamp of their own —
@@ -241,8 +251,8 @@ function budgetOutputTokensForWindow(
       ? undefined
       : Math.min(
           envCeiling,
-          hasExplicitOutputLimit(model)
-            ? tokenLimit(model, 'output')
+          hasExplicitOutputLimit(budgetModel, baseUrl)
+            ? tokenLimit(budgetModel, 'output', baseUrl)
             : Number.POSITIVE_INFINITY,
         ));
   // `<= 0` means "not configured", the reading `config.ts` gives this same
@@ -253,14 +263,14 @@ function budgetOutputTokensForWindow(
     contentGeneratorConfig?.contextWindowSize,
   ].find((v): v is number => typeof v === 'number' && v > 0);
   const room =
-    (declaredWindow ?? tokenLimit(model, 'input')) -
+    (declaredWindow ?? tokenLimit(budgetModel, 'input', baseUrl)) -
     // The operator's resolved estimate, not `DEFAULT_IMAGE_TOKEN_ESTIMATE`:
     // every other estimator on the send path uses it, and pricing a kept image
     // low here over-states the room, which is the 400 this budget exists to
     // prevent.
     estimateContentTokens(contents, imageTokenEstimate) -
     estimateSystemInstructionTokens(requestConfig.systemInstruction) -
-    estimateToolTokens(tools) -
+    estimateToolTokens(options?.tools) -
     estimateResponseSchemaTokens(requestConfig.responseJsonSchema);
 
   // A window the measured prompt all but fills is not this layer's to paper
@@ -274,7 +284,7 @@ function budgetOutputTokensForWindow(
   // can itself exceed a tight window, which is what this path must not do.
   if (room < 256) return requestConfig;
 
-  const ceiling = explicitCeiling ?? defaultOutputCeiling(model);
+  const ceiling = explicitCeiling ?? defaultOutputCeiling(budgetModel, baseUrl);
   // Only the window term is this layer's business: when it does not bind,
   // leave the request alone so each wire keeps applying whatever output limit
   // it applied before side queries were budgeted. Two wires apply none at all —
@@ -561,7 +571,7 @@ export class BaseLlmClient {
       resolvedContextWindowSize,
       resolveSlimmingConfig(this.config.getChatCompression?.())
         .imageTokenEstimate,
-      tools,
+      { tools },
     );
 
     try {
@@ -699,18 +709,23 @@ export class BaseLlmClient {
     });
     // An already-started shared OAuth refresh may outlive this request.
     if (isolatedRequest) abortSignal.throwIfAborted();
+    const nominalCapabilities =
+      isolatedRequest && requestModel === contentGeneratorConfig?.model
+        ? contentGeneratorConfig.nominalModelCapabilities
+        : undefined;
     const requestContents = slimCompactionInput(
       contents,
-      contentGeneratorConfig.modalities,
+      nominalCapabilities?.modalities ?? contentGeneratorConfig.modalities,
     ).slimmedHistory;
     const budgetedConfig = budgetOutputTokensForWindow(
       requestConfig,
       requestContents,
       requestModel,
       contentGeneratorConfig,
-      resolvedContextWindowSize,
+      nominalCapabilities?.contextWindowSize ?? resolvedContextWindowSize,
       resolveSlimmingConfig(this.config.getChatCompression?.())
         .imageTokenEstimate,
+      { isolatedRequest },
     );
 
     try {
@@ -925,14 +940,10 @@ export class BaseLlmClient {
     const retryErrorCodes =
       resolvedModel?.generationConfig?.retryErrorCodes ?? mainRetryErrorCodes;
     const targetModel = resolvedModel?.id ?? requestModel;
-    // `contentGeneratorConfig` is built from `{ ...parentConfig }` and
-    // `applyResolvedModelConfig` overwrites `contextWindowSize` only when the
-    // registry declares one, so for a same-provider target it carries the
-    // *session* model's window. Resolve the window against the target instead.
-    // The session value stays authoritative only on the fallback route, where
-    // the session generator really is the one sending the request — detected
-    // by identity, since that fallback hands back the very object
-    // `mainGeneratorConfig` was read from.
+    const inferredWireWindow = contentGeneratorConfig?.nominalModelCapabilities
+      ?.contextWindowSize
+      ? contentGeneratorConfig.contextWindowSize
+      : undefined;
     const fellBackToSessionGenerator =
       contentGeneratorConfig === mainGeneratorConfig;
 
@@ -944,8 +955,9 @@ export class BaseLlmClient {
       model: targetModel,
       contextWindowSize: fellBackToSessionGenerator
         ? undefined
-        : (resolvedModel?.generationConfig?.contextWindowSize ??
-          tokenLimit(targetModel, 'input')),
+        : (inferredWireWindow ??
+          resolvedModel?.generationConfig?.contextWindowSize ??
+          tokenLimit(targetModel, 'input', contentGeneratorConfig?.baseUrl)),
     };
   }
 
@@ -1097,6 +1109,13 @@ export class BaseLlmClient {
             ...targetConfig.modalities,
             image: true,
           };
+          const nominal = targetConfig.nominalModelCapabilities;
+          if (nominal?.modalities) {
+            targetConfig.nominalModelCapabilities = {
+              ...nominal,
+              modalities: { ...nominal.modalities, image: true },
+            };
+          }
         }
         if (isolatedRoute && resolvedModel.authType === AuthType.QWEN_OAUTH) {
           targetConfig.apiKey = QWEN_OAUTH_TOKEN_PLACEHOLDER;

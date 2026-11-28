@@ -134,6 +134,257 @@ describe('frozen Managed side-query input', () => {
     expect(request?.config?.tools).toBeUndefined();
   });
 
+  it.each(['main', 'private'] as const)(
+    'fits %s history before sizing the default output for a tight HF route',
+    async (source) => {
+      const f = fixture();
+      const question = 'What did we decide?';
+      const text = 'Use the inventory marker. ' + 'x'.repeat(12_656);
+      if (source === 'main') f.turn('good', 'completed', question, text);
+      const request = await prepareManagedSideQuery(
+        {
+          kind: 'btw',
+          question: 'What is the marker?',
+          privateHistory: source === 'private' ? [{ question, text }] : [],
+          throughSequence: f.events.length,
+        },
+        f.events,
+        f.resources,
+        {
+          model: 'MiniMaxAI/MiniMax-M2.5:digitalocean',
+          baseUrl: 'https://router.huggingface.co/v1',
+        },
+      );
+      const contents = request?.contents as Content[];
+      expect(contents).toHaveLength(3);
+      expect(contents[1]?.parts?.[0]?.text).toBe(text);
+      const maxOutput = request?.config?.maxOutputTokens ?? 0;
+      expect(maxOutput).toBeGreaterThan(4_000);
+      expect(maxOutput).toBeLessThan(58_982);
+    },
+  );
+
+  it('keeps CJK history and leaves room for the DigitalOcean tokenizer count', async () => {
+    const f = fixture();
+    const text =
+      'The inventory marker is inventory-marker-neptune-88621.\n' +
+      '协调，检查，撤回，超时，等待，分配，重试，终止，恢复，降级，拒绝，忽略，转移，冻结。\n'.repeat(
+        720,
+      );
+    f.turn('good', 'completed', 'Record my new inventory marker.', text);
+    const request = await prepareManagedSideQuery(
+      {
+        kind: 'btw',
+        question:
+          'What inventory marker did I record in the previous exchange?',
+        privateHistory: [],
+        throughSequence: f.events.length,
+      },
+      f.events,
+      f.resources,
+      {
+        model: 'MiniMaxAI/MiniMax-M2.5:digitalocean',
+        baseUrl: 'https://router.huggingface.co/v1',
+      },
+    );
+
+    const contents = request?.contents as Content[];
+    expect(contents[1]?.parts?.[0]?.text).toBe(text);
+    // The published MiniMax tokenizer counts 17,368 input tokens for this replay.
+    expect(request?.config?.maxOutputTokens).toBeLessThanOrEqual(
+      65_536 - 17_368,
+    );
+  });
+
+  it('fits denser Cantonese history within the DigitalOcean window', async () => {
+    const f = fixture();
+    const question = 'Keep the inventory marker.';
+    const text =
+      '呢啲嘢唔好掂住；噚日個掣郁唔到，依家仲係咁。佢噚晚收咗工至嚟睇，冇話畀我哋知幾時整得掂。\n'.repeat(
+        430,
+      );
+    const request = await prepareManagedSideQuery(
+      {
+        kind: 'btw',
+        question: 'What is the marker?',
+        privateHistory: [{ question, text }],
+        throughSequence: f.events.length,
+      },
+      f.events,
+      f.resources,
+      {
+        model: 'MiniMaxAI/MiniMax-M2.5:digitalocean',
+        baseUrl: 'https://router.huggingface.co/v1',
+      },
+    );
+
+    expect((request?.contents as Content[])[1]?.parts?.[0]?.text).toBe(text);
+    // The published MiniMax tokenizer counts 25,008 input tokens for this replay.
+    expect(request?.config?.maxOutputTokens).toBeLessThanOrEqual(
+      65_536 - 25_008,
+    );
+  });
+
+  it.each(['main', 'private'] as const)(
+    'fits traditional Mongolian %s history within the DigitalOcean window',
+    async (source) => {
+      const f = fixture();
+      const question =
+        'Preserve this snapshot for the subsequent incident summary.';
+      const text =
+        'The export-1-reference is inventory-marker-neptune-88621. The retained snapshot follows.\n\n' +
+        'ᠰᠠᠢᠨ ᠪᠠᠢᠨ᠎ᠠ ᠤᠤ᠂ ᠪᠢᠴᠢᠭ᠌ ᠪᠠᠷᠢᠮᠲᠠ ᠤᠩᠰᠢᠵᠤ ᠪᠠᠢᠨ᠎ᠠ᠃\n'.repeat(255);
+      if (source === 'main') f.turn('good', 'completed', question, text);
+      const request = await prepareManagedSideQuery(
+        {
+          kind: 'btw',
+          question:
+            'What inventory marker did I record in the previous exchange?',
+          privateHistory: source === 'private' ? [{ question, text }] : [],
+          throughSequence: f.events.length,
+        },
+        f.events,
+        f.resources,
+        {
+          model: 'MiniMaxAI/MiniMax-M2.5:digitalocean',
+          baseUrl: 'https://router.huggingface.co/v1',
+        },
+      );
+
+      expect((request?.contents as Content[])[1]?.parts?.[0]?.text).toBe(text);
+      const output = request?.config?.maxOutputTokens ?? 0;
+      expect(output).toBeGreaterThan(4_000);
+      // The published MiniMax tokenizer counts 30,189 input tokens for this replay.
+      expect(output + 30_189).toBeLessThanOrEqual(65_536);
+    },
+  );
+
+  it.each([
+    { kind: 'btw', shifts: 1, maxTokens: undefined, retained: 1 },
+    { kind: 'btw', shifts: 2, maxTokens: 32_000, retained: 1 },
+    { kind: 'recap', shifts: 3, maxTokens: undefined, retained: 2 },
+  ] as const)(
+    'fits $shifts numeric CSV exports for $kind with max_tokens $maxTokens',
+    async ({ kind, shifts, maxTokens, retained }) => {
+      const f = fixture();
+      const csv = [
+        'time,started,succeeded,failed,timeout,p50_ms,p90_ms,p95_ms,p99_ms,bytes_in,bytes_out',
+        ...Array.from({ length: 600 }, (_, minute) => {
+          const date = new Date(Date.UTC(2026, 9, 21, 8, minute));
+          const time = date.toISOString().slice(0, 19) + 'Z';
+          return (
+            time + ',2021,1986,32,3,54.57,67.39,92.68,195.38,18884129,35051762'
+          );
+        }),
+      ].join('\n');
+      const exports = Array.from({ length: shifts }, (_, index) =>
+        ['Shift ' + (index + 1), csv].join('\n'),
+      );
+      for (const [index, text] of exports.entries()) {
+        f.turn(String(index), 'completed', 'Keep this gateway export.', text);
+      }
+
+      const request = await prepareManagedSideQuery(
+        {
+          kind,
+          question: kind === 'btw' ? 'How many requests were started?' : null,
+          privateHistory: [],
+          throughSequence: f.events.length,
+        },
+        f.events,
+        f.resources,
+        {
+          model: 'MiniMaxAI/MiniMax-M2.5:digitalocean',
+          baseUrl: 'https://router.huggingface.co/v1',
+          ...(maxTokens === undefined
+            ? {}
+            : { samplingParams: { max_tokens: maxTokens } }),
+        },
+      );
+
+      const contents = request?.contents as Content[];
+      expect(
+        contents
+          .filter((content) => content.role === 'model')
+          .map((content) => content.parts?.[0]?.text),
+      ).toEqual(exports.slice(-retained));
+      if (shifts === 1) {
+        // The published MiniMax tokenizer counts 28,900 input tokens here.
+        expect(request?.config?.maxOutputTokens).toBeLessThanOrEqual(
+          65_536 - 28_900,
+        );
+      } else {
+        expect(request?.config?.maxOutputTokens).toBe(maxTokens ?? 300);
+      }
+    },
+  );
+
+  it.each([
+    { kind: 'btw', length: 112_000, maxTokens: undefined },
+    { kind: 'btw', length: 68_000, maxTokens: 32_000 },
+    { kind: 'recap', length: 132_000, maxTokens: undefined },
+  ] as const)(
+    'keeps $length characters of English history for $kind with max_tokens $maxTokens',
+    async ({ kind, length, maxTokens }) => {
+      const f = fixture();
+      const text =
+        'Find the account marker, preserve the original document, and record the new window in the audit notes. '
+          .repeat(1_320)
+          .slice(0, length);
+      f.turn('good', 'completed', 'Keep the inventory marker.', text);
+      const request = await prepareManagedSideQuery(
+        {
+          kind,
+          question: kind === 'btw' ? 'What is the marker?' : null,
+          privateHistory: [],
+          throughSequence: f.events.length,
+        },
+        f.events,
+        f.resources,
+        {
+          model: 'MiniMaxAI/MiniMax-M2.5:digitalocean',
+          baseUrl: 'https://router.huggingface.co/v1',
+          ...(maxTokens && { samplingParams: { max_tokens: maxTokens } }),
+        },
+      );
+
+      expect((request?.contents as Content[])[1]?.parts?.[0]?.text).toBe(text);
+      if (maxTokens || kind === 'recap') {
+        expect(request?.config?.maxOutputTokens).toBe(maxTokens ?? 300);
+      }
+    },
+  );
+
+  it('reserves an explicit hosted output budget before fitting history', async () => {
+    const f = fixture();
+    f.turn(
+      'good',
+      'completed',
+      'Previous question',
+      'Keep the original marker in the audit notes. '.repeat(1_000),
+    );
+    const request = await prepareManagedSideQuery(
+      {
+        kind: 'btw',
+        question: 'Current question',
+        privateHistory: [],
+        throughSequence: f.events.length,
+      },
+      f.events,
+      f.resources,
+      {
+        model: 'MiniMaxAI/MiniMax-M2.5:digitalocean',
+        baseUrl: 'https://router.huggingface.co/v1',
+        samplingParams: { max_tokens: 58_982 },
+      },
+    );
+
+    expect(request?.contents).toEqual([
+      { role: 'user', parts: [{ text: 'Current question' }] },
+    ]);
+    expect(request?.config?.maxOutputTokens).toBe(58_982);
+  });
+
   it('recaps only visible original dialogue and uses the pre-hook display text', async () => {
     const f = fixture();
     f.event('input.accepted', {

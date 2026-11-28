@@ -14,6 +14,9 @@ import { ModelRegistry } from '@qwen-code/qwen-code-core/models/modelRegistry.js
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { completeModModel, resolveModModel } from './mod-model.js';
 
+const HF_ROUTER_URL = 'https://router.huggingface.co/v1';
+const GLM_MODEL = 'zai-org/GLM-5.3-Flash:deepinfra';
+
 const usage = {
   promptTokenCount: 10,
   cachedContentTokenCount: 4,
@@ -25,6 +28,7 @@ function fakeConfig(
   options: {
     fastModel?: string;
     generateText?: (request: Record<string, unknown>) => Promise<unknown>;
+    session?: { model: string; baseUrl: string };
   } = {},
 ) {
   const generateText = vi.fn(
@@ -41,15 +45,21 @@ function fakeConfig(
     { id: 'claude-x', authType: 'anthropic' },
     { id: 'inherit', authType: 'openai' },
     { id: 'constructor', authType: 'openai' },
+    { id: GLM_MODEL, authType: 'openai', baseUrl: HF_ROUTER_URL },
   ];
   const config = {
-    getModel: () => 'qwen-max',
-    getContentGeneratorConfig: () => ({ authType: 'openai' }),
+    getModel: () => options.session?.model ?? 'qwen-max',
+    getContentGeneratorConfig: () => ({
+      authType: 'openai',
+      ...options.session,
+    }),
     getFastModel: () => options.fastModel,
     getAllConfiguredModels: (authTypes?: string[]) =>
       models.filter(
         (model) => !authTypes || authTypes.includes(model.authType),
       ),
+    getResolvedModelConfig: (authType: string, id: string) =>
+      models.find((model) => model.id === id && model.authType === authType),
     getBaseLlmClient: () => ({ generateText }),
   } as unknown as Config;
   return { config, generateText };
@@ -81,6 +91,7 @@ describe('resolveModModel', () => {
       selector: pinned,
       modelId: 'qwen-flash',
       authType: 'openai',
+      baseUrl: 'https://workspace.example/v1',
     });
   });
 
@@ -190,6 +201,52 @@ describe('completeModModel', () => {
       ),
     ).rejects.toThrow("over deepseek-chat's output limit");
     expect(generateText).not.toHaveBeenCalled();
+  });
+
+  it('looks up the Hugging Face output limit for session and registered routes', async () => {
+    const hfSession = fakeConfig({
+      session: { model: GLM_MODEL, baseUrl: HF_ROUTER_URL },
+    });
+    const otherSession = fakeConfig({
+      session: { model: GLM_MODEL, baseUrl: 'https://workspace.example/v1' },
+    });
+    const signal = new AbortController().signal;
+    const input = { model: 'inherit', prompt: 'p', maxTokens: 200_000 };
+
+    for (const [target, model] of [
+      [hfSession, 'inherit'],
+      [otherSession, `openai:${GLM_MODEL}\0${HF_ROUTER_URL}`],
+      [fakeConfig(), GLM_MODEL],
+    ] as const) {
+      await expect(
+        completeModModel(
+          target.config,
+          { ...input, model, maxTokens: 1_000_000 },
+          signal,
+        ),
+      ).rejects.toThrow('output limit of 943718');
+      expect(target.generateText).not.toHaveBeenCalled();
+
+      await expect(
+        completeModModel(target.config, { ...input, model }, signal),
+      ).resolves.toMatchObject({ isAnswered: true });
+      expect(target.generateText).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          config: expect.objectContaining({ maxOutputTokens: 200_000 }),
+        }),
+      );
+      target.generateText.mockClear();
+    }
+
+    await expect(
+      completeModModel(otherSession.config, input, signal),
+    ).resolves.toMatchObject({ isAnswered: true });
+    expect(otherSession.generateText).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        model: `openai:${GLM_MODEL}`,
+        config: expect.objectContaining({ maxOutputTokens: 200_000 }),
+      }),
+    );
   });
 
   it('answers an empty reply, an API error and a timeout as results', async () => {
@@ -336,6 +393,7 @@ describe('completeModModel', () => {
         getModelsConfig: () => ({
           getResolvedModel: registry.getModel.bind(registry),
         }),
+        getResolvedModelConfig: registry.getModel.bind(registry),
         getSessionId: () => 'mod-model-test',
         getCliVersion: () => 'test',
         getProxy: () => undefined,

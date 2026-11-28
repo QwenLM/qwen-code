@@ -22,11 +22,13 @@ import {
   createContentGenerator,
   type ContentGeneratorConfig,
 } from '../core/contentGenerator.js';
+import { defaultModalities } from '../core/modalityDefaults.js';
 import {
   DEFAULT_DASHSCOPE_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
   normalizeOpenAiWireBaseUrl,
 } from '../core/openaiContentGenerator/constants.js';
+import { isHuggingFaceRouterUrl, tokenLimit } from '../core/tokenLimits.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   AUTH_ENV_MAPPINGS,
@@ -42,6 +44,7 @@ import {
   type ReasoningEffort,
 } from '../core/reasoning-effort.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { applyHuggingFaceWireModelDefaults } from './hugging-face-wire-model.js';
 
 const debugLogger = createDebugLogger('AGENT_CONTENT_GENERATOR');
 
@@ -161,7 +164,7 @@ function offeredReasoningEfforts(
     );
     if (resolved) return reasoningEffortsForCapability(resolved);
     return (
-      getGptReasoningCapabilities(target.model)?.efforts ??
+      getGptReasoningCapabilities(target.model, target.baseUrl)?.efforts ??
       REASONING_EFFORT_TIERS
     );
   }
@@ -181,7 +184,8 @@ function offeredReasoningEfforts(
     if (declared) return reasoningEffortsForCapability(declared);
   }
   return (
-    getGptReasoningCapabilities(target.model)?.efforts ?? REASONING_EFFORT_TIERS
+    getGptReasoningCapabilities(target.model, target.baseUrl)?.efforts ??
+    REASONING_EFFORT_TIERS
   );
 }
 
@@ -282,13 +286,6 @@ function buildInheritedAgentContentGeneratorConfig(
     authOverrides.authType,
     'apiKey',
   );
-  if (
-    !sameProvider ||
-    nextConfig.model !== parentConfig.model ||
-    (authOverrides.baseUrl !== undefined &&
-      authOverrides.baseUrl !== parentConfig.baseUrl)
-  )
-    nextConfig.reasoningRouteBaseUrl = authOverrides.baseUrl;
   nextConfig.baseUrl =
     authOverrides.baseUrl ??
     resolveCredentialField(
@@ -300,6 +297,45 @@ function buildInheritedAgentContentGeneratorConfig(
   nextConfig.apiKeyEnvKey = sameProvider
     ? parentConfig.apiKeyEnvKey
     : undefined;
+
+  const modelChanged = nextConfig.model !== parentConfig.model;
+  const usesHuggingFaceRouter =
+    isHuggingFaceRouterUrl(nextConfig.baseUrl) ||
+    isHuggingFaceRouterUrl(parentConfig.baseUrl);
+  const endpointChanged =
+    !sameProvider ||
+    (nextConfig.baseUrl !== parentConfig.baseUrl &&
+      !matchesOpenAiRequestEndpoint(
+        authOverrides.authType as AuthType,
+        parentConfig.baseUrl,
+        nextConfig.baseUrl,
+      ));
+  if (
+    !sameProvider ||
+    modelChanged ||
+    (authOverrides.baseUrl !== undefined && endpointChanged)
+  ) {
+    nextConfig.reasoningRouteBaseUrl = authOverrides.baseUrl;
+  }
+  const huggingFaceRouteChanged =
+    usesHuggingFaceRouter && (endpointChanged || modelChanged);
+  if (endpointChanged || huggingFaceRouteChanged) {
+    nextConfig.contextWindowSize = tokenLimit(
+      nextConfig.model,
+      'input',
+      nextConfig.baseUrl,
+    );
+    if (huggingFaceRouteChanged) {
+      nextConfig.modalities = defaultModalities(
+        nextConfig.model,
+        nextConfig.baseUrl,
+      );
+    }
+    applyHuggingFaceWireModelDefaults(nextConfig, nextConfig, {
+      contextWindowSize: true,
+      modalities: huggingFaceRouteChanged,
+    });
+  }
 
   return nextConfig;
 }
@@ -357,6 +393,25 @@ function openAiApiPrefix(
     return `${normalizeOpenAiWireBaseUrl(baseUrl)}/v1`;
   }
   return undefined;
+}
+
+function matchesOpenAiRequestEndpoint(
+  authType: AuthType,
+  parentBaseUrl: string | undefined,
+  targetBaseUrl: string | undefined,
+): boolean {
+  const parent = openAiApiPrefix(authType, parentBaseUrl);
+  const target = openAiApiPrefix(authType, targetBaseUrl);
+  if (!parent || !target) return false;
+
+  // Like the transport, join the request path before parsing the URL.
+  const path =
+    authType === AuthType.USE_OPENAI ? '/chat/completions' : '/responses';
+  try {
+    return new URL(parent + path).href === new URL(target + path).href;
+  } catch {
+    return false;
+  }
 }
 
 function matchesIsolatedEndpoint(
@@ -493,6 +548,34 @@ function applyResolvedModelConfig(
       (targetConfig as any)[field] = registryValue;
     }
   }
+
+  // Materialize the target's fallback so Config cannot reuse the session window.
+  const inferContextWindow =
+    resolvedModel.generationConfig.contextWindowSize === undefined &&
+    (isolateGenerationConfig ||
+      !sameProvider ||
+      targetConfig.model !== parentConfig.model ||
+      targetConfig.baseUrl !== parentConfig.baseUrl ||
+      differentRowForSameModel ||
+      targetConfig.nominalModelCapabilities?.contextWindowSize !== undefined);
+  if (inferContextWindow) {
+    targetConfig.contextWindowSize = tokenLimit(
+      targetConfig.model,
+      'input',
+      targetConfig.baseUrl,
+    );
+  }
+  const inferModalities = resolvedModel.modalitiesInferred === true;
+  if (inferModalities && targetConfig.baseUrl !== resolvedModel.baseUrl) {
+    targetConfig.modalities = defaultModalities(
+      targetConfig.model,
+      targetConfig.baseUrl,
+    );
+  }
+  applyHuggingFaceWireModelDefaults(targetConfig, targetConfig, {
+    contextWindowSize: inferContextWindow,
+    modalities: inferModalities,
+  });
 }
 
 /**

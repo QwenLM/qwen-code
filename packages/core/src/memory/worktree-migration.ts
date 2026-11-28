@@ -206,7 +206,7 @@ export async function prepareWorktreeMemoryMigration(
   const window = config.getModelContextWindowSize();
   const outputTokens = Math.min(
     8_192,
-    tokenLimit(model, 'output'),
+    tokenLimit(model, 'output', config.getContentGeneratorConfig()?.baseUrl),
     Math.floor(window / 4),
   );
   const promptTokens =

@@ -1622,6 +1622,54 @@ describe('BaseLlmClient', () => {
       expect(100_000 + 31_072).toBeLessThanOrEqual(131_072);
     });
 
+    it.each([
+      [
+        'deepseek-ai/DeepSeek-V4.1-Flash:featherless',
+        'MiniMaxAI/MiniMax-M2.5:digitalocean',
+        44_286,
+        undefined,
+      ],
+      [
+        'MiniMaxAI/MiniMax-M2.5:digitalocean',
+        'deepseek-ai/DeepSeek-V4.1-Flash:featherless',
+        undefined,
+        44_286,
+      ],
+    ])(
+      'budgets ordinary and isolated side queries on their Hugging Face routes (%s -> %s)',
+      async (model, wireModel, normalBudget, isolatedBudget) => {
+        const { config } = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          env: {
+            OPENAI_MODEL: model,
+            OPENAI_BASE_URL: 'https://router.huggingface.co/v1',
+          },
+          settings: { generationConfig: { extra_body: { model: wireModel } } },
+        });
+        mockConfig.getModel.mockReturnValue(model);
+        mockConfig.getContentGeneratorConfig.mockReturnValue(config);
+
+        await askText(model, 21_250);
+        expect(sentBudget()).toBe(normalBudget);
+
+        await askText(model, 21_250, { isolatedRequest: true });
+        expect(sentBudget()).toBe(isolatedBudget);
+
+        answerWithJson({ ok: true });
+        await client.generateJson({
+          contents: promptOfTokens(21_250),
+          schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+          model,
+          abortSignal: abortController.signal,
+        });
+        expect(sentBudget()).toBe(
+          normalBudget === undefined
+            ? undefined
+            : normalBudget - sentToolsTokens(),
+        );
+      },
+    );
+
     it('keeps a smaller caller-supplied maxOutputTokens', async () => {
       useWindow('qwen3-coder-plus', 131_072);
 

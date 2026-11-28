@@ -16,7 +16,10 @@ import {
   type CompactionTriggerReason,
   CompressionStatus,
 } from '../core/turn.js';
-import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
+import {
+  DEFAULT_TOKEN_LIMIT,
+  isHuggingFaceRouterUrl,
+} from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
 import { withoutAutoMemorySnapshots } from '../memory/request-context.js';
 import { runSideQuery } from '../utils/sideQuery.js';
@@ -985,12 +988,25 @@ export class ChatCompressionService {
           (compactionEndpoint
             ? sameId.find((m) => m.registryBaseUrl === compactionEndpoint)
             : undefined) ?? sameId[0];
-        const window = entry?.contextWindowSize;
+        // A Hugging Face Chat target can inherit the primary's model override.
+        const runtime =
+          entry?.authType === AuthType.USE_OPENAI &&
+          isHuggingFaceRouterUrl(entry.baseUrl)
+            ? await config
+                .getBaseLlmClient()
+                .resolveForModel(effectiveCompactionModel)
+            : undefined;
+        const window = runtime?.contextWindowSize ?? entry?.contextWindowSize;
         // Include the system prompt and the output reserve: providers check
         // prompt + max_tokens <= window, so all three terms count.
         const slimmedTokenEstimate =
           getColdInputEstimate() + COMPACT_MAX_OUTPUT_TOKENS;
-        if (window && window > 0 && slimmedTokenEstimate > window) {
+        if (
+          runtime &&
+          runtime.contentGeneratorConfig === contentGeneratorConfig
+        ) {
+          effectiveCompactionModel = config.getModel();
+        } else if (window && window > 0 && slimmedTokenEstimate > window) {
           compactionWarning =
             `Compaction model "${resolved.modelId}" context window ` +
             `(${window.toLocaleString()} tokens) is too small for the current ` +

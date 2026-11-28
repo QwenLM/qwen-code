@@ -8,7 +8,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { defaultOutputCeiling, tokenLimit } from '../core/tokenLimits.js';
+import {
+  DEFAULT_OUTPUT_TOKEN_LIMIT,
+  DEFAULT_TOKEN_LIMIT,
+  defaultOutputCeiling,
+  tokenLimit,
+} from '../core/tokenLimits.js';
 import bundled from './generated/model-registry.json' with { type: 'json' };
 import {
   getModelCatalogCachePath,
@@ -38,6 +43,19 @@ const chat = (
   limit,
   modalities: { input, output: ['text'] },
 });
+
+const conflictingVersionAliases: ModelsDevApi = {
+  zai: {
+    models: {
+      '1.1-x1-1': chat('1.1-x1-1', { context: 111000, output: 1000 }),
+    },
+  },
+  alibaba: {
+    models: {
+      '1-1-x1.1': chat('1-1-x1.1', { context: 222000, output: 2000 }),
+    },
+  },
+};
 
 const providerStubs = Object.fromEntries(
   MODELS_DEV_PROVIDERS.map((provider) => [
@@ -165,6 +183,25 @@ const ENV_NAMES = [
 ];
 
 describe('trimModelsDevCatalog', () => {
+  it('preserves catalog keys independently of endpoint-specific routing', () => {
+    const { models } = trimModelsDevCatalog(
+      {
+        google: {
+          models: {
+            enterprise: chat('google/gemini-2.5-flash:enterprise', {
+              context: 524_288,
+            }),
+          },
+        },
+      },
+      NOW,
+    );
+
+    expect(models).toEqual({
+      enterprise: { context: 524_288, modalities: {} },
+    });
+  });
+
   it('keeps limits from allowlisted providers and unions modalities across all of them, keyed by normalized id', () => {
     expect(trimModelsDevCatalog(api, NOW)).toEqual({
       source: MODELS_DEV_URL,
@@ -493,21 +530,7 @@ describe('trimModelsDevCatalog', () => {
     // boundaries: both of these respell onto `1.1-x1.1`. Committing either
     // would let provider iteration order choose the context window a user
     // gets, so the alias goes unwritten and each source keeps its own numbers.
-    const models = trimModelsDevCatalog(
-      {
-        zai: {
-          models: {
-            '1.1-x1-1': chat('1.1-x1-1', { context: 111000, output: 1000 }),
-          },
-        },
-        alibaba: {
-          models: {
-            '1-1-x1.1': chat('1-1-x1.1', { context: 222000, output: 2000 }),
-          },
-        },
-      },
-      NOW,
-    ).models;
+    const { models } = trimModelsDevCatalog(conflictingVersionAliases, NOW);
     expect(models).not.toHaveProperty('1.1-x1.1');
     expect(models['1.1-x1-1']).toEqual({
       context: 111000,
@@ -719,6 +742,28 @@ describe('refreshModelCatalog', () => {
     expect(cache.etag).toBe('"abc"');
     expect(cache.models).toEqual(trimmed);
     expect(lookupModelCatalog('qwen-x')).toEqual(trimmed['qwen-x']);
+  });
+
+  it('keeps fallback limits for a conflicting alias with a route suffix', () => {
+    const fetchedAt = new Date(
+      Date.parse(bundled.fetchedAt) + 60_000,
+    ).toISOString();
+    writeJson(
+      getModelCatalogCachePath(),
+      trimModelsDevCatalog(conflictingVersionAliases, fetchedAt),
+    );
+
+    expect(lookupModelCatalog('1.1-x1-1')).toMatchObject({
+      context: 111_000,
+      output: 1_000,
+    });
+    for (const model of ['org/1.1-x1.1', 'org/1.1-x1.1:novita']) {
+      const baseUrl = 'https://router.huggingface.co/v1';
+      expect(tokenLimit(model, 'input', baseUrl)).toBe(DEFAULT_TOKEN_LIMIT);
+      expect(tokenLimit(model, 'output', baseUrl)).toBe(
+        DEFAULT_OUTPUT_TOKEN_LIMIT,
+      );
+    }
   });
 
   it('keeps the current context and output defaults until the next process', async () => {

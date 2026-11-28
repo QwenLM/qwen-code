@@ -746,6 +746,65 @@ describe('ModelsConfig', () => {
     }
   });
 
+  it.each([
+    {
+      generationConfig: undefined,
+      contextWindowSize: 1_048_576,
+      modalities: { image: true },
+    },
+    {
+      generationConfig: {
+        contextWindowSize: 262_144,
+        modalities: { image: false },
+      },
+      contextWindowSize: 262_144,
+      modalities: { image: false },
+    },
+  ])(
+    'uses the effective Hugging Face endpoint when refreshing a registered model with $generationConfig',
+    ({ generationConfig, contextWindowSize, modalities }) => {
+      const modelId = 'zai-org/GLM-5.3-Flash:deepinfra';
+      const baseUrl = 'https://router.huggingface.co/v1';
+      const modelsConfig = openaiConfig(
+        [entry(modelId, 'GLM', undefined, undefined, generationConfig)],
+        { model: modelId, apiKey: 'settings-key', baseUrl },
+        settingsAuthSources(true),
+      );
+
+      expect(refreshOpenAI(modelsConfig, modelId)).toMatchObject({
+        model: modelId,
+        baseUrl,
+        contextWindowSize,
+        modalities,
+      });
+      expect(modelsConfig.getGenerationConfigSources()['baseUrl']?.kind).toBe(
+        'settings',
+      );
+    },
+  );
+
+  it('infers Hugging Face capabilities from the wire model on registered auth refresh', () => {
+    const model = 'zai-org/GLM-5.3-Flash:deepinfra';
+    const baseUrl = 'https://router.huggingface.co/v1';
+    const modelsConfig = openaiConfig(
+      [
+        entry(model, 'GLM', undefined, undefined, {
+          extra_body: { model: 'Qwen/Qwen3-Coder-30B-A3B-Instruct' },
+        }),
+      ],
+      { model, apiKey: 'settings-key', baseUrl },
+      settingsAuthSources(true),
+    );
+
+    const config = refreshOpenAI(modelsConfig, model);
+    expect(config).toMatchObject({
+      model,
+      baseUrl,
+      contextWindowSize: 262_144,
+    });
+    expect(config.modalities).toEqual({});
+  });
+
   it('should preserve programmatic apiKey when authType and modelId unchanged (restart scenario)', () => {
     // An apiKey set via updateCredentials (programmatic source) survives a
     // refresh with the same authType+modelId: the short-circuit saves and

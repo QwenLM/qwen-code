@@ -3259,6 +3259,139 @@ describe('Server Config (config.ts)', () => {
       ).toEqual(sameProviderRoute);
     });
 
+    const hfUrl = 'https://router.huggingface.co/v1';
+    const hfVision = 'zai-org/GLM-5.3-Flash:deepinfra';
+    const hfText = 'Qwen/Qwen3-Coder-30B-A3B-Instruct';
+    it.each([
+      {
+        name: 'an image-capable name with a text-only override',
+        candidate: hfVision,
+        override: hfText,
+        accepted: false,
+      },
+      {
+        name: 'a text-only name with an image-capable override',
+        candidate: hfText,
+        override: hfVision,
+        accepted: true,
+      },
+      {
+        name: 'an inherited text-only override',
+        candidate: hfVision,
+        primaryOverride: hfText,
+        accepted: false,
+      },
+      {
+        name: 'an explicit image opt-out',
+        candidate: hfText,
+        override: hfVision,
+        modalities: { image: false },
+        accepted: false,
+      },
+      {
+        name: 'a pinned route with a text-only wire override',
+        candidate: hfVision,
+        override: hfText,
+        pin: true,
+        accepted: true,
+        flags: { imageUnsupported: true },
+      },
+      {
+        name: 'a pinned image-capable route',
+        candidate: hfVision,
+        pin: true,
+        accepted: true,
+        flags: { agentCapable: true },
+      },
+      {
+        name: 'a cross-provider pin with an image-capable wire override',
+        candidate: hfText,
+        override: hfVision,
+        pin: true,
+        primaryAuth: AuthType.USE_ANTHROPIC,
+        primaryBaseUrl: ANTHROPIC_URL,
+        accepted: true,
+        flags: { agentCapable: true },
+      },
+      {
+        name: 'a pinned explicit image opt-out',
+        candidate: hfText,
+        override: hfVision,
+        pin: true,
+        modalities: { image: false },
+        accepted: true,
+        flags: { imageUnsupported: true },
+      },
+      {
+        name: 'a pinned explicit vision capability override',
+        candidate: hfVision,
+        override: hfText,
+        pin: true,
+        explicitVision: true,
+        accepted: true,
+        flags: { agentCapable: true },
+      },
+      {
+        name: 'a direct pin with unknown Hugging Face modalities',
+        candidate: 'fixture/unknown-model',
+        pin: true,
+        accepted: true,
+      },
+      {
+        name: 'a non-Hugging Face pin with unknown modalities',
+        candidate: 'fixture/unknown-model',
+        baseUrl: TOKEN_PLAN_URL,
+        override: hfText,
+        pin: true,
+        accepted: true,
+      },
+    ])('uses the actual vision route for $name', (fixture) => {
+      const primary = 'deepseek-ai/DeepSeek-V4.1-Flash:featherless';
+      const authType = fixture.primaryAuth ?? AuthType.USE_OPENAI;
+      const baseUrl = fixture.baseUrl ?? hfUrl;
+      const config = makeConfig({
+        model: primary,
+        authType,
+        ...(fixture.pin && {
+          visionModel: `openai:${fixture.candidate}\0${baseUrl}`,
+        }),
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: fixture.candidate,
+              baseUrl,
+              ...(fixture.pin && {
+                capabilities: {
+                  agent: true,
+                  ...(fixture.explicitVision && { vision: true }),
+                },
+              }),
+              generationConfig: {
+                ...(fixture.override && {
+                  extra_body: { model: fixture.override },
+                }),
+                modalities: fixture.modalities,
+              },
+            },
+          ],
+        },
+      });
+      vi.spyOn(config, 'getContentGeneratorConfig').mockReturnValue({
+        model: primary,
+        authType,
+        baseUrl: fixture.primaryBaseUrl ?? hfUrl,
+        ...(fixture.primaryOverride && {
+          extra_body: { model: fixture.primaryOverride },
+        }),
+      });
+
+      expect(config.getDefaultVisionBridgeModel()).toEqual(
+        fixture.accepted
+          ? { id: `openai:${fixture.candidate}`, baseUrl, ...fixture.flags }
+          : undefined,
+      );
+    });
+
     it('honors an authType-qualified visionModel against the matching provider only', () => {
       // Same model id on two providers; the 'anthropic:' qualifier must bind to
       // the anthropic row, not the same-provider openai one.

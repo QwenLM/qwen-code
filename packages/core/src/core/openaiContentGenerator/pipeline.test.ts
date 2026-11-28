@@ -1153,6 +1153,149 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
+    it.each([
+      {
+        extraBody: { max_tokens: 300_000 },
+        requestLimit: 64_000,
+        expected: { max_tokens: 32_768 },
+      },
+      {
+        extraBody: { max_completion_tokens: 300_000 },
+        requestLimit: 19_037,
+        expected: { max_tokens: undefined, max_completion_tokens: 19_037 },
+      },
+    ])(
+      'caps the final Hugging Face request with $extraBody',
+      async ({ extraBody, requestLimit, expected }) => {
+        mockClient.baseURL = 'https://router.huggingface.co/v1';
+        const model = 'deepseek-ai/DeepSeek-V4.1-Flash:featherless';
+        const apiCall = await executeWith(
+          {
+            baseUrl: mockClient.baseURL,
+            model,
+            samplingParams: undefined,
+            extra_body: extraBody,
+          },
+          userRequest(model, { maxOutputTokens: requestLimit }),
+          'prompt-id',
+          DefaultOpenAICompatibleProvider,
+        );
+
+        expectFields(apiCall, { ...expected, model });
+      },
+    );
+
+    it.each([
+      [125_000, false, 125_000],
+      [180_000, false, 180_000],
+      [180_000, true, 180_000],
+      [1_000_000, false, 943_718],
+      [1_000_000, true, 943_718],
+    ])(
+      'uses the verified GLM output limit for %i with sampling=%s',
+      async (maxOutputTokens, withTemperature, expected) => {
+        mockClient.baseURL = 'https://router.huggingface.co/v1';
+        const model = 'zai-org/GLM-5.3-Flash:deepinfra';
+        const apiCall = await executeWith(
+          {
+            baseUrl: mockClient.baseURL,
+            model,
+            samplingParams: withTemperature ? { temperature: 0.8 } : undefined,
+          },
+          userRequest(model, { maxOutputTokens }),
+          'prompt-id',
+          DefaultOpenAICompatibleProvider,
+        );
+
+        expectFields(apiCall, {
+          model,
+          max_tokens: expected,
+          ...(withTemperature && { temperature: 0.8 }),
+        });
+      },
+    );
+
+    it.each([
+      ['extra_body', null],
+      ['extra_body', 0],
+      ['samplingParams', null],
+      ['samplingParams', 0],
+    ] as const)(
+      'keeps the Hugging Face output budget with %s.max_completion_tokens=%s',
+      async (field, maxCompletionTokens) => {
+        mockClient.baseURL = 'https://router.huggingface.co/v1';
+        const model = 'deepseek-ai/DeepSeek-V4.1-Flash:featherless';
+        const apiCall = await executeWith(
+          {
+            baseUrl: mockClient.baseURL,
+            model,
+            samplingParams: undefined,
+            [field]: { max_completion_tokens: maxCompletionTokens },
+          },
+          userRequest(model, { maxOutputTokens: 128 }),
+          'prompt-id',
+          DefaultOpenAICompatibleProvider,
+        );
+
+        expectFields(apiCall, {
+          model,
+          max_tokens: 128,
+          max_completion_tokens: undefined,
+        });
+      },
+    );
+
+    it('serializes images for the nominal Hugging Face model on a single attempt', async () => {
+      mockClient.baseURL = 'https://router.huggingface.co/v1';
+      const model = 'zai-org/GLM-5.3-Flash:deepinfra';
+      const wireModel = 'Qwen/Qwen3-Coder-30B-A3B-Instruct';
+      pipelineWith({
+        authType: AuthType.USE_OPENAI,
+        baseUrl: mockClient.baseURL,
+        model,
+        extra_body: { model: wireModel },
+        modalities: {},
+        nominalModelCapabilities: { modalities: { image: true } },
+      });
+      const converter =
+        await vi.importActual<typeof import('./converter.js')>(
+          './converter.js',
+        );
+      mockCompletion();
+      vi.mocked(mockConverter.convertLlmRequestToOpenAI)
+        .mockImplementationOnce(converter.convertLlmRequestToOpenAI)
+        .mockImplementationOnce(converter.convertLlmRequestToOpenAI);
+      const request: GenerateContentParameters = {
+        model,
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+            ],
+          },
+        ],
+      };
+
+      await pipeline.execute(request, 'chat');
+      await retryContext.run(
+        {
+          attempt: 1,
+          retryTotalDelayMs: 0,
+          requestSetupMs: 0,
+          singleAttempt: true,
+        },
+        () => pipeline.execute(request, 'side-query'),
+      );
+
+      expect(sentBody(0).model).toBe(wireModel);
+      expect(JSON.stringify(sentBody(0).messages)).not.toContain('image_url');
+      expect(sentBody(1).model).toBe(model);
+      expect(JSON.stringify(sentBody(1).messages)).toContain(
+        'data:image/png;base64,aW1hZ2U=',
+      );
+    });
+
     it('never ships the max tier to a generic OpenAI-compatible endpoint end to end', async () => {
       // The same persisted-tier failure through the real default provider.
       const apiCall = await executeWith(

@@ -15,16 +15,21 @@ import {
   OUTPUT_TOKEN_CEILING,
 } from './tokenLimits.js';
 
+const HF_ROUTER_URL = 'https://router.huggingface.co/v1';
+
 vi.mock('../models/model-catalog.js', async (importOriginal) => {
   const entries: Record<string, { context?: number; output?: number }> = {
     'catalog-model': { context: 123_456, output: 7_890 },
     'qwen-catalog-context-only': { context: 50_000 },
     'qwen-catalog-tiny': { context: 5 },
     'qwen4-catalog-override': { context: 400_000 },
+    'gemini-2-5-flash': { context: 1_048_576, output: 65_536 },
     // Spelling twins: `findTokenLimit` consults OUTPUT_PATTERNS against the
     // other spelling only when this one matched no row.
     'glm-4-7': { context: 200_000, output: 131_072 },
     'qwen3-8-max': { context: 262_144, output: 131_072 },
+    // Reachable only through the dashed spelling of a stripped dotted version.
+    'twin-model-v2-1': { context: 122_222, output: 7_777 },
   };
   // Only the catalog read is stubbed; versionSpellingAlias is a pure string
   // rewrite, so the twin fallback sees the real rule.
@@ -37,12 +42,94 @@ vi.mock('../models/model-catalog.js', async (importOriginal) => {
 });
 
 describe('normalize', () => {
-  it('keeps unrecognized batch routing tags out of token lookup', () => {
-    expect(normalize('google/gemini-2.5-flash:batch')).toBe('batch');
-    expect(
-      knownTokenLimit('google/gemini-2.5-flash:batch', 'output'),
-    ).toBeUndefined();
+  it.each([
+    'google/gemini-2.5-flash:batch',
+    '  google/gemini-2.5-flash:batch  ',
+  ])('keeps batch route %s out of token lookup', (model) => {
+    expect(normalize(model, HF_ROUTER_URL)).toBe('batch');
+    expect(knownTokenLimit(model, 'input', HF_ROUTER_URL)).toBeUndefined();
+    expect(knownTokenLimit(model, 'output', HF_ROUTER_URL)).toBeUndefined();
   });
+
+  it('keeps the model name before a suffix after an org segment', () => {
+    // Hugging Face router `org/model:provider` and routing policies.
+    expect(normalize('zai-org/GLM-5.3-Flash:zai-org', HF_ROUTER_URL)).toBe(
+      'glm-5.3-flash',
+    );
+    expect(
+      normalize('deepseek-ai/DeepSeek-V4.1-Flash:novita', HF_ROUTER_URL),
+    ).toBe('deepseek-v4.1-flash');
+    expect(normalize('moonshotai/Kimi-K3:fireworks-ai', HF_ROUTER_URL)).toBe(
+      'kimi-k3',
+    );
+    expect(normalize('openai/gpt-oss-120b:fastest', HF_ROUTER_URL)).toBe(
+      'gpt-oss-120b',
+    );
+    expect(
+      normalize('openai:zai-org/GLM-5.3-Flash:zai-org', HF_ROUTER_URL),
+    ).toBe('glm-5.3-flash');
+    expect(
+      normalize('thinkingmachines/Inkling-2-Mini:peft:262144', HF_ROUTER_URL),
+    ).toBe('262144');
+  });
+
+  it('uses smaller family limits for unverified HF router IDs', () => {
+    expect(
+      tokenLimit('org/Twin-Model-V2.1:together', 'input', HF_ROUTER_URL),
+    ).toBe(122_222);
+    expect(
+      tokenLimit('org/Twin-Model-V2.1:together', 'output', HF_ROUTER_URL),
+    ).toBe(7_777);
+  });
+
+  it.each([
+    ['deepseek-ai/DeepSeek-V4.1-Flash:featherless', 262_144],
+    ['  qwen|openai:DEEPSEEK-AI/DeepSeek-V4.1-Flash:Featherless  ', 262_144],
+    ['deepseek-ai/DeepSeek-V4.1-Flash:deepinfra', 1_048_576],
+    ['zai-org/GLM-5.3-Flash:deepinfra', 1_048_576],
+    ['moonshotai/Kimi-K3:fireworks', 1_048_576],
+  ])('uses the published HF context window for %s', (model, window) => {
+    expect(knownTokenLimit(model, 'input', HF_ROUTER_URL)).toBe(window);
+  });
+
+  it.each([
+    ['deepseek-ai/DeepSeek-V4.1-Flash:featherless', 262_144, 32_768, 32_768],
+    ['Qwen/Qwen3.8-27B:cerebras', 65_536, 32_768, 32_768],
+    ['MiniMaxAI/MiniMax-M2.5:digitalocean', 65_536, 58_982, 58_982],
+    ['deepseek-ai/DeepSeek-V4.1-Flash:deepinfra', 1_048_576, 393_216, 64_000],
+    ['zai-org/GLM-5.3-Flash:deepinfra', 1_048_576, 943_718, 64_000],
+    ['moonshotai/Kimi-K3:fireworks', 1_048_576, 943_718, 64_000],
+  ])(
+    'uses the published limits and automatic output ceiling for %s',
+    (model, context, output, automatic) => {
+      expect(tokenLimit(model, 'input', HF_ROUTER_URL)).toBe(context);
+      expect(tokenLimit(model, 'output', HF_ROUTER_URL)).toBe(output);
+      expect(defaultOutputCeiling(model, HF_ROUTER_URL)).toBe(automatic);
+      expect(hasExplicitOutputLimit(model, HF_ROUTER_URL)).toBe(true);
+    },
+  );
+
+  it.each([
+    'deepseek-ai/DeepSeek-V4.1-Flash:fastest',
+    'deepseek-ai/DeepSeek-V4.1-Flash:unlisted',
+    'another-org/DeepSeek-V4.1-Flash:featherless',
+    'zai-org/GLM-5.3-Flash:zai-org',
+    'moonshotai/Kimi-K3:fireworks-ai',
+  ])(
+    'keeps conservative defaults for %s without a published route limit',
+    (model) => {
+      expect(knownTokenLimit(model, 'input', HF_ROUTER_URL)).toBe(
+        DEFAULT_TOKEN_LIMIT,
+      );
+      expect(tokenLimit(model, 'input', HF_ROUTER_URL)).toBe(
+        DEFAULT_TOKEN_LIMIT,
+      );
+      expect(defaultOutputCeiling(model, HF_ROUTER_URL)).toBe(
+        DEFAULT_OUTPUT_TOKEN_LIMIT,
+      );
+      expect(hasExplicitOutputLimit(model, HF_ROUTER_URL)).toBe(false);
+    },
+  );
 
   it('should lowercase and trim the model string', () => {
     expect(normalize('  GEMINI-1.5-PRO  ')).toBe('gemini-1.5-pro');
@@ -468,6 +555,15 @@ describe('variant-tagged model ids', () => {
     // it looks like a tag, so the `family:model` forms stay as they were.
     expect(tokenLimit('qwen|qwen2.5:qwen2.5-1m')).toBe(262_144);
     expect(tokenLimit('  a/b/c|GPT-4o:gpt-4o-2024-05-13-q4  ')).toBe(131_072);
+  });
+
+  it('keeps pipe-separated prefixes out of route suffix matching', () => {
+    expect(
+      tokenLimit('a/b/c|GPT-4o:glm-5.3-flash', 'input', HF_ROUTER_URL),
+    ).toBe(1_000_000);
+    expect(tokenLimit('org/gpt-4o:novita|gpt-5', 'input', HF_ROUTER_URL)).toBe(
+      272_000,
+    );
   });
 });
 

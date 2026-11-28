@@ -13,7 +13,7 @@ import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER } from '../qwen/oauth-config.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 import { normalizeOpenAiWireBaseUrl } from '../core/openaiContentGenerator/constants.js';
-import { tokenLimit } from '../core/tokenLimits.js';
+import { isHuggingFaceRouterUrl, tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import {
   RUNTIME_SNAPSHOT_PREFIX,
@@ -38,6 +38,7 @@ import {
   CREDENTIAL_FIELDS,
   PROVIDER_SOURCED_FIELDS,
 } from './constants.js';
+import { applyHuggingFaceWireModelDefaults } from './hugging-face-wire-model.js';
 
 export {
   MODEL_GENERATION_CONFIG_FIELDS,
@@ -502,21 +503,34 @@ export class ModelsConfig {
    * support and send unsupported inline media.
    */
   private applyRawModelDerivedDefaults(modelId: string): void {
-    if (this.shouldUpdateModelDerivedDefault('modalities')) {
-      this._generationConfig.modalities = defaultModalities(modelId);
+    const { baseUrl } = this._generationConfig;
+    const inferModalities = this.shouldUpdateModelDerivedDefault('modalities');
+    const inferContextWindow =
+      this.shouldUpdateModelDerivedDefault('contextWindowSize');
+    if (inferModalities) {
+      this._generationConfig.modalities = defaultModalities(modelId, baseUrl);
       this.generationConfigSources['modalities'] = {
         kind: 'computed',
         detail: 'auto-detected from model',
       };
     }
 
-    if (this.shouldUpdateModelDerivedDefault('contextWindowSize')) {
-      this._generationConfig.contextWindowSize = tokenLimit(modelId, 'input');
+    if (inferContextWindow) {
+      this._generationConfig.contextWindowSize = tokenLimit(
+        modelId,
+        'input',
+        baseUrl,
+      );
       this.generationConfigSources['contextWindowSize'] = {
         kind: 'computed',
         detail: 'auto-detected from model',
       };
     }
+    applyHuggingFaceWireModelDefaults(
+      this._generationConfig,
+      { model: modelId, authType: this.currentAuthType, baseUrl },
+      { contextWindowSize: inferContextWindow, modalities: inferModalities },
+    );
   }
 
   private shouldUpdateModelDerivedDefault(
@@ -771,6 +785,8 @@ export class ModelsConfig {
     },
     settingsGenerationConfig?: Partial<ContentGeneratorConfig>,
   ): void {
+    const hadWireModelDefaults =
+      this._generationConfig.nominalModelCapabilities !== undefined;
     /**
      * If any fields are updated here, we treat the resulting config as manually overridden
      * and avoid applying modelProvider defaults during the next auth refresh.
@@ -818,6 +834,15 @@ export class ModelsConfig {
     // has lower priority than programmatic overrides but should still be applied.
     if (settingsGenerationConfig) {
       this.mergeSettingsGenerationConfig(settingsGenerationConfig);
+    }
+    const { model, baseUrl } = this._generationConfig;
+    if (
+      model &&
+      (hadWireModelDefaults ||
+        (this.currentAuthType === AuthType.USE_OPENAI &&
+          isHuggingFaceRouterUrl(baseUrl)))
+    ) {
+      this.applyRawModelDerivedDefaults(model);
     }
 
     // Sync with runtime model snapshot if we have a complete configuration
@@ -887,6 +912,7 @@ export class ModelsConfig {
    * Other layers (CLI, env, settings, defaults) will participate in resolve.
    */
   private clearProviderSourcedConfig(): void {
+    delete this._generationConfig.nominalModelCapabilities;
     for (const field of PROVIDER_SOURCED_FIELDS) {
       const source = this.generationConfigSources[field];
       if (source?.kind === 'modelProviders') {
@@ -923,7 +949,10 @@ export class ModelsConfig {
   /**
    * Apply resolved model config to generation config
    */
-  private applyResolvedModelDefaults(model: ResolvedModelConfig): void {
+  private applyResolvedModelDefaults(
+    model: ResolvedModelConfig,
+    baseUrl = model.baseUrl,
+  ): void {
     this.strictModelProviderSelection = true;
     this.currentRegistryBaseUrl = model.registryBaseUrl ?? null;
     // We're explicitly applying modelProvider defaults now, so manual overrides
@@ -1000,7 +1029,7 @@ export class ModelsConfig {
     }
 
     // Base URL
-    this._generationConfig.baseUrl = model.baseUrl;
+    this._generationConfig.baseUrl = baseUrl;
     this.generationConfigSources['baseUrl'] = {
       kind: 'modelProviders',
       authType: model.authType,
@@ -1022,8 +1051,13 @@ export class ModelsConfig {
     }
 
     // contextWindowSize fallback: auto-detect from model when not set by provider
-    if (gc.contextWindowSize === undefined) {
-      this._generationConfig.contextWindowSize = tokenLimit(model.id, 'input');
+    const inferContextWindow = gc.contextWindowSize === undefined;
+    if (inferContextWindow) {
+      this._generationConfig.contextWindowSize = tokenLimit(
+        model.id,
+        'input',
+        baseUrl,
+      );
       this.generationConfigSources['contextWindowSize'] = {
         kind: 'computed',
         detail: 'auto-detected from model',
@@ -1031,8 +1065,26 @@ export class ModelsConfig {
     }
 
     // modalities fallback: auto-detect from model when not set by provider
-    if (gc.modalities === undefined) {
-      this._generationConfig.modalities = defaultModalities(model.id);
+    if (
+      gc.modalities === undefined ||
+      (model.modalitiesInferred && baseUrl !== model.baseUrl)
+    ) {
+      this._generationConfig.modalities = defaultModalities(model.id, baseUrl);
+      this.generationConfigSources['modalities'] = {
+        kind: 'computed',
+        detail: 'auto-detected from model',
+      };
+    }
+    applyHuggingFaceWireModelDefaults(
+      this._generationConfig,
+      { model: model.id, authType: model.authType, baseUrl },
+      {
+        contextWindowSize: inferContextWindow,
+        modalities:
+          gc.modalities === undefined || model.modalitiesInferred === true,
+      },
+    );
+    if (this._generationConfig.nominalModelCapabilities?.modalities) {
       this.generationConfigSources['modalities'] = {
         kind: 'computed',
         detail: 'auto-detected from model',
@@ -1206,7 +1258,7 @@ export class ModelsConfig {
           : undefined
         : undefined;
 
-      this.applyResolvedModelDefaults(resolved);
+      this.applyResolvedModelDefaults(resolved, savedBaseUrl);
 
       // Restore the previously-resolved apiKey if applyResolvedModelDefaults
       // cleared it (env var not found) and this is the same model.
@@ -1216,11 +1268,8 @@ export class ModelsConfig {
           this.generationConfigSources['apiKey'] = savedApiKeySource;
         }
       }
-      if (savedBaseUrl) {
-        this._generationConfig.baseUrl = savedBaseUrl;
-        if (savedBaseUrlSource) {
-          this.generationConfigSources['baseUrl'] = savedBaseUrlSource;
-        }
+      if (savedBaseUrlSource) {
+        this.generationConfigSources['baseUrl'] = savedBaseUrlSource;
       }
 
       this.strictModelProviderSelection = true;
@@ -1449,6 +1498,7 @@ export class ModelsConfig {
       }
 
       // Apply generation config
+      delete this._generationConfig.nominalModelCapabilities;
       if (runtimeModelSnapshot.generationConfig) {
         Object.assign(
           this._generationConfig,

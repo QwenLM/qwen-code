@@ -220,7 +220,9 @@ function resolveBoolean(
 export function estimatePartChars(
   part: Part,
   imageTokenEstimate: number,
+  measureText?: (text: string) => number,
 ): number {
+  const measure = measureText ?? ((text: string) => text.length);
   if (part.inlineData || part.fileData) {
     return imageTokenEstimate * TOKEN_TO_CHAR_RATIO;
   }
@@ -228,7 +230,7 @@ export function estimatePartChars(
     // A thought's signature is replayed beside its text, so it takes room in
     // the request too (#9455). Other parts reach `JSON.stringify` below,
     // which already counts it.
-    return part.text.length + (part.thoughtSignature?.length ?? 0);
+    return measure(part.text) + (part.thoughtSignature?.length ?? 0);
   }
   // Tool results in qwen-code carry media on `functionResponse.parts`
   // (an extension to the @google/genai schema; see
@@ -237,24 +239,27 @@ export function estimatePartChars(
   // isn't billed as ~350K chars by `JSON.stringify`.
   if (part.functionResponse) {
     let total = 0;
-    const output = part.functionResponse.response?.['output'];
-    const error = part.functionResponse.response?.['error'];
+    const response = part.functionResponse.response;
+    const output = response?.['output'];
+    const error = response?.['error'];
     if (typeof output === 'string') {
-      total += output.length;
+      total += measure(output);
     } else if (typeof error === 'string') {
-      total += error.length;
+      total += measure(error);
+    } else if (measureText && response != null) {
+      total += measureText(JSON.stringify(response));
     }
     const nested = getFunctionResponseParts(part);
     if (nested) {
       for (const inner of nested) {
-        total += estimatePartChars(inner, imageTokenEstimate);
+        total += estimatePartChars(inner, imageTokenEstimate, measureText);
       }
     }
     // Add a small fixed floor for the wrapper metadata (id, name) so a
     // pure media-only response isn't reported as just the image budget.
     return total + 64;
   }
-  return JSON.stringify(part ?? {}).length;
+  return measure(JSON.stringify(part ?? {}));
 }
 
 /**
@@ -275,11 +280,12 @@ export function getFunctionResponseParts(part: Part): Part[] | undefined {
 export function estimateContentChars(
   content: Content,
   imageTokenEstimate: number,
+  measureText?: (text: string) => number,
 ): number {
   if (!content.parts) return 0;
   let total = 0;
   for (const part of content.parts) {
-    total += estimatePartChars(part, imageTokenEstimate);
+    total += estimatePartChars(part, imageTokenEstimate, measureText);
   }
   return total;
 }

@@ -58,6 +58,7 @@ import type { VisionBridgeModelSelection } from '../services/visionBridge/vision
 import {
   getQualifiedVisionModelId,
   isFullTurnVisionCapable,
+  isImageCapable,
   selectVisionBridgeModel,
 } from '../services/visionBridge/vision-bridge-service.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
@@ -94,7 +95,8 @@ import {
   resetPreloadedContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
-import { tokenLimit } from '../core/tokenLimits.js';
+import { isHuggingFaceRouterUrl, tokenLimit } from '../core/tokenLimits.js';
+import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import {
   getRuntimeContentGenerator,
   isTopLevelSession,
@@ -2595,6 +2597,7 @@ interface ModelPreferenceDefaults {
   key: string;
   reasoning: ContentGeneratorConfig['reasoning'];
   contextWindowSize: number | undefined;
+  nominalContextWindowSize?: number;
   reasoningSource: ContentGeneratorConfigSources['reasoning'];
   contextWindowSource: ContentGeneratorConfigSources['contextWindowSize'];
 }
@@ -5977,10 +5980,16 @@ export class Config {
   }
 
   getModelContextWindowSize(): number {
+    const config = this.getContentGeneratorConfig();
+    const modelConfig = this.modelsConfig.getGenerationConfig();
     return (
-      this.getContentGeneratorConfig()?.contextWindowSize ??
-      this.modelsConfig.getGenerationConfig().contextWindowSize ??
-      tokenLimit(this.getModel(), 'input')
+      config?.contextWindowSize ??
+      modelConfig.contextWindowSize ??
+      tokenLimit(
+        this.getModel(),
+        'input',
+        config?.baseUrl ?? modelConfig.baseUrl,
+      )
     );
   }
 
@@ -7276,7 +7285,11 @@ export class Config {
   getModelPreferenceContextLimit(): number {
     return (
       this.modelPreferenceDefaults?.contextWindowSize ??
-      tokenLimit(stripRuntimeSnapshotPrefix(this.getModel()), 'input')
+      tokenLimit(
+        stripRuntimeSnapshotPrefix(this.getModel()),
+        'input',
+        this.getContentGeneratorConfig()?.baseUrl,
+      )
     );
   }
 
@@ -7324,6 +7337,8 @@ export class Config {
       key: `${config.authType}/${modelId}${suffix}`,
       reasoning: config.reasoning,
       contextWindowSize: config.contextWindowSize,
+      nominalContextWindowSize:
+        config.nominalModelCapabilities?.contextWindowSize,
       reasoningSource: sources['reasoning'],
       contextWindowSource: sources['contextWindowSize'],
     };
@@ -7338,19 +7353,31 @@ export class Config {
     const contextWindow = preference?.contextWindow;
     const contextLimit =
       defaults.contextWindowSize ??
-      tokenLimit(stripRuntimeSnapshotPrefix(config.model), 'input');
+      tokenLimit(
+        stripRuntimeSnapshotPrefix(config.model),
+        'input',
+        config.baseUrl,
+      );
     config.contextWindowSize = defaults.contextWindowSize;
     sources['contextWindowSize'] = defaults.contextWindowSource;
-    if (
+    const hasContextWindowPreference =
       contextWindow !== undefined &&
       Number.isSafeInteger(contextWindow) &&
       contextWindow > 0 &&
-      contextWindow <= contextLimit
-    ) {
+      contextWindow <= contextLimit;
+    if (hasContextWindowPreference) {
       config.contextWindowSize = contextWindow;
       sources['contextWindowSize'] = {
         kind: 'settings',
         settingsPath: 'model.preferences',
+      };
+    }
+    if (config.nominalModelCapabilities) {
+      config.nominalModelCapabilities = {
+        ...config.nominalModelCapabilities,
+        contextWindowSize: hasContextWindowPreference
+          ? undefined
+          : defaults.nominalContextWindowSize,
       };
     }
 
@@ -7964,6 +7991,33 @@ export class Config {
     return true;
   }
 
+  private resolveVisionBridgeCandidate(
+    candidate: AvailableModel,
+  ): { model: AvailableModel; imageUnsupported?: boolean } | undefined {
+    if (
+      candidate.authType !== AuthType.USE_OPENAI ||
+      !isHuggingFaceRouterUrl(candidate.baseUrl) ||
+      candidate.isRuntimeModel
+    ) {
+      return { model: candidate };
+    }
+    try {
+      const config = buildAgentContentGeneratorConfig(this, candidate.id, {
+        authType: candidate.authType,
+        baseUrl: candidate.baseUrl,
+      });
+      const model = { ...candidate, modalities: config.modalities };
+      // An HF Chat override can change whether the SDK sends the image.
+      const imageUnsupported =
+        !isImageCapable(model) &&
+        (getRequestModel(config) !== config.model ||
+          config.modalities?.image === false);
+      return { model, imageUnsupported };
+    } catch {
+      return undefined;
+    }
+  }
+
   /**
    * Resolve the user's explicit `visionModel` (set via `/model --vision`) into a
    * bridge selection. The selected id is auth-qualified so `runSideQuery`
@@ -8031,13 +8085,16 @@ export class Config {
       );
       return undefined;
     }
-    const agentCapable = isFullTurnVisionCapable(match);
+    const resolved = this.resolveVisionBridgeCandidate(match);
+    if (!resolved) return undefined;
+    const { model, imageUnsupported } = resolved;
     return {
-      id: getQualifiedVisionModelId(match),
-      ...((parsedSetting.baseUrl ?? match.baseUrl) && {
-        baseUrl: parsedSetting.baseUrl ?? match.baseUrl,
+      id: getQualifiedVisionModelId(model),
+      ...((parsedSetting.baseUrl ?? model.baseUrl) && {
+        baseUrl: parsedSetting.baseUrl ?? model.baseUrl,
       }),
-      ...(agentCapable && { agentCapable: true }),
+      ...(isFullTurnVisionCapable(model) && { agentCapable: true }),
+      ...(imageUnsupported && { imageUnsupported: true }),
     };
   }
 
@@ -8054,14 +8111,34 @@ export class Config {
     const explicit = this.resolveVisionModelSelection();
     if (explicit) return explicit;
     const contentGeneratorConfig = this.getContentGeneratorConfig();
-    return selectVisionBridgeModel(
-      this.getModel(),
-      this.getAllConfiguredModels(),
-      {
-        authType: contentGeneratorConfig?.authType,
-        baseUrl: contentGeneratorConfig?.baseUrl,
-      },
-    );
+    const primary = this.getModel();
+    const baseUrl = contentGeneratorConfig?.baseUrl;
+    // A same-provider Chat candidate can inherit the primary's model override.
+    const listed = this.getAllConfiguredModels();
+    const candidates = listed.flatMap((model, index) => {
+      if (
+        !isHuggingFaceRouterUrl(baseUrl) ||
+        model.baseUrl !== baseUrl ||
+        model.id === primary ||
+        model.voiceOnly ||
+        model.imageOnly ||
+        listed.some(
+          (other, otherIndex) =>
+            otherIndex !== index &&
+            other.id === model.id &&
+            other.authType === model.authType &&
+            other.baseUrl === model.baseUrl,
+        )
+      ) {
+        return [model];
+      }
+      const candidate = this.resolveVisionBridgeCandidate(model);
+      return candidate ? [candidate.model] : [];
+    });
+    return selectVisionBridgeModel(primary, candidates, {
+      authType: contentGeneratorConfig?.authType,
+      baseUrl,
+    });
   }
 
   /**

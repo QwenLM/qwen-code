@@ -151,6 +151,8 @@ export interface ResolvedModelConfig extends ModelConfig {
   registryBaseUrl?: string;
   /** Generation config (always present, merged with defaults) */
   generationConfig: ModelGenerationConfig;
+  /** Whether the registry derived modalities from the model ID and URL. */
+  modalitiesInferred?: true;
   /** Capabilities (always present, defaults to {}) */
   capabilities: ModelCapabilities;
 }

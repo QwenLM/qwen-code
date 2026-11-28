@@ -709,6 +709,19 @@ describe('ResponsesPipeline', () => {
     ],
   ])('%s', expectBody);
 
+  it('caps the final Responses output budget for a verified Hugging Face route', async () => {
+    const model = 'deepseek-ai/DeepSeek-V4.1-Flash:featherless';
+    const pipeline = pipe({
+      baseUrl: 'https://router.huggingface.co/v1',
+      model,
+      extra_body: { max_output_tokens: 300_000 },
+    });
+
+    const body = await sendBody(pipeline, { ...textRequest('hi'), model });
+
+    expect(body).toMatchObject({ model, max_output_tokens: 32_768 });
+  });
+
   it('keeps isolated Mod requests free of configured tools and server-side history', async () => {
     const body = await retryContext.run(
       {

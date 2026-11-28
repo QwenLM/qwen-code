@@ -15,9 +15,18 @@ import {
   RECAP_SYSTEM_PROMPT,
   takeRecentDialog,
 } from '../services/sessionRecap.js';
-import { estimateContentTokens } from '../services/tokenEstimation.js';
+import {
+  estimateContentTokens,
+  estimateDenseTextTokensWithScriptAllowance,
+} from '../services/tokenEstimation.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
-import { defaultOutputCeiling, tokenLimit } from '../core/tokenLimits.js';
+import {
+  defaultOutputCeiling,
+  getHuggingFaceRoute,
+  MIN_CLAMPED_OUTPUT_TOKENS,
+  outputClampMargin,
+  tokenLimit,
+} from '../core/tokenLimits.js';
 import { projectManagedModelRecords } from './managed-session-message-projection.js';
 import type { ManagedSessionEvent } from './managed-session-records.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
@@ -177,26 +186,64 @@ export async function prepareManagedSideQuery(
       },
     ],
   };
-  const maxOutputTokens = recap
+  const routeLimits = getHuggingFaceRoute(model.model, model.baseUrl)?.limits;
+  const configuredOutput = model.samplingParams?.max_tokens;
+  const outputCeiling = recap
     ? 300
-    : (model.samplingParams?.max_tokens ?? defaultOutputCeiling(model.model));
-  const window = model.contextWindowSize ?? tokenLimit(model.model);
+    : Math.min(
+        configuredOutput ?? defaultOutputCeiling(model.model, model.baseUrl),
+        routeLimits?.output ?? Infinity,
+      );
+  const adaptiveOutput =
+    !recap && configuredOutput == null && routeLimits !== undefined;
+  const reservedOutput = adaptiveOutput
+    ? Math.min(outputCeiling, MIN_CLAMPED_OUTPUT_TOKENS)
+    : outputCeiling;
+  const window =
+    model.contextWindowSize ?? tokenLimit(model.model, 'input', model.baseUrl);
+  // Keep the usual estimation margin proportional for small configured windows.
+  const headroom = adaptiveOutput
+    ? Math.min(outputClampMargin(window), Math.floor(window / 4))
+    : 1_024;
+  const system: Content = {
+    role: 'user',
+    parts: [{ text: systemInstruction }],
+  };
+  // The fit search revisits retained messages. Count their text density once.
+  const estimatedTokens = new WeakMap<Content, number>();
+  const promptTokens = (contents: Content[]): number => {
+    if (!routeLimits) return 2 * estimateContentTokens(contents);
+    let total = 0;
+    for (const content of contents) {
+      let estimate = estimatedTokens.get(content);
+      if (estimate === undefined) {
+        estimate = estimateContentTokens(
+          [content],
+          undefined,
+          estimateDenseTextTokensWithScriptAllowance,
+        );
+        estimatedTokens.set(content, estimate);
+      }
+      total += estimate;
+    }
+    return total;
+  };
   const assemble = (): Content[] => [
     ...main.flat(),
     ...privateHistory.flat(),
     question,
   ];
-  const fitsWith = (mainDrop: number, privateDrop: number): boolean =>
-    estimateContentTokens([
-      { role: 'user', parts: [{ text: systemInstruction }] },
+  const outputRoom = (mainDrop: number, privateDrop: number): number =>
+    window -
+    promptTokens([
+      system,
       ...main.slice(mainDrop).flat(),
       ...privateHistory.slice(privateDrop).flat(),
       question,
-    ]) *
-      2 +
-      maxOutputTokens +
-      1024 <=
-    window;
+    ]) -
+    headroom;
+  const fitsWith = (mainDrop: number, privateDrop: number): boolean =>
+    outputRoom(mainDrop, privateDrop) >= reservedOutput;
   // fitsWith is monotone in each drop count, so binary-search the cut point
   // rather than re-estimating the whole retained history per dropped turn
   // (the shift loop was O(n^2) on the harness event loop). The estimate ceils
@@ -225,14 +272,15 @@ export async function prepareManagedSideQuery(
   }
   main = main.slice(mainDrop);
   privateHistory.splice(0, privateDrop);
-  if (!fitsWith(0, 0) || (recap && main.length === 0))
+  const availableOutput = outputRoom(0, 0);
+  if (!(availableOutput >= reservedOutput) || (recap && main.length === 0))
     throw new ManagedSideQueryError('context_too_large');
   const request: GenerateContentParameters = {
     model: model.model,
     contents: assemble(),
     config: {
       systemInstruction,
-      maxOutputTokens,
+      maxOutputTokens: Math.min(outputCeiling, availableOutput),
       thinkingConfig: { includeThoughts: false },
     },
   };

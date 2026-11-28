@@ -89,14 +89,22 @@ import type {
   InputModalities,
   PromptCacheSharingParameters,
 } from './contentGenerator.js';
-import { getSystemPromptModel } from './request-model.js';
+import { getRequestModel, getSystemPromptModel } from './request-model.js';
+import { getWireOutputBudget } from './openaiContentGenerator/output-budget.js';
+import {
+  filterIsolatedModelOverrides,
+  mapOpenAIToolChoice,
+} from './openaiContentGenerator/provider/utils.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   clampOutputTokensToWindow,
   defaultOutputCeiling,
+  getHuggingFaceRoute,
+  isHuggingFaceRouterUrl,
   DEFAULT_TOKEN_LIMIT,
   OUTPUT_TOKEN_CEILING,
   parsePositiveIntegerEnvValue,
+  tokenLimit,
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
@@ -161,9 +169,12 @@ import {
 import {
   CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR,
   estimateContentTokens,
+  estimateDenseTextTokens,
+  estimateDenseTextTokensWithScriptAllowance,
   estimatePromptTokens,
   getUsageOutputTokenCountForPromptEstimate,
 } from '../services/tokenEstimation.js';
+import { estimateTextTokens } from '../utils/request-tokenizer/textTokenizer.js';
 import {
   microcompactHistory,
   getFunctionCallIdentity,
@@ -990,6 +1001,285 @@ function getToolArgumentStallRetryError(error: unknown) {
  * large windows (the output ceiling binds long before the pad matters).
  */
 const ESTIMATE_CLAMP_OVERHEAD_PAD = 20_000;
+const KIMI_K3_FIREWORKS = 'moonshotai/kimi-k3:fireworks';
+const KIMI_K3_REQUIRED_TOOL_PROMPT_RESERVE = 64;
+
+function getConfiguredHuggingFaceChatOutputBudget(
+  config: ContentGeneratorConfig | undefined,
+  providerLimit: number | undefined,
+): number | undefined {
+  if (providerLimit === undefined || config?.authType !== AuthType.USE_OPENAI) {
+    return undefined;
+  }
+  return getWireOutputBudget({
+    ...config.samplingParams,
+    ...config.extra_body,
+  });
+}
+
+interface OpenAIChatPromptSource {
+  model: string;
+  messages?: unknown[];
+  tools: unknown;
+  rendering: Record<string, unknown>;
+  acceptsAutoToolUsage: boolean;
+  systemInstruction: GenerateContentConfig['systemInstruction'];
+  schemaCompliance?: ContentGeneratorConfig['schemaCompliance'];
+}
+
+function withAutoToolChoice(
+  source: OpenAIChatPromptSource,
+): OpenAIChatPromptSource {
+  return {
+    ...source,
+    acceptsAutoToolUsage: false,
+    rendering: { ...source.rendering, tool_choice: undefined },
+  };
+}
+
+function normalizeRenderOptions(options: unknown): unknown {
+  // Empty override maps leave the renderer's defaults in effect.
+  if (
+    options !== null &&
+    typeof options === 'object' &&
+    !Array.isArray(options) &&
+    Object.keys(options).length === 0
+  ) {
+    return undefined;
+  }
+  return options ?? undefined;
+}
+
+function normalizeNativeChatResponseFormat(format: unknown) {
+  const jsonObject = { type: 'json_object' };
+  if (isDeepStrictEqual(format, jsonObject)) return jsonObject;
+
+  const schemaFormat = format as
+    | { type?: unknown; json_schema?: { schema?: unknown } }
+    | undefined;
+  const schema = schemaFormat?.json_schema?.schema;
+  if (
+    schemaFormat?.type === 'json_schema' &&
+    schema !== null &&
+    typeof schema === 'object' &&
+    !Array.isArray(schema)
+  ) {
+    return { type: 'json_schema', json_schema: { schema } };
+  }
+  return undefined;
+}
+
+function getOpenAIChatFunctionName(value: unknown): string | undefined {
+  const tool = value as
+    | { type?: unknown; function?: { name?: unknown } }
+    | undefined;
+  const name = tool?.function?.name;
+  return tool?.type === 'function' &&
+    typeof name === 'string' &&
+    name.length > 0
+    ? name
+    : undefined;
+}
+
+function matchesSoleChatFunction(
+  toolChoice: unknown,
+  requestTools: unknown,
+  generatedTools: GenerateContentConfig['tools'],
+): boolean {
+  const name = getOpenAIChatFunctionName(toolChoice);
+  if (!name || !Array.isArray(requestTools) || requestTools.length !== 1) {
+    return false;
+  }
+
+  if (generatedTools) {
+    const tool = generatedTools[0];
+    return (
+      tool !== undefined &&
+      !('tool' in tool) &&
+      tool.functionDeclarations?.length === 1 &&
+      tool.functionDeclarations[0]?.name === name
+    );
+  }
+  return getOpenAIChatFunctionName(requestTools[0]) === name;
+}
+
+function openAIChatPromptSource(
+  config: ContentGeneratorConfig | undefined,
+  model: string | undefined,
+  generation:
+    | Pick<GenerateContentConfig, 'systemInstruction' | 'tools' | 'toolConfig'>
+    | undefined,
+): OpenAIChatPromptSource | undefined {
+  if (!model || config?.authType !== AuthType.USE_OPENAI) {
+    return undefined;
+  }
+  const extraBody = filterIsolatedModelOverrides(config.extra_body);
+  const body = {
+    ...filterIsolatedModelOverrides(config.samplingParams),
+    ...extraBody,
+  };
+  // Omitted vLLM render flags have the same effect as their protocol defaults.
+  const {
+    messages,
+    tools,
+    add_generation_prompt: addGenerationPrompt = true,
+    continue_final_message: continueFinalMessage = false,
+    add_special_tokens: addSpecialTokens = false,
+  } = body;
+  const rawMessages = Array.isArray(messages) ? messages : undefined;
+  const chatTemplate = body['chat_template'] ?? undefined;
+  const templateOptions = normalizeRenderOptions(body['chat_template_kwargs']);
+  const templateArgs =
+    templateOptions !== null && typeof templateOptions === 'object'
+      ? (templateOptions as Record<string, unknown>)
+      : undefined;
+  const templateResponseFormat = templateArgs?.['response_format'] ?? undefined;
+  const responseFormat = body['response_format'] ?? undefined;
+  const plainText = { type: 'text' };
+  const wireModel = model.trim().toLowerCase();
+  const pinnedMiniMax = wireModel === 'minimaxai/minimax-m2.5:digitalocean';
+  // Renderers can use explicit text to replace a nested or server default.
+  // The pinned MiniMax template does not consume the top-level text setting.
+  const omitPlainText =
+    chatTemplate === undefined &&
+    isDeepStrictEqual(responseFormat, plainText) &&
+    (isDeepStrictEqual(templateResponseFormat, plainText) ||
+      (templateResponseFormat === undefined && pinnedMiniMax));
+  const nativeRenderer =
+    chatTemplate === undefined &&
+    (pinnedMiniMax || wireModel === KIMI_K3_FIREWORKS);
+  // The native prompt uses the inner schema. The provider sends the wrapper.
+  const nativeResponseFormat = nativeRenderer
+    ? normalizeNativeChatResponseFormat(responseFormat)
+    : undefined;
+  const nativeTemplateFormat = nativeRenderer
+    ? normalizeNativeChatResponseFormat(templateResponseFormat)
+    : undefined;
+  const omitRedundantStructuredFormat =
+    nativeResponseFormat !== undefined &&
+    isDeepStrictEqual(nativeResponseFormat, nativeTemplateFormat);
+  // The Chat pipeline applies generated tools and tool choice after sampling
+  // params. The provider applies extra_body last.
+  const generatedTools =
+    generation?.tools?.length && !Object.hasOwn(extraBody ?? {}, 'tools')
+      ? generation.tools
+      : undefined;
+  const generatedToolChoice =
+    generation?.tools?.length && !Object.hasOwn(extraBody ?? {}, 'tool_choice')
+      ? mapOpenAIToolChoice(generation.toolConfig)
+      : undefined;
+  const toolChoice = generatedToolChoice ?? body['tool_choice'];
+  const requestTools = generatedTools ?? tools;
+  const defaultToolChoice =
+    Array.isArray(requestTools) && requestTools.length > 0 ? 'auto' : 'none';
+  const acceptsAutoToolUsage =
+    nativeRenderer &&
+    (templateArgs?.['tool_choice'] ?? 'auto') === 'auto' &&
+    matchesSoleChatFunction(toolChoice, requestTools, generatedTools);
+  return {
+    model,
+    messages: rawMessages,
+    tools: requestTools,
+    acceptsAutoToolUsage,
+    // These overrides can change the tokens rendered from the same messages and tools.
+    rendering: {
+      chat_template: chatTemplate,
+      chat_template_kwargs: nativeTemplateFormat
+        ? { ...templateArgs, response_format: nativeTemplateFormat }
+        : templateOptions,
+      documents: body['documents'] ?? undefined,
+      response_format:
+        omitPlainText || omitRedundantStructuredFormat
+          ? undefined
+          : (nativeResponseFormat ?? responseFormat),
+      tool_choice:
+        toolChoice === defaultToolChoice
+          ? undefined
+          : (toolChoice ?? undefined),
+      add_generation_prompt: addGenerationPrompt,
+      continue_final_message: continueFinalMessage,
+      add_special_tokens: addSpecialTokens,
+      mm_processor_kwargs: normalizeRenderOptions(body['mm_processor_kwargs']),
+      truncate_prompt_tokens: body['truncate_prompt_tokens'] ?? undefined,
+    },
+    systemInstruction: rawMessages ? undefined : generation?.systemInstruction,
+    schemaCompliance: generatedTools
+      ? (config.schemaCompliance ?? 'auto')
+      : undefined,
+  };
+}
+
+function estimateHuggingFaceFallbackTextTokens(text: string): number {
+  // Kana commonly merges across letters.
+  const kana =
+    text.match(/[\p{Script=Hiragana}\p{Script=Katakana}ー]/gu)?.length ?? 0;
+  return Math.ceil(
+    estimateDenseTextTokens(text, estimateTextTokens) - kana * 0.6,
+  );
+}
+
+function estimateHuggingFaceUnpaddedTextTokens(text: string): number {
+  // Raw messages and the new part of a warm prompt lack the cold-prompt pad.
+  return estimateDenseTextTokensWithScriptAllowance(
+    text,
+    estimateHuggingFaceFallbackTextTokens,
+  );
+}
+
+function estimateRawChatMessagesTokens(
+  messages: unknown[],
+  imageTokenEstimate: number,
+): number {
+  let imageTokens = 0;
+  const text = JSON.stringify(messages, (_key, value: unknown) => {
+    if (
+      value &&
+      typeof value === 'object' &&
+      'type' in value &&
+      value.type === 'image_url'
+    ) {
+      imageTokens += imageTokenEstimate;
+      return undefined;
+    }
+    return value;
+  });
+  let textTokens = estimateHuggingFaceUnpaddedTextTokens(text);
+  // Long repeated separators like log dividers use merged tokens.
+  for (const [separator] of text.matchAll(/([=_-])\1{7,}/g)) {
+    textTokens +=
+      Math.ceil(separator.length / 8) - Math.floor(separator.length / 2);
+  }
+  return textTokens + imageTokens;
+}
+
+async function prepareHuggingFacePromptTools(
+  promptSource: OpenAIChatPromptSource,
+  tools: GenerateContentConfig['tools'],
+  params: SendMessageParameters,
+): Promise<{ params: SendMessageParameters; toolTokens: number }> {
+  let wireTools = promptSource.tools;
+  if (promptSource.schemaCompliance && tools) {
+    // Resolve callable tools once so sizing and dispatch see the same declarations.
+    const declarations: Tool[] = [];
+    for (const tool of tools) {
+      declarations.push('tool' in tool ? await tool.tool() : tool);
+    }
+    const { convertLlmToolsToOpenAI } = await import(
+      './openaiContentGenerator/converter.js'
+    );
+    wireTools = await convertLlmToolsToOpenAI(
+      declarations,
+      promptSource.schemaCompliance,
+    );
+    params = { ...params, config: { ...params.config, tools: declarations } };
+  }
+  return {
+    params,
+    toolTokens: estimateHuggingFaceFallbackTextTokens(
+      JSON.stringify(wireTools) ?? '',
+    ),
+  };
+}
 
 /**
  * Cap on how many routes' token counts are retained while their route is
@@ -2614,6 +2904,7 @@ export class LlmChat {
    */
   private toolBudgetUsageAnchor?: {
     routeKey: string;
+    promptTokens: number;
     tokens: number;
     history: Content[];
   };
@@ -3783,6 +4074,13 @@ export class LlmChat {
 
     let compressionInfo: ChatCompressionInfo;
     let requestContents: Content[];
+    let usageBackedPrompt:
+      | {
+          source: OpenAIChatPromptSource;
+          contents: Content[];
+          tokens: number;
+        }
+      | undefined;
     let userContentAdded = false;
     let manualPlanExitNoticeVersion: number | undefined;
     let manualPlanExitNoticeText: string | undefined;
@@ -3798,7 +4096,8 @@ export class LlmChat {
     // (params.config.maxOutputTokens from subagents, samplingParams.max_tokens
     // or QWEN_CODE_MAX_OUTPUT_TOKENS from user config), else
     // defaultOutputCeiling(model) (the model's output limit clipped to
-    // OUTPUT_TOKEN_CEILING).
+    // OUTPUT_TOKEN_CEILING). A verified Hugging Face Chat route may also set a
+    // ceiling in its provider-native body fields.
     const cgConfigForThresholds =
       exactRoute?.contentGeneratorConfig ??
       this.config.getContentGeneratorConfig();
@@ -3809,8 +4108,28 @@ export class LlmChat {
       params.config?.maxOutputTokens ??
       cgConfigForThresholds?.samplingParams?.max_tokens ??
       parsedEnvMaxTokensForClamp;
-    const outputCeiling: number =
-      explicitOutputCeiling ?? defaultOutputCeiling(model);
+    const primaryUsesHuggingFace = isHuggingFaceRouterUrl(
+      cgConfigForThresholds?.baseUrl,
+    );
+    const budgetModel =
+      cgConfigForThresholds && primaryUsesHuggingFace
+        ? getRequestModel(cgConfigForThresholds, model)
+        : model;
+    const hfRoute = getHuggingFaceRoute(
+      budgetModel,
+      cgConfigForThresholds?.baseUrl,
+    );
+    const bodyOutputCeiling = getConfiguredHuggingFaceChatOutputBudget(
+      cgConfigForThresholds,
+      hfRoute?.limits?.output,
+    );
+    const outputCeiling = Math.min(
+      explicitOutputCeiling ??
+        bodyOutputCeiling ??
+        defaultOutputCeiling(budgetModel, cgConfigForThresholds?.baseUrl),
+      bodyOutputCeiling ?? Infinity,
+      hfRoute?.limits?.output ?? Infinity,
+    );
     // Declared at function level so the MAX_TOKENS escalation path inside
     // the generator closure can re-clamp against the same window and prompt
     // estimate.
@@ -4495,7 +4814,8 @@ export class LlmChat {
         // self-corrects when provider usage arrives. An under-count is the ONE
         // way `prompt + max_tokens` can still overflow the window, so keep the
         // pad until provider usage replaces the estimate.
-        if (this.promptCountIsEstimateDerived()) {
+        const promptCountIsEstimated = this.promptCountIsEstimateDerived();
+        if (promptCountIsEstimated) {
           promptTokensForClamp += ESTIMATE_CLAMP_OVERHEAD_PAD;
           debugLogger.debug(
             `[clamp] estimate-derived prompt count; padded by ` +
@@ -4503,6 +4823,98 @@ export class LlmChat {
               `promptTokensForClamp=${promptTokensForClamp}, ` +
               `count=${this.lastPromptTokenCount}`,
           );
+        }
+        const generation = primaryUsesHuggingFace
+          ? { ...this.generationConfig, ...params.config }
+          : undefined;
+        let primaryPromptSource = generation
+          ? openAIChatPromptSource(
+              cgConfigForThresholds,
+              budgetModel,
+              generation,
+            )
+          : undefined;
+        let rawToolTokens = 0;
+        if (primaryPromptSource?.messages) {
+          const prepared = await prepareHuggingFacePromptTools(
+            primaryPromptSource,
+            generation?.tools,
+            params,
+          );
+          if (prepared.params !== params) {
+            primaryPromptSource = {
+              ...primaryPromptSource,
+              tools: prepared.params.config?.tools,
+            };
+          }
+          params = prepared.params;
+          rawToolTokens = prepared.toolTokens;
+        }
+        requestContents = this.getRequestHistoryForRoute(
+          currentUserContent,
+          requestModalities,
+        );
+        const usageAnchor = this.toolBudgetUsageAnchor;
+        if (
+          primaryPromptSource &&
+          !promptCountIsEstimated &&
+          usageAnchor?.routeKey === requestRouteKey &&
+          usageAnchor.history.every(
+            (content, index) => content === this.history[index],
+          )
+        ) {
+          // Session counts may be attributed to the primary even when a different
+          // model or prompt supplied the usage. Check the successful dispatch.
+          const usageRequest = this.dispatchedRequest;
+          const usageConfig = usageRequest?.runtimeView?.contentGeneratorConfig;
+          if (
+            isHuggingFaceRouterUrl(usageConfig?.baseUrl) &&
+            isDeepStrictEqual(
+              primaryPromptSource,
+              openAIChatPromptSource(
+                usageConfig,
+                usageRequest?.model,
+                usageRequest?.generationConfig,
+              ),
+            )
+          ) {
+            // Fixed raw messages replace the conversation. Otherwise the usage
+            // covers the prior turns; the new input still needs a density estimate.
+            let usageTokens = usageAnchor.promptTokens;
+            if (!primaryPromptSource.messages) {
+              // The prepared user turn includes any newly attached snapshots.
+              const pendingContents = requestContents.slice(-1);
+              const legacyPendingTokens = Math.ceil(
+                estimateContentTokens(pendingContents, imageTokenEstimate) *
+                  CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR,
+              );
+              const densePendingTokens = estimateContentTokens(
+                pendingContents,
+                imageTokenEstimate,
+                estimateHuggingFaceUnpaddedTextTokens,
+              );
+              usageTokens =
+                promptTokensForClamp +
+                Math.max(0, densePendingTokens - legacyPendingTokens);
+            }
+            usageBackedPrompt = {
+              source: primaryPromptSource,
+              contents: requestContents,
+              tokens: usageTokens,
+            };
+          }
+        }
+        if (primaryPromptSource?.messages) {
+          // Matched usage covers the complete fixed body.
+          promptTokensForClamp =
+            usageBackedPrompt?.tokens ??
+            Math.max(
+              promptTokensForClamp,
+              estimateRawChatMessagesTokens(
+                primaryPromptSource.messages,
+                imageTokenEstimate,
+              ) + rawToolTokens,
+            );
         }
         const clampedMaxOutputTokens = clampOutputTokensToWindow(
           outputCeiling,
@@ -4517,10 +4929,6 @@ export class LlmChat {
             maxOutputTokens: clampedMaxOutputTokens,
           },
         };
-        requestContents = this.getRequestHistoryForRoute(
-          currentUserContent,
-          requestModalities,
-        );
       }
     } catch (error) {
       if (userContentAdded) {
@@ -4658,7 +5066,9 @@ export class LlmChat {
         const effectiveInitialMaxOutputTokens =
           params.config?.maxOutputTokens ?? outputCeiling;
         const escalatedLimit = clampOutputTokensToWindow(
-          OUTPUT_TOKEN_CEILING,
+          hfRoute
+            ? Math.min(outputCeiling, OUTPUT_TOKEN_CEILING)
+            : OUTPUT_TOKEN_CEILING,
           contextWindowForClamp,
           promptTokensForClamp,
         );
@@ -6177,6 +6587,76 @@ export class LlmChat {
                       currentUserContent,
                       fallbackModalities ?? {},
                     );
+                  const fallbackParams = self.prepareRequestParams(
+                    resolvedFallbackModel,
+                    params,
+                    fallbackConfig,
+                    Object.hasOwn(
+                      callerParams.config ?? {},
+                      'systemInstruction',
+                    ),
+                  );
+                  const fallbackUsesHuggingFace = isHuggingFaceRouterUrl(
+                    fallbackConfig?.baseUrl,
+                  );
+                  const reclampOutput =
+                    primaryUsesHuggingFace || fallbackUsesHuggingFace;
+                  const fallbackPromptSource = reclampOutput
+                    ? openAIChatPromptSource(
+                        fallbackConfig,
+                        getRequestModel(
+                          fallbackConfig ?? {},
+                          resolvedFallbackModel,
+                        ),
+                        { ...self.generationConfig, ...fallbackParams.config },
+                      )
+                    : undefined;
+                  const promptSource =
+                    fallbackUsesHuggingFace || fallbackPromptSource?.messages
+                      ? fallbackPromptSource
+                      : undefined;
+                  // A named choice can suppress a server-default tool instruction.
+                  // The earlier auto measurement still covers the named prompt.
+                  const comparableFallbackPrompt =
+                    usageBackedPrompt &&
+                    fallbackPromptSource?.acceptsAutoToolUsage &&
+                    usageBackedPrompt.source.rendering['tool_choice'] ===
+                      undefined
+                      ? withAutoToolChoice(fallbackPromptSource)
+                      : fallbackPromptSource;
+                  // Reuse the primary count only when the configured prompt inputs match.
+                  const usagePromptTokens =
+                    usageBackedPrompt &&
+                    isDeepStrictEqual(
+                      usageBackedPrompt.source,
+                      comparableFallbackPrompt,
+                    ) &&
+                    (fallbackPromptSource?.messages ||
+                      isDeepStrictEqual(
+                        usageBackedPrompt.contents,
+                        fallbackRequestContents,
+                      ))
+                      ? usageBackedPrompt.tokens
+                      : undefined;
+                  // Allow for the native required-tool instruction on the same fixed body.
+                  const rawPromptTokenFloor =
+                    usageBackedPrompt &&
+                    promptSource?.messages &&
+                    promptSource.model.trim().toLowerCase() ===
+                      KIMI_K3_FIREWORKS &&
+                    promptSource.rendering['chat_template'] === undefined &&
+                    promptSource.rendering['tool_choice'] === 'required' &&
+                    Array.isArray(promptSource.tools) &&
+                    promptSource.tools.length > 0 &&
+                    isDeepStrictEqual(
+                      usageBackedPrompt.source.acceptsAutoToolUsage
+                        ? withAutoToolChoice(usageBackedPrompt.source)
+                        : usageBackedPrompt.source,
+                      withAutoToolChoice(promptSource),
+                    )
+                      ? usageBackedPrompt.tokens +
+                        KIMI_K3_REQUIRED_TOOL_PROMPT_RESERVE
+                      : undefined;
                   // Stamp the fallback-served counts under the REQUEST route
                   // key: a fallback serves on behalf of the same session
                   // request (the session model never changes), and the
@@ -6188,15 +6668,7 @@ export class LlmChat {
                   for await (const event of self.makeFallbackStream(
                     resolvedFallbackModel,
                     fallbackRequestContents,
-                    self.prepareRequestParams(
-                      resolvedFallbackModel,
-                      params,
-                      fallbackConfig,
-                      Object.hasOwn(
-                        callerParams.config ?? {},
-                        'systemInstruction',
-                      ),
-                    ),
+                    fallbackParams,
                     prompt_id,
                     fallbackGenerator,
                     fallbackRetryAuthType,
@@ -6207,6 +6679,21 @@ export class LlmChat {
                     promptTokensForClamp,
                     fallbackConfig,
                     options?.onModelRequestDispatched,
+                    reclampOutput
+                      ? {
+                          explicitOutputCeiling,
+                          promptSource,
+                          usagePromptTokens,
+                          rawPromptTokenFloor,
+                          // A warm prompt still estimates its new input. Only
+                          // room after the reserve can raise the primary budget.
+                          outputFloorLimit:
+                            usagePromptTokens !== undefined &&
+                            !fallbackPromptSource?.messages
+                              ? params.config?.maxOutputTokens
+                              : undefined,
+                        }
+                      : undefined,
                   )) {
                     const emittedUserVisibleOutput =
                       event.type !== StreamEventType.CHUNK ||
@@ -6644,7 +7131,112 @@ export class LlmChat {
     promptTokensForClamp = 0,
     contentGeneratorConfig?: ContentGeneratorConfig,
     onModelRequestDispatched?: () => void,
+    outputClamp?: {
+      explicitOutputCeiling: number | undefined;
+      promptSource?: OpenAIChatPromptSource;
+      usagePromptTokens?: number;
+      rawPromptTokenFloor?: number;
+      outputFloorLimit?: number;
+    },
   ): AsyncGenerator<StreamEvent> {
+    if (outputClamp) {
+      const baseUrl = contentGeneratorConfig?.baseUrl;
+      const wireModel = getRequestModel(contentGeneratorConfig ?? {}, model);
+      const route = getHuggingFaceRoute(wireModel, baseUrl);
+      const window =
+        contentGeneratorConfig?.contextWindowSize ??
+        tokenLimit(wireModel, 'input', baseUrl);
+      const bodyOutputCeiling = getConfiguredHuggingFaceChatOutputBudget(
+        contentGeneratorConfig,
+        route?.limits?.output,
+      );
+      const {
+        explicitOutputCeiling,
+        promptSource,
+        usagePromptTokens,
+        rawPromptTokenFloor,
+        outputFloorLimit,
+      } = outputClamp;
+      const fallbackUsesHuggingFace = isHuggingFaceRouterUrl(baseUrl);
+      // Keep the primary cap for a compatible route without matching usage.
+      const outputCeiling = Math.min(
+        explicitOutputCeiling ?? Infinity,
+        bodyOutputCeiling ?? Infinity,
+        (fallbackUsesHuggingFace && promptSource) ||
+          usagePromptTokens !== undefined
+          ? Infinity
+          : (params.config?.maxOutputTokens ?? Infinity),
+        contentGeneratorConfig?.samplingParams?.max_tokens ??
+          explicitOutputCeiling ??
+          bodyOutputCeiling ??
+          defaultOutputCeiling(wireModel, baseUrl),
+        route?.limits?.output ?? Infinity,
+      );
+      // The fallback can prepare different history and a different system prompt.
+      const { systemInstruction, tools } = {
+        ...this.generationConfig,
+        ...params.config,
+      };
+      const systemPrompt = getCustomSystemPrompt(systemInstruction);
+      const { imageTokenEstimate } = resolveSlimmingConfig(
+        this.config.getChatCompression(),
+      );
+      let toolTokens = 0;
+      if (promptSource && usagePromptTokens === undefined) {
+        ({ params, toolTokens } = await prepareHuggingFacePromptTools(
+          promptSource,
+          tools,
+          params,
+        ));
+      }
+      const estimatedPromptTokens =
+        fallbackUsesHuggingFace && promptSource?.messages
+          ? 0
+          : estimateContentTokens(requestContents, imageTokenEstimate) +
+            Math.max(
+              ESTIMATE_CLAMP_OVERHEAD_PAD,
+              Math.ceil(systemPrompt.length / TOKEN_TO_CHAR_RATIO),
+            );
+      if (promptSource?.messages) {
+        const rawPromptTokens =
+          usagePromptTokens ??
+          estimateRawChatMessagesTokens(
+            promptSource.messages,
+            imageTokenEstimate,
+          ) + toolTokens;
+        promptTokensForClamp = Math.max(
+          estimatedPromptTokens,
+          rawPromptTokens,
+          rawPromptTokenFloor ?? 0,
+        );
+      } else {
+        // A resumed or different route lacks a matching usage anchor. Price the
+        // destination's text, system instruction and tools without double counting the pad.
+        const densePromptTokens =
+          promptSource && usagePromptTokens === undefined
+            ? estimateContentTokens(
+                requestContents,
+                imageTokenEstimate,
+                estimateHuggingFaceFallbackTextTokens,
+              ) +
+              estimateHuggingFaceFallbackTextTokens(systemPrompt) +
+              toolTokens
+            : 0;
+        promptTokensForClamp = Math.max(
+          estimatedPromptTokens,
+          usagePromptTokens ?? 0,
+          densePromptTokens,
+        );
+      }
+      const maxOutputTokens = clampOutputTokensToWindow(
+        outputCeiling,
+        window,
+        promptTokensForClamp,
+        outputFloorLimit,
+      );
+      this.lastRequestMaxOutputTokens = maxOutputTokens;
+      params = { ...params, config: { ...params.config, maxOutputTokens } };
+    }
     const stream = await this.makeApiCallAndProcessStream(
       model,
       requestContents,
@@ -8392,6 +8984,7 @@ export class LlmChat {
       usageMetadata.promptTokenCount > 0
         ? {
             routeKey,
+            promptTokens: usageMetadata.promptTokenCount,
             tokens:
               usageMetadata.promptTokenCount +
               getUsageOutputTokenCountForPromptEstimate(usageMetadata),

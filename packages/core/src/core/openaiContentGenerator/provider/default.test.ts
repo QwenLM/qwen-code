@@ -127,6 +127,17 @@ describe('DefaultOpenAICompatibleProvider', () => {
     expect(request.max_tokens).toBe(65536);
   });
 
+  it.each([
+    ['https://router.huggingface.co/v1', 64_000],
+    ['https://compatible.example/v1', 32_000],
+  ])('scopes the router output ceiling to %s', (baseUrl, maxTokens) => {
+    const model = 'zai-org/GLM-5.3-Flash:deepinfra';
+    const request = build(hello(model), providerWith({ baseUrl, model }));
+
+    expect(request.model).toBe(model);
+    expect(request.max_tokens).toBe(maxTokens);
+  });
+
   afterEach(() => {
     if (savedMaxOutputTokensEnv === undefined) {
       delete process.env[MAX_OUTPUT_TOKENS_ENV];

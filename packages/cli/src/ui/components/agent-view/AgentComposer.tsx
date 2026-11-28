@@ -134,7 +134,7 @@ export function getAgentContextWindowSize(
   // A declared window of 0 would divide the usage by zero.
   return declared !== undefined && declared > 0
     ? declared
-    : tokenLimit(agentModel, 'input');
+    : tokenLimit(agentModel, 'input', route?.baseUrl);
 }
 
 // ─── Component ──────────────────────────────────────────────

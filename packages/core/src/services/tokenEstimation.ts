@@ -46,6 +46,29 @@ export function estimateContextTextTokens(text: string): number {
   return Math.ceil(asciiChars / 4 + nonAsciiChars * 1.5);
 }
 
+export function estimateDenseTextTokens(
+  text: string,
+  estimateBase = estimateContextTextTokens,
+): number {
+  let estimate = estimateBase(text);
+  // Numbers and ASCII delimiters commonly tokenize in shorter runs than prose.
+  for (const [run] of text.matchAll(
+    /[0-9]+|[!-/:-@\u005b-\u0060{-~]+|\r?\n/g,
+  )) {
+    estimate += Math.ceil(run.length / 2) - run.length / 4;
+  }
+  return Math.ceil(estimate);
+}
+
+export function estimateDenseTextTokensWithScriptAllowance(
+  text: string,
+  estimateBase = estimateDenseTextTokens,
+): number {
+  const khmer = text.match(/\p{Script=Khmer}/gu)?.length ?? 0;
+  const mongolian = text.match(/\p{Script=Mongolian}/gu)?.length ?? 0;
+  return estimateBase(text) + Math.ceil(khmer * 0.9 + mongolian * 1.5);
+}
+
 /**
  * Estimate the token count of a list of Content objects via char/4.
  *
@@ -61,10 +84,18 @@ export function estimateContextTextTokens(text: string): number {
 export function estimateContentTokens(
   contents: Content[],
   imageTokenEstimate: number = DEFAULT_IMAGE_TOKEN_ESTIMATE,
+  estimateTextTokens?: (text: string) => number,
 ): number {
+  const measureText =
+    estimateTextTokens &&
+    ((text: string) => estimateTextTokens(text) * CHARS_PER_TOKEN);
   let totalChars = 0;
   for (const content of contents) {
-    totalChars += estimateContentChars(content, imageTokenEstimate);
+    totalChars += estimateContentChars(
+      content,
+      imageTokenEstimate,
+      measureText,
+    );
   }
   return Math.ceil(totalChars / CHARS_PER_TOKEN);
 }

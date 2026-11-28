@@ -171,7 +171,7 @@ export function validateReasoningCapabilities(
   if (!input) return undefined;
   if (input.profile === undefined && 'thinking' in input)
     return parseModelReasoningCapabilities(input);
-  const model = normalize(route.model);
+  const model = normalize(route.model, route.baseUrl);
   const provider = ALL_PROVIDERS.find((candidate) =>
     typeof candidate.baseUrl === 'string'
       ? candidate.baseUrl === route.baseUrl
@@ -187,7 +187,7 @@ export function validateReasoningCapabilities(
     if (input.efforts || input.defaultEffort) return invalidReasoning(route);
     return parseModelReasoningCapabilities({ ...inherited, ...input });
   }
-  const gpt = getGptReasoningCapabilities(route.model);
+  const gpt = getGptReasoningCapabilities(route.model, route.baseUrl);
   const claude =
     route.authType === 'anthropic'
       ? parseClaudeModelVersion(route.model)

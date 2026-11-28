@@ -44,6 +44,7 @@ describe('worktree memory migration', () => {
       getProjectAutoMemoryRoot: () => getWorkspaceProjectMemoryRoot(cwd, base),
       isTrustedFolder: () => true,
       getModel: () => 'test-model',
+      getContentGeneratorConfig: () => ({ model: 'test-model' }),
       getModelContextWindowSize: () => 128 * 1024,
       getBaseLlmClient: () => ({ generateJson }),
     } as unknown as Config;
