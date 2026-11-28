@@ -1652,6 +1652,7 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
     | 'memory_tool'
     | 'memory_pressure'
     | 'session_mismatch'
+    | 'writes_denied'
     | 'cadence';
   patches_count: number;
   touched_topics: string;
@@ -1666,6 +1667,7 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
       | 'memory_tool'
       | 'memory_pressure'
       | 'session_mismatch'
+      | 'writes_denied'
       | 'cadence';
     patches_count: number;
     touched_topics: string[];
