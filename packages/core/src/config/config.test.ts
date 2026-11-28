@@ -183,6 +183,10 @@ import type {
   ChatRecordingFailureEvent,
 } from '../services/chatRecordingService.js';
 import type { ResumedSessionData } from '../services/sessionService.js';
+import {
+  settleOrphanedShellStatusFiles,
+  watchOrphanedShellStatusFiles,
+} from '../services/backgroundShellRegistry.js';
 import { GoalPersistenceUnavailableError } from '../goals/goal-runtime.js';
 import type { GoalTurnPermit } from '../goals/goal-protocol.js';
 import {
@@ -228,6 +232,14 @@ vi.mock('node:fs', async (importOriginal) => {
     default: mocked, // Required for ESM default imports (import fs from 'node:fs')
   };
 });
+
+vi.mock('../services/backgroundShellRegistry.js', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('../services/backgroundShellRegistry.js')
+  >()),
+  settleOrphanedShellStatusFiles: vi.fn(() => ({ settled: 0, unsettled: [] })),
+  watchOrphanedShellStatusFiles: vi.fn(() => vi.fn()),
+}));
 
 // This Config suite uses a synthetic filesystem. Archive exclusion and
 // generation checks are covered on disk by session-archive-write-fence.test.ts.
@@ -3459,6 +3471,81 @@ describe('Server Config (config.ts)', () => {
         );
       },
     ));
+
+  describe('orphaned background shell status files', () => {
+    const shellDir = (config: Config, sessionId: string) =>
+      path.join(
+        config.storage.getProjectTempDir(),
+        'background-shells',
+        sessionId,
+      );
+
+    it('settles the session it initializes', async () => {
+      vi.mocked(settleOrphanedShellStatusFiles).mockClear();
+      const config = await initConfig({ sessionId: 'resumed-session' });
+      expect(settleOrphanedShellStatusFiles).toHaveBeenCalledWith(
+        shellDir(config, 'resumed-session'),
+      );
+    });
+
+    it('settles a session it switches to, but not the one it is in', () => {
+      const config = makeConfig({ sessionId: 'current-session' });
+      vi.mocked(settleOrphanedShellStatusFiles).mockClear();
+      config.startNewSession('current-session');
+      expect(settleOrphanedShellStatusFiles).not.toHaveBeenCalled();
+      config.startNewSession('other-session');
+      expect(settleOrphanedShellStatusFiles).toHaveBeenCalledWith(
+        shellDir(config, 'other-session'),
+      );
+    });
+
+    it('watches unsettled orphans until it switches away or shuts down', async () => {
+      const orphan = { statusPath: '/tmp/shell-bg_1.status', pid: 4242 };
+      const stopFirst = vi.fn();
+      const stopSecond = vi.fn();
+      vi.mocked(watchOrphanedShellStatusFiles)
+        .mockClear()
+        .mockReturnValueOnce(stopFirst)
+        .mockReturnValueOnce(stopSecond);
+      const config = makeConfig({ sessionId: 'current-session' });
+      vi.mocked(settleOrphanedShellStatusFiles)
+        .mockReturnValueOnce({ settled: 0, unsettled: [orphan] })
+        .mockReturnValueOnce({ settled: 0, unsettled: [orphan] });
+
+      config.startNewSession('resumed-session');
+      expect(watchOrphanedShellStatusFiles).toHaveBeenCalledWith([orphan]);
+      config.startNewSession('resumed-session');
+      expect(stopFirst).not.toHaveBeenCalled();
+      config.startNewSession('another-session');
+      expect(stopFirst).toHaveBeenCalledOnce();
+
+      await config.shutdown();
+      expect(stopSecond).toHaveBeenCalledOnce();
+    });
+
+    it('does not settle for a Config with an execution environment', () => {
+      const config = makeConfig({
+        sessionId: 'current-session',
+        executionEnvironment: new SshExecutionEnvironment(
+          { host: 'host', directory: '/srv/project' },
+          '/local/anchor',
+        ),
+      });
+      vi.mocked(settleOrphanedShellStatusFiles).mockClear();
+      config.startNewSession('other-session');
+      expect(settleOrphanedShellStatusFiles).not.toHaveBeenCalled();
+    });
+
+    it('still initializes when settling throws', async () => {
+      vi.mocked(settleOrphanedShellStatusFiles).mockImplementationOnce(() => {
+        throw Object.assign(new Error('permission denied'), {
+          code: 'EACCES',
+        });
+      });
+      const config = await initConfig({ sessionId: 'resumed-session' });
+      expect(config.getSessionId()).toBe('resumed-session');
+    });
+  });
 
   it('drops stale file history callbacks after session switch', () =>
     withFileHistory({}, async ({ config, trackedFile, record }) => {
