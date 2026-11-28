@@ -984,6 +984,10 @@ describe('local container recipe pins', () => {
           /"\$\(cat ~\/\.cache\/qwen-verify-guard\/pr<n>\/<round-id>\/guard\.sha256\)"/g,
           '<guard-digest>',
         )
+        .replace(
+          /"\$\(cat ~\/\.cache\/qwen-verify\/pr<n>\/review-threads\.sha256\)"/g,
+          '<review-digest>',
+        )
         .replace(/(^|\s)--repo=/g, '$1--repo ')
         .replaceAll('[--round <r>]', '--round <r>')
         .replaceAll('[--artifact-dir <dir>]', '--artifact-dir <artifact-dir>')
@@ -1023,13 +1027,15 @@ describe('local container recipe pins', () => {
       if (kind === 'check') {
         const match = text.match(
           exact(
-            String.raw` --context (${pathValue}) --context-sha256 <digest>(?: --context-root (${pathValue}))?(?: --execution-record <execution-record> --execution-record-sha256 <execution-record-sha256>)?(?: --require-guard --guard (${pathValue}) --guard-sha256 <guard-digest>)? (${pathValue})`,
+            String.raw` --context (${pathValue}) --context-sha256 <digest>(?: --context-root (${pathValue}))?(?: --execution-record <execution-record> --execution-record-sha256 <execution-record-sha256>)?(?: --require-guard --guard (${pathValue}) --guard-sha256 <guard-digest>)?(?: --review-threads (${pathValue}) --review-threads-sha256 <review-digest>)? (${pathValue})`,
           ),
         );
         return (
           match !== null &&
           (match[3] === undefined ||
             match[3].startsWith('~/.cache/qwen-verify-guard/prN/roundId/')) &&
+          (match[4] === undefined ||
+            match[4] === '~/.cache/qwen-verify/prN/review-threads.json') &&
           match
             .slice(1)
             .every((path) => path === undefined || validDocumentedPath(path))
@@ -6815,6 +6821,7 @@ describe('local container recipe pins', () => {
             }
             if (
               raw === `> ${cacheRoot}/pr.sha256` ||
+              raw === `> ${cacheRoot}/review-threads.sha256` ||
               raw === `> ${guardCacheRoot}/guard.sha256`
             ) {
               return name === 'sed';
@@ -6947,9 +6954,12 @@ describe('local container recipe pins', () => {
               return (
                 values.length === 1 &&
                 (relativeDataPath(rawValues[0]) ||
-                  ['prepare.log', 'pr.sha256', 'proxy.pid'].some((suffix) =>
-                    cachePath(rawValues[0], suffix),
-                  ) ||
+                  [
+                    'prepare.log',
+                    'pr.sha256',
+                    'review-threads.sha256',
+                    'proxy.pid',
+                  ].some((suffix) => cachePath(rawValues[0], suffix)) ||
                   ['guard.log', 'guard.sha256'].some((suffix) =>
                     guardCachePath(rawValues[0], suffix),
                   ))
@@ -7007,6 +7017,7 @@ describe('local container recipe pins', () => {
               ) {
                 return (
                   cachePath(rawValues[2], 'pr.sha256') ||
+                  cachePath(rawValues[2], 'review-threads.sha256') ||
                   guardCachePath(rawValues[2], 'guard.sha256')
                 );
               }
@@ -7112,6 +7123,7 @@ describe('local container recipe pins', () => {
                           'prepare.log',
                           'pr.sha256',
                           'review-threads.json',
+                          'review-threads.sha256',
                           'previous-report.md',
                           'proxy.json',
                           'proxy.err',
@@ -7326,7 +7338,8 @@ describe('local container recipe pins', () => {
               valid =
                 rawValues.length === 3 &&
                 rawValues[0] === '-n' &&
-                ((rawValues[1] === "'s/^  context-sha256  //p'" &&
+                (((rawValues[1] === "'s/^  context-sha256  //p'" ||
+                  rawValues[1] === "'s/^  review-sha256  //p'") &&
                   cachePath(rawValues[2], 'prepare.log')) ||
                   (rawValues[1] === "'s/^  guard-sha256  //p'" &&
                     guardCachePath(rawValues[2], 'guard.log')));
@@ -7690,6 +7703,27 @@ describe('local container recipe pins', () => {
         skill.replace(
           '--execution-record <execution-record> \\',
           '--execution-record /tmp/evil.json \\',
+        ),
+      ],
+      [
+        'review-threads.sha256 written outside host verify cache',
+        skill.replace(
+          '> ~/.cache/qwen-verify/pr<n>/review-threads.sha256',
+          '> /tmp/review-threads.sha256',
+        ),
+      ],
+      [
+        'review-threads path redirected inside PR clone',
+        skill.replace(
+          '--review-threads ~/.cache/qwen-verify/pr<n>/review-threads.json \\',
+          '--review-threads <pr-clone>/tmp/verify-context/pr<n>-review-threads.json \\',
+        ),
+      ],
+      [
+        'review-threads passed without digest in publish check',
+        skill.replace(
+          '--review-threads-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/review-threads.sha256)" \\',
+          '',
         ),
       ],
     ]) {
@@ -10513,6 +10547,57 @@ describe('local container recipe pins', () => {
       'git -C <pr-clone> rev-parse "<baseRefOid>:.qwen/skills/verify-pr/SKILL.md"',
     );
     expect(skill).toContain("never the PR head's copy");
+  });
+
+  // PR #18581 showed three root-container rounds certifying 88/88 merge-ready
+  // while missing FIFO/hard-link/xattr loss (P1), non-root symlink-only
+  // ownership-skip (P2) in mid-round delta 2490bb3f, and an unverified
+  // top-level P1 review comment. Pin the fidelity protocol, mid-round delta
+  // bar, proxy-signal rule, container uid disclosure, and --review-threads
+  // mechanical binding in SKILL.md.
+  it('requires extract-repack fidelity axes, mid-round delta probes, proxy-signal counterexamples, and mechanical review-threads binding', () => {
+    const flat = skill.replace(/\s+/g, ' ');
+    expect(flat).toContain(
+      'For **extract-repack and fidelity-preserving transform diffs**',
+    );
+    expect(flat).toContain('Source-anchored full differential oracle');
+    expect(flat).toContain('File-type matrix');
+    expect(flat).toContain('Inode topology');
+    expect(flat).toContain('Metadata, ownership, and xattrs');
+    expect(flat).toContain('Unprivileged execution context');
+    expect(flat).toContain(
+      'New production logic in a follow-up or mid-round delta needs fresh-round adversarial verification.',
+    );
+    expect(flat).toContain(
+      'Attack proxy-signal gates with false-negative counterexamples.',
+    );
+    expect(flat).toContain(
+      'Verify newly fixed external-tool semantics against the real binary, not shell fakes.',
+    );
+    expect(flat).toContain(
+      '`verify-pr-prepare.mjs` (under `--require-isolation`) records the container process `uid` in `boundary-gate.json`',
+    );
+    expect(skill).toContain(
+      "sed -n 's/^  review-sha256  //p' ~/.cache/qwen-verify/pr<n>/prepare.log > ~/.cache/qwen-verify/pr<n>/review-threads.sha256",
+    );
+    expect(skill).toContain(
+      '--review-threads ~/.cache/qwen-verify/pr<n>/review-threads.json \\',
+    );
+    expect(skill).toContain(
+      '--review-threads-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/review-threads.sha256)" \\',
+    );
+    expect(flat).toContain(
+      'which `prepare` also binds via `reviewSha256` inside the host `pr.json` snapshot',
+    );
+    expect(flat).toContain(
+      'optional positive integer `finding` (required per finding whenever one comment lists multiple distinct blockers)',
+    );
+    expect(flat).toContain(
+      'in both `report.md` and `comment.md` (when present) when marked `not-reproduced`',
+    );
+    expect(flat).toContain(
+      'plus the explicit finding number (for example `finding 2` or `第 2 项`',
+    );
   });
 });
 

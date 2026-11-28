@@ -3991,12 +3991,24 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       'verify-context',
       'pr42-review-threads.json',
     );
-    expect(JSON.parse(readFileSync(reviewPath, 'utf8'))).toEqual(
-      reviewState(pages),
-    );
+    const reviewRaw = readFileSync(reviewPath, 'utf8');
+    expect(JSON.parse(reviewRaw)).toEqual(reviewState(pages));
+    const expectedReviewSha = createHash('sha256')
+      .update(reviewRaw, 'utf8')
+      .digest('hex');
     expect(result.stdout).toContain(
       `review     ${reviewPath} (2 of 3 threads unresolved, 1 change requests)`,
     );
+    expect(result.stdout).toContain(`  review-sha256  ${expectedReviewSha}`);
+    const contextSnapshotPath = join(
+      realpathSync(dir),
+      'tmp',
+      'verify-context',
+      'pr42.json',
+    );
+    expect(
+      JSON.parse(readFileSync(contextSnapshotPath, 'utf8')).reviewSha256,
+    ).toBe(expectedReviewSha);
     const args = ghApiArgs(env)
       .trim()
       .split('\n')
@@ -4045,6 +4057,10 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       writeFileSync(env.FAKE_GH_REVIEW, answer);
       const odd = runPrepare(dir, ['42', '--repo', REPO], env);
       expect(odd.status).toBe(0);
+      expect(odd.stdout).not.toContain('review-sha256');
+      expect(
+        JSON.parse(readFileSync(contextSnapshotPath, 'utf8')).reviewSha256,
+      ).toBeNull();
       expect(existsSync(reviewPath)).toBe(false);
       expect(odd.stdout).toContain(
         `review     not written — ${reason}; the round lists review findings as not covered`,
@@ -4269,6 +4285,41 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     );
     // The plaintext never rides the record: a host battery cannot copy it out.
     expect(JSON.stringify(record)).not.toContain(plaintext);
+    if (typeof process.getuid === 'function') {
+      expect(record.uid).toBe(process.getuid());
+    }
+  });
+
+  it('records explicit container uid (including uid=0 root vs non-root uid) in boundary-gate.json', () => {
+    const rootArt = makeTmpDir();
+    const rootHome = makeTmpDir();
+    expect(
+      requireBoundary(rootArt, {
+        env: { QWEN_VERIFY_CREDENTIAL_FREE: '1' },
+        exists: (p) => p === '/.dockerenv',
+        home: rootHome,
+        uid: 0,
+      }),
+    ).toBe(0);
+    const rootRecord = JSON.parse(
+      readFileSync(join(rootArt, 'boundary-gate.json'), 'utf8'),
+    );
+    expect(rootRecord.uid).toBe(0);
+
+    const userArt = makeTmpDir();
+    const userHome = makeTmpDir();
+    expect(
+      requireBoundary(userArt, {
+        env: { QWEN_VERIFY_CREDENTIAL_FREE: '1' },
+        exists: (p) => p === '/.dockerenv',
+        home: userHome,
+        uid: 1000,
+      }),
+    ).toBe(0);
+    const userRecord = JSON.parse(
+      readFileSync(join(userArt, 'boundary-gate.json'), 'utf8'),
+    );
+    expect(userRecord.uid).toBe(1000);
   });
 
   // R1-4: an unwritable/absent $HOME must fail the gate before the pass line,

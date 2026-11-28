@@ -69,8 +69,48 @@ export const EXECUTION_RECORD_SCHEMA = 'verify-pr-exec-record-v1';
 export const GUARD_VERDICT_SCHEMA = 'verify-pr-guard-verdict-v1';
 export const DEFAULT_GUARD_MAX_AGE_SEC = 600;
 export const MAX_GUARD_AGE_SEC = 86400;
+export const REVIEW_COVERAGE_STATUSES = [
+  'reproduced',
+  'not-reproduced',
+  'not-measured',
+  'no-defect-claimed',
+];
 const GUARD_FUTURE_SKEW_MS = 60_000;
 const GUARD_ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+const MAINTAINER_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+const CI_VERIFY_FOOTER = /^— _Qwen Code · sandboxed verification_$/;
+const IGNORED_BOT_COMMENT_HEADER =
+  /^\s*<!--\s*(?:qwen-verify|qwen-triage\s+lifecycle|qwen-review-fallback|qwen-release-comment|qwen-autofix|pr-ui-verify|qwen-pr-precheck|qwen-review-ack|qwen-resolve-result|td-patrol|qwen:web-shell-visuals|pr-evidence)\b/i;
+const PR_URL_COORDINATES_RE =
+  /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)(?:[#/?].*)?$/;
+const BRACKET_BLOCKING_TAG_RE =
+  /(?:\[|【)\s*(?:P0|P1|Critical|Blocker)\s*(?:\]|】)(?!\()/i;
+const LEADING_BACKTICK_BRACKET_TAG_RE =
+  /^\s*(?:>\s*)?(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)?(?:\*\*|__)?`(?:\[|【)\s*(?:P0|P1|Critical|Blocker)\s*(?:\]|】)`/i;
+const TRANSLATION_SUMMARY_RE =
+  /^\s*<summary>\s*(?:中文说明|中文|Chinese(?:\s+(?:summary|translation))?)\s*<\/summary>\s*$/i;
+const LINE_LEADING_BLOCKING_TAG_RE =
+  /^\s*(?:>\s*)?(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)?(?:\*\*|__|`)?(?:P0|P1|Critical|Blocker|Blockers)(?:\*\*|__|`)?(?:\s*(?:[:：—–-]|$|\())/i;
+const BARE_BLOCKING_HEADING_RE =
+  /^\s*(?:>\s*)?(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)?(?:\*\*|__)?(?:P0|P1|Critical|Blocker|Blockers)(?:\*\*|__)?\s*$/i;
+const SEVERITY_KV_BLOCKING_TAG_RE =
+  /\bseverity\s*[:=]\s*(?:\*\*|__|`)?(?:P0|P1|Critical|Blocker)\b/i;
+const ZERO_OR_NONE_BLOCKING_LINE_RE =
+  /(?:[:：—–-]\s*(?:none|0|n\/a|无)\s*$|\(\s*0\s*\)\s*$)/i;
+const NONE_ONLY_LINE_RE =
+  /^\s*(?:>\s*)?(?:[-*+]\s+)?(?:none|0|n\/a|无)\.?\s*$/i;
+const TABLE_SEVERITY_HEADER_RE =
+  /^(?:severity|priority|level|优先级|严重度|严重程度|严重级别|级别|等级)$/i;
+const TABLE_COUNT_HEADER_RE =
+  /^(?:count|total|found|findings|数量|个数|条数)$/i;
+const STANDALONE_BLOCKING_SEVERITY_RE = /^(?:P0|P1|Critical|Blocker)$/i;
+const ZERO_OR_NONE_CELL_RE = /^(?:0|none|n\/a|无|-|—)?$/i;
+const NUMERIC_OR_ZERO_COUNT_CELL_RE = /^(?:\d+|none|n\/a|无|-|—)?$/i;
+const LIST_ITEM_RE = /^(\s*(?:>\s*)?)(?:[-*+]\s+|\d+[.)]\s+)/;
+const TABLE_SEPARATOR_CELL_RE = /^:?-{1,}:?$/;
+const REVIEW_ANCHOR_TOKEN_RE =
+  /(?:issuecomment-|discussion_r|pullrequestreview-)\d+/g;
+const GENERIC_SEVERITY_TOKENS = new Set(['p0', 'p1', 'critical', 'blocker']);
 
 /**
  * Who caused a failed assertion. `pr` is the only one that can stamp a defect
@@ -100,7 +140,7 @@ const HEADING_TITLE_MAX = 120;
 const FOOTER =
   /^_— .+ via Qwen Code \/verify-pr \(v[^;]+; skill [0-9a-f]{12}\)_$/;
 
-const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--context-root <pr-clone>] [--context-sha256 <digest>] [--execution-record <record>] [--execution-record-sha256 <digest>] [--guard <verdict>] [--guard-sha256 <digest>] [--guard-max-age-sec <sec>] [--require-guard] [--publish-lane] <artifact-dir>
+const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--context-root <pr-clone>] [--context-sha256 <digest>] [--execution-record <record>] [--execution-record-sha256 <digest>] [--guard <verdict>] [--guard-sha256 <digest>] [--guard-max-age-sec <sec>] [--require-guard] [--review-threads <snapshot>] [--review-threads-sha256 <digest>] [--publish-lane] <artifact-dir>
 
 Checks a local round against the rules the CI publisher enforces:
 
@@ -178,6 +218,20 @@ OPEN PR state, and have fresh start/now/compare timestamps within
 Pass --require-guard before local publication so missing guard evidence or a
 missing --guard-sha256 fails closed. A guard-verdict.json planted inside the
 PR-writable artifact directory is always refused.
+
+With --review-threads <snapshot> (host-held review-threads.json prepared by
+verify-pr-prepare.mjs), the checker extracts open blocking inline threads,
+standing change-request bodies, and maintainer top-level blocking comments
+(Critical, Blocker, P0, P1 — including severity-column table rows and multiple
+findings within one comment) and verifies that assertions.json reviewCoverage
+accounts for every finding (with per-finding { url, finding } entries when a
+comment carries more than one blocker) before allowing merge-ready, with
+citations in both report.md and comment.md (when present) for not-reproduced
+items. Pass --review-threads-sha256 <digest> (printed by prepare as
+review-sha256) to bind its bytes; when the bound host --context snapshot
+carries reviewSha256, the checker enforces exact digest agreement to block
+cross-PR empty/stale snapshot substitution. A review-threads.json planted
+inside the PR-writable artifact directory is always refused.
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
@@ -370,6 +424,14 @@ function gateRecordErrors(gateText, { publishLane = false } = {}) {
     }
     if (!Array.isArray(gate.signals) || gate.signals.length === 0) {
       return ['boundary-gate.json records no isolation signals'];
+    }
+    if (
+      gate.uid !== undefined &&
+      (!Number.isInteger(gate.uid) ||
+        gate.uid < 0 ||
+        gate.uid > Number.MAX_SAFE_INTEGER)
+    ) {
+      return ['boundary-gate.json uid must be a non-negative integer'];
     }
   }
   return [];
@@ -1634,6 +1696,1593 @@ export function checkGuardVerdict(
   return errors;
 }
 
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parsePrUrlCoordinates(url) {
+  if (typeof url !== 'string') return null;
+  const match = PR_URL_COORDINATES_RE.exec(url);
+  if (!match) return null;
+  const number = Number(match[3]);
+  if (!Number.isSafeInteger(number) || number <= 0) return null;
+  return { owner: match[1], repo: match[2], number };
+}
+
+function coordinatesMismatch(url, coordinates) {
+  if (!coordinates || typeof url !== 'string' || url.trim() === '') return null;
+  const parsed = parsePrUrlCoordinates(url);
+  if (!parsed) {
+    return `--review-threads contains a non-PR URL ${JSON.stringify(url)} that cannot be bound to ${coordinates.owner}/${coordinates.repo}#${coordinates.number}`;
+  }
+  if (
+    parsed.owner.toLowerCase() !== coordinates.owner.toLowerCase() ||
+    parsed.repo.toLowerCase() !== coordinates.repo.toLowerCase() ||
+    parsed.number !== coordinates.number
+  ) {
+    return `--review-threads targets ${parsed.owner}/${parsed.repo}#${parsed.number}, not ${coordinates.owner}/${coordinates.repo}#${coordinates.number}`;
+  }
+  return null;
+}
+
+function stripInlineCodeSpans(line) {
+  let out = '';
+  let i = 0;
+  while (i < line.length) {
+    if (line[i] === '`') {
+      let tickLen = 0;
+      while (i + tickLen < line.length && line[i + tickLen] === '`') {
+        tickLen++;
+      }
+      const closer = '`'.repeat(tickLen);
+      let searchFrom = i + tickLen;
+      let closeIdx = -1;
+      while (searchFrom < line.length) {
+        const candidate = line.indexOf(closer, searchFrom);
+        if (candidate === -1) break;
+        const beforeOk = candidate === 0 || line[candidate - 1] !== '`';
+        const afterOk =
+          candidate + tickLen === line.length ||
+          line[candidate + tickLen] !== '`';
+        if (beforeOk && afterOk) {
+          closeIdx = candidate;
+          break;
+        }
+        searchFrom = candidate + 1;
+      }
+      if (closeIdx !== -1) {
+        i = closeIdx + tickLen;
+        continue;
+      }
+      out += closer;
+      i += tickLen;
+      continue;
+    }
+    out += line[i];
+    i++;
+  }
+  return out;
+}
+
+function splitMarkdownTableRow(line) {
+  const stripped = line.replace(/^\s*(?:>\s*)+/, '').trim();
+  if (!stripped.includes('|')) return null;
+  const cells = [];
+  let current = '';
+  let inBackticks = 0;
+  for (let i = 0; i < stripped.length; i++) {
+    const ch = stripped[i];
+    if (ch === '\\' && inBackticks === 0 && i + 1 < stripped.length) {
+      if (stripped[i + 1] === '|') {
+        current += '|';
+        i++;
+        continue;
+      }
+    }
+    if (ch === '`') {
+      let tickLen = 0;
+      while (i + tickLen < stripped.length && stripped[i + tickLen] === '`') {
+        tickLen++;
+      }
+      if (inBackticks === 0) {
+        inBackticks = tickLen;
+      } else if (inBackticks === tickLen) {
+        inBackticks = 0;
+      }
+      current += '`'.repeat(tickLen);
+      i += tickLen - 1;
+      continue;
+    }
+    if (ch === '|' && inBackticks === 0) {
+      cells.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  cells.push(current.trim());
+  if (stripped.startsWith('|') && cells[0] === '') cells.shift();
+  if (stripped.endsWith('|') && cells[cells.length - 1] === '') cells.pop();
+  return cells.length > 0 ? cells : null;
+}
+
+function isMarkdownTableSeparator(line, expectedCols) {
+  const cells = splitMarkdownTableRow(line);
+  if (!cells || cells.length !== expectedCols) return false;
+  return cells.every((cell) => TABLE_SEPARATOR_CELL_RE.test(cell));
+}
+
+function normalizeTableCellToken(cell) {
+  let text = cell.trim();
+  for (let pass = 0; pass < 4; pass++) {
+    const prev = text;
+    text = text
+      .replace(/^(?:🔴|🟠|🟡|🚨|⛔|❌|⚠️|❗)\s*/u, '')
+      .replace(/^\*\*(.*)\*\*$/, '$1')
+      .replace(/^__(.*)__$/, '$1')
+      .replace(/^\*(.*)\*$/, '$1')
+      .replace(/^_(.*)_$/, '$1')
+      .replace(/^`(.*)`$/, '$1')
+      .replace(/^\[(.*)\]$/, '$1')
+      .replace(/^【(.*)】$/, '$1')
+      .trim();
+    if (text === prev) break;
+  }
+  return text;
+}
+
+function stripHtmlCommentsOutsideFences(body) {
+  const lines = normalizeNewlines(body).split('\n');
+  // Precompute whether a line is inside a fenced code block so we can safely
+  // check for a closing `-->` outside fences before entering an HTML comment.
+  const fenced = new Array(lines.length).fill(false);
+  let fenceChar = null;
+  let fenceLen = 0;
+  let fenceQuoted = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (fenceChar !== null && fenceQuoted && !/^\s*>/.test(line)) {
+      fenceChar = null;
+      fenceLen = 0;
+      fenceQuoted = false;
+    }
+    const fenceMatch = /^(\s*(?:>\s*)?)(`{3,}|~{3,})/.exec(line);
+    if (fenceMatch) {
+      const prefix = fenceMatch[1];
+      const marker = fenceMatch[2];
+      const rest = line.slice(fenceMatch[0].length);
+      if (fenceChar === null) {
+        if (marker[0] !== '`' || !rest.includes('`')) {
+          fenceChar = marker[0];
+          fenceLen = marker.length;
+          fenceQuoted = prefix.includes('>');
+          fenced[i] = true;
+          continue;
+        }
+      } else if (
+        marker[0] === fenceChar &&
+        marker.length >= fenceLen &&
+        rest.trim() === ''
+      ) {
+        fenceChar = null;
+        fenceLen = 0;
+        fenceQuoted = false;
+        fenced[i] = true;
+        continue;
+      }
+    }
+    fenced[i] = fenceChar !== null;
+  }
+
+  const hasClosingMarker = (startLine, startCol) => {
+    if (lines[startLine].indexOf('-->', startCol) !== -1) return true;
+    for (let j = startLine + 1; j < lines.length; j++) {
+      if (!fenced[j] && lines[j].includes('-->')) return true;
+    }
+    return false;
+  };
+
+  const out = [];
+  let inHtmlComment = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (fenced[i]) {
+      out.push(line);
+      continue;
+    }
+    let pos = 0;
+    let rebuilt = '';
+    while (pos < line.length) {
+      if (inHtmlComment) {
+        const endIdx = line.indexOf('-->', pos);
+        if (endIdx === -1) {
+          pos = line.length;
+        } else {
+          inHtmlComment = false;
+          pos = endIdx + 3;
+        }
+        continue;
+      }
+      // Preserve balanced inline backtick code spans verbatim so a span like
+      // `` `<!-- qwen-verify` `` never opens an HTML comment.
+      if (line[pos] === '`') {
+        let tickLen = 0;
+        while (pos + tickLen < line.length && line[pos + tickLen] === '`') {
+          tickLen++;
+        }
+        const closer = '`'.repeat(tickLen);
+        let searchFrom = pos + tickLen;
+        let closeIdx = -1;
+        while (searchFrom < line.length) {
+          const candidate = line.indexOf(closer, searchFrom);
+          if (candidate === -1) break;
+          const beforeOk = candidate === 0 || line[candidate - 1] !== '`';
+          const afterOk =
+            candidate + tickLen === line.length ||
+            line[candidate + tickLen] !== '`';
+          if (beforeOk && afterOk) {
+            closeIdx = candidate;
+            break;
+          }
+          searchFrom = candidate + 1;
+        }
+        if (closeIdx !== -1) {
+          rebuilt += line.slice(pos, closeIdx + tickLen);
+          pos = closeIdx + tickLen;
+          continue;
+        }
+        rebuilt += closer;
+        pos += tickLen;
+        continue;
+      }
+      if (line.startsWith('<!--', pos) && hasClosingMarker(i, pos + 4)) {
+        inHtmlComment = true;
+        pos += 4;
+        continue;
+      }
+      rebuilt += line[pos];
+      pos++;
+    }
+    out.push(rebuilt);
+  }
+  return out.join('\n');
+}
+
+function splitTranslationDetailsBlocks(body) {
+  const lines = normalizeNewlines(body).split('\n');
+  const mainLines = [];
+  const translationLines = [];
+  let fenceChar = null;
+  let fenceLen = 0;
+  let fenceQuoted = false;
+  let inTranslationDepth = 0;
+  const hasClosingDetails = (fromIndex) => {
+    let depth = 1;
+    let fChar = null;
+    let fLen = 0;
+    let fQuoted = false;
+    for (let j = fromIndex; j < lines.length; j++) {
+      const l = lines[j];
+      if (fChar !== null && fQuoted && !/^\s*>/.test(l)) {
+        fChar = null;
+        fLen = 0;
+        fQuoted = false;
+      }
+      const fm = /^(\s*(?:>\s*)?)(`{3,}|~{3,})/.exec(l);
+      if (fm) {
+        const rest = l.slice(fm[0].length);
+        if (fChar === null) {
+          if (fm[2][0] !== '`' || !rest.includes('`')) {
+            fChar = fm[2][0];
+            fLen = fm[2].length;
+            fQuoted = fm[1].includes('>');
+          }
+        } else if (
+          fm[2][0] === fChar &&
+          fm[2].length >= fLen &&
+          rest.trim() === ''
+        ) {
+          fChar = null;
+          fLen = 0;
+          fQuoted = false;
+        }
+        continue;
+      }
+      if (fChar !== null) continue;
+      if (/^\s*<details\b[^>]*>/i.test(l)) depth++;
+      if (/<\/details>\s*$/i.test(l)) {
+        depth--;
+        if (depth === 0) return true;
+      }
+    }
+    return false;
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (fenceChar !== null && fenceQuoted && !/^\s*>/.test(line)) {
+      fenceChar = null;
+      fenceLen = 0;
+      fenceQuoted = false;
+    }
+    const fenceMatch = /^(\s*(?:>\s*)?)(`{3,}|~{3,})/.exec(line);
+    if (fenceMatch) {
+      const prefix = fenceMatch[1];
+      const marker = fenceMatch[2];
+      const rest = line.slice(fenceMatch[0].length);
+      if (fenceChar === null) {
+        if (marker[0] !== '`' || !rest.includes('`')) {
+          fenceChar = marker[0];
+          fenceLen = marker.length;
+          fenceQuoted = prefix.includes('>');
+        }
+      } else if (
+        marker[0] === fenceChar &&
+        marker.length >= fenceLen &&
+        rest.trim() === ''
+      ) {
+        fenceChar = null;
+        fenceLen = 0;
+        fenceQuoted = false;
+      }
+      (inTranslationDepth > 0 ? translationLines : mainLines).push(line);
+      continue;
+    }
+    if (fenceChar !== null) {
+      (inTranslationDepth > 0 ? translationLines : mainLines).push(line);
+      continue;
+    }
+    if (inTranslationDepth === 0) {
+      const inlineDetails =
+        /^\s*<details\b[^>]*>\s*(<summary>[\s\S]*<\/summary>)\s*$/i.exec(line);
+      if (
+        inlineDetails &&
+        TRANSLATION_SUMMARY_RE.test(inlineDetails[1]) &&
+        hasClosingDetails(i + 1)
+      ) {
+        inTranslationDepth = 1;
+        continue;
+      }
+      if (/^\s*<details\b[^>]*>\s*$/i.test(line)) {
+        let nextIdx = i + 1;
+        while (nextIdx < lines.length && lines[nextIdx].trim() === '')
+          nextIdx++;
+        if (
+          nextIdx < lines.length &&
+          TRANSLATION_SUMMARY_RE.test(lines[nextIdx]) &&
+          hasClosingDetails(nextIdx + 1)
+        ) {
+          inTranslationDepth = 1;
+          i = nextIdx;
+          continue;
+        }
+      }
+    } else if (inTranslationDepth > 0) {
+      if (/^\s*<details\b[^>]*>/i.test(line)) {
+        inTranslationDepth++;
+      } else if (/<\/details>\s*$/i.test(line)) {
+        inTranslationDepth--;
+        if (inTranslationDepth === 0) continue;
+      }
+      translationLines.push(line);
+      continue;
+    }
+    mainLines.push(line);
+  }
+  return {
+    mainBody: mainLines.join('\n'),
+    translationBody: translationLines.join('\n'),
+  };
+}
+
+function compactFindingExcerpt(line) {
+  const clean = line
+    .replace(/^\s*(?:>\s*)+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return clean.length > 96 ? `${clean.slice(0, 93)}...` : clean;
+}
+
+function lineIndentWidth(prefix) {
+  return prefix.replace(/>/g, ' ').length;
+}
+
+/**
+ * Extracts each distinct blocking finding (P0, P1, Critical, Blocker) from a
+ * Markdown review/comment body outside fenced code blocks, including
+ * severity-column Markdown tables, heading-led blocker bullet lists, and
+ * multiple numbered/bulleted findings inside one comment.
+ */
+function extractBlockingFindingsFromSection(body) {
+  if (typeof body !== 'string' || body.trim() === '') return [];
+  const lines = normalizeNewlines(body).split('\n');
+  const findings = [];
+  const summaryTableFindings = [];
+  let fenceChar = null;
+  let fenceLen = 0;
+  let fenceQuoted = false;
+
+  const updateFence = (line) => {
+    if (fenceChar !== null && fenceQuoted && !/^\s*>/.test(line)) {
+      fenceChar = null;
+      fenceLen = 0;
+      fenceQuoted = false;
+    }
+    const fenceMatch = /^(\s*(?:>\s*)?)(`{3,}|~{3,})/.exec(line);
+    if (!fenceMatch) return false;
+    const prefix = fenceMatch[1];
+    const marker = fenceMatch[2];
+    const rest = line.slice(fenceMatch[0].length);
+    if (fenceChar === null) {
+      // CommonMark forbids backticks in a backtick fence info string, so a
+      // line like ```foo``` [P1] is an inline code span, not an open fence.
+      if (marker[0] !== '`' || !rest.includes('`')) {
+        fenceChar = marker[0];
+        fenceLen = marker.length;
+        fenceQuoted = prefix.includes('>');
+        return true;
+      }
+      return false;
+    }
+    if (
+      marker[0] === fenceChar &&
+      marker.length >= fenceLen &&
+      rest.trim() === ''
+    ) {
+      fenceChar = null;
+      fenceLen = 0;
+      fenceQuoted = false;
+      return true;
+    }
+    return false;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (updateFence(line) || fenceChar !== null) continue;
+
+    // 1. Markdown table: detect severity-column cells and per-row blocking tags.
+    if (i + 1 < lines.length && line.includes('|')) {
+      const headerCells = splitMarkdownTableRow(line);
+      if (
+        headerCells &&
+        isMarkdownTableSeparator(lines[i + 1], headerCells.length)
+      ) {
+        const severityCols = [];
+        const countCols = [];
+        for (let c = 0; c < headerCells.length; c++) {
+          const normalized = normalizeTableCellToken(headerCells[c]);
+          if (TABLE_SEVERITY_HEADER_RE.test(normalized)) severityCols.push(c);
+          if (TABLE_COUNT_HEADER_RE.test(normalized)) countCols.push(c);
+        }
+        let r = i + 2;
+        while (r < lines.length) {
+          const rowLine = lines[r];
+          if (
+            rowLine.trim() === '' ||
+            /^(\s*(?:>\s*)?)(`{3,}|~{3,})/.test(rowLine)
+          ) {
+            break;
+          }
+          const cells = splitMarkdownTableRow(rowLine);
+          if (!cells) break;
+          const rowHasCountValues =
+            countCols.length > 0 &&
+            countCols.every((c) =>
+              NUMERIC_OR_ZERO_COUNT_CELL_RE.test(
+                normalizeTableCellToken(cells[c] ?? ''),
+              ),
+            );
+          const hasDescriptionCell = cells.some(
+            (cell, idx) =>
+              !severityCols.includes(idx) &&
+              !countCols.includes(idx) &&
+              normalizeTableCellToken(cell) !== '' &&
+              !NUMERIC_OR_ZERO_COUNT_CELL_RE.test(
+                normalizeTableCellToken(cell),
+              ),
+          );
+          const hasSeverityCell = severityCols.some((c) =>
+            STANDALONE_BLOCKING_SEVERITY_RE.test(
+              normalizeTableCellToken(cells[c] ?? ''),
+            ),
+          );
+          const hasInlineTagInRow = cells.some((cell) => {
+            const cleaned = stripInlineCodeSpans(cell);
+            return (
+              BRACKET_BLOCKING_TAG_RE.test(cleaned) ||
+              SEVERITY_KV_BLOCKING_TAG_RE.test(cleaned)
+            );
+          });
+          // Only pure count-summary rows (numeric/zero count cells with no
+          // independent prose description and no explicit inline blocking tag)
+          // qualify for zero-count exemption or summary-table fallback.
+          const isPureCountSummaryRow =
+            rowHasCountValues && !hasDescriptionCell && !hasInlineTagInRow;
+          const isZeroCountSummary =
+            isPureCountSummaryRow &&
+            countCols.every((c) =>
+              ZERO_OR_NONE_CELL_RE.test(
+                normalizeTableCellToken(cells[c] ?? ''),
+              ),
+            );
+          if (!isZeroCountSummary && (hasSeverityCell || hasInlineTagInRow)) {
+            const entry = buildFindingRecord(rowLine);
+            if (isPureCountSummaryRow) {
+              summaryTableFindings.push(entry);
+            } else {
+              findings.push(entry);
+            }
+          }
+          r++;
+        }
+        i = r - 1;
+        continue;
+      }
+    }
+
+    const stripped = stripInlineCodeSpans(line);
+
+    // 2. Bare blocking section heading (e.g. "**Blockers**", "### Critical"):
+    // skip if immediately followed by None/0, else extract each top-level list
+    // item under it as a distinct finding, keeping indented continuation
+    // paragraphs, sub-bullets, and fenced code blocks within list scope.
+    if (BARE_BLOCKING_HEADING_RE.test(stripped)) {
+      let nextIdx = i + 1;
+      while (
+        nextIdx < lines.length &&
+        lines[nextIdx].replace(/^\s*(?:>\s*)+/, '').trim() === ''
+      ) {
+        nextIdx++;
+      }
+      if (nextIdx < lines.length && NONE_ONLY_LINE_RE.test(lines[nextIdx])) {
+        i = nextIdx;
+        continue;
+      }
+      const firstListMatch =
+        nextIdx < lines.length ? LIST_ITEM_RE.exec(lines[nextIdx]) : null;
+      if (firstListMatch) {
+        const baseIndent = lineIndentWidth(firstListMatch[1]);
+        const baseQuoted = firstListMatch[1].includes('>');
+        const listFindings = [];
+        let cursor = nextIdx;
+        let itemFenceChar = null;
+        let itemFenceLen = 0;
+        let inItemParagraph = false;
+        let currentItemLines = null;
+        const flushCurrentItem = () => {
+          if (currentItemLines && currentItemLines.length > 0) {
+            listFindings.push(
+              buildFindingRecord(currentItemLines.join('\n'), {
+                excerptLine: currentItemLines[0],
+              }),
+            );
+            currentItemLines = null;
+          }
+        };
+        const interruptsParagraph = (lineText, lineIdx) => {
+          const unquoted = lineText.replace(/^\s*(?:>\s*)+/, '');
+          if (/^\s*#{1,6}(?:\s|$)/.test(unquoted)) return true;
+          if (/^\s*(?:[-*_]\s*){3,}$/.test(unquoted)) return true;
+          if (
+            /^\s*<\/?(?:details|summary|div|section|hr|table|h[1-6]|pre|blockquote)\b/i.test(
+              unquoted,
+            )
+          ) {
+            return true;
+          }
+          if (
+            !baseQuoted &&
+            /^\s*>/.test(lineText) &&
+            lineIndentWidth(/^(\s*)/.exec(lineText)?.[1] ?? '') <= baseIndent
+          ) {
+            return true;
+          }
+          if (lineIdx + 1 < lines.length && lineText.includes('|')) {
+            const hdr = splitMarkdownTableRow(lineText);
+            if (
+              hdr &&
+              isMarkdownTableSeparator(lines[lineIdx + 1], hdr.length)
+            ) {
+              return true;
+            }
+          }
+          return false;
+        };
+        while (cursor < lines.length) {
+          const curLine = lines[cursor];
+          if (itemFenceChar !== null) {
+            const closeMatch = /^(\s*(?:>\s*)?)(`{3,}|~{3,})/.exec(curLine);
+            if (
+              closeMatch &&
+              closeMatch[2][0] === itemFenceChar &&
+              closeMatch[2].length >= itemFenceLen &&
+              curLine.slice(closeMatch[0].length).trim() === ''
+            ) {
+              itemFenceChar = null;
+              itemFenceLen = 0;
+              inItemParagraph = false;
+            }
+            if (currentItemLines) currentItemLines.push(curLine);
+            cursor++;
+            continue;
+          }
+          if (curLine.replace(/^\s*(?:>\s*)+/, '').trim() === '') {
+            inItemParagraph = false;
+            let peek = cursor + 1;
+            while (
+              peek < lines.length &&
+              lines[peek].replace(/^\s*(?:>\s*)+/, '').trim() === ''
+            ) {
+              peek++;
+            }
+            if (peek >= lines.length) break;
+            const peekLine = lines[peek];
+            if (baseQuoted && !/^\s*>/.test(peekLine)) break;
+            const peekListMatch = LIST_ITEM_RE.exec(peekLine);
+            if (peekListMatch) {
+              cursor = peek;
+              continue;
+            }
+            const peekLeading = /^(\s*(?:>\s*)?)/.exec(peekLine)?.[1] ?? '';
+            if (lineIndentWidth(peekLeading) >= baseIndent + 2) {
+              cursor = peek;
+              continue;
+            }
+            break;
+          }
+          if (baseQuoted && !/^\s*>/.test(curLine)) break;
+          const fenceMatch = /^(\s*(?:>\s*)?)(`{3,}|~{3,})/.exec(curLine);
+          if (fenceMatch) {
+            const fenceIndent = lineIndentWidth(fenceMatch[1]);
+            const rest = curLine.slice(fenceMatch[0].length);
+            if (
+              fenceIndent >= baseIndent + 2 &&
+              (fenceMatch[2][0] !== '`' || !rest.includes('`'))
+            ) {
+              itemFenceChar = fenceMatch[2][0];
+              itemFenceLen = fenceMatch[2].length;
+              inItemParagraph = false;
+              if (currentItemLines) currentItemLines.push(curLine);
+              cursor++;
+              continue;
+            }
+            if (fenceIndent <= baseIndent) break;
+          }
+          const itemMatch = LIST_ITEM_RE.exec(curLine);
+          if (itemMatch) {
+            if (lineIndentWidth(itemMatch[1]) <= baseIndent + 1) {
+              flushCurrentItem();
+              if (!NONE_ONLY_LINE_RE.test(curLine)) {
+                currentItemLines = [curLine];
+              }
+            } else if (currentItemLines) {
+              currentItemLines.push(curLine);
+            }
+            inItemParagraph = true;
+            cursor++;
+            continue;
+          }
+          if (
+            !baseQuoted &&
+            /^\s*>/.test(curLine) &&
+            lineIndentWidth(/^(\s*)/.exec(curLine)?.[1] ?? '') <= baseIndent
+          ) {
+            break;
+          }
+          const leading = /^(\s*(?:>\s*)?)/.exec(curLine)?.[1] ?? '';
+          if (lineIndentWidth(leading) <= baseIndent) {
+            // CommonMark §5.2 lazy paragraph continuation: a non-blank line
+            // immediately following a paragraph line stays inside the current
+            // list item unless it opens a paragraph-interrupting block.
+            if (!inItemParagraph || interruptsParagraph(curLine, cursor)) {
+              break;
+            }
+          } else {
+            inItemParagraph = !interruptsParagraph(curLine, cursor);
+          }
+          if (currentItemLines) currentItemLines.push(curLine);
+          cursor++;
+        }
+        flushCurrentItem();
+        if (listFindings.length > 0) {
+          findings.push(...listFindings);
+          i = cursor - 1;
+          continue;
+        }
+      }
+      findings.push(buildFindingRecord(line));
+      continue;
+    }
+
+    // 3. Inline / bulleted / numbered / heading blocking line.
+    if (
+      LEADING_BACKTICK_BRACKET_TAG_RE.test(line) ||
+      BRACKET_BLOCKING_TAG_RE.test(stripped) ||
+      SEVERITY_KV_BLOCKING_TAG_RE.test(stripped) ||
+      (LINE_LEADING_BLOCKING_TAG_RE.test(line) &&
+        !ZERO_OR_NONE_BLOCKING_LINE_RE.test(line))
+    ) {
+      findings.push(buildFindingRecord(line));
+    }
+  }
+
+  return findings.length > 0 ? findings : summaryTableFindings;
+}
+
+function buildFindingRecord(rawText, { excerptLine = null } = {}) {
+  const firstLine = excerptLine ?? rawText.split('\n')[0] ?? rawText;
+  const severityMatch = /\b(P0|P1|Critical|Blocker)\b/i.exec(firstLine);
+  const severity = severityMatch ? severityMatch[1].toUpperCase() : null;
+  const numMatch = /^\s*(?:>\s*)?(\d+)[.)]\s+/.exec(firstLine);
+  const listNumber = numMatch ? Number(numMatch[1]) : null;
+
+  const tokens = new Set();
+  for (const m of rawText.matchAll(/`([^`\n]+)`/g)) {
+    const tok = m[1].trim().toLowerCase();
+    if (tok && !GENERIC_SEVERITY_TOKENS.has(tok)) tokens.add(tok);
+  }
+  for (const m of rawText.matchAll(/#(\d{2,})\b/g)) {
+    tokens.add(`#${m[1]}`);
+  }
+  for (const m of rawText.matchAll(
+    /\b[A-Za-z0-9]+(?:[._/-][A-Za-z0-9]+)+\b/g,
+  )) {
+    const tok = m[0].toLowerCase();
+    if (!GENERIC_SEVERITY_TOKENS.has(tok)) tokens.add(tok);
+  }
+  for (const m of rawText.matchAll(/\b\d{2,}\b/g)) {
+    tokens.add(m[0]);
+  }
+  for (const m of rawText.matchAll(/\b[A-Z]\d+(?:-[A-Z]\d+)?\b/g)) {
+    const tok = m[0].toLowerCase();
+    if (!GENERIC_SEVERITY_TOKENS.has(tok)) tokens.add(tok);
+  }
+
+  const findingIdCodes = new Set();
+  for (const m of rawText.matchAll(/\b(?:R\d+-)?F\d+\b/gi)) {
+    findingIdCodes.add(m[0].toLowerCase());
+  }
+
+  return {
+    excerpt: compactFindingExcerpt(firstLine),
+    severity,
+    listNumber,
+    tokens,
+    findingIdCodes,
+  };
+}
+
+function tokenOverlapCount(a, b) {
+  let count = 0;
+  for (const tok of a) {
+    if (b.has(tok)) count++;
+  }
+  return count;
+}
+
+function severitiesCompatible(a, b) {
+  return (
+    a.severity === null || b.severity === null || a.severity === b.severity
+  );
+}
+
+function findingsExplicitlyConflict(a, b) {
+  if (
+    a.listNumber !== null &&
+    b.listNumber !== null &&
+    a.listNumber !== b.listNumber
+  ) {
+    return true;
+  }
+  if (
+    a.findingIdCodes.size > 0 &&
+    b.findingIdCodes.size > 0 &&
+    tokenOverlapCount(a.findingIdCodes, b.findingIdCodes) === 0
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function mergeBilingualFindings(mainFindings, translationFindings) {
+  if (translationFindings.length === 0) return mainFindings;
+  if (mainFindings.length === 0) return translationFindings;
+
+  const matchedMain = new Set();
+  const matchedTrans = new Set();
+
+  // Pass 1: greedy 1-to-1 match by shared language-independent technical tokens,
+  // never merging items whose explicit item numbers or finding IDs conflict.
+  const candidates = [];
+  for (let tIdx = 0; tIdx < translationFindings.length; tIdx++) {
+    const t = translationFindings[tIdx];
+    for (let mIdx = 0; mIdx < mainFindings.length; mIdx++) {
+      const m = mainFindings[mIdx];
+      if (!severitiesCompatible(m, t)) continue;
+      if (findingsExplicitlyConflict(m, t)) continue;
+      const overlap = tokenOverlapCount(m.tokens, t.tokens);
+      if (overlap > 0) {
+        const numBonus =
+          m.listNumber !== null && m.listNumber === t.listNumber ? 1 : 0;
+        candidates.push({
+          mIdx,
+          tIdx,
+          overlap,
+          numBonus,
+          dist: Math.abs(mIdx - tIdx),
+        });
+      }
+    }
+  }
+  candidates.sort(
+    (a, b) =>
+      b.overlap - a.overlap ||
+      b.numBonus - a.numBonus ||
+      a.dist - b.dist ||
+      a.tIdx - b.tIdx,
+  );
+  for (const c of candidates) {
+    if (matchedMain.has(c.mIdx) || matchedTrans.has(c.tIdx)) continue;
+    matchedMain.add(c.mIdx);
+    matchedTrans.add(c.tIdx);
+  }
+
+  // Pass 2: positional 1-to-1 mirror match for pure-prose translations without
+  // conflicting item numbers, finding IDs, or disjoint technical tokens.
+  for (let tIdx = 0; tIdx < translationFindings.length; tIdx++) {
+    if (matchedTrans.has(tIdx)) continue;
+    if (tIdx >= mainFindings.length || matchedMain.has(tIdx)) continue;
+    const m = mainFindings[tIdx];
+    const t = translationFindings[tIdx];
+    if (!severitiesCompatible(m, t)) continue;
+    if (findingsExplicitlyConflict(m, t)) continue;
+    if (
+      m.tokens.size > 0 &&
+      t.tokens.size > 0 &&
+      tokenOverlapCount(m.tokens, t.tokens) === 0
+    ) {
+      continue;
+    }
+    matchedMain.add(tIdx);
+    matchedTrans.add(tIdx);
+  }
+
+  const merged = [...mainFindings];
+  for (let tIdx = 0; tIdx < translationFindings.length; tIdx++) {
+    if (!matchedTrans.has(tIdx)) merged.push(translationFindings[tIdx]);
+  }
+  return merged;
+}
+
+/**
+ * Extracts each distinct blocking finding (P0, P1, Critical, Blocker) from a
+ * Markdown review/comment body outside fenced code blocks and HTML comments,
+ * merging 1-to-1 bilingual translations inside `<details><summary>中文说明</summary>`
+ * while preserving any additional or disjoint findings unique to the fold.
+ */
+export function extractBlockingFindings(body) {
+  if (typeof body !== 'string' || body.trim() === '') return [];
+  const visible = stripHtmlCommentsOutsideFences(body);
+  const { mainBody, translationBody } = splitTranslationDetailsBlocks(visible);
+  const mainFindings = extractBlockingFindingsFromSection(mainBody);
+  const translationFindings =
+    extractBlockingFindingsFromSection(translationBody);
+  return mergeBilingualFindings(mainFindings, translationFindings).map(
+    ({ excerpt }) => ({ excerpt }),
+  );
+}
+
+export function hasBlockingSeverityTag(body) {
+  return extractBlockingFindings(body).length > 0;
+}
+
+function isIgnoredTopLevelReviewComment(comment) {
+  const body = normalizeNewlines(comment?.body ?? '');
+  if (IGNORED_BOT_COMMENT_HEADER.test(body)) return true;
+  const nonEmptyLines = body
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+  if (nonEmptyLines.length === 0) return true;
+  const firstParagraph = body.trimStart().split(/\n\s*\n/)[0] ?? '';
+  const lastLine = nonEmptyLines[nonEmptyLines.length - 1] ?? '';
+  if (
+    /\bVerdict:\s*(?:merge-ready|findings|blocked|inconclusive)\b/.test(
+      firstParagraph,
+    ) &&
+    (FOOTER.test(lastLine) || CI_VERIFY_FOOTER.test(lastLine))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Extracts open blocking inline threads and maintainer top-level blocking
+ * comments from a parsed review-threads.json snapshot. Fails closed on
+ * malformed payloads or cross-PR URLs when trusted coordinates are provided.
+ */
+export function extractBlockingReviewItems(
+  reviewData,
+  { coordinates = null } = {},
+) {
+  const errors = [];
+  const items = [];
+  if (!isPlainObject(reviewData)) {
+    return {
+      errors: ['--review-threads snapshot must be a JSON object'],
+      items,
+    };
+  }
+  if (!Array.isArray(reviewData.threads)) {
+    errors.push('--review-threads snapshot threads must be an array');
+  }
+  if (!Array.isArray(reviewData.changeRequests)) {
+    errors.push('--review-threads snapshot changeRequests must be an array');
+  }
+  if (
+    reviewData.issueComments !== undefined &&
+    !Array.isArray(reviewData.issueComments)
+  ) {
+    errors.push('--review-threads snapshot issueComments must be an array');
+  }
+  if (errors.length > 0) return { errors, items };
+
+  const seenKeys = new Set();
+  const pushFindings = (kind, url, author, body) => {
+    const findings = extractBlockingFindings(body);
+    if (findings.length === 0) return false;
+    for (let idx = 0; idx < findings.length; idx++) {
+      const finding = idx + 1;
+      const key = `${url}#finding-${finding}`;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      items.push({
+        kind,
+        url,
+        finding,
+        findingCount: findings.length,
+        author: typeof author === 'string' ? author : null,
+        excerpt: findings[idx].excerpt,
+      });
+    }
+    return true;
+  };
+
+  const standingChangeRequestUrls = new Set();
+  for (const request of reviewData.changeRequests) {
+    if (!isPlainObject(request)) {
+      errors.push(
+        '--review-threads snapshot changeRequests entries must be objects',
+      );
+      continue;
+    }
+    const mismatch = coordinatesMismatch(request.url, coordinates);
+    if (mismatch) errors.push(mismatch);
+    const requestUrl =
+      typeof request.url === 'string' ? request.url.trim() : '';
+    if (requestUrl !== '') {
+      standingChangeRequestUrls.add(requestUrl);
+    }
+    if (
+      MAINTAINER_ASSOCIATIONS.has(request.association) &&
+      !isIgnoredTopLevelReviewComment(request) &&
+      extractBlockingFindings(request.body).length > 0
+    ) {
+      if (requestUrl === '') {
+        errors.push(
+          '--review-threads contains a blocking change request with no url',
+        );
+      } else {
+        pushFindings(
+          'change-request',
+          requestUrl,
+          request.author,
+          request.body,
+        );
+      }
+    }
+  }
+
+  for (const thread of reviewData.threads) {
+    if (!isPlainObject(thread) || !Array.isArray(thread.comments)) {
+      errors.push(
+        '--review-threads snapshot threads entries must be objects with comments arrays',
+      );
+      continue;
+    }
+    for (const comment of thread.comments) {
+      if (!isPlainObject(comment)) {
+        errors.push(
+          '--review-threads snapshot thread comments must be objects',
+        );
+        continue;
+      }
+      const mismatch = coordinatesMismatch(comment.url, coordinates);
+      if (mismatch) errors.push(mismatch);
+      const reviewMismatch = coordinatesMismatch(comment.review, coordinates);
+      if (reviewMismatch) errors.push(reviewMismatch);
+    }
+    const first = thread.comments[0];
+    if (!isPlainObject(first)) continue;
+    if (!MAINTAINER_ASSOCIATIONS.has(first.association)) continue;
+    const firstReview =
+      typeof first.review === 'string' ? first.review.trim() : '';
+    const isOpen =
+      thread.resolved !== true ||
+      (firstReview !== '' && standingChangeRequestUrls.has(firstReview));
+    if (!isOpen) continue;
+    if (extractBlockingFindings(first.body).length === 0) continue;
+    const firstUrl = typeof first.url === 'string' ? first.url.trim() : '';
+    if (firstUrl === '') {
+      errors.push(
+        '--review-threads contains an open blocking thread with no url',
+      );
+      continue;
+    }
+    pushFindings('thread', firstUrl, first.author, first.body);
+  }
+
+  for (const comment of reviewData.issueComments ?? []) {
+    if (!isPlainObject(comment)) {
+      errors.push(
+        '--review-threads snapshot issueComments entries must be objects',
+      );
+      continue;
+    }
+    const mismatch = coordinatesMismatch(comment.url, coordinates);
+    if (mismatch) errors.push(mismatch);
+    if (!MAINTAINER_ASSOCIATIONS.has(comment.association)) continue;
+    if (isIgnoredTopLevelReviewComment(comment)) continue;
+    if (extractBlockingFindings(comment.body).length === 0) continue;
+    const commentUrl =
+      typeof comment.url === 'string' ? comment.url.trim() : '';
+    if (commentUrl === '') {
+      errors.push(
+        '--review-threads contains a blocking issue comment with no url',
+      );
+      continue;
+    }
+    pushFindings('issue-comment', commentUrl, comment.author, comment.body);
+  }
+
+  return { errors, items };
+}
+
+export function checkReviewThreads(
+  reviewThreadsText,
+  { coordinates = null } = {},
+) {
+  let parsed;
+  try {
+    parsed = JSON.parse(reviewThreadsText);
+  } catch {
+    return { errors: ['--review-threads is not valid JSON'], items: [] };
+  }
+  return extractBlockingReviewItems(parsed, { coordinates });
+}
+
+function reviewUrlTokens(url) {
+  const hashIndex = url.indexOf('#');
+  const fragment = hashIndex === -1 ? '' : url.slice(hashIndex + 1);
+  const digitMatch = /(\d{6,})$/.exec(fragment);
+  return {
+    url,
+    fragment,
+    digits: digitMatch ? digitMatch[1] : null,
+  };
+}
+
+function textMentionsReviewTokens(text, tokens) {
+  if (text.includes(tokens.url)) return true;
+  if (tokens.fragment && text.includes(tokens.fragment)) return true;
+  if (tokens.digits) {
+    return new RegExp(`(?<![0-9])${tokens.digits}(?![0-9])`).test(text);
+  }
+  return false;
+}
+
+function lineMentionsOtherReviewAnchor(line, ownTokens) {
+  const matches = line.match(REVIEW_ANCHOR_TOKEN_RE);
+  if (matches && matches.some((token) => token !== ownTokens.fragment)) {
+    return true;
+  }
+  if (ownTokens.digits) {
+    const idMatches = line.match(
+      /(?<![0-9A-Za-z_#/.:-])#?\d{7,}(?![0-9A-Za-z_])/g,
+    );
+    if (
+      idMatches &&
+      idMatches.some((raw) => raw.replace(/^#/, '') !== ownTokens.digits)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseFindingNumberSpec(spec, intervals) {
+  const parts = spec.split(
+    /(?:[,、，]\s*(?:and\b|和|与|及|&)|[,、，&+]|\band\b|和|与|及)/i,
+  );
+  for (const rawPart of parts) {
+    const part = rawPart.trim();
+    if (!part) continue;
+    const rangeMatch =
+      /^(?:第\s*|#)?(\d+)\s*[-–—~～]\s*(?:第\s*|#)?(\d+)$/.exec(part);
+    if (rangeMatch) {
+      const lo = Number(rangeMatch[1]);
+      const hi = Number(rangeMatch[2]);
+      if (
+        Number.isSafeInteger(lo) &&
+        Number.isSafeInteger(hi) &&
+        lo >= 1 &&
+        hi >= lo &&
+        hi - lo <= 50
+      ) {
+        intervals.push([lo, hi]);
+      }
+      continue;
+    }
+    const singleMatch = /^(?:第\s*|#)?(\d+)$/.exec(part);
+    if (singleMatch) {
+      const n = Number(singleMatch[1]);
+      if (Number.isSafeInteger(n) && n >= 1) {
+        intervals.push([n, n]);
+      }
+    }
+  }
+}
+
+function extractReferencedFindingIntervals(text) {
+  const intervals = [];
+  const patterns = [
+    /#finding-(\d+)\b/gi,
+    /\b(?:findings?|items?|points?|issues?)\s*#?(\d+(?:\s*(?:[-–—~～]\s*#?\d+|(?:,\s*(?:and\b|&)|[,、&+]|\band\b)\s*#?\d+))*)/gi,
+    /第\s*(\d+(?:\s*(?:[-–—~～]\s*第?\s*\d+|(?:[,、，]\s*(?:和|与|及|&)|[,、，&+]|和|与|及)\s*第?\s*\d+))*)\s*(?:项|条|个|点|处|问|题)/g,
+    /(?:发现|问题|阻塞项|缺陷)\s*#?(\d+(?:\s*(?:[-–—~～]\s*#?\d+|(?:[,、，]\s*(?:和|与|及|&)|[,、，&+]|和|与|及)\s*#?\d+))*)/g,
+    /\(\s*#(\d+(?:\s*(?:[-–—~～]\s*#?\d+|(?:[,、，]\s*(?:and\b|和|与|及|&)|[,、，&+]|\band\b|和|与|及)\s*#?\d+))*)\s*\)/gi,
+  ];
+  for (const re of patterns) {
+    for (const m of text.matchAll(re)) {
+      parseFindingNumberSpec(m[1], intervals);
+    }
+  }
+  return intervals;
+}
+
+function splitTopLevelCommas(text) {
+  const parts = [];
+  let current = '';
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '(' || ch === '（' || ch === '[') {
+      depth++;
+      current += ch;
+    } else if (ch === ')' || ch === '）' || ch === ']') {
+      if (depth > 0) depth--;
+      current += ch;
+    } else if ((ch === ',' || ch === '，') && depth === 0) {
+      parts.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  parts.push(current);
+  return parts;
+}
+
+const ANY_REVIEW_ANCHOR_TEST_RE =
+  /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+#(?:issuecomment-|discussion_r|pullrequestreview-)\d+|(?:issuecomment-|discussion_r|pullrequestreview-)\d+|(?<![0-9A-Za-z_#/.:-])#?\d{7,}(?![0-9A-Za-z_])/;
+
+function hasAnyReviewAnchor(text) {
+  return ANY_REVIEW_ANCHOR_TEST_RE.test(text);
+}
+
+function splitTopLevelCommasPreservingAnchors(text) {
+  const rawParts = splitTopLevelCommas(text);
+  const grouped = [];
+  let pendingPrefix = '';
+  for (const part of rawParts) {
+    if (!hasAnyReviewAnchor(part)) {
+      if (grouped.length === 0) {
+        pendingPrefix = pendingPrefix ? `${pendingPrefix},${part}` : part;
+      } else {
+        grouped[grouped.length - 1] = `${grouped[grouped.length - 1]},${part}`;
+      }
+    } else {
+      const combined = pendingPrefix ? `${pendingPrefix},${part}` : part;
+      pendingPrefix = '';
+      grouped.push(combined);
+    }
+  }
+  if (pendingPrefix) {
+    if (grouped.length > 0) {
+      grouped[grouped.length - 1] =
+        `${grouped[grouped.length - 1]},${pendingPrefix}`;
+    } else {
+      grouped.push(pendingPrefix);
+    }
+  }
+  return grouped;
+}
+
+function sliceByAnchorSpans(segment, ownTokens) {
+  const spans = [];
+  const anchorRe = new RegExp(ANY_REVIEW_ANCHOR_TEST_RE.source, 'g');
+  for (const m of segment.matchAll(anchorRe)) {
+    const raw = m[0];
+    spans.push({
+      start: m.index,
+      end: m.index + raw.length,
+      isOwn: textMentionsReviewTokens(raw, ownTokens),
+    });
+  }
+  const ownIndices = spans
+    .map((span, idx) => (span.isOwn ? idx : -1))
+    .filter((idx) => idx !== -1);
+  if (ownIndices.length === 0) return segment;
+  // Determine whether findings precede anchors (`findings 1 and 2 of A ...`) or
+  // follow anchors (`A findings 1 and 2 ...`) based on the first anchor span.
+  const firstSpan = spans[0];
+  const findingsPrecedeAnchors =
+    extractReferencedFindingIntervals(segment.slice(0, firstSpan.start))
+      .length > 0;
+  const kept = [];
+  for (const idx of ownIndices) {
+    const own = spans[idx];
+    const prevOtherEnd =
+      idx > 0 && !spans[idx - 1].isOwn ? spans[idx - 1].end : 0;
+    const nextOtherStart =
+      idx + 1 < spans.length && !spans[idx + 1].isOwn
+        ? spans[idx + 1].start
+        : segment.length;
+    if (findingsPrecedeAnchors) {
+      kept.push(segment.slice(prevOtherEnd, own.end));
+    } else {
+      kept.push(segment.slice(own.start, nextOtherStart));
+    }
+  }
+  return kept.join(' ');
+}
+
+function isolateClauseForReviewAnchor(line, ownTokens) {
+  if (!lineMentionsOtherReviewAnchor(line, ownTokens)) return line;
+  // 1. Split on sentence/clause boundaries (`;`, `；`, `。`, `!`, `?`, or `. `
+  // before whitespace without breaking URLs or abbreviations like `e.g. `).
+  const sentences = line.split(
+    /(?:[;；。!?！？]+|(?<![A-Za-z]\.[A-Za-z])\.(?=\s+))/,
+  );
+  const owned = [];
+  for (const sentence of sentences) {
+    if (!textMentionsReviewTokens(sentence, ownTokens)) continue;
+    if (!lineMentionsOtherReviewAnchor(sentence, ownTokens)) {
+      owned.push(sentence);
+      continue;
+    }
+    // 2. If multiple anchors share one sentence, group top-level comma parts
+    // around each anchor (preserving Oxford commas inside `findings 1, 2, and 3`).
+    const commaParts = splitTopLevelCommasPreservingAnchors(sentence).filter(
+      (part) => textMentionsReviewTokens(part, ownTokens),
+    );
+    const refined =
+      commaParts.length > 0
+        ? commaParts.map((part) =>
+            lineMentionsOtherReviewAnchor(part, ownTokens)
+              ? sliceByAnchorSpans(part, ownTokens)
+              : part,
+          )
+        : [sliceByAnchorSpans(sentence, ownTokens)];
+    owned.push(...refined);
+  }
+  return owned.length > 0 ? owned.join(' ') : line;
+}
+
+function scopedCitationBlockForLine(lines, idx, ownTokens) {
+  const line = lines[idx];
+  // 1. Markdown table row: keep scope strictly to that row (isolated if multiple anchors).
+  if (splitMarkdownTableRow(line) !== null) {
+    return isolateClauseForReviewAnchor(line, ownTokens);
+  }
+  // 2. If the same line mentions another review anchor, isolate only this anchor's clause.
+  if (lineMentionsOtherReviewAnchor(line, ownTokens)) {
+    return isolateClauseForReviewAnchor(line, ownTokens);
+  }
+  // 3. Markdown heading (e.g. "### issuecomment-7231584332"): include its body
+  // until the next heading of equal or higher level or a different review anchor.
+  const headingMatch = /^\s*(#{1,6})\s+/.exec(line);
+  if (headingMatch) {
+    const level = headingMatch[1].length;
+    const block = [line];
+    for (let j = idx + 1; j < lines.length; j++) {
+      const next = lines[j];
+      const nextHeading = /^\s*(#{1,6})\s+/.exec(next);
+      if (nextHeading && nextHeading[1].length <= level) break;
+      if (lineMentionsOtherReviewAnchor(next, ownTokens)) break;
+      block.push(next);
+    }
+    return block.join('\n');
+  }
+  // 3. Normal paragraph or list item (plus an immediately following sub-list
+  // when the anchor line ends with a colon introducing per-finding bullets).
+  let start = idx;
+  if (!LIST_ITEM_RE.test(line)) {
+    while (start > 0) {
+      const prev = lines[start - 1];
+      if (
+        prev.trim() === '' ||
+        /^\s*#{1,6}\s+/.test(prev) ||
+        splitMarkdownTableRow(prev) !== null ||
+        lineMentionsOtherReviewAnchor(prev, ownTokens)
+      ) {
+        break;
+      }
+      start--;
+      if (LIST_ITEM_RE.test(prev)) break;
+    }
+  }
+  const startListMatch = LIST_ITEM_RE.exec(lines[start]);
+  const startIndent = startListMatch
+    ? lineIndentWidth(startListMatch[1])
+    : null;
+  let end = idx;
+  while (end + 1 < lines.length) {
+    const next = lines[end + 1];
+    if (
+      next.trim() === '' ||
+      /^\s*#{1,6}\s+/.test(next) ||
+      splitMarkdownTableRow(next) !== null ||
+      lineMentionsOtherReviewAnchor(next, ownTokens)
+    ) {
+      break;
+    }
+    const nextList = LIST_ITEM_RE.exec(next);
+    if (nextList) {
+      if (
+        startIndent !== null &&
+        lineIndentWidth(nextList[1]) <= startIndent + 1
+      ) {
+        break;
+      }
+    }
+    end++;
+  }
+  const block = lines.slice(start, end + 1);
+  // If this paragraph introduces a per-finding bullet list (ends with `:` / `：`),
+  // include those bullets while they belong to this comment.
+  if (
+    startIndent === null &&
+    /[:：]\s*$/.test(lines[end].trim()) &&
+    end + 1 < lines.length
+  ) {
+    let j = end + 1;
+    while (j < lines.length && lines[j].trim() === '') j++;
+    if (j < lines.length && LIST_ITEM_RE.test(lines[j])) {
+      while (j < lines.length) {
+        const cur = lines[j];
+        if (cur.trim() === '') {
+          let peek = j + 1;
+          while (peek < lines.length && lines[peek].trim() === '') peek++;
+          if (
+            peek < lines.length &&
+            LIST_ITEM_RE.test(lines[peek]) &&
+            !lineMentionsOtherReviewAnchor(lines[peek], ownTokens)
+          ) {
+            j = peek;
+            continue;
+          }
+          break;
+        }
+        if (
+          /^\s*#{1,6}\s+/.test(cur) ||
+          lineMentionsOtherReviewAnchor(cur, ownTokens)
+        ) {
+          break;
+        }
+        block.push(cur);
+        j++;
+      }
+    }
+  }
+  return block.join('\n');
+}
+
+export function reportMentionsReviewFinding(
+  reportText,
+  url,
+  finding = 1,
+  findingCount = 1,
+) {
+  if (typeof reportText !== 'string' || reportText.trim() === '') return false;
+  const visible = stripHtmlCommentsOutsideFences(reportText);
+  const tokens = reviewUrlTokens(url);
+  if (!textMentionsReviewTokens(visible, tokens)) return false;
+  if (findingCount <= 1) return true;
+
+  const lines = normalizeNewlines(visible).split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (!textMentionsReviewTokens(lines[i], tokens)) continue;
+    const block = scopedCitationBlockForLine(lines, i, tokens);
+    const intervals = extractReferencedFindingIntervals(block);
+    if (intervals.some(([lo, hi]) => finding >= lo && finding <= hi)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function checkReviewCoverage(
+  reviewCoverage,
+  blockingItems,
+  { verdict = null, reportText = null, commentText = null } = {},
+) {
+  const errors = [];
+  const warnings = [];
+  const coverageByKey = new Map();
+  const bareUrls = new Set();
+  const indexedUrls = new Set();
+
+  if (reviewCoverage !== undefined) {
+    if (!Array.isArray(reviewCoverage)) {
+      errors.push(
+        `assertions.json reviewCoverage must be an array of { url, finding?, status, evidence | reason } entries (${REVIEW_COVERAGE_STATUSES.join(' | ')})`,
+      );
+    } else {
+      for (const entry of reviewCoverage) {
+        if (
+          !isPlainObject(entry) ||
+          typeof entry.url !== 'string' ||
+          entry.url.trim() === '' ||
+          !REVIEW_COVERAGE_STATUSES.includes(entry.status)
+        ) {
+          errors.push(
+            `assertions.json reviewCoverage entries each need a non-empty url and status of ${REVIEW_COVERAGE_STATUSES.join(' | ')}`,
+          );
+          continue;
+        }
+        const url = entry.url.trim();
+        let finding = undefined;
+        if (entry.finding !== undefined) {
+          if (
+            !Number.isInteger(entry.finding) ||
+            entry.finding < 1 ||
+            entry.finding > Number.MAX_SAFE_INTEGER
+          ) {
+            errors.push(
+              `assertions.json reviewCoverage entry for ${url} has invalid finding index (must be a positive integer)`,
+            );
+            continue;
+          }
+          finding = entry.finding;
+        }
+        const entryKey =
+          finding !== undefined ? `${url}#finding-${finding}` : url;
+        const entryLabel =
+          finding !== undefined ? `${url} (finding ${finding})` : url;
+        if (coverageByKey.has(entryKey)) {
+          errors.push(
+            `assertions.json reviewCoverage lists duplicate ${finding !== undefined ? `url+finding ${entryLabel}` : `url ${url}`}`,
+          );
+          continue;
+        }
+        if (finding !== undefined) {
+          if (bareUrls.has(url)) {
+            errors.push(
+              `assertions.json reviewCoverage mixes bare and finding-indexed entries for ${url}`,
+            );
+            continue;
+          }
+          indexedUrls.add(url);
+        } else {
+          if (indexedUrls.has(url)) {
+            errors.push(
+              `assertions.json reviewCoverage mixes bare and finding-indexed entries for ${url}`,
+            );
+            continue;
+          }
+          bareUrls.add(url);
+        }
+        if (
+          (entry.status === 'reproduced' ||
+            entry.status === 'not-reproduced') &&
+          (typeof entry.evidence !== 'string' || entry.evidence.trim() === '')
+        ) {
+          errors.push(
+            `assertions.json reviewCoverage entry for ${entryLabel} (${entry.status}) needs a non-empty evidence string`,
+          );
+          continue;
+        }
+        if (
+          (entry.status === 'not-measured' ||
+            entry.status === 'no-defect-claimed') &&
+          (typeof entry.reason !== 'string' || entry.reason.trim() === '')
+        ) {
+          errors.push(
+            `assertions.json reviewCoverage entry for ${entryLabel} (${entry.status}) needs a non-empty reason string`,
+          );
+          continue;
+        }
+        coverageByKey.set(entryKey, entry);
+        if (
+          verdict === 'merge-ready' &&
+          (entry.status === 'reproduced' || entry.status === 'not-measured')
+        ) {
+          errors.push(
+            `merge-ready with blocking review item ${entryLabel} marked ${entry.status}: open blocking review findings must be verified not-reproduced before merge-ready`,
+          );
+        }
+      }
+    }
+  }
+
+  if (Array.isArray(blockingItems)) {
+    const hasCommentText =
+      typeof commentText === 'string' && commentText.trim() !== '';
+    for (const item of blockingItems) {
+      const findingCount = item.findingCount ?? 1;
+      const finding = item.finding ?? 1;
+      const entry =
+        findingCount > 1
+          ? coverageByKey.get(`${item.url}#finding-${finding}`)
+          : (coverageByKey.get(`${item.url}#finding-1`) ??
+            coverageByKey.get(item.url));
+      const findingSuffix =
+        findingCount > 1
+          ? ` (finding ${finding} of ${findingCount}${item.excerpt ? `: ${JSON.stringify(item.excerpt)}` : ''})`
+          : '';
+      if (!entry) {
+        const who = item.author ? ` by ${item.author}` : '';
+        if (verdict === 'merge-ready') {
+          errors.push(
+            `merge-ready omits open blocking ${item.kind} ${item.url}${findingSuffix}${who}: verify it on the verified head and record ${findingCount > 1 ? `{ url, finding: ${finding}, status, ... }` : 'it'} in assertions.json reviewCoverage before merge-ready`,
+          );
+        } else {
+          warnings.push(
+            `assertions.json reviewCoverage omits open blocking ${item.kind} ${item.url}${findingSuffix}${who}`,
+          );
+        }
+      } else if (
+        entry.status === 'not-reproduced' &&
+        verdict === 'merge-ready'
+      ) {
+        const citationHint =
+          findingCount > 1
+            ? ` (cite both the comment URL/ID and finding ${finding}, e.g. "finding ${finding}" or "第 ${finding} 项")`
+            : '';
+        if (
+          !reportMentionsReviewFinding(
+            reportText,
+            item.url,
+            finding,
+            findingCount,
+          )
+        ) {
+          errors.push(
+            `report.md does not reference verified blocking ${item.kind} ${item.url}${findingSuffix} recorded as not-reproduced in assertions.json reviewCoverage${citationHint}`,
+          );
+        }
+        if (
+          hasCommentText &&
+          !reportMentionsReviewFinding(
+            commentText,
+            item.url,
+            finding,
+            findingCount,
+          )
+        ) {
+          errors.push(
+            `comment.md does not reference verified blocking ${item.kind} ${item.url}${findingSuffix} recorded as not-reproduced in assertions.json reviewCoverage${citationHint}`,
+          );
+        }
+      }
+    }
+  }
+
+  return { errors, warnings };
+}
+
 /**
  * Pure check over already-read artifacts. `files` carries raw text or null;
  * `evidence` is the PNG file names under evidence/.
@@ -1657,6 +3306,8 @@ export function checkArtifacts({
   expectedContextSha256 = null,
   requiredExecutionClass = null,
   trustClassification = undefined,
+  reviewThreadsText = null,
+  expectedReviewSha256 = undefined,
 }) {
   const errors = [];
   const warnings = [];
@@ -1689,6 +3340,7 @@ export function checkArtifacts({
   let counts = null;
   let attributions = null;
   let ledgerPresent = false;
+  let reviewCoverage = undefined;
   if (files.assertions && files.assertions.trim() !== '') {
     let parsed;
     let parsedOk = true;
@@ -1709,6 +3361,7 @@ export function checkArtifacts({
         'assertions.json must be an object with pass, fail and total',
       );
     } else if (parsedOk) {
+      reviewCoverage = parsed.reviewCoverage;
       const fields = ['pass', 'fail', 'total'];
       const valid = fields.every(
         (field) => Number.isInteger(parsed?.[field]) && parsed[field] >= 0,
@@ -1822,6 +3475,44 @@ export function checkArtifacts({
         `${verdict} with ${counts.fail} failed assertion${plural} and none attributed to the PR (${[...new Set(attributions)].join(', ')}): re-encode an A/A-proven environment red as an expected-red pass and move the lost coverage to Not covered, and report a harness fault as inconclusive`,
       );
     }
+  }
+
+  if (expectedReviewSha256 === null && verdict === 'merge-ready') {
+    errors.push(
+      'merge-ready is not allowed when host --context recorded reviewSha256=null (review snapshot fetch failed): re-run prepare to capture review state or degrade verdict to inconclusive',
+    );
+  }
+
+  const readableReportText = unreadableKeys.has('report')
+    ? null
+    : (files.report ?? null);
+  const readableCommentText = unreadableKeys.has('comment')
+    ? null
+    : (files.comment ?? null);
+  if (reviewThreadsText !== null && reviewThreadsText !== undefined) {
+    const reviewCheck = checkReviewThreads(reviewThreadsText, { coordinates });
+    errors.push(...reviewCheck.errors);
+    if (reviewCheck.errors.length === 0) {
+      const coverageCheck = checkReviewCoverage(
+        reviewCoverage,
+        reviewCheck.items,
+        {
+          verdict,
+          reportText: readableReportText,
+          commentText: readableCommentText,
+        },
+      );
+      errors.push(...coverageCheck.errors);
+      warnings.push(...coverageCheck.warnings);
+    }
+  } else if (reviewCoverage !== undefined) {
+    const coverageCheck = checkReviewCoverage(reviewCoverage, null, {
+      verdict,
+      reportText: readableReportText,
+      commentText: readableCommentText,
+    });
+    errors.push(...coverageCheck.errors);
+    warnings.push(...coverageCheck.warnings);
   }
 
   errors.push(...checkMutationCoverage(files.mutations).errors);
@@ -1959,6 +3650,27 @@ export function checkArtifacts({
     (boundaryBackend === 'provider-vm' ||
       executionRecord?.backend === 'provider-vm');
 
+  if (
+    boundaryMode === 'container' &&
+    files.boundaryGate &&
+    files.boundaryGate.trim() !== ''
+  ) {
+    try {
+      const parsedGate = JSON.parse(files.boundaryGate);
+      if (
+        isPlainObject(parsedGate) &&
+        parsedGate.gate !== 'ci-lane' &&
+        parsedGate.uid === 0
+      ) {
+        warnings.push(
+          'boundary-gate.json records uid=0 (root) inside the verification container: root bypasses non-root permission, chown, and ownership-warning code paths (such as debugfs rdump ownership warnings); run the container with --user "$(id -u):$(id -g)" or explicitly exercise non-root paths and record any root-only coverage under Not covered',
+        );
+      }
+    } catch {
+      // Malformed boundary-gate.json is reported by checkBoundary above.
+    }
+  }
+
   // Disclose the coordinate-check downgrade: a waiver/vm whose approval
   // permalink was only shape-checked (no trusted repo/pr coordinates) must
   // not read as "the approval was compared against this PR".
@@ -2054,6 +3766,8 @@ function main(argv) {
   let guardMaxAgeSec = DEFAULT_GUARD_MAX_AGE_SEC;
   let guardMaxAgeProvided = false;
   let requireGuard = false;
+  let reviewThreadsPath = null;
+  let reviewThreadsSha = null;
   let publishLane = false;
   const positional = [];
   for (let index = 0; index < argv.length; index++) {
@@ -2133,6 +3847,22 @@ function main(argv) {
       guardMaxAgeProvided = true;
     } else if (arg === '--require-guard') {
       requireGuard = true;
+    } else if (arg === '--review-threads') {
+      reviewThreadsPath = argv[++index];
+      if (!reviewThreadsPath) {
+        process.stderr.write(
+          `verify-pr check: --review-threads requires a host review snapshot path\n\n${HELP}`,
+        );
+        return 2;
+      }
+    } else if (arg === '--review-threads-sha256') {
+      reviewThreadsSha = argv[++index];
+      if (!reviewThreadsSha || !/^[0-9a-f]{64}$/.test(reviewThreadsSha)) {
+        process.stderr.write(
+          `verify-pr check: --review-threads-sha256 requires the 64-hex digest prepare printed\n\n${HELP}`,
+        );
+        return 2;
+      }
     } else if (arg === '--publish-lane') {
       // The CI publish job's flag: honors the ci-lane gate record the job
       // writes itself. An argv claim, not an authenticated identity — a
@@ -2166,6 +3896,12 @@ function main(argv) {
   if (guardMaxAgeProvided && !guardPath) {
     process.stderr.write(
       `verify-pr check: --guard-max-age-sec applies to --guard; pass --guard too\n\n${HELP}`,
+    );
+    return 2;
+  }
+  if (reviewThreadsSha && !reviewThreadsPath) {
+    process.stderr.write(
+      `verify-pr check: --review-threads-sha256 binds a --review-threads snapshot; pass --review-threads too\n\n${HELP}`,
     );
     return 2;
   }
@@ -2513,6 +4249,7 @@ function main(argv) {
   let hostContextSha256 = null;
   let requiredExecutionClass = null;
   let trustClassification = undefined;
+  let expectedReviewSha256 = undefined;
   if (contextPath) {
     // A host-held snapshot: the PR clone is mounted read-write, so the round
     // can write ANY path inside it — the artifact dir AND the
@@ -2648,6 +4385,19 @@ function main(argv) {
             return 1;
           }
           requiredExecutionClass = tcCheck.requiredExecutionClass;
+        }
+        if (snapshot?.reviewSha256 !== undefined) {
+          if (
+            snapshot.reviewSha256 !== null &&
+            (typeof snapshot.reviewSha256 !== 'string' ||
+              !/^[0-9a-f]{64}$/.test(snapshot.reviewSha256))
+          ) {
+            process.stderr.write(
+              `verify-pr check: --context ${contextPath} has invalid reviewSha256 (must be a 64-hex digest or null)\n`,
+            );
+            return 1;
+          }
+          expectedReviewSha256 = snapshot.reviewSha256;
         }
       } catch {
         // Reported below; never falls back to the writable artifact copy.
@@ -2866,6 +4616,111 @@ function main(argv) {
     );
   }
 
+  // Refuse a guest-planted review-threads.json inside the PR-writable artifact dir.
+  const reviewThreadsErrors = [];
+  const plantedReviewThreadsPath = join(canonicalDir, 'review-threads.json');
+  try {
+    lstatSync(plantedReviewThreadsPath);
+    reviewThreadsErrors.push(
+      'review-threads.json must not reside inside the PR-writable artifact directory: pass the host-held review snapshot via --review-threads',
+    );
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      reviewThreadsErrors.push(
+        `could not verify absence of planted review-threads.json (${error?.code ?? 'error'})`,
+      );
+    }
+  }
+
+  let reviewThreadsText = null;
+  let reviewThreadsWarning = null;
+  if (reviewThreadsPath) {
+    let realReviewThreads;
+    try {
+      realReviewThreads = realPath(reviewThreadsPath);
+    } catch {
+      realReviewThreads = resolve(reviewThreadsPath);
+    }
+    const reviewDerivedRoots = deriveTrustRoots();
+    if (reviewDerivedRoots.error) {
+      process.stderr.write(`verify-pr check: ${reviewDerivedRoots.error}\n`);
+      return 1;
+    }
+    const reviewMatchedRoot =
+      reviewDerivedRoots.roots.find((root) => isFilesystemRoot(root)) ??
+      reviewDerivedRoots.roots.find((root) =>
+        withinRoot(root, realReviewThreads),
+      ) ??
+      null;
+    const reviewInsideByPath = reviewMatchedRoot !== null;
+    let reviewIsAlias = false;
+    let reviewLinks = 0;
+    if (!reviewInsideByPath) {
+      try {
+        const reviewStat = statSync(realReviewThreads);
+        if (reviewStat.isFile()) {
+          reviewLinks = reviewStat.nlink;
+          reviewIsAlias = reviewStat.nlink !== 1;
+        }
+      } catch {
+        // Missing/unreadable review snapshot is refused below.
+      }
+    }
+    if (reviewInsideByPath || reviewIsAlias) {
+      let reason;
+      if (reviewIsAlias) {
+        reason = `--review-threads ${reviewThreadsPath} is a hard link (${reviewLinks} names); copy the snapshot into host-held storage instead of linking it`;
+      } else if (isFilesystemRoot(reviewMatchedRoot)) {
+        reason = `--review-threads ${reviewThreadsPath} cannot be trusted under root-level trust root '${reviewMatchedRoot}'`;
+      } else {
+        reason = `--review-threads must not point inside the PR-writable worktree (${reviewThreadsPath}): pass a host-held review snapshot outside the artifact tree`;
+      }
+      process.stderr.write(`verify-pr check: ${reason}\n`);
+      return 1;
+    }
+    const rawReviewThreads = readIfExists(reviewThreadsPath);
+    if (rawReviewThreads === null || rawReviewThreads === UNREADABLE) {
+      process.stderr.write(
+        `verify-pr check: --review-threads ${reviewThreadsPath} is missing or unreadable (symlinks, directories, FIFOs, and oversized files are refused)\n`,
+      );
+      return 1;
+    }
+    const actualReviewSha = createHash('sha256')
+      .update(rawReviewThreads, 'utf8')
+      .digest('hex');
+    if (reviewThreadsSha) {
+      if (actualReviewSha !== reviewThreadsSha) {
+        process.stderr.write(
+          `verify-pr check: --review-threads ${reviewThreadsPath} does not match --review-threads-sha256\n`,
+        );
+        return 1;
+      }
+    } else if (requireGuard) {
+      reviewThreadsErrors.push(
+        '--require-guard requires --review-threads-sha256 when --review-threads is passed',
+      );
+    } else {
+      reviewThreadsWarning = `--review-threads ${reviewThreadsPath} has no --review-threads-sha256 binding; pass the host digest prepare printed to bind its bytes`;
+    }
+    if (expectedReviewSha256 === null) {
+      reviewThreadsErrors.push(
+        `--review-threads ${reviewThreadsPath} was provided, but the bound host --context snapshot recorded reviewSha256=null (no review snapshot was captured by prepare): re-run prepare to bind a fresh review snapshot for this PR`,
+      );
+    } else if (
+      typeof expectedReviewSha256 === 'string' &&
+      actualReviewSha !== expectedReviewSha256
+    ) {
+      reviewThreadsErrors.push(
+        `--review-threads ${reviewThreadsPath} does not match reviewSha256 recorded in the bound host --context snapshot (cross-PR or stale review snapshot)`,
+      );
+    }
+    reviewThreadsText = rawReviewThreads;
+  } else if (requireGuard && typeof expectedReviewSha256 === 'string') {
+    reviewThreadsErrors.push(
+      '--require-guard requires --review-threads matching reviewSha256 recorded in the bound host --context snapshot',
+    );
+  }
+
   // The CI entry path is defined by $QWEN_VERIFY_CONTEXT; there the publish
   // job owns the declaration, so an absent boundary.json is a warning for
   // the round's own pre-finish self-check, not an error it cannot clear.
@@ -2885,6 +4740,8 @@ function main(argv) {
     expectedContextSha256: contextSha ?? hostContextSha256,
     requiredExecutionClass,
     trustClassification,
+    reviewThreadsText,
+    expectedReviewSha256,
   });
   let executionMode = null;
   try {
@@ -2999,7 +4856,9 @@ function main(argv) {
     );
   }
   result.errors.push(...guardErrors);
+  result.errors.push(...reviewThreadsErrors);
   result.errors.unshift(...unreadableErrors);
+  if (reviewThreadsWarning) result.warnings.unshift(reviewThreadsWarning);
   if (guardWarning) result.warnings.unshift(guardWarning);
   if (executionRecordWarning) result.warnings.unshift(executionRecordWarning);
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);
