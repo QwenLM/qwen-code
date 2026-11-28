@@ -8,7 +8,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
   AGENT_WORKTREE_SLUG_PATTERN,
+  type CarriedEntry,
   GitWorktreeService,
+  computeCarriedIdentities,
+  resolveWorktreeIncludePathsInCheckout,
   worktreeBranchForSlug,
   worktreeHasWork,
 } from './gitWorktreeService.js';
@@ -52,6 +55,61 @@ function isEphemeralSlug(slug: string): boolean {
 }
 
 /**
+ * Content identities for the repository's `.worktreeinclude` paths as the
+ * source checkout holds them, for the shared has-work predicate.
+ *
+ * A creation copies those gitignored paths into the new worktree (`.env` and
+ * the like) but leaves the source untouched, so on disk a pristine copy is
+ * indistinguishable from the user's own untracked file. Without these
+ * identities every such copy reads as work and preserves the checkout forever
+ * (#12758's fail-closed rule turned into a leak). Deriving them from the
+ * SOURCE keeps the shared predicate's rule: a path is waived only while the
+ * worktree's copy still matches what the source holds. Edited or staged
+ * copies count as work. These identities are inferred, so a missing path
+ * waives nothing: the worktree might never have received that copy.
+ *
+ * Empty on every failure (no `.worktreeinclude`, unreadable source), which
+ * waives nothing and preserves the checkout.
+ */
+async function resolveIncludeCarriedEntries(
+  projectRoot: string,
+): Promise<CarriedEntry[] | undefined> {
+  try {
+    const paths = await resolveWorktreeIncludePathsInCheckout(projectRoot);
+    if (paths.length === 0) return undefined;
+    const entries = await computeCarriedIdentities(projectRoot, paths);
+    const present = entries.filter((e) => e.hash !== null);
+    return present.length > 0 ? present : undefined;
+  } catch (error) {
+    debugLogger.debug(
+      `cleanupStaleAgentWorktrees: cannot resolve .worktreeinclude copies: ${error}`,
+    );
+    return undefined;
+  }
+}
+
+async function includeEntriesInWorktree(
+  worktreePath: string,
+  entries: CarriedEntry[],
+): Promise<CarriedEntry[]> {
+  const present = await Promise.all(
+    entries.map(async (entry) => {
+      try {
+        const stat = await fs.lstat(path.join(worktreePath, entry.path));
+        // Let the regular has-work check handle symlinks. Other file types
+        // and probe failures still go through the carried-identity check.
+        return stat.isSymbolicLink() ? undefined : entry;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === 'ENOENT'
+          ? undefined
+          : entry;
+      }
+    }),
+  );
+  return present.filter((entry) => entry !== undefined);
+}
+
+/**
  * Removes stale ephemeral worktrees under `<projectRoot>/.qwen/worktrees/`.
  *
  * Safety guarantees (fail-closed):
@@ -76,6 +134,7 @@ export async function cleanupStaleAgentWorktrees(
 
   const service = new GitWorktreeService(projectRoot);
   const worktreesDir = service.getUserWorktreesDir();
+  const includeEntries = await resolveIncludeCarriedEntries(projectRoot);
 
   // Fast bail-out for the common case (user has never used worktrees):
   // skip the dynamic readdir entirely instead of relying on the catch
@@ -125,10 +184,14 @@ export async function cleanupStaleAgentWorktrees(
     if (mtimeMs >= cutoffDate) continue;
 
     // Fail-closed: any sign of in-progress work or unmerged commits → keep.
-    // Run both checks concurrently — neither depends on the other and each
+    // Run the probes concurrently — neither depends on the other and each
     // spawns its own git invocation.
     const [dirty, unmerged] = await Promise.all([
-      worktreeHasWork(worktreePath),
+      includeEntries
+        ? includeEntriesInWorktree(worktreePath, includeEntries).then(
+            (entries) => worktreeHasWork(worktreePath, entries),
+          )
+        : worktreeHasWork(worktreePath),
       service.hasUnmergedWorktreeCommits(entry.name),
     ]);
     if (dirty || unmerged) {

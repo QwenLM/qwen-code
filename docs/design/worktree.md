@@ -390,8 +390,9 @@ git fetch origin pull/<N>/head
 
 以下功能面向更特定的使用场景，当前阶段不纳入排期，待用户需求明确后再评估实现。
 
-| 功能                    | 说明                                                                                      |
-| ----------------------- | ----------------------------------------------------------------------------------------- |
-| sparse checkout         | `worktree.sparsePaths` 配置项，大型 monorepo 只 checkout 指定路径，缩短创建时间和磁盘占用 |
-| `.worktreeinclude` 文件 | 将 gitignore 的文件（`.env`、`secrets.json` 等）自动复制进 worktree                       |
-| tmux 集成               | `--worktree --tmux` 在新 tmux 窗口启动 worktree 会话                                      |
+（`.worktreeinclude` 原列于此表，已实现，见 [用户文档](../users/features/worktree.md#worktreeinclude)。）
+
+| 功能            | 说明                                                                                      |
+| --------------- | ----------------------------------------------------------------------------------------- |
+| sparse checkout | `worktree.sparsePaths` 配置项，大型 monorepo 只 checkout 指定路径，缩短创建时间和磁盘占用 |
+| tmux 集成       | `--worktree --tmux` 在新 tmux 窗口启动 worktree 会话                                      |
