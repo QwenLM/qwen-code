@@ -6,7 +6,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act, render, screen, waitFor } from '@testing-library/react';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BUILT_IN_OUTPUT_STYLES,
@@ -46,9 +52,18 @@ const mocks = vi.hoisted(() => {
             ),
           ),
         );
+        const { onMouseOver, onMouseUp } = (config ?? {}) as Record<
+          string,
+          unknown
+        >;
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          { ...(key === undefined ? {} : { key }), 'data-p': captured },
+          {
+            ...(key === undefined ? {} : { key }),
+            'data-p': captured,
+            ...(onMouseOver ? { onMouseOver } : null),
+            ...(onMouseUp ? { onMouseUp } : null),
+          },
           children,
         );
       }
@@ -1758,6 +1773,43 @@ describe('OpenTuiSettingsDialog region budget', () => {
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.width = 100;
+  });
+
+  it('ignores right-click on a settings row but selects it with left-click', () => {
+    const items = buildSettingsListItems();
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    const isActiveRow = (label: string) => {
+      const text = screen.getByText(label);
+      return (
+        text.parentElement?.parentElement?.parentElement?.textContent ?? ''
+      )
+        .trim()
+        .startsWith('●');
+    };
+    render(
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        availableTerminalHeight={19}
+      />,
+    );
+
+    expect(isActiveRow(items[0]!.label)).toBe(true);
+    act(() => {
+      fireEvent.mouseUp(screen.getByText(items[1]!.label), { button: 2 });
+    });
+    expect(isActiveRow(items[0]!.label)).toBe(true);
+    expect(isActiveRow(items[1]!.label)).toBe(false);
+
+    act(() => {
+      fireEvent.mouseUp(screen.getByText(items[1]!.label), { button: 0 });
+    });
+    expect(isActiveRow(items[1]!.label)).toBe(true);
   });
 
   it('windows the settings list to the region the mount hands it', () => {

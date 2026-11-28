@@ -163,6 +163,51 @@ describe('OpenTuiMcpDialog list windows', () => {
     mocks.state.width = 100;
   });
 
+  it('ignores right-click on a server row but opens it with left-click', async () => {
+    render(
+      <OpenTuiMcpDialog
+        servers={[serverWith({ name: 'srv', toolCount: 1 })]}
+        availableTerminalHeight={12}
+        onClose={() => {}}
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.mouseUp(screen.getByText('srv'), { button: 2 });
+    });
+    expect(screen.queryByText('View tools')).toBeNull();
+
+    await act(async () => {
+      fireEvent.mouseUp(screen.getByText('srv'), { button: 0 });
+    });
+    expect(screen.getByText('View tools')).toBeTruthy();
+  });
+
+  it('ignores right-click on a server-detail action but opens it with left-click', async () => {
+    render(
+      <OpenTuiMcpDialog
+        servers={[serverWith({ toolCount: 1 })]}
+        availableTerminalHeight={20}
+        onClose={() => {}}
+      />,
+    );
+
+    await press('return'); // server list → server detail
+    await act(async () => {
+      fireEvent.mouseUp(screen.getByText('View tools'), { button: 2 });
+    });
+    expect(
+      screen.queryByText('No tools available for this server.'),
+    ).toBeNull();
+
+    await act(async () => {
+      fireEvent.mouseUp(screen.getByText('View tools'), { button: 0 });
+    });
+    expect(
+      screen.getByText('No tools available for this server.'),
+    ).toBeTruthy();
+  });
+
   it('keeps the tool window put on hover, so a click opens the row under the pointer', async () => {
     // A twelve-tool server in a three-row window (region 12 minus the frame,
     // header, margin and footer). Hovering a painted row sets the cursor to
@@ -193,6 +238,13 @@ describe('OpenTuiMcpDialog list windows', () => {
     expect(screen.queryByText('tool_2')).toBeNull();
     expect(screen.getByText('tool_4')).toBeTruthy();
     expect(screen.getByText('tool_5')).toBeTruthy();
+
+    // A right-click must not open the row either.
+    await act(async () => {
+      fireEvent.mouseUp(screen.getByText('tool_3'), { button: 2 });
+    });
+    expect(screen.queryByText('(no description)')).toBeNull();
+    expect(screen.getByText('tool_4')).toBeTruthy();
 
     // And the click opens the row the pointer is on.
     await act(async () => {
@@ -225,6 +277,12 @@ describe('OpenTuiMcpDialog list windows', () => {
     expect(screen.queryByText('res://resource_2')).toBeNull();
     expect(screen.getByText('res://resource_4')).toBeTruthy();
     expect(screen.getByText('res://resource_5')).toBeTruthy();
+
+    // A right-click must not open the detail either.
+    await act(async () => {
+      fireEvent.mouseUp(screen.getByText('res://resource_3'), { button: 2 });
+    });
+    expect(screen.getByText('res://resource_4')).toBeTruthy();
 
     await act(async () => {
       fireEvent.mouseUp(screen.getByText('res://resource_3'), { button: 0 });

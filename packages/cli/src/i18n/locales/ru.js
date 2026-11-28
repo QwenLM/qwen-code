@@ -3215,4 +3215,7 @@ export default {
     'Подсказка: используйте /btw, чтобы задать короткий побочный вопрос, не прерывая текущую работу',
   '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
     '(Модель попыталась вызвать {{tool}} вместо прямого ответа. Переформулируйте вопрос или задайте его в основном разговоре.)',
+  'Jump to bottom (ctrl+End)': 'Перейти вниз (Ctrl+End)',
+  'Copied {{count}} chars': 'Скопировано символов: {{count}}',
+  'Copied 1 char': 'Скопировано символов: 1',
 };

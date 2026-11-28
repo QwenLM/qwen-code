@@ -19,6 +19,7 @@
 
 import { useEffect, useState } from 'react';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
+import { MouseButton } from '@opentui/core';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -1019,7 +1020,8 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
               <box
                 key={item.key}
                 flexDirection="row"
-                onMouseUp={() => {
+                onMouseUp={(event) => {
+                  if (event.button !== MouseButton.LEFT) return;
                   setActiveSettingIndex(itemIndex);
                   setFocusZone('list');
                 }}

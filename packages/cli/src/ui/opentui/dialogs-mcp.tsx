@@ -17,6 +17,7 @@
 
 import { useEffect, useState } from 'react';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
+import { MouseButton } from '@opentui/core';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import { MCPServerStatus } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
@@ -994,7 +995,8 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
               key={row.key}
               flexDirection="row"
               onMouseOver={() => setServerCursor(row.flatIndex)}
-              onMouseUp={() => {
+              onMouseUp={(event) => {
+                if (event.button !== MouseButton.LEFT) return;
                 setServerCursor(row.flatIndex);
                 setSelectedServerName(server.name);
                 setActionCursor(0);
@@ -1129,7 +1131,8 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
               key={row.key}
               flexDirection="row"
               onMouseOver={() => setActionCursor(row.index)}
-              onMouseUp={() => {
+              onMouseUp={(event) => {
+                if (event.button !== MouseButton.LEFT) return;
                 setActionCursor(row.index);
                 if (!selectedServer) return;
                 switch (action.action) {
@@ -1186,7 +1189,8 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
               key={tool.name}
               flexDirection="row"
               onMouseOver={() => setToolCursor(index)}
-              onMouseUp={() => {
+              onMouseUp={(event) => {
+                if (event.button !== MouseButton.LEFT) return;
                 setToolCursor(index);
                 setSelectedTool(tool);
                 navigateToStep(MCP_MANAGEMENT_STEPS.TOOL_DETAIL);
@@ -1278,7 +1282,8 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
               key={resource.uri}
               flexDirection="row"
               onMouseOver={() => setResourceCursor(index)}
-              onMouseUp={() => {
+              onMouseUp={(event) => {
+                if (event.button !== MouseButton.LEFT) return;
                 setResourceCursor(index);
                 setSelectedResource(resource);
                 navigateToStep(MCP_MANAGEMENT_STEPS.RESOURCE_DETAIL);
