@@ -13,6 +13,7 @@ import { getPersistScopeForModelSelection } from '../config/modelProvidersScope.
 import { publicProviderBaseUrl } from '../utils/acpModelUtils.js';
 import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import {
+  isBatchVoiceTransport,
   isSelectableVoiceModel,
   resolveVoiceTransport,
   type VoiceTransport,
@@ -196,7 +197,7 @@ export function hasConfiguredBatchVoiceTranscriptionModel(
   opts: { env?: Readonly<Record<string, string | undefined>> } = {},
 ): boolean {
   for (const model of listAvailableVoiceModels(settings)) {
-    if (model.transport !== 'qwen-asr-chat') {
+    if (!isBatchVoiceTransport(model.transport)) {
       continue;
     }
     try {
@@ -275,7 +276,7 @@ export function validateWorkspaceVoiceConfig(
   const descriptor = validateWorkspaceVoiceModel(settings, voiceModel);
   try {
     const config = createVoiceModelSource(settings);
-    if (descriptor.transport === 'qwen-asr-chat') {
+    if (isBatchVoiceTransport(descriptor.transport)) {
       resolveVoiceTranscriptionConfig({
         config,
         settings,
@@ -344,7 +345,7 @@ export async function transcribeWorkspaceVoiceAudio(
     input.settings,
     input.voiceModel,
   );
-  if (descriptor.transport !== 'qwen-asr-chat') {
+  if (!isBatchVoiceTransport(descriptor.transport)) {
     throw new WorkspaceVoiceError(
       400,
       'unsupported_voice_model',

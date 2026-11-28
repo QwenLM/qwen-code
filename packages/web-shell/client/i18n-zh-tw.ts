@@ -3572,7 +3572,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'auth.purpose.imageHint':
     '支援 DashScope 或 MiniMax 相容生圖介面，請使用不含查詢參數或片段的 HTTPS 地址。新增後保留當前對話模型。',
   'auth.purpose.voiceHint':
-    '請選擇 OpenAI Chat Completions API，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支援的轉寫模型。新增後保留當前對話模型。',
+    '請選擇 OpenAI Chat Completions API，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支援的轉寫模型；qwen-audio-3.0-asr-flash 則使用 DashScope 原生多模態介面。新增後保留當前對話模型。',
   'model.setAdvisor': '設定顧問模型',
   'model.setImage': '設定生圖模型',
   'model.useMain': '使用主模型',

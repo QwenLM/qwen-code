@@ -3649,7 +3649,7 @@ export const ZH: Messages = {
   'auth.purpose.imageHint':
     '支持 DashScope 或 MiniMax 兼容生图接口，请使用不含查询参数或片段的 HTTPS 地址。添加后保留当前对话模型。',
   'auth.purpose.voiceHint':
-    '请选择 OpenAI Chat Completions API，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
+    '请选择 OpenAI Chat Completions API，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型；qwen-audio-3.0-asr-flash 则使用 DashScope 原生多模态接口。添加后保留当前对话模型。',
   'model.setAdvisor': '设置顾问模型',
   'model.setImage': '设置生图模型',
   'model.useMain': '使用主模型',

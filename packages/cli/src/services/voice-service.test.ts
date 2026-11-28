@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   LoadedSettings,
   SettingScope,
@@ -449,5 +449,124 @@ describe('voice service', () => {
     ).rejects.toMatchObject({
       code: 'unsupported_voice_model',
     });
+  });
+
+  it('accepts the qwen-audio batch model as a daemon transcription model', () => {
+    const settings = makeSettings({
+      user: {
+        modelProviders: {
+          openai: [
+            {
+              id: 'qwen-audio-3.0-asr-flash',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+      },
+    });
+    const env = { DASHSCOPE_API_KEY: 'sk-secret' };
+
+    expect(hasConfiguredBatchVoiceTranscriptionModel(settings, { env })).toBe(
+      true,
+    );
+    expect(
+      validateWorkspaceVoiceConfig(settings, 'qwen-audio-3.0-asr-flash', {
+        env,
+      }),
+    ).toEqual({
+      id: 'qwen-audio-3.0-asr-flash',
+      transport: 'dashscope-multimodal-asr',
+    });
+  });
+
+  it('keeps streaming-only models off the batch endpoint', async () => {
+    const settings = makeSettings({
+      user: {
+        modelProviders: {
+          openai: [
+            {
+              id: 'qwen3-asr-flash-realtime',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+            {
+              id: 'fun-asr-realtime',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+      },
+    });
+    const env = { DASHSCOPE_API_KEY: 'sk-secret' };
+
+    expect(hasConfiguredBatchVoiceTranscriptionModel(settings, { env })).toBe(
+      false,
+    );
+    // Their own validation still passes, through the streaming resolver.
+    expect(
+      validateWorkspaceVoiceConfig(settings, 'fun-asr-realtime', { env }),
+    ).toEqual({
+      id: 'fun-asr-realtime',
+      transport: 'dashscope-task-realtime',
+    });
+    await expect(
+      transcribeWorkspaceVoiceAudio({
+        workspaceCwd: '/workspace',
+        settings,
+        voiceModel: 'fun-asr-realtime',
+        data: new Uint8Array([1, 2, 3]),
+        mimeType: 'audio/wav',
+        env,
+      }),
+    ).rejects.toMatchObject({ code: 'unsupported_voice_model' });
+  });
+
+  it('dispatches the qwen-audio batch model to the native endpoint', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({ text: 'привет, это проверка. ' }),
+    });
+    // transcribeWorkspaceVoiceAudio has no fetchFn seam, so stub the global.
+    vi.stubGlobal('fetch', fetchFn);
+    try {
+      const settings = makeSettings({
+        user: {
+          modelProviders: {
+            openai: [
+              {
+                // An IP literal keeps the network guard off the real resolver.
+                id: 'qwen-audio-3.0-asr-flash',
+                baseUrl: 'https://8.8.8.8/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+            ],
+          },
+        },
+      });
+
+      const result = await transcribeWorkspaceVoiceAudio({
+        workspaceCwd: '/workspace',
+        settings,
+        voiceModel: 'qwen-audio-3.0-asr-flash',
+        data: new Uint8Array([1, 2, 3]),
+        mimeType: 'audio/wav',
+        env: { DASHSCOPE_API_KEY: 'sk-secret' },
+      });
+
+      expect(result).toEqual({
+        text: 'привет, это проверка.',
+        model: 'qwen-audio-3.0-asr-flash',
+        transport: 'dashscope-multimodal-asr',
+      });
+      expect(fetchFn).toHaveBeenCalledOnce();
+      const [url] = fetchFn.mock.calls[0] as [string];
+      expect(url).toBe(
+        'https://8.8.8.8/api/v1/services/aigc/multimodal-generation/generation',
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

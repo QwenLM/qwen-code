@@ -48,6 +48,37 @@ async function lookupPublicHost(): Promise<{ address: string }> {
   return { address: '8.8.8.8' };
 }
 
+/** Minimal 44-byte RIFF/WAVE header with the given sample rate. */
+function wavAudio(sampleRate: number): { data: Uint8Array; mimeType: string } {
+  const buffer = Buffer.alloc(44);
+  buffer.write('RIFF', 0);
+  buffer.writeUInt32LE(36, 4);
+  buffer.write('WAVE', 8);
+  buffer.write('fmt ', 12);
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(1, 22);
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(sampleRate * 2, 28);
+  buffer.writeUInt16LE(2, 32);
+  buffer.writeUInt16LE(16, 34);
+  buffer.write('data', 36);
+  buffer.writeUInt32LE(0, 40);
+  return { data: new Uint8Array(buffer), mimeType: 'audio/wav' };
+}
+
+function qwenAudioAsrConfig() {
+  return createConfig([
+    {
+      id: 'qwen-audio-3.0-asr-flash',
+      label: 'Qwen Audio ASR',
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'https://dashscope.example/compatible-mode/v1',
+      envKey: 'DASHSCOPE_API_KEY',
+    },
+  ]);
+}
+
 describe('voice-transcriber', () => {
   beforeEach(() => {
     vi.stubEnv('OPENAI_API_KEY', '');
@@ -157,6 +188,34 @@ describe('voice-transcriber', () => {
     expect(resolveVoiceTransport('qwen3-asr-flash-filetrans')).toBe(
       'unsupported',
     );
+    expect(resolveVoiceTransport('qwen-audio-3.0-asr-flash')).toBe(
+      'dashscope-multimodal-asr',
+    );
+    expect(resolveVoiceTransport('qwen-audio-3.0-asr-flash-2026-06-15')).toBe(
+      'dashscope-multimodal-asr',
+    );
+    expect(resolveVoiceTransport('QWEN-Audio-3.0-ASR-Flash')).toBe(
+      'dashscope-multimodal-asr',
+    );
+    // Siblings of the family use different APIs, so they stay unroutable.
+    expect(resolveVoiceTransport('qwen-audio-3.0-asr-flash-streaming')).toBe(
+      'unsupported',
+    );
+    expect(resolveVoiceTransport('qwen-audio-3.0-asr-flash-filetrans')).toBe(
+      'unsupported',
+    );
+    expect(resolveVoiceTransport('qwen-audio-asr-flash')).toBe('unsupported');
+  });
+
+  it('keeps the qwen-audio asr family on a batch, not streaming, transport', () => {
+    expect(isStreamingVoiceModel('qwen-audio-3.0-asr-flash')).toBe(false);
+    expect(() =>
+      resolveVoiceStreamConfig({
+        config: qwenAudioAsrConfig(),
+        settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+        voiceModel: 'qwen-audio-3.0-asr-flash',
+      }),
+    ).toThrow(/does not support streaming/);
   });
 
   it('does not rewrite qwen3-asr-flash to a realtime model', () => {
@@ -1797,5 +1856,186 @@ describe('voice-transcriber', () => {
     );
 
     expect(text).toBe('');
+  });
+
+  it('posts qwen-audio asr audio to the multimodal-generation endpoint', async () => {
+    const onEgress = vi.fn();
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        text: 'привет, это проверка. ',
+        sentence: { text: 'привет' },
+      }),
+    });
+
+    const text = await transcribeVoiceAudio(wavAudio(48000), {
+      config: qwenAudioAsrConfig(),
+      settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+      voiceModel: 'qwen-audio-3.0-asr-flash',
+      lookupHost: lookupPublicHost,
+      fetchFn,
+      onEgress,
+    });
+
+    expect(text).toBe('привет, это проверка.');
+    expect(onEgress).toHaveBeenCalledOnce();
+    const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    // Native DashScope route: the baseUrl path is replaced, only the origin is kept.
+    expect(url).toBe(
+      'https://dashscope.example/api/v1/services/aigc/multimodal-generation/generation',
+    );
+    expect(init.method).toBe('POST');
+    expect(init.redirect).toBe('manual');
+    const headers = init.headers as Record<string, string>;
+    expect(headers['Content-Type']).toBe('application/json');
+    expect(headers['X-DashScope-SSE']).toBe('disable');
+    expect(headers['Authorization']).toBe('Bearer sk-test');
+    const body = JSON.parse(init.body as string);
+    expect(body.model).toBe('qwen-audio-3.0-asr-flash');
+    expect(body.parameters).toEqual({ format: 'wav', sample_rate: '48000' });
+    expect(body.messages).toBeUndefined();
+    expect(body.input.messages[0].role).toBe('user');
+    const part = body.input.messages[0].content[0];
+    expect(part.type).toBe('input_audio');
+    expect(part.input_audio.data).toMatch(/^data:audio\/wav;base64,/);
+    expect(part.input_audio.format).toBeUndefined();
+  });
+
+  it('reads the WAV sample rate and defaults to 16 kHz for other formats', async () => {
+    async function sampleRateOf(audio: {
+      data: Uint8Array;
+      mimeType: string;
+    }): Promise<unknown> {
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue({ text: 'hi' }),
+      });
+      await transcribeVoiceAudio(audio, {
+        config: qwenAudioAsrConfig(),
+        settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+        voiceModel: 'qwen-audio-3.0-asr-flash',
+        lookupHost: lookupPublicHost,
+        fetchFn,
+      });
+      const [, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+      return JSON.parse(init.body as string).parameters;
+    }
+
+    expect(await sampleRateOf(wavAudio(16000))).toEqual({
+      format: 'wav',
+      sample_rate: '16000',
+    });
+    expect(await sampleRateOf(wavAudio(48000))).toEqual({
+      format: 'wav',
+      sample_rate: '48000',
+    });
+    // Browser recorders hand us WebM, which carries no WAV header.
+    expect(
+      await sampleRateOf({
+        data: new Uint8Array([1, 2, 3]),
+        mimeType: 'audio/webm;codecs=opus',
+      }),
+    ).toEqual({ format: 'webm', sample_rate: '16000' });
+  });
+
+  it('rejects a multimodal ASR response without a text string', async () => {
+    for (const payload of [{ sentence: { text: 'hi' } }, { text: 42 }]) {
+      await expect(
+        transcribeVoiceAudio(wavAudio(16000), {
+          config: qwenAudioAsrConfig(),
+          settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+          voiceModel: 'qwen-audio-3.0-asr-flash',
+          lookupHost: lookupPublicHost,
+          fetchFn: vi.fn().mockResolvedValue({
+            ok: true,
+            json: vi.fn().mockResolvedValue(payload),
+          }),
+        }),
+      ).rejects.toThrow('Voice transcription response did not include text.');
+    }
+  });
+
+  it('reports multimodal ASR failures without leaking the key', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      statusText: 'Bad Request',
+      text: vi.fn().mockResolvedValue('{"code":"InvalidParameter"}'),
+    });
+
+    await expect(
+      transcribeVoiceAudio(wavAudio(16000), {
+        config: qwenAudioAsrConfig(),
+        settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+        voiceModel: 'qwen-audio-3.0-asr-flash',
+        lookupHost: lookupPublicHost,
+        fetchFn,
+      }),
+    ).rejects.toThrow(
+      'Voice transcription request failed (400 Bad Request): {"code":"InvalidParameter"}',
+    );
+  });
+
+  it('rejects oversized qwen-audio asr recordings without calling the API', async () => {
+    const fetchFn = vi.fn();
+    await expect(
+      transcribeVoiceAudio(
+        { data: new Uint8Array(10 * 1024 * 1024 + 1), mimeType: 'audio/wav' },
+        {
+          config: qwenAudioAsrConfig(),
+          settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+          voiceModel: 'qwen-audio-3.0-asr-flash',
+          lookupHost: lookupPublicHost,
+          fetchFn,
+        },
+      ),
+    ).rejects.toThrow(/too long/);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('sends an inference timeout signal for qwen-audio asr and reports timeout clearly', async () => {
+    let signal: AbortSignal | undefined;
+    const fetchFn = vi.fn((_url: RequestInfo | URL, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return Promise.reject(new DOMException('TimeoutError', 'TimeoutError'));
+    });
+
+    await expect(
+      transcribeVoiceAudio(wavAudio(16000), {
+        config: qwenAudioAsrConfig(),
+        settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+        voiceModel: 'qwen-audio-3.0-asr-flash',
+        lookupHost: lookupPublicHost,
+        fetchFn,
+      }),
+    ).rejects.toThrow(
+      'Voice transcription timed out after 60s. Check ASR service health and retry.',
+    );
+
+    expect(signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('rejects redirected qwen-audio asr responses without following them', async () => {
+    const response = {
+      ok: false,
+      status: 307,
+      statusText: 'Temporary Redirect',
+      text: vi.fn(),
+    };
+    const fetchFn = vi.fn().mockResolvedValue(response);
+
+    await expect(
+      transcribeVoiceAudio(wavAudio(16000), {
+        config: qwenAudioAsrConfig(),
+        settings: createSettings({ DASHSCOPE_API_KEY: 'sk-test' }),
+        voiceModel: 'qwen-audio-3.0-asr-flash',
+        lookupHost: lookupPublicHost,
+        fetchFn,
+      }),
+    ).rejects.toThrow('Voice transcription request redirected.');
+
+    const [, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    expect(init.redirect).toBe('manual');
+    expect(response.text).not.toHaveBeenCalled();
   });
 });

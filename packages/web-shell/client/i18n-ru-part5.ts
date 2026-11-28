@@ -232,7 +232,7 @@ export const RU_PART5: Record<
   'auth.purpose.imageHint':
     'Используйте HTTPS-эндпоинт генерации изображений, совместимый с DashScope или MiniMax, без query и fragment. Добавление этой модели сохраняет модель диалога.',
   'auth.purpose.voiceHint':
-    'Используйте OpenAI Chat Completions с qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime или paraformer-realtime. Добавление этой модели сохраняет модель диалога.',
+    'Используйте OpenAI Chat Completions с qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime или paraformer-realtime; qwen-audio-3.0-asr-flash работает через нативный мультимодальный эндпоинт DashScope. Добавление этой модели сохраняет модель диалога.',
   'model.setAdvisor': 'Задать модель-советника',
   'model.setImage': 'Задать модель изображений',
   'model.useMain': 'Использовать основную модель',

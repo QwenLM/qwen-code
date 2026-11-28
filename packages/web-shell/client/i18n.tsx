@@ -3831,7 +3831,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'auth.purpose.imageHint':
     'Use a DashScope- or MiniMax-compatible HTTPS image-generation endpoint without query or fragment. Adding this model keeps your conversation model.',
   'auth.purpose.voiceHint':
-    'Use OpenAI Chat Completions with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
+    'Use OpenAI Chat Completions with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime; qwen-audio-3.0-asr-flash uses the DashScope-native multimodal endpoint instead. Adding this model keeps your conversation model.',
   'model.setAdvisor': 'Set Advisor Model',
   'model.setImage': 'Set Image Model',
   'model.useMain': 'Use main model',
