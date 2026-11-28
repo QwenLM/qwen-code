@@ -1142,6 +1142,7 @@ describe('tiered sandbox, container hardening, and verifiable reap', () => {
       'QWEN_REVIEW_PROVIDER_VM_ENDPOINT',
       'QWEN_REVIEW_FCSANDBOX_TEMPLATE',
       'QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER',
+      'QWEN_REVIEW_FORCE_HARDWARE_CAUSE',
     ]) {
       expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
     }

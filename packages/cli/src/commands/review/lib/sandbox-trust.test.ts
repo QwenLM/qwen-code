@@ -511,6 +511,11 @@ describe('external content-allowlist downgrade (operator opt-in)', () => {
       'docs/../package.json',
       'packages/cli/README.md',
       'readme.md.bak',
+      // R4-1: only LICENSE is accepted extensionless; the other three root
+      // prose files require .md (docs and docblock promise exactly this).
+      'README',
+      'CHANGELOG',
+      'CONTRIBUTING',
       '',
     ]) {
       expect(isReviewContentAllowlistedPath(p)).toBe(false);

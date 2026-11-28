@@ -2051,12 +2051,12 @@ describe('ChatSurface', () => {
     expect(container.querySelector('[data-testid="chat-editor"]')).toBeNull();
   });
 
-  it('supports transcriptRef, footerClassName, composerEditorVisible, transcript isResponding override, and excludes questions from TranscriptViewport.pendingApproval', () => {
+  it('supports transcriptRef, footerClassName, composerEditorVisible, controller-derived isResponding, and excludes questions from TranscriptViewport.pendingApproval', () => {
     captured.transcriptScrollToBottom.mockClear();
     const transcriptRef = { current: null as MessageListHandle | null };
     const questionRequest = permissionRequest('q-only');
     const controller = fakeController({
-      phase: 'idle',
+      phase: 'running',
       pendingApprovals: [],
       pendingQuestions: [{ id: 'q-only', request: questionRequest }],
     });
@@ -2066,7 +2066,6 @@ describe('ChatSurface', () => {
         controller={controller}
         transcriptRef={transcriptRef}
         footerClassName="custom-footer"
-        transcriptProps={{ isResponding: true }}
         composerEditorVisible={false}
         composerStatus={<div data-testid="ro-status">status</div>}
         composerFooter={<div data-testid="ro-footer">footer</div>}
@@ -2077,7 +2076,7 @@ describe('ChatSurface', () => {
     transcriptRef.current?.scrollToBottom();
     expect(captured.transcriptScrollToBottom).toHaveBeenCalledTimes(1);
 
-    // transcriptProps.isResponding overrides controller.phase-derived isRunning.
+    // controller.phase drives TranscriptViewport.isResponding directly.
     expect(captured.transcript?.isResponding).toBe(true);
 
     // AskUserQuestion is not a tool approval: pendingApproval stays null while

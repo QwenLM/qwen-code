@@ -137,7 +137,7 @@ final class LocalStorageOwners {
         }
     }
 
-    /** The column is VARBINARY, but queryForList hands an identifier back as text on MySQL. */
+    /** The column is VARBINARY; row-reading callers decode it to text, others keep the bytes. */
     private static boolean samePhysicalRef(Object stored, String key) {
         return stored instanceof byte[] bytes
                 ? java.util.Arrays.equals(bytes, key.getBytes(java.nio.charset.StandardCharsets.UTF_8))

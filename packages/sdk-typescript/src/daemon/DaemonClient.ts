@@ -1082,6 +1082,8 @@ export interface SubscribeOptions {
    * an older daemon or intermediary omits a valid stream-id response header.
    */
   onSseStreamAccepted?: (streamId: string | undefined) => void;
+  /** Called when the subscription is ready to receive session events. */
+  onEventStreamReady?: () => void;
 }
 
 export class DaemonClient {
@@ -7837,6 +7839,7 @@ export class DaemonClient {
       sseConnectReason: opts.sseConnectReason,
       previousSseStreamId: opts.previousSseStreamId,
       onSseStreamAccepted: opts.onSseStreamAccepted,
+      onEventStreamReady: opts.onEventStreamReady,
       signal: opts.signal,
       connectTimeoutMs: this.fetchTimeoutMs || undefined,
     });

@@ -44,6 +44,7 @@ type SurfaceOwnedTranscriptKeys =
   | 'approvalOverlayActive'
   | 'sessionViewportEnabled'
   | 'loadingTranscript'
+  | 'isResponding'
   | 'sessionKey'
   | 'hasOlderHistory'
   | 'onLoadOlderHistory'
@@ -688,11 +689,7 @@ export function ChatSurface({
               approvalOverlayActive={cardActive}
               sessionViewportEnabled={sessionViewportEnabled}
               loadingTranscript={controller.transcriptState === 'loading'}
-              isResponding={
-                transcriptProps && 'isResponding' in transcriptProps
-                  ? Boolean(transcriptProps.isResponding)
-                  : isRunning
-              }
+              isResponding={isRunning}
               sessionKey={controller.sessionId}
               hasOlderHistory={hasOlderHistory ?? controller.hasOlderHistory}
               onLoadOlderHistory={loadOlder}
