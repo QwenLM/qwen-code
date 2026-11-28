@@ -1946,6 +1946,7 @@ const SETTINGS_SCHEMA = {
               reasoning: {
                 type: 'object',
                 properties: {
+                  enabled: { type: 'boolean' },
                   effort: { type: 'string', enum: REASONING_EFFORT_TIERS },
                 },
               },

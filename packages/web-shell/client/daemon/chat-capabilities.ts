@@ -132,6 +132,7 @@ export const DAEMON_CHAT_CAPABILITY_MAP: Record<
   skill_archive_install: [],
   skill_zip_file_source: [],
   web_shell_brand: [],
+  workspace_model_preferences: [],
   workspace_settings: [],
   workspace_permissions: [],
   workspace_voice: [],

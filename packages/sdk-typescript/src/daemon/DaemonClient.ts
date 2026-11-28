@@ -320,6 +320,8 @@ import type {
   DaemonWorkspacePermissionsStatus,
   DaemonSettingUpdateResult,
   DaemonModelConfiguration,
+  DaemonModelPreferences,
+  DaemonModelPreferencesPatch,
   DaemonModelProviderRuntimeSyncResult,
   DaemonModelConfigurationUpdateResult,
   DaemonModelDeleteRequest,
@@ -6453,6 +6455,28 @@ export class DaemonClient {
     );
   }
 
+  modelPreferences(): Promise<DaemonModelPreferences> {
+    return this.jsonRequest(
+      '/workspace/model-preferences',
+      'GET /workspace/model-preferences',
+      { mode: 'rest' },
+    );
+  }
+
+  updateModelPreferences(
+    patch: DaemonModelPreferencesPatch,
+  ): Promise<DaemonModelPreferences> {
+    return this.jsonRequest(
+      '/workspace/model-preferences',
+      'PATCH /workspace/model-preferences',
+      {
+        method: 'PATCH',
+        body: patch,
+        mode: 'rest',
+      },
+    );
+  }
+
   async modelConfigurations(): Promise<{ models: DaemonModelConfiguration[] }> {
     return this.jsonRequest('/workspace/models', 'GET /workspace/models');
   }
@@ -8741,6 +8765,26 @@ export class WorkspaceDaemonClient {
       sessionId,
       { ...req, workspaceCwd },
       clientId,
+    );
+  }
+
+  modelPreferences(): Promise<DaemonModelPreferences> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/model-preferences',
+      'GET /workspaces/:workspace/model-preferences',
+      { mode: 'rest' },
+    );
+  }
+
+  updateModelPreferences(
+    patch: DaemonModelPreferencesPatch,
+  ): Promise<DaemonModelPreferences> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/model-preferences',
+      'PATCH /workspaces/:workspace/model-preferences',
+      { method: 'PATCH', body: patch, mode: 'rest' },
     );
   }
 

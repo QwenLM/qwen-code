@@ -292,6 +292,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // request and swallow a 404 from a daemon too old to have it.
   web_shell_brand: { since: 'v1' },
   workspace_settings: { since: 'v1' },
+  workspace_model_preferences: { since: 'v1' },
   // `GET /workspace/permissions` is always available when this tag is
   // advertised. `POST /workspace/permissions` updates the active ACP
   // child and returns `permission_session_required` when no live ACP

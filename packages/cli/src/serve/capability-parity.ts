@@ -405,6 +405,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     evidence: 'docs:packages/web-shell/README.md',
   },
   workspace_settings: NO_MANAGED_EQUIVALENT('no Managed settings route'),
+  workspace_model_preferences: NO_MANAGED_EQUIVALENT(
+    'no Managed model preferences route',
+  ),
   workspace_permissions: NO_MANAGED_EQUIVALENT('no Managed permissions route'),
   workspace_voice: NO_MANAGED_EQUIVALENT('no Managed voice route'),
   workspace_voice_transcription: NO_MANAGED_EQUIVALENT(

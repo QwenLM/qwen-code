@@ -21,7 +21,11 @@ import {
 } from '../qwen/subscription-models.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
-import type { ModelPreferences } from '../models/model-preferences.js';
+import {
+  getModelPreferenceKey,
+  resolveModelPreferenceReasoning,
+  type ModelPreferences,
+} from '../models/model-preferences.js';
 import {
   captureReasoningSnapshot,
   validateReasoningCapabilities,
@@ -1717,6 +1721,7 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   modelPreferences?: ModelPreferences;
   modelPreferenceDefaultEffort?: string;
+  workspaceModelPreferences?: boolean;
   /** Maps custom provider ids to their SDK protocol (AuthType) */
   providerProtocolConfig?: ProviderProtocolConfig;
   /** Agent and multi-agent collaboration settings */
@@ -3498,7 +3503,8 @@ export class Config {
   private compactionModel?: string;
   private reasoningSnapshot?: ReasoningSnapshot;
   private modelPreferences?: ModelPreferences;
-  private readonly modelPreferenceDefaultEffort?: ReasoningEffort | 'none';
+  private modelPreferenceDefaultEffort?: ReasoningEffort | 'none';
+  private readonly workspaceModelPreferences: boolean;
   private modelPreferenceDefaults?: ModelPreferenceDefaults;
   private modelPreferenceSessionEffort?: {
     key: string;
@@ -3863,6 +3869,7 @@ export class Config {
     this.ideMode = params.ideMode ?? false;
     this.modelProvidersConfig = params.modelProvidersConfig;
     this.modelPreferences = params.modelPreferences;
+    this.workspaceModelPreferences = params.workspaceModelPreferences === true;
     this.modelPreferenceDefaultEffort =
       params.modelPreferenceDefaultEffort === 'none'
         ? 'none'
@@ -6382,8 +6389,16 @@ export class Config {
         priorReasoningSource.settingsPath === 'model.reasoningEffort') ||
       (priorReasoningSource?.kind === 'programmatic' &&
         priorReasoningSource.detail === 'reasoning selection');
+    const preferenceDefaults = this.captureModelPreferenceDefaults(
+      config,
+      sources,
+    );
+    const useLegacyReasoning =
+      this.modelPreferences === undefined ||
+      (this.workspaceModelPreferences &&
+        !this.modelPreferences[preferenceDefaults?.key ?? '']?.reasoning);
     const preserveReasoningOff =
-      this.modelPreferences === undefined &&
+      useLegacyReasoning &&
       priorReasoning === false &&
       (requestModel !== newContentGeneratorConfig.model ||
         newContentGeneratorConfig.thinkingMandatory !== true) &&
@@ -6399,12 +6414,11 @@ export class Config {
       if (deepSeekRoute && priorReasoningSource)
         sources['reasoning'] = priorReasoningSource;
     }
-    const preferenceDefaults = this.captureModelPreferenceDefaults(
-      config,
-      sources,
-    );
     if (preferenceDefaults) {
-      this.applyModelPreferences(config, sources, preferenceDefaults);
+      this.applyModelPreferences(config, sources, preferenceDefaults, {
+        contextWindow: true,
+        reasoning: !useLegacyReasoning,
+      });
     }
     this.contentGenerator = await createContentGenerator(
       newContentGeneratorConfig,
@@ -6421,7 +6435,7 @@ export class Config {
 
     // Re-apply the user's reasoning preference that the provider sync wiped.
     if (
-      this.modelPreferences === undefined &&
+      useLegacyReasoning &&
       priorReasoning === false &&
       newContentGeneratorConfig.reasoning === false
     ) {
@@ -6431,7 +6445,7 @@ export class Config {
           priorReasoningSource;
       }
     }
-    if (this.modelPreferences === undefined && priorReasoningEffort) {
+    if (useLegacyReasoning && priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
     }
 
@@ -7270,7 +7284,52 @@ export class Config {
   }
 
   getModelPreferenceKey(): string | undefined {
-    return this.modelPreferenceDefaults?.key;
+    return this.workspaceModelPreferences
+      ? undefined
+      : this.modelPreferenceDefaults?.key;
+  }
+
+  usesWorkspaceModelPreferences(): boolean {
+    return this.workspaceModelPreferences;
+  }
+
+  hasWorkspaceModelReasoningPreference(): boolean {
+    const key = this.modelPreferenceDefaults?.key;
+    return Boolean(
+      this.workspaceModelPreferences &&
+        key &&
+        this.modelPreferences?.[key]?.reasoning,
+    );
+  }
+
+  setWorkspaceModelPreferences(
+    preferences: ModelPreferences,
+    defaultEffort: string | undefined,
+    preserveSessionReasoning = false,
+  ): void {
+    if (!this.workspaceModelPreferences) return;
+    const defaults = this.modelPreferenceDefaults;
+    const previous = defaults && this.modelPreferences?.[defaults.key];
+    this.modelPreferences = preferences;
+    this.modelPreferenceDefaultEffort =
+      defaultEffort === 'none'
+        ? 'none'
+        : normalizeReasoningEffort(defaultEffort);
+    if (!this.contentGeneratorConfig || !defaults) return;
+    const current = preferences[defaults.key];
+    const contextChanged = previous?.contextWindow !== current?.contextWindow;
+    const reasoningChanged =
+      !preserveSessionReasoning &&
+      (previous?.reasoning?.enabled !== current?.reasoning?.enabled ||
+        previous?.reasoning?.effort !== current?.reasoning?.effort);
+    if (!contextChanged && !reasoningChanged) return;
+    this.applyModelPreferences(
+      this.contentGeneratorConfig,
+      this.contentGeneratorConfigSources,
+      defaults,
+      { contextWindow: contextChanged, reasoning: reasoningChanged },
+    );
+    this.notifyModelChangeListeners();
   }
 
   getModelPreferenceContextLimit(): number {
@@ -7314,14 +7373,8 @@ export class Config {
       endpointSource === 'settings'
         ? config.baseUrl
         : (registryEndpoint ?? config.baseUrl);
-    const modelId = encodeURIComponent(
-      stripRuntimeSnapshotPrefix(config.model),
-    );
-    const suffix = endpoint
-      ? `#${createHash('sha256').update(endpoint).digest('hex')}`
-      : '';
     return {
-      key: `${config.authType}/${modelId}${suffix}`,
+      key: getModelPreferenceKey(config.authType, config.model, endpoint),
       reasoning: config.reasoning,
       contextWindowSize: config.contextWindowSize,
       reasoningSource: sources['reasoning'],
@@ -7333,53 +7386,68 @@ export class Config {
     config: ContentGeneratorConfig,
     sources: ContentGeneratorConfigSources,
     defaults: ModelPreferenceDefaults,
+    apply = { contextWindow: true, reasoning: true },
   ): void {
     const preference = this.modelPreferences?.[defaults.key];
-    const contextWindow = preference?.contextWindow;
-    const contextLimit =
-      defaults.contextWindowSize ??
-      tokenLimit(stripRuntimeSnapshotPrefix(config.model), 'input');
-    config.contextWindowSize = defaults.contextWindowSize;
-    sources['contextWindowSize'] = defaults.contextWindowSource;
-    if (
-      contextWindow !== undefined &&
-      Number.isSafeInteger(contextWindow) &&
-      contextWindow > 0 &&
-      contextWindow <= contextLimit
-    ) {
-      config.contextWindowSize = contextWindow;
-      sources['contextWindowSize'] = {
-        kind: 'settings',
-        settingsPath: 'model.preferences',
-      };
-    }
-
-    config.reasoning = defaults.reasoning;
-    sources['reasoning'] = defaults.reasoningSource;
-    const sessionEffort = this.modelPreferenceSessionEffort;
-    const savedEffort = normalizeReasoningEffort(preference?.reasoning?.effort);
-    if (sessionEffort?.key === defaults.key) {
-      setGeneratorReasoningEffort(config, sessionEffort.effort);
-    } else if (savedEffort) {
-      if (setGeneratorReasoningEffort(config, savedEffort)) {
-        sources['reasoning'] = {
+    if (apply.contextWindow) {
+      const contextWindow = preference?.contextWindow;
+      const contextLimit =
+        defaults.contextWindowSize ??
+        tokenLimit(stripRuntimeSnapshotPrefix(config.model), 'input');
+      config.contextWindowSize = defaults.contextWindowSize;
+      sources['contextWindowSize'] = defaults.contextWindowSource;
+      if (
+        contextWindow !== undefined &&
+        Number.isSafeInteger(contextWindow) &&
+        contextWindow > 0 &&
+        contextWindow <= contextLimit
+      ) {
+        config.contextWindowSize = contextWindow;
+        sources['contextWindowSize'] = {
           kind: 'settings',
           settingsPath: 'model.preferences',
         };
       }
-    } else if (this.modelPreferenceDefaultEffort === 'none') {
-      if (
-        config.thinkingMandatory !== true &&
-        resolveReasoningForModel(this, config)?.canDisable !== false
-      ) {
-        config.reasoning = false;
-        sources['reasoning'] = {
-          kind: 'settings',
-          settingsPath: 'model.reasoningEffort',
-        };
-      }
-    } else if (this.modelPreferenceDefaultEffort) {
-      setGeneratorReasoningEffort(config, this.modelPreferenceDefaultEffort);
+    }
+    if (!apply.reasoning) return;
+
+    config.reasoning = defaults.reasoning;
+    sources['reasoning'] = defaults.reasoningSource;
+    const sessionEffort = this.modelPreferenceSessionEffort;
+    if (sessionEffort?.key === defaults.key) {
+      setGeneratorReasoningEffort(config, sessionEffort.effort);
+      return;
+    }
+    const reasoningPreference = preference?.reasoning;
+    const canDisable =
+      (getRequestModel(config) !== config.model ||
+        config.thinkingMandatory !== true) &&
+      resolveReasoningForModel(this, config)?.canDisable !== false;
+    config.reasoning = resolveModelPreferenceReasoning(
+      config.reasoning,
+      reasoningPreference,
+      this.modelPreferenceDefaultEffort,
+      canDisable,
+    );
+    if (
+      (reasoningPreference?.enabled === false && config.reasoning === false) ||
+      reasoningPreference?.enabled === true ||
+      (reasoningPreference?.effort && config.reasoning !== false)
+    ) {
+      sources['reasoning'] = {
+        kind: 'settings',
+        settingsPath: 'model.preferences',
+      };
+    } else if (
+      !reasoningPreference?.effort &&
+      config.reasoning === false &&
+      this.modelPreferenceDefaultEffort === 'none' &&
+      canDisable
+    ) {
+      sources['reasoning'] = {
+        kind: 'settings',
+        settingsPath: 'model.reasoningEffort',
+      };
     }
   }
 
@@ -7927,7 +7995,7 @@ export class Config {
     if (runtimeCfg && runtimeCfg !== this.contentGeneratorConfig) {
       applyEffort(runtimeCfg);
     }
-    if (this.modelPreferences === undefined) {
+    if (this.modelPreferences === undefined || this.workspaceModelPreferences) {
       // Keep the rebuildable source in sync so a later refreshAuth keeps the tier.
       applyEffort(this.modelsConfig?.getGenerationConfig());
     } else if (
@@ -8115,8 +8183,11 @@ export class Config {
 
     // Callers without model preferences keep the legacy live effort across
     // both the hot-update path and a full generator rebuild.
+    const priorWorkspacePreference =
+      this.hasWorkspaceModelReasoningPreference();
     const priorReasoningEffort =
-      this.modelPreferences === undefined
+      this.modelPreferences === undefined ||
+      (this.workspaceModelPreferences && !priorWorkspacePreference)
         ? this.getReasoningEffort()
         : undefined;
 
@@ -8148,9 +8219,19 @@ export class Config {
       );
       this.modelPreferenceDefaults = preferenceDefaults;
       if (preferenceDefaults) {
-        this.applyModelPreferences(config, sources, preferenceDefaults);
-        this.contentGeneratorConfig.reasoning = config.reasoning;
-        this.contentGeneratorConfigSources['reasoning'] = sources['reasoning'];
+        const applyReasoning =
+          !this.workspaceModelPreferences ||
+          priorWorkspacePreference ||
+          this.hasWorkspaceModelReasoningPreference();
+        this.applyModelPreferences(config, sources, preferenceDefaults, {
+          contextWindow: true,
+          reasoning: applyReasoning,
+        });
+        if (applyReasoning) {
+          this.contentGeneratorConfig.reasoning = config.reasoning;
+          this.contentGeneratorConfigSources['reasoning'] =
+            sources['reasoning'];
+        }
       }
 
       // Hot-update fields (qwen-oauth models share the same auth + client).
@@ -8228,7 +8309,10 @@ export class Config {
         this.contentGeneratorConfigSources['toolResultContentFormat'] =
           sources['toolResultContentFormat'];
       }
-      if (priorReasoningEffort) {
+      if (
+        priorReasoningEffort &&
+        !this.hasWorkspaceModelReasoningPreference()
+      ) {
         this.setReasoningEffort(priorReasoningEffort);
       }
       resetPreloadedContentGenerator(this.contentGenerator);
@@ -8255,7 +8339,7 @@ export class Config {
     } else {
       await this.refreshAuth(authType);
     }
-    if (priorReasoningEffort) {
+    if (priorReasoningEffort && !this.hasWorkspaceModelReasoningPreference()) {
       this.setReasoningEffort(priorReasoningEffort);
     }
   }

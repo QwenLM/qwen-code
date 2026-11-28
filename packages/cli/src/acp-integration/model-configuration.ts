@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { normalizeReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
+import {
+  resolveModelPreferenceReasoning,
+  type ModelPreference,
+} from '@qwen-code/qwen-code-core/models/model-preferences.js';
 import {
   parseModelReasoningCapabilities,
   REASONING_EFFORT_TIERS,
@@ -721,6 +726,7 @@ export function buildModelReasoningRoutePreview(
   reasoning: ResolvedReasoning | undefined,
   selection: unknown,
   opaqueRoute = false,
+  preference?: ModelPreference['reasoning'],
 ): SessionConfigOption[] | undefined {
   const model = getRequestModel(generation);
   const thinkingMandatory =
@@ -740,6 +746,23 @@ export function buildModelReasoningRoutePreview(
     !getDeepSeekReasoningState(generation, routeReasoning)
   )
     return undefined;
+  if (preference) {
+    const capability = getModelConfiguration(model, routeReasoning)?.reasoning;
+    generation = {
+      ...generation,
+      reasoning: resolveModelPreferenceReasoning(
+        generation.reasoning,
+        preference,
+        selection === REASONING_EFFORT_NONE
+          ? selection
+          : normalizeReasoningEffort(
+              typeof selection === 'string' ? selection : undefined,
+            ),
+        !thinkingMandatory && capability?.canDisable !== false,
+      ),
+    };
+    selection = undefined;
+  }
   const parsedSelection = parseReasoningSelection(selection);
   const usesConfiguredState =
     !parsedSelection ||

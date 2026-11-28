@@ -42,6 +42,7 @@ interface CreateServeFeaturesDeps {
   opts: ServeOptions;
   boundWorkspace: string;
   persistSettingAvailable: boolean;
+  modelPreferencesAvailable?: boolean;
   userSkillActivationAvailable?: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
   sessionGenerationAvailable: () => boolean;
@@ -161,6 +162,7 @@ export function createServeFeatures(
           ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
           : {}),
         persistSettingAvailable,
+        modelPreferencesAvailable: deps.modelPreferencesAvailable,
         userSkillActivationAvailable: deps.userSkillActivationAvailable,
         sessionShellCommandEnabled,
         sessionArtifactsPersistenceAvailable,

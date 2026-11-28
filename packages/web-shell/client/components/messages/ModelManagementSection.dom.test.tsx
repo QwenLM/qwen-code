@@ -135,7 +135,7 @@ describe('ModelManagementSection', () => {
         ],
         onUpdateContextWindow,
       });
-      act(() => buttonByText(container, 'Edit context window').click());
+      act(() => buttonByText(container, 'Provider window limit').click());
       await act(async () => {
         container
           .querySelector('form')!
@@ -177,7 +177,9 @@ describe('ModelManagementSection', () => {
       'Multiple configurations share this route',
     );
     expect(
-      container.querySelector('[aria-label="Edit context window Saved alias"]'),
+      container.querySelector(
+        '[aria-label="Provider window limit Saved alias"]',
+      ),
     ).toBeNull();
     act(() =>
       (
@@ -213,7 +215,7 @@ describe('ModelManagementSection', () => {
       ],
     });
     expect(
-      container.querySelectorAll('[aria-label="Edit context window GPT-4o"]'),
+      container.querySelectorAll('[aria-label="Provider window limit GPT-4o"]'),
     ).toHaveLength(1);
     expect(
       container.querySelectorAll('[aria-label="Delete GPT-4o"]'),
@@ -279,7 +281,9 @@ describe('ModelManagementSection', () => {
         container.querySelectorAll('[aria-label="Delete image"]'),
       ).toHaveLength(1);
       expect(
-        container.querySelectorAll('[aria-label="Edit context window image"]'),
+        container.querySelectorAll(
+          '[aria-label="Provider window limit image"]',
+        ),
       ).toHaveLength(count === 1 ? 1 : 0);
     },
   );

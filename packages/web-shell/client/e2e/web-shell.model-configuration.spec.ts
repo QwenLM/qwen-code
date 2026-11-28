@@ -793,11 +793,11 @@ test('reports a failed runtime sync after saving a context window', async ({
     });
   });
   const edit = page.getByRole('button', {
-    name: 'Edit context window Configured Test Model',
+    name: 'Provider window limit Configured Test Model',
     exact: true,
   });
   await edit.click();
-  await page.getByLabel('Context window', { exact: true }).fill('65536');
+  await page.getByLabel('Provider window limit', { exact: true }).fill('65536');
   await page
     .getByRole('button', { name: 'save Configured Test Model', exact: true })
     .click();
@@ -805,9 +805,9 @@ test('reports a failed runtime sync after saving a context window', async ({
     'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
   );
   await edit.click();
-  await expect(page.getByLabel('Context window', { exact: true })).toHaveValue(
-    '65536',
-  );
+  await expect(
+    page.getByLabel('Provider window limit', { exact: true }),
+  ).toHaveValue('65536');
 });
 
 test('edits a persisted context window, retries a failure, and resets to automatic', async ({
@@ -858,11 +858,11 @@ test('edits a persisted context window, retries a failure, and resets to automat
     await route.fulfill({ json: { updated: true, requiresRestart: true } });
   });
   const edit = page.getByRole('button', {
-    name: 'Edit context window Configured Test Model',
+    name: 'Provider window limit Configured Test Model',
     exact: true,
   });
   await edit.click();
-  const context = page.getByLabel('Context window', { exact: true });
+  const context = page.getByLabel('Provider window limit', { exact: true });
   await expect(context).toHaveValue('131072');
   await context.fill('0');
   await expect(

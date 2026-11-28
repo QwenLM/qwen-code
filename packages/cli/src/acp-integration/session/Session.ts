@@ -5,6 +5,7 @@
  */
 
 import type { HookProgress } from '@qwen-code/qwen-code-core/confirmation-bus/types.js';
+import { copyModelPreferences } from '@qwen-code/qwen-code-core/models/model-preferences.js';
 import { parseHookLifecycle } from '@qwen-code/qwen-code-core/telemetry/hook-lifecycle-contract.js';
 import {
   createTranscriptHookLifecycleUpdate,
@@ -2699,6 +2700,9 @@ export class Session implements SessionContext {
   /** The end of the session's Mods, which `dispose` starts. */
   modsClosed?: Promise<void>;
   private sessionReasoningSelection?: ReasoningSelection;
+  private pendingWorkspaceModelPreferences?: NonNullable<
+    LoadedSettings['merged']['model']
+  >;
   private readonly restoredHistoryGaps?: HistoryGap[];
   private historySnapshotBoundary?: { hash: string; prefixLength: number };
   /**
@@ -6538,6 +6542,7 @@ export class Session implements SessionContext {
     let promptFailureMessage: string | undefined;
     if (turnRecording) turnRecording.startedAt = Date.now();
     try {
+      this.applyPendingWorkspaceModelPreferences();
       const reasoningMeta = (params as { _meta?: Record<string, unknown> })
         ._meta;
       if (
@@ -15861,6 +15866,26 @@ export class Session implements SessionContext {
     return getDefaultReasoningConfig(this.config, this.settings);
   }
 
+  reloadWorkspaceModelPreferences(
+    model: LoadedSettings['merged']['model'],
+  ): boolean {
+    this.pendingWorkspaceModelPreferences = model ?? {};
+    if (!this.isIdle()) return false;
+    this.applyPendingWorkspaceModelPreferences();
+    return true;
+  }
+
+  private applyPendingWorkspaceModelPreferences(): void {
+    const model = this.pendingWorkspaceModelPreferences;
+    if (!model) return;
+    this.pendingWorkspaceModelPreferences = undefined;
+    this.config.setWorkspaceModelPreferences?.(
+      copyModelPreferences(model.preferences),
+      model.reasoningEffort,
+      this.sessionReasoningSelection !== undefined,
+    );
+  }
+
   reloadReasoningSelection(): void {
     this.settings.reloadScopeFromDisk(SettingScope.User);
     this.settings.reloadScopeFromDisk(SettingScope.Workspace);
@@ -15936,7 +15961,11 @@ export class Session implements SessionContext {
     modelId: string,
     options: { persist: boolean },
   ): void {
-    const rawSelection = this.settings.merged.model?.reasoningEffort;
+    const hasWorkspacePreference =
+      this.config.hasWorkspaceModelReasoningPreference?.();
+    const rawSelection = hasWorkspacePreference
+      ? undefined
+      : this.settings.merged.model?.reasoningEffort;
     let hasSessionSelection = this.sessionReasoningSelection !== undefined;
     if (!hasSessionSelection && rawSelection === undefined) return;
 
@@ -15968,6 +15997,7 @@ export class Session implements SessionContext {
       hasSessionSelection && selection === REASONING_EFFORT_DEFAULT;
     if (hasSessionSelection && !supported && !appliesSessionDefault) {
       this.sessionReasoningSelection = undefined;
+      if (hasWorkspacePreference) return;
       hasSessionSelection = false;
       selection = parseReasoningSelection(rawSelection);
       supported = supportsPreference(selection);

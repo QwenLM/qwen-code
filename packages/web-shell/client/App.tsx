@@ -4562,6 +4562,11 @@ export function App({
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
+  const modelPreferencesSupported =
+    standalone &&
+    workspace.capabilities?.features?.includes(
+      'workspace_model_preferences',
+    ) === true;
   const [skillsSource, setSkillsSource] = useState<{
     client: typeof workspace.client;
     cwd: string;
@@ -16329,6 +16334,15 @@ export function App({
     )
       ? settingsWorkspaceCwd
       : undefined;
+  const preferenceWorkspace = settingsWorkspaceCwd ?? uiLanguageWorkspaceCwd;
+  const modelPreferencesWorkspaceCwd =
+    modelPreferencesSupported &&
+    ordinaryWorkspaces.some(
+      (entry) =>
+        entry.cwd === preferenceWorkspace && entry.trusted && !entry.ssh,
+    )
+      ? preferenceWorkspace
+      : undefined;
   const secondarySettingsReloadRef = useRef<
     (() => Promise<unknown>) | undefined
   >(undefined);
@@ -27544,6 +27558,9 @@ export function App({
                                   }
                                 />
                               ) : undefined
+                            }
+                            modelPreferencesWorkspaceCwd={
+                              modelPreferencesWorkspaceCwd
                             }
                             modelManagementSectionProps={
                               projectFeaturesAvailable

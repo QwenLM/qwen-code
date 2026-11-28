@@ -346,6 +346,7 @@ import {
 import { Session, registerCreateSubSessionTool } from './session/Session.js';
 import { acpModRowSites } from './session/acp-mod-session.js';
 import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
+import { copyModelPreferences } from '@qwen-code/qwen-code-core/models/model-preferences.js';
 import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
@@ -7835,6 +7836,46 @@ class QwenAgent implements Agent {
       // The path does not exist (yet); compare the resolved spelling.
       return resolved;
     }
+  }
+
+  private reloadWorkspaceModelPreferences(): {
+    sessionsRefreshed: string[];
+    sessionsSkipped: string[];
+  } {
+    const sessionsRefreshed: string[] = [];
+    const sessionsSkipped: string[] = [];
+    const workspaceModels = new Map<
+      string,
+      LoadedSettings['merged']['model']
+    >();
+    for (const [id, session] of this.sessions) {
+      const config = session.getConfig();
+      if (!config.usesWorkspaceModelPreferences?.()) continue;
+      const workspace = this.sessionWorkspaceRoot(config);
+      try {
+        if (!workspaceModels.has(workspace)) {
+          workspaceModels.set(
+            workspace,
+            this.loadRequestSettings(workspace).merged.model,
+          );
+        }
+        if (
+          session.reloadWorkspaceModelPreferences(
+            workspaceModels.get(workspace),
+          )
+        ) {
+          sessionsRefreshed.push(id);
+        } else {
+          sessionsSkipped.push(id);
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Model preferences reload failed for session ${id}: ${error}`,
+        );
+        sessionsSkipped.push(id);
+      }
+    }
+    return { sessionsRefreshed, sessionsSkipped };
   }
 
   /**
@@ -16495,6 +16536,9 @@ class QwenAgent implements Agent {
         };
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceReload: {
+        if (params['modelPreferencesOnly'] === true) {
+          return this.reloadWorkspaceModelPreferences();
+        }
         const oldMerged = structuredClone(this.settings.merged);
 
         this.settings.reloadScopeFromDisk(SettingScope.User);
@@ -16504,6 +16548,17 @@ class QwenAgent implements Agent {
         const envResult = reloadEnvironment(newMerged, cwd);
 
         const changed = diffSettingsKeys(oldMerged, newMerged);
+        if (
+          !isDeepStrictEqual(
+            oldMerged.model?.preferences,
+            newMerged.model?.preferences,
+          )
+        ) {
+          this.reloadWorkspaceModelPreferences();
+          const { preferences: _old, ...oldModel } = oldMerged.model ?? {};
+          const { preferences: _new, ...newModel } = newMerged.model ?? {};
+          if (isDeepStrictEqual(oldModel, newModel)) changed.delete('model');
+        }
         const envChanged =
           envResult.updatedKeys.length > 0 || envResult.removedKeys.length > 0;
         const providersChanged =
@@ -17390,6 +17445,14 @@ class QwenAgent implements Agent {
     );
     const agentHostReadOnly =
       sessionSource?.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE;
+    const useModelPreferences =
+      this.isTrustedManagedParent() &&
+      !this.conversationsRuntimeProvenance &&
+      settings.isTrusted &&
+      !provisionalWorkspace &&
+      !agentHostReadOnly &&
+      executionEngine !== 'managed' &&
+      this.hostExecutionEngine !== 'managed';
     // ACP/IDE-injected servers are session-level: they must outrank a project
     // `.mcp.json` and stay un-gated. Collect them separately and pass them as
     // `sessionMcpServers` (top precedence tier) rather than merging into
@@ -17553,8 +17616,17 @@ class QwenAgent implements Agent {
         provisionalWorkspace ||
         agentHostReadOnly ||
         executionEngine ||
-        workflowAncestorTrustProvider
+        workflowAncestorTrustProvider ||
+        useModelPreferences
         ? {
+            ...(useModelPreferences
+              ? {
+                  workspaceModelPreferences: true,
+                  modelPreferences: copyModelPreferences(
+                    settings.merged.model?.preferences,
+                  ),
+                }
+              : {}),
             ...(workflowAncestorTrustProvider
               ? { workflowAncestorTrustProvider }
               : {}),
@@ -17985,7 +18057,9 @@ class QwenAgent implements Agent {
     }
     const selection =
       sessionSelection ??
-      parseReasoningSelection(settings.merged.model?.reasoningEffort);
+      (config.hasWorkspaceModelReasoningPreference?.()
+        ? undefined
+        : parseReasoningSelection(settings.merged.model?.reasoningEffort));
     if (!selection || selection === REASONING_EFFORT_DEFAULT) {
       return;
     }
@@ -18653,6 +18727,12 @@ class QwenAgent implements Agent {
         config.setSessionWorkflowEnabledProvider?.(
           () => this.sessionWorkflowEnabledOverride === true,
         );
+      }
+      if (config.usesWorkspaceModelPreferences?.()) {
+        const model = this.loadRequestSettings(
+          this.sessionWorkspaceRoot(config),
+        ).merged.model;
+        session.reloadWorkspaceModelPreferences(model);
       }
       this.assertHostedSessionIdAvailable(sessionId);
       this.sessions.set(sessionId, session);
