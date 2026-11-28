@@ -77,15 +77,27 @@
 }
 
 .fixing {
-  border-color: color-mix(in srgb, var(--primary) 55%, var(--border));
-  background: color-mix(in srgb, var(--primary) 10%, transparent);
-  color: var(--primary);
+  border-color: color-mix(
+    in srgb,
+    var(--status-running-fg, var(--agent-blue-500)) 55%,
+    var(--border)
+  );
+  background: color-mix(
+    in srgb,
+    var(--status-running-fg, var(--agent-blue-500)) 10%,
+    transparent
+  );
+  color: var(--status-running-fg, var(--agent-blue-500));
 }
 
 .fixing:hover:not(:disabled) {
-  border-color: var(--primary);
-  background: color-mix(in srgb, var(--primary) 18%, transparent);
-  color: var(--primary);
+  border-color: var(--status-running-fg, var(--agent-blue-500));
+  background: color-mix(
+    in srgb,
+    var(--status-running-fg, var(--agent-blue-500)) 18%,
+    transparent
+  );
+  color: var(--status-running-fg, var(--agent-blue-500));
 }
 
 .attention {

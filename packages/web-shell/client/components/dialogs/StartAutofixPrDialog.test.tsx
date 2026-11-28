@@ -262,4 +262,109 @@ describe('StartAutofixPrDialog', () => {
       sessionTitle: 'Autofix PR #99',
     });
   });
+
+  it('rejects unsupported --every intervals such as 3, omits --every on default 2, clears PR input on workspace switch, and blocks dismiss while submitting', async () => {
+    const secondaryWs: DaemonWorkspaceCapability = {
+      id: 'second',
+      cwd: '/w/second',
+      primary: false,
+      trusted: true,
+      kind: 'ordinary',
+    };
+    workspaceGitHubPullRequests.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/w/main',
+      available: true,
+      pullRequests: [],
+    });
+    let resolveStart!: () => void;
+    const onStart = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    const onClose = vi.fn();
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <StartAutofixPrDialog
+            workspaces={[primaryWs, secondaryWs]}
+            defaultWorkspaceCwd="/w/main"
+            onStart={onStart}
+            onClose={onClose}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const prInput = document.querySelector<HTMLInputElement>(
+      'input[placeholder*="PR URL"]',
+    )!;
+    const everyInput = document.querySelector<HTMLInputElement>(
+      'input[type="number"]',
+    )!;
+    const wsSelect = document.querySelector<HTMLSelectElement>('select')!;
+    const form = document.querySelector('form')!;
+
+    // Typing bare #42 then switching workspace clears PR input so it cannot cross repos.
+    act(() => {
+      setInputValue(prInput, '#42');
+    });
+    expect(prInput.value).toBe('#42');
+    act(() => {
+      wsSelect.value = '/w/second';
+      wsSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    expect(prInput.value).toBe('');
+
+    // Non-member interval `3` is rejected with everyInvalid alert.
+    act(() => {
+      setInputValue(prInput, '#77');
+      setInputValue(everyInput, '3');
+    });
+    await act(async () => {
+      form.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(onStart).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe(
+      'Choose one of 1, 2, 5, 10, 15, 30, or 60 minutes.',
+    );
+
+    // Default interval 2 omits --every, and Escape cannot dismiss while submitting.
+    act(() => {
+      setInputValue(everyInput, '2');
+    });
+    await act(async () => {
+      form.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(onStart).toHaveBeenCalledWith({
+      prompt: '/autofix-pr 77',
+      workspaceCwd: '/w/second',
+      sessionTitle: 'Autofix PR #77',
+    });
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    expect(onClose).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveStart();
+      await Promise.resolve();
+    });
+    expect(onClose).toHaveBeenCalledOnce();
+  });
 });

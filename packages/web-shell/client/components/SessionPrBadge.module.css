@@ -60,7 +60,7 @@
 }
 
 .watchDotFixing {
-  background: var(--primary, var(--agent-blue-500));
+  background: var(--status-running-fg, var(--agent-blue-500));
   animation: watchDotPulse 1.8s ease-in-out infinite;
 }
 

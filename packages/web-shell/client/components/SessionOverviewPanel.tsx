@@ -768,12 +768,19 @@ function SessionOverviewPanelInner({
         workspaceLabel: openSessionContext(card)
           ? t('sidebar.noWorkspace')
           : undefined,
+        readOnly:
+          Boolean(openSessionContext(card)) ||
+          Boolean(
+            registeredWorkspaces?.some(
+              (entry) => entry.cwd === card.workspaceCwd && !entry.trusted,
+            ),
+          ),
         label: card.label,
         time: card.updatedAt ? formatRelativeTime(card.updatedAt, t) : '',
         completedUnread: false,
       };
     },
-    [sessionByIdentity, sessionDetailsOwner, t],
+    [registeredWorkspaces, sessionByIdentity, sessionDetailsOwner, t],
   );
 
   const isPrimaryCard = useCallback(

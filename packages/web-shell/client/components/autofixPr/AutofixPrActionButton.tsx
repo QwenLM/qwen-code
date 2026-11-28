@@ -13,13 +13,19 @@ import {
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import {
+  buildAutofixPrRestartCommand,
   buildAutofixPrStartCommand,
   findWatchForPr,
   isPrOpenForAutofix,
   isWatchActivePhase,
+  nonEmptyCwd,
+  parseAutofixPrInput,
   resumeCommand,
 } from '../../utils/autofixPrWatches';
-import { useAutofixPrOptional } from './AutofixPrContext';
+import {
+  isAutofixWatchStateReady,
+  useAutofixPrOptional,
+} from './AutofixPrContext';
 import styles from './AutofixPrActionButton.module.css';
 
 export interface AutofixPrActionButtonProps {
@@ -65,9 +71,13 @@ export function AutofixPrActionButton({
   }, []);
 
   if (!ctx || !isPrOpenForAutofix(prState)) return null;
+  const parsedPrUrl = parseAutofixPrInput(prUrl);
+  if (!parsedPrUrl || parsedPrUrl.kind !== 'url') return null;
+  const canonicalPrUrl = parsedPrUrl.url;
 
-  const entry = findWatchForPr(ctx.watchIndex, prUrl);
-  const targetWorkspaceCwd = workspaceCwd ?? entry?.workspaceCwd;
+  const entry = findWatchForPr(ctx.watchIndex, canonicalPrUrl);
+  const surfaceCwd = nonEmptyCwd(workspaceCwd);
+  const watchCwd = nonEmptyCwd(entry?.workspaceCwd);
 
   const runAction = (work: () => Promise<void>) => {
     if (busy) return;
@@ -81,7 +91,7 @@ export function AutofixPrActionButton({
   };
 
   if (entry && isWatchActivePhase(entry.phase)) {
-    const needsHumanCount = entry.watch.needsHuman.length;
+    const needsHumanCount = entry.needsHumanCount;
     let toneClass = styles.watching;
     let label = t('autofixPr.action.watching');
     let Icon = EyeIcon;
@@ -121,9 +131,15 @@ export function AutofixPrActionButton({
     );
   }
 
-  if (!ctx.canStartInWorkspace(targetWorkspaceCwd)) return null;
+  // Live watch state knows the PR was merged/closed even when the session's
+  // cached PR state is stale or absent.
+  if (entry && (entry.phase === 'merged' || entry.phase === 'closed')) {
+    return null;
+  }
 
   if (entry && entry.phase === 'idle') {
+    const resumeCwd = watchCwd ?? surfaceCwd;
+    if (!ctx.canStartInWorkspace(resumeCwd)) return null;
     const label = t('autofixPr.action.resume');
     const hint = t('autofixPr.action.resumeHint', { number: prNumber });
     return (
@@ -142,7 +158,7 @@ export function AutofixPrActionButton({
           runAction(() =>
             ctx.startInNewSession({
               prompt: resumeCommand(entry.watch),
-              workspaceCwd: targetWorkspaceCwd,
+              workspaceCwd: resumeCwd,
               sessionTitle: t('autofixPr.sessionTitle', { number: prNumber }),
             }),
           );
@@ -153,6 +169,18 @@ export function AutofixPrActionButton({
       </button>
     );
   }
+
+  const startCwd = entry ? (watchCwd ?? surfaceCwd) : surfaceCwd;
+  if (!entry && !isAutofixWatchStateReady(ctx, startCwd)) return null;
+  if (!ctx.canStartInWorkspace(startCwd)) return null;
+
+  const startPrompt = entry
+    ? buildAutofixPrRestartCommand({
+        pr: entry.watch.pr,
+        url: entry.watch.url || canonicalPrUrl,
+        inPlace: entry.watch.inPlace,
+      })
+    : buildAutofixPrStartCommand({ pr: canonicalPrUrl });
 
   const label = t('autofixPr.action.start');
   const hint = t('autofixPr.action.startHint', { number: prNumber });
@@ -171,8 +199,8 @@ export function AutofixPrActionButton({
         event.stopPropagation();
         runAction(() =>
           ctx.startInNewSession({
-            prompt: buildAutofixPrStartCommand({ pr: prUrl }),
-            workspaceCwd: targetWorkspaceCwd,
+            prompt: startPrompt,
+            workspaceCwd: startCwd,
             sessionTitle: t('autofixPr.sessionTitle', { number: prNumber }),
           }),
         );

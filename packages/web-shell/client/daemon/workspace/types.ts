@@ -535,6 +535,8 @@ export interface DaemonAutofixPrWatch {
   /** Items the watch left for a person, newest last. */
   needsHuman: Array<{ sha: string; at: string; text: string }>;
   worktreeExists: boolean;
+  /** True when the watch operates directly in the user's checkout (`--in-place`). */
+  inPlace?: boolean;
   /** A background fix's attempt: `fresh` while it has not ended. */
   fix: {
     attempt: string | null;

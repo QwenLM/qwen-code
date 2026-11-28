@@ -7,12 +7,15 @@
 import { describe, expect, it } from 'vitest';
 import type { DaemonAutofixPrWatch } from '../daemon/workspace/types';
 import {
+  buildAutofixPrRestartCommand,
   buildAutofixPrStartCommand,
   findWatchForPr,
   getWatchActiveStatus,
   indexAutofixPrWatches,
   isPrOpenForAutofix,
+  isValidAutofixPrWatchInterval,
   isWatchActivePhase,
+  nonEmptyCwd,
   normalizePrUrlKey,
   parseAutofixPrInput,
   parseAutofixPrTick,
@@ -143,7 +146,7 @@ it('stops and resumes a watch as a user types it', () => {
 });
 
 describe('buildAutofixPrStartCommand', () => {
-  it('builds watch, once, in-place, interval, no-reply, and instructions commands', () => {
+  it('builds watch, once, inPlaceWatch, interval, no-reply, and instructions commands', () => {
     expect(
       buildAutofixPrStartCommand({ pr: 'https://github.com/o/r/pull/12' }),
     ).toBe('/autofix-pr https://github.com/o/r/pull/12');
@@ -158,6 +161,15 @@ describe('buildAutofixPrStartCommand', () => {
     ).toBe('/autofix-pr 12 --every 5 --no-reply keep the public API unchanged');
     expect(
       buildAutofixPrStartCommand({
+        pr: 12,
+        mode: 'watch',
+        every: 3,
+      }),
+    ).toBe('/autofix-pr 12');
+    expect(isValidAutofixPrWatchInterval(5)).toBe(true);
+    expect(isValidAutofixPrWatchInterval(3)).toBe(false);
+    expect(
+      buildAutofixPrStartCommand({
         pr: 'https://github.com/o/r/pull/12',
         mode: 'once',
         every: 5,
@@ -166,28 +178,46 @@ describe('buildAutofixPrStartCommand', () => {
     ).toBe('/autofix-pr https://github.com/o/r/pull/12 --once --no-reply');
     expect(
       buildAutofixPrStartCommand({
-        pr: 12,
-        mode: 'in-place',
+        pr: 'https://github.com/o/r/pull/12',
+        inPlaceWatch: true,
         every: 5,
       }),
-    ).toBe('/autofix-pr 12 --in-place');
+    ).toBe('/autofix-pr https://github.com/o/r/pull/12 --in-place --watch');
+    expect(buildAutofixPrRestartCommand(watch({ inPlace: true }))).toBe(
+      '/autofix-pr https://github.com/o/r/pull/12 --in-place --watch',
+    );
+    expect(buildAutofixPrRestartCommand(watch({ inPlace: false }))).toBe(
+      '/autofix-pr https://github.com/o/r/pull/12',
+    );
+    expect(nonEmptyCwd('  ')).toBeUndefined();
+    expect(nonEmptyCwd('/w/a')).toBe('/w/a');
   });
 });
 
 describe('normalizePrUrlKey and parseAutofixPrInput', () => {
-  it('canonicalizes PR URLs case-insensitively and ignores trailing slashes', () => {
+  it('canonicalizes PR URLs case-insensitively and strips PR sub-page paths', () => {
     expect(normalizePrUrlKey('https://GitHub.com/Acme/Widgets/pull/12/')).toBe(
       'github.com/acme/widgets#12',
     );
+    expect(
+      normalizePrUrlKey('https://github.com/Acme/Widgets/pull/12/files'),
+    ).toBe('github.com/acme/widgets#12');
+    expect(
+      normalizePrUrlKey('https://github.com/Acme/Widgets/pull/12/checks?x=1'),
+    ).toBe('github.com/acme/widgets#12');
+    expect(
+      normalizePrUrlKey('https://github.com/Acme/Widgets/pull/12.diff'),
+    ).toBe('github.com/acme/widgets#12');
     expect(
       normalizePrUrlKey('https://git.corp.example:8443/Org/Repo/pull/7'),
     ).toBe('git.corp.example:8443/org/repo#7');
     expect(normalizePrUrlKey('javascript:alert(1)')).toBeNull();
     expect(normalizePrUrlKey('https://github.com/o/r/issues/12')).toBeNull();
     expect(normalizePrUrlKey('https://github.com/o/r/pull/0')).toBeNull();
+    expect(normalizePrUrlKey('https://github.com/o/r/pull/12x')).toBeNull();
   });
 
-  it('parses bare numbers, #numbers, and http(s) PR URLs', () => {
+  it('parses bare numbers, #numbers, and http(s) PR URLs including sub-paths', () => {
     expect(parseAutofixPrInput('42')).toEqual({ kind: 'number', number: 42 });
     expect(parseAutofixPrInput('#42')).toEqual({ kind: 'number', number: 42 });
     expect(
@@ -197,31 +227,84 @@ describe('normalizePrUrlKey and parseAutofixPrInput', () => {
       url: 'https://github.com/Acme/Widgets/pull/42',
       number: 42,
     });
-    for (const invalid of ['', '0', '#0', '-1', 'abc', 'ftp://x/o/r/pull/1']) {
+    expect(
+      parseAutofixPrInput(
+        'https://github.com/Acme/Widgets/pull/42/files#diff-123',
+      ),
+    ).toEqual({
+      kind: 'url',
+      url: 'https://github.com/Acme/Widgets/pull/42',
+      number: 42,
+    });
+    for (const invalid of [
+      '',
+      '0',
+      '#0',
+      '-1',
+      'abc',
+      'ftp://x/o/r/pull/1',
+      'https://github.com/o/r/pull/12x',
+      'https://github.com/o%20--yes/r/pull/12',
+    ]) {
       expect(parseAutofixPrInput(invalid)).toBeNull();
     }
   });
 });
 
 describe('indexAutofixPrWatches and helpers', () => {
-  it('indexes watches by canonical PR URL and keeps higher-priority phase on duplicates', () => {
-    const idleWatch = watch({ checkedRecently: false });
-    const fixingWatch = watch({
+  it('deduplicates linked checkouts of the same clone and aggregates needsHuman across independent clones', () => {
+    const idleWithNeedsHuman = watch({
+      checkedRecently: false,
+      needsHuman: [
+        { sha: 'a'.repeat(40), at: '2026-11-28T00:00:00Z', text: 'Clone A' },
+      ],
+    });
+    const fixingCloneB = watch({
       fix: { attempt: '0123456789ab', startedAt: null, fresh: true },
+      needsHuman: [],
     });
     const index = indexAutofixPrWatches(
       new Map([
-        ['', { available: true, watches: [idleWatch] }],
-        ['second', { available: true, watches: [fixingWatch] }],
+        [
+          '',
+          {
+            available: true,
+            root: '/clones/a',
+            watches: [idleWithNeedsHuman],
+          },
+        ],
+        [
+          'linked-a',
+          {
+            available: true,
+            root: '/clones/a',
+            watches: [idleWithNeedsHuman],
+          },
+        ],
+        [
+          'clone-b',
+          {
+            available: true,
+            root: '/clones/b',
+            watches: [fixingCloneB],
+          },
+        ],
       ]),
       new Map([
         ['', '/w/main'],
-        ['second', '/w/second'],
+        ['linked-a', '/w/linked-a'],
+        ['clone-b', '/w/second'],
       ]),
     );
     const found = findWatchForPr(index, 'https://GITHUB.com/O/R/pull/12/');
     expect(found?.phase).toBe('fixing');
     expect(found?.workspaceCwd).toBe('/w/second');
+    // Same-clone linked checkout counted once; independent clone A's needsHuman preserved!
+    expect(found?.needsHumanCount).toBe(1);
+    expect(summarizeAutofixPrWatches(index)).toEqual({
+      activeCount: 1,
+      needsHumanCount: 1,
+    });
     expect(
       findWatchForPr(index, 'https://github.com/other/repo/pull/12'),
     ).toBeUndefined();
@@ -299,6 +382,8 @@ describe('indexAutofixPrWatches and helpers', () => {
       summarizeSessionPrWatchStatus(index, [
         { url: 'https://github.com/o/r/pull/10', state: 'open' },
         { url: 'https://github.com/o/r/pull/12', state: 'open' },
+        // Duplicate PR binding with trailing slash / case difference must not double-count needsHuman.
+        { url: 'https://GITHUB.com/O/R/pull/12/', state: 'open' },
       ]),
     ).toEqual({ status: 'needsHuman', needsHumanCount: 2 });
   });

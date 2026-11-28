@@ -188,20 +188,39 @@ describe('SessionPrBadge', () => {
     ).toBeNull();
   });
 
-  it('shows a visible watch indicator dot and status suffix when an open PR is watched or needs human input', () => {
+  it('shows a visible watch indicator dot and status suffix when an open PR is watched, fixing, or needs human input', () => {
     const watchingBadge = renderBadge(
       [pr(9500, 'open')],
       false,
       makeAutofixCtx([makeWatch()]),
     );
-    expect(
-      watchingBadge
-        .querySelector('[data-autofix-pr-badge-state]')
-        ?.getAttribute('data-autofix-pr-badge-state'),
-    ).toBe('watching');
+    const watchingDot = watchingBadge.querySelector(
+      '[data-autofix-pr-badge-state]',
+    );
+    expect(watchingDot?.getAttribute('data-autofix-pr-badge-state')).toBe(
+      'watching',
+    );
+    expect(watchingDot?.className).toContain(badgeStyles.watchDotWatching);
     expect(
       watchingBadge.querySelector('a')?.getAttribute('aria-label'),
     ).toContain('Watching');
+
+    const fixingBadge = renderBadge(
+      [pr(9500, 'open')],
+      false,
+      makeAutofixCtx([
+        makeWatch({
+          fix: { attempt: '0123456789ab', startedAt: null, fresh: true },
+        }),
+      ]),
+    );
+    const fixingDot = fixingBadge.querySelector(
+      '[data-autofix-pr-badge-state]',
+    );
+    expect(fixingDot?.getAttribute('data-autofix-pr-badge-state')).toBe(
+      'fixing',
+    );
+    expect(fixingDot?.className).toContain(badgeStyles.watchDotFixing);
 
     const needsHumanBadge = renderBadge(
       [pr(9500, 'open')],
@@ -218,11 +237,13 @@ describe('SessionPrBadge', () => {
         }),
       ]),
     );
-    expect(
-      needsHumanBadge
-        .querySelector('[data-autofix-pr-badge-state]')
-        ?.getAttribute('data-autofix-pr-badge-state'),
-    ).toBe('needsHuman');
+    const needsHumanDot = needsHumanBadge.querySelector(
+      '[data-autofix-pr-badge-state]',
+    );
+    expect(needsHumanDot?.getAttribute('data-autofix-pr-badge-state')).toBe(
+      'needsHuman',
+    );
+    expect(needsHumanDot?.className).toContain(badgeStyles.watchDotAttention);
     expect(
       needsHumanBadge.querySelector('a')?.getAttribute('aria-label'),
     ).toContain('Needs you (1)');

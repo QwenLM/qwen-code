@@ -828,4 +828,167 @@ describe('WebShellSidebar bind PR', () => {
       collapsedBtn?.querySelector('[data-pr-watches-attention]')?.textContent,
     ).toBe('');
   });
+
+  it('prefers the watch clone workspaceCwd, preserves --in-place --watch, suppresses merged watches, and gates on loaded state in the session menu', async () => {
+    const startInNewSession = vi.fn().mockResolvedValue(undefined);
+    const lists = new Map([
+      ['', { available: true, watches: [] }],
+      [
+        'second',
+        {
+          available: true,
+          watches: [
+            {
+              pr: 201,
+              repo: 'o/r',
+              host: 'github.com',
+              url: 'https://github.com/o/r/pull/201',
+              headRefName: 'feat/idle-other',
+              headSha: 'a'.repeat(40),
+              pushes: 1,
+              maxPushes: 10,
+              session: 'idle-sess',
+              preparedAt: null,
+              lastCheck: null,
+              checkedRecently: false,
+              lastRound: null,
+              stopped: null,
+              watch: {
+                every: 2,
+                reply: true,
+                instructions: '',
+                task: 'feedc0ffee21',
+              },
+              ended: null,
+              needsHuman: [],
+              worktreeExists: true,
+              fix: null,
+            },
+            {
+              pr: 202,
+              repo: 'o/r',
+              host: 'github.com',
+              url: 'https://github.com/o/r/pull/202',
+              headRefName: 'feat/in-place',
+              headSha: 'a'.repeat(40),
+              pushes: 0,
+              maxPushes: 10,
+              session: 'inplace-sess',
+              preparedAt: null,
+              lastCheck: null,
+              checkedRecently: false,
+              lastRound: null,
+              stopped: null,
+              watch: null,
+              inPlace: true,
+              ended: null,
+              needsHuman: [],
+              worktreeExists: true,
+              fix: null,
+            },
+            {
+              pr: 203,
+              repo: 'o/r',
+              host: 'github.com',
+              url: 'https://github.com/o/r/pull/203',
+              headRefName: 'feat/merged',
+              headSha: 'a'.repeat(40),
+              pushes: 1,
+              maxPushes: 10,
+              session: 'merged-sess',
+              preparedAt: null,
+              lastCheck: null,
+              checkedRecently: false,
+              lastRound: null,
+              stopped: 'merged' as const,
+              watch: null,
+              ended: null,
+              needsHuman: [],
+              worktreeExists: false,
+              fix: null,
+            },
+          ],
+        },
+      ],
+    ]);
+    const ctx: AutofixPrContextValue = {
+      watchIndex: indexAutofixPrWatches(
+        lists,
+        new Map([
+          ['', '/tmp/project'],
+          ['second', '/tmp/second'],
+        ]),
+      ),
+      lists,
+      error: null,
+      loaded: true,
+      reload: vi.fn().mockResolvedValue(undefined),
+      canStartInWorkspace: (cwd) => cwd === '/tmp/second',
+      startInNewSession,
+      openWatch: vi.fn().mockResolvedValue(undefined),
+    };
+
+    active.sessions = [
+      makeSession('s-cross', {
+        prs: [
+          {
+            number: 201,
+            url: 'https://github.com/o/r/pull/201',
+            state: 'open',
+          },
+          {
+            number: 202,
+            url: 'https://github.com/o/r/pull/202',
+            state: 'open',
+          },
+          {
+            number: 203,
+            url: 'https://github.com/o/r/pull/203',
+            state: 'open',
+          },
+        ],
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar({ autofixCtx: ctx });
+    await flushSidebar();
+
+    let menu = await openSessionMenu();
+    // Merged watch suppresses menu item even when session PR state is still 'open'.
+    expect(menuItem(menu, 'Autofix PR #203')).toBeUndefined();
+    const resumeItem = menuItem(menu, 'Resume autofix PR #201')!;
+    const restartInPlaceItem = menuItem(menu, 'Autofix PR #202')!;
+    expect(resumeItem).not.toBeUndefined();
+    expect(restartInPlaceItem).not.toBeUndefined();
+
+    act(() => click(resumeItem));
+    await flushSidebar();
+    expect(startInNewSession).toHaveBeenLastCalledWith({
+      prompt: '/autofix-pr resume 201',
+      workspaceCwd: '/tmp/second',
+      sessionTitle: 'Autofix PR #201',
+    });
+
+    menu = await openSessionMenu();
+    act(() => click(menuItem(menu, 'Autofix PR #202')!));
+    await flushSidebar();
+    expect(startInNewSession).toHaveBeenLastCalledWith({
+      prompt: '/autofix-pr https://github.com/o/r/pull/202 --in-place --watch',
+      workspaceCwd: '/tmp/second',
+      sessionTitle: 'Autofix PR #202',
+    });
+
+    // While watch state is still loading (!loaded), unwatched PRs do not show Autofix.
+    renderSidebar({
+      autofixCtx: {
+        ...ctx,
+        watchIndex: new Map(),
+        loaded: false,
+        canStartInWorkspace: () => true,
+      },
+    });
+    await flushSidebar();
+    menu = await openSessionMenu();
+    expect(menuItem(menu, 'Autofix PR #201')).toBeUndefined();
+  });
 });

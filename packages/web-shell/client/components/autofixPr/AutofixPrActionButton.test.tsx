@@ -182,7 +182,7 @@ describe('AutofixPrActionButton', () => {
     });
   });
 
-  it('offers Autofix restart for an ended watch on an open PR', async () => {
+  it('offers Autofix restart for an ended watch on an open PR, preserving --in-place --watch when inPlace is true', async () => {
     const ctx = makeContext([
       makeWatch({ ended: { at: '2026-11-28T00:00:00Z', reason: 'stopped' } }),
     ]);
@@ -193,6 +193,108 @@ describe('AutofixPrActionButton', () => {
       await Promise.resolve();
     });
     expect(ctx.startInNewSession).toHaveBeenCalledWith({
+      prompt: '/autofix-pr https://github.com/acme/widgets/pull/42',
+      workspaceCwd: '/repo',
+      sessionTitle: 'Autofix PR #42',
+    });
+
+    act(() => root?.unmount());
+    const inPlaceCtx = makeContext([
+      makeWatch({
+        watch: null,
+        inPlace: true,
+        checkedRecently: false,
+      }),
+    ]);
+    const inPlaceBtn = renderButton(inPlaceCtx);
+    expect(inPlaceBtn?.textContent).toBe('Autofix');
+    await act(async () => {
+      inPlaceBtn!.click();
+      await Promise.resolve();
+    });
+    expect(inPlaceCtx.startInNewSession).toHaveBeenCalledWith({
+      prompt:
+        '/autofix-pr https://github.com/acme/widgets/pull/42 --in-place --watch',
+      workspaceCwd: '/repo',
+      sessionTitle: 'Autofix PR #42',
+    });
+  });
+
+  it('prefers the watch clone workspaceCwd over the surface workspaceCwd when resuming across workspaces', async () => {
+    const lists = new Map([
+      ['', { available: true, watches: [] }],
+      [
+        'second',
+        {
+          available: true,
+          watches: [makeWatch({ checkedRecently: false })],
+        },
+      ],
+    ]);
+    const ctx: AutofixPrContextValue = {
+      watchIndex: indexAutofixPrWatches(
+        lists,
+        new Map([
+          ['', '/w/a'],
+          ['second', '/w/b'],
+        ]),
+      ),
+      lists,
+      error: null,
+      loaded: true,
+      reload: vi.fn().mockResolvedValue(undefined),
+      canStartInWorkspace: vi.fn((cwd) => cwd === '/w/b'),
+      startInNewSession: vi.fn().mockResolvedValue(undefined),
+      openWatch: vi.fn().mockResolvedValue(undefined),
+    };
+    const btn = renderButton(ctx, { workspaceCwd: '/w/a' });
+    expect(btn?.textContent).toBe('Resume');
+    await act(async () => {
+      btn!.click();
+      await Promise.resolve();
+    });
+    expect(ctx.startInNewSession).toHaveBeenCalledWith({
+      prompt: '/autofix-pr resume 42',
+      workspaceCwd: '/w/b',
+      sessionTitle: 'Autofix PR #42',
+    });
+  });
+
+  it('suppresses start buttons when watch state is merged/closed, still loading, errored, or URL is malformed, and canonicalizes sub-page URLs', async () => {
+    // Terminal watch state suppresses button even when session PR state is stale 'open'.
+    expect(
+      renderButton(
+        makeContext([makeWatch({ stopped: 'merged', checkedRecently: false })]),
+        { prState: 'open' },
+      ),
+    ).toBeNull();
+    act(() => root?.unmount());
+    // Cold-start !loaded suppresses unwatched Autofix start button.
+    expect(renderButton(makeContext([], { loaded: false }))).toBeNull();
+    act(() => root?.unmount());
+    // Failed watch listing suppresses unwatched Autofix start button.
+    expect(
+      renderButton(makeContext([], { error: 'daemon offline' })),
+    ).toBeNull();
+    act(() => root?.unmount());
+    // Hostile or malformed PR URL never renders an actionable trigger.
+    expect(
+      renderButton(makeContext(), {
+        prUrl: 'https://github.com/o%20--yes/r/pull/42',
+      }),
+    ).toBeNull();
+    act(() => root?.unmount());
+    // Sub-page PR URL is canonicalized before emitting /autofix-pr command.
+    const subCtx = makeContext();
+    const subBtn = renderButton(subCtx, {
+      prUrl: 'https://github.com/acme/widgets/pull/42/files?w=1',
+    });
+    expect(subBtn?.textContent).toBe('Autofix');
+    await act(async () => {
+      subBtn!.click();
+      await Promise.resolve();
+    });
+    expect(subCtx.startInNewSession).toHaveBeenCalledWith({
       prompt: '/autofix-pr https://github.com/acme/widgets/pull/42',
       workspaceCwd: '/repo',
       sessionTitle: 'Autofix PR #42',

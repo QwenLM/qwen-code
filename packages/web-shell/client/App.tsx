@@ -424,6 +424,7 @@ import {
 } from './hooks/useAutofixPrWatches';
 import {
   indexAutofixPrWatches,
+  nonEmptyCwd,
   watchOfTask,
   type IndexedAutofixPrWatch,
 } from './utils/autofixPrWatches';
@@ -20316,6 +20317,7 @@ export function App({
     targetCwd: string;
     invocation: number;
     runtimeClient: typeof workspace.client;
+    carriedManualTitle?: string;
     resolve: () => void;
     reject: (err: unknown) => void;
     timer?: ReturnType<typeof setTimeout>;
@@ -20708,6 +20710,13 @@ export function App({
       const prevNew = pendingNewSessionRunRef.current;
       if (prevNew) {
         if (prevNew.timer !== undefined) clearTimeout(prevNew.timer);
+        if (
+          prevNew.carriedManualTitle &&
+          pendingManualTitleRef.current?.displayName ===
+            prevNew.carriedManualTitle
+        ) {
+          pendingManualTitleRef.current = undefined;
+        }
         pendingNewSessionRunRef.current = null;
         prevNew.reject(new Error('superseded by another run'));
       }
@@ -20804,20 +20813,40 @@ export function App({
     tryFireBoundRun,
     workspace.client,
   ]);
-  const clearPendingNewSessionRun = useCallback((invocation?: number) => {
-    const cur = pendingNewSessionRunRef.current;
-    if (cur && (invocation === undefined || cur.invocation === invocation)) {
-      if (cur.timer !== undefined) clearTimeout(cur.timer);
-      pendingNewSessionRunRef.current = null;
-    }
-  }, []);
+  const disarmCarriedAutofixTitle = useCallback(
+    (carriedManualTitle?: string) => {
+      if (
+        carriedManualTitle &&
+        pendingManualTitleRef.current?.displayName === carriedManualTitle
+      ) {
+        pendingManualTitleRef.current = undefined;
+      }
+    },
+    [],
+  );
+  const clearPendingNewSessionRun = useCallback(
+    (invocation?: number) => {
+      const cur = pendingNewSessionRunRef.current;
+      if (cur && (invocation === undefined || cur.invocation === invocation)) {
+        if (cur.timer !== undefined) clearTimeout(cur.timer);
+        disarmCarriedAutofixTitle(cur.carriedManualTitle);
+        pendingNewSessionRunRef.current = null;
+      }
+    },
+    [disarmCarriedAutofixTitle],
+  );
   useEffect(
     () => () => {
       const cur = pendingNewSessionRunRef.current;
-      if (cur?.timer !== undefined) clearTimeout(cur.timer);
+      if (!cur) return;
+      if (cur.timer !== undefined) clearTimeout(cur.timer);
+      disarmCarriedAutofixTitle(cur.carriedManualTitle);
       pendingNewSessionRunRef.current = null;
+      cur.reject(
+        new DOMException('New session run owner was unmounted', 'AbortError'),
+      );
     },
-    [],
+    [disarmCarriedAutofixTitle],
   );
   const tryFireNewSessionRun = useCallback(() => {
     const pending = pendingNewSessionRunRef.current;
@@ -20853,10 +20882,11 @@ export function App({
         pending.resolve();
       },
       (error: unknown) => {
+        disarmCarriedAutofixTitle(pending.carriedManualTitle);
         pending.reject(error);
       },
     );
-  }, [clearPendingNewSessionRun, enqueueManualRun]);
+  }, [clearPendingNewSessionRun, disarmCarriedAutofixTitle, enqueueManualRun]);
   useEffect(() => {
     tryFireNewSessionRun();
   }, [
@@ -20909,21 +20939,22 @@ export function App({
   ]);
   const resolveAutofixWorkspaceCwd = useCallback(
     (requestedCwd?: string): string | undefined => {
+      const normalized = nonEmptyCwd(requestedCwd);
       if (lockedWorkspaceCwd) {
         if (lockedWorkspaceCapability?.trusted === false) return undefined;
-        if (requestedCwd !== undefined && requestedCwd !== lockedWorkspaceCwd) {
+        if (normalized !== undefined && normalized !== lockedWorkspaceCwd) {
           return undefined;
         }
         return lockedWorkspaceCwd;
       }
-      if (requestedCwd !== undefined) {
+      if (normalized !== undefined) {
         if (ordinaryWorkspaces.length > 0) {
           return ordinaryWorkspaces.find(
-            (entry) => entry.cwd === requestedCwd && entry.trusted !== false,
+            (entry) => entry.cwd === normalized && entry.trusted !== false,
           )?.cwd;
         }
-        return requestedCwd === workspace.capabilities?.workspaceCwd
-          ? requestedCwd
+        return normalized === workspace.capabilities?.workspaceCwd
+          ? normalized
           : undefined;
       }
       return (
@@ -20946,6 +20977,53 @@ export function App({
       Boolean(resolveAutofixWorkspaceCwd(workspaceCwd)),
     [resolveAutofixWorkspaceCwd],
   );
+  const isAutofixWatchStateReadyForWorkspace = useCallback(
+    (workspaceCwd?: string): boolean => {
+      if (!sharedAutofixPrWatches.loaded) return false;
+      const targetCwd = resolveAutofixWorkspaceCwd(workspaceCwd);
+      if (!targetCwd) return false;
+      const idx = autofixPrOperableWorkspaces.findIndex(
+        (ws) => ws.cwd === targetCwd,
+      );
+      const id =
+        idx >= 0
+          ? autofixPrWatchWorkspaceIds[idx]
+          : targetCwd === workspace.capabilities?.workspaceCwd
+            ? undefined
+            : null;
+      if (id === null) return false;
+      return sharedAutofixPrWatches.lists.has(autofixPrWatchesKey(id));
+    },
+    [
+      autofixPrOperableWorkspaces,
+      autofixPrWatchWorkspaceIds,
+      resolveAutofixWorkspaceCwd,
+      sharedAutofixPrWatches.lists,
+      sharedAutofixPrWatches.loaded,
+      workspace.capabilities?.workspaceCwd,
+    ],
+  );
+  const canStartAnyAutofixWatch = useMemo(
+    () =>
+      autofixPrOperableWorkspaces.length > 0
+        ? autofixPrOperableWorkspaces.some((ws) =>
+            canStartAutofixInWorkspace(ws.cwd),
+          )
+        : canStartAutofixInWorkspace(),
+    [autofixPrOperableWorkspaces, canStartAutofixInWorkspace],
+  );
+  const defaultAutofixWorkspaceCwd = useMemo(
+    () =>
+      resolveAutofixWorkspaceCwd() ??
+      autofixPrOperableWorkspaces.find((ws) =>
+        canStartAutofixInWorkspace(ws.cwd),
+      )?.cwd,
+    [
+      autofixPrOperableWorkspaces,
+      canStartAutofixInWorkspace,
+      resolveAutofixWorkspaceCwd,
+    ],
+  );
   const startAutofixPrInNewSession = useCallback(
     async (request: AutofixPrStartSessionRequest): Promise<void> => {
       const targetCwd = resolveAutofixWorkspaceCwd(request.workspaceCwd);
@@ -20966,6 +21044,7 @@ export function App({
       const prevNew = pendingNewSessionRunRef.current;
       if (prevNew) {
         if (prevNew.timer !== undefined) clearTimeout(prevNew.timer);
+        disarmCarriedAutofixTitle(prevNew.carriedManualTitle);
         pendingNewSessionRunRef.current = null;
         prevNew.reject(new Error('superseded by another run'));
       }
@@ -20975,7 +21054,10 @@ export function App({
           ? { carryManualTitle: request.sessionTitle }
           : undefined,
       );
-      if (!created) return;
+      if (!created) {
+        disarmCarriedAutofixTitle(request.sessionTitle);
+        return;
+      }
       onSessionIdChange?.(undefined);
       const invocation = sessionOpenInvocationRef.current;
       try {
@@ -20985,6 +21067,7 @@ export function App({
             targetCwd,
             invocation,
             runtimeClient: boundRunRuntimeClientRef.current,
+            carriedManualTitle: request.sessionTitle,
             resolve,
             reject,
           };
@@ -20992,6 +21075,7 @@ export function App({
           tryFireNewSessionRun();
         });
       } catch (error) {
+        disarmCarriedAutofixTitle(request.sessionTitle);
         if (error instanceof DOMException && error.name === 'AbortError') {
           return;
         }
@@ -21000,6 +21084,7 @@ export function App({
     },
     [
       createNewSession,
+      disarmCarriedAutofixTitle,
       onSessionIdChange,
       resolveAutofixWorkspaceCwd,
       t,
@@ -21018,6 +21103,8 @@ export function App({
   );
   const openAutofixPrWatch = useCallback(
     async (entry: IndexedAutofixPrWatch): Promise<void> => {
+      const openSeq = sessionOpenInvocationRef.current;
+      const startClient = boundRunRuntimeClientRef.current;
       const taskLists = await Promise.all(
         autofixPrWatchWorkspaceIds.map(async (id, index) => {
           try {
@@ -21035,6 +21122,12 @@ export function App({
           }
         }),
       );
+      if (
+        sessionOpenInvocationRef.current !== openSeq ||
+        boundRunRuntimeClientRef.current !== startClient
+      ) {
+        return;
+      }
       for (const { cwd, tasks } of taskLists) {
         const owning = tasks.find((task) => {
           const match = watchOfTask(task.prompt, [entry.watch]);
@@ -21076,6 +21169,7 @@ export function App({
             error: sharedAutofixPrWatches.error,
             loaded: sharedAutofixPrWatches.loaded,
             reload: sharedAutofixPrWatches.reload,
+            isWatchStateReady: isAutofixWatchStateReadyForWorkspace,
             canStartInWorkspace: canStartAutofixInWorkspace,
             startInNewSession: startAutofixPrFromAction,
             openWatch: openAutofixPrWatch,
@@ -21085,6 +21179,7 @@ export function App({
       autofixPrEnabled,
       autofixPrWatchIndex,
       canStartAutofixInWorkspace,
+      isAutofixWatchStateReadyForWorkspace,
       openAutofixPrWatch,
       sharedAutofixPrWatches.error,
       sharedAutofixPrWatches.lists,
@@ -28368,11 +28463,11 @@ export function App({
                         // as a scheduled task's manual run does.
                         onRunPrompt={runTaskManually}
                         onStartWatch={
-                          canStartAutofixInWorkspace()
+                          canStartAnyAutofixWatch
                             ? startAutofixPrInNewSession
                             : undefined
                         }
-                        defaultWorkspaceCwd={resolveAutofixWorkspaceCwd()}
+                        defaultWorkspaceCwd={defaultAutofixWorkspaceCwd}
                         workspaces={
                           lockedWorkspaceCwd
                             ? visibleWorkspaces

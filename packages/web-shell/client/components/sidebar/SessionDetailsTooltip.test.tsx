@@ -1488,4 +1488,68 @@ describe('SessionDetailsTooltip', () => {
 
     act(() => root.unmount());
   });
+
+  it('keeps click-opened focus on Copy Session ID even when open PR autofix buttons precede it', () => {
+    const lists = new Map([['', { available: true, watches: [] }]]);
+    const ctx: AutofixPrContextValue = {
+      watchIndex: indexAutofixPrWatches(
+        lists,
+        new Map([['', '/work/qwen-code']]),
+      ),
+      lists,
+      error: null,
+      loaded: true,
+      reload: vi.fn().mockResolvedValue(undefined),
+      canStartInWorkspace: () => true,
+      startInNewSession: vi.fn().mockResolvedValue(undefined),
+      openWatch: vi.fn().mockResolvedValue(undefined),
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <AutofixPrContext.Provider value={ctx}>
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'session-focus-1',
+                workspaceCwd: '/work/qwen-code',
+                clientCount: 1,
+                prs: [
+                  {
+                    number: 9501,
+                    url: 'https://github.com/o/r/pull/9501',
+                    state: 'open',
+                  },
+                ],
+              }}
+              label="Fix CI"
+              time=""
+              completedUnread={false}
+              openOnClick
+            >
+              <button type="button">Fix CI</button>
+            </SessionDetailsTooltip>
+          </AutofixPrContext.Provider>
+        </I18nProvider>,
+      );
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>('button')!;
+    act(() => {
+      trigger.click();
+    });
+    expect(
+      document.querySelector('[data-testid="autofix-pr-action"]'),
+    ).not.toBeNull();
+    expect(
+      document.activeElement?.hasAttribute('data-web-shell-session-id-copy'),
+    ).toBe(true);
+    expect(document.activeElement?.getAttribute('aria-label')).toBe(
+      'Copy session ID',
+    );
+    act(() => root.unmount());
+  });
 });

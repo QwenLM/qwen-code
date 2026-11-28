@@ -2303,7 +2303,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'autofixPr.dialog.modeWatch': 'Continuous watch',
   'autofixPr.dialog.modeOnce': 'One-shot (--once)',
   'autofixPr.dialog.every': 'Check interval (minutes)',
-  'autofixPr.dialog.everyInvalid': 'Enter a positive whole number of minutes.',
+  'autofixPr.dialog.everyInvalid':
+    'Choose one of 1, 2, 5, 10, 15, 30, or 60 minutes.',
   'autofixPr.dialog.reply': 'Post replies on the PR',
   'autofixPr.dialog.instructions': 'Additional instructions (optional)',
   'autofixPr.dialog.instructionsPlaceholder':

@@ -22,12 +22,28 @@ export interface AutofixPrContextValue {
   error: string | null;
   loaded: boolean;
   reload: () => Promise<void>;
+  /**
+   * Whether watch state for `workspaceCwd` has been fetched cleanly so absence
+   * from `watchIndex` reliably means "not watched". When omitted, defaults to
+   * `loaded && error === null`.
+   */
+  isWatchStateReady?: (workspaceCwd?: string) => boolean;
   /** Whether a new `/autofix-pr` session can be started for `workspaceCwd`. */
   canStartInWorkspace: (workspaceCwd?: string) => boolean;
   /** Start `/autofix-pr` (or `resume` / `stop`) in a dedicated session. */
   startInNewSession: (request: AutofixPrStartSessionRequest) => Promise<void>;
   /** Open an active watch's owning Web Shell session, or the PR watches page. */
   openWatch: (entry: IndexedAutofixPrWatch) => Promise<void>;
+}
+
+/** True only when watch state for `workspaceCwd` is known (loaded without error). */
+export function isAutofixWatchStateReady(
+  ctx: AutofixPrContextValue,
+  workspaceCwd?: string,
+): boolean {
+  if (!ctx.loaded) return false;
+  if (ctx.isWatchStateReady) return ctx.isWatchStateReady(workspaceCwd);
+  return ctx.error === null;
 }
 
 export const AutofixPrContext = createContext<AutofixPrContextValue | null>(

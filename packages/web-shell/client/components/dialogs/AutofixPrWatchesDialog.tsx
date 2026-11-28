@@ -18,7 +18,7 @@ import {
   useAutofixPrWatches,
 } from '../../hooks/useAutofixPrWatches';
 import {
-  buildAutofixPrStartCommand,
+  buildAutofixPrRestartCommand,
   indexAutofixPrWatches,
   resumeCommand,
   stopCommand,
@@ -293,7 +293,7 @@ export function AutofixPrWatchesDialog({
       const prompt =
         kind === 'resume'
           ? resumeCommand(row.watch)
-          : buildAutofixPrStartCommand({ pr: row.watch.url || row.watch.pr });
+          : buildAutofixPrRestartCommand(row.watch);
       const fallbackError =
         kind === 'resume'
           ? t('autofixPrWatches.resumeFailed')
@@ -319,6 +319,23 @@ export function AutofixPrWatchesDialog({
       }
     },
     [onRunPrompt, onStartWatch, runRowAction, t],
+  );
+
+  const startableWorkspaces = useMemo(
+    () => operable.filter((ws) => ws.trusted !== false),
+    [operable],
+  );
+  const canStartForRow = useCallback(
+    (row: Row) => {
+      if (!onStartWatch) return false;
+      if (sharedWatches) {
+        return sharedWatches.canStartInWorkspace(row.listedWorkspaceCwd);
+      }
+      if (operable.length === 0) return true;
+      const ws = operable.find((entry) => entry.cwd === row.listedWorkspaceCwd);
+      return ws ? ws.trusted !== false : false;
+    },
+    [onStartWatch, operable, sharedWatches],
   );
 
   return (
@@ -375,6 +392,7 @@ export function AutofixPrWatchesDialog({
             busyRow?.key === row.key && busyRow.kind === 'stop';
           const isPrimaryBusy =
             busyRow?.key === row.key && busyRow.kind === 'primary';
+          const rowCanStart = canStartForRow(row);
 
           const ownedSummaryProps = row.owner
             ? {
@@ -385,32 +403,41 @@ export function AutofixPrWatchesDialog({
                   ),
                 ...(phase === 'idle'
                   ? {
-                      onPrimaryAction: () => resumeOrRestart(row, 'resume'),
-                      primaryActionLabel: t('autofixPrWatches.resume'),
-                      primaryActionHint: t('autofixPrWatches.resumeHint', {
-                        pr: row.watch.pr,
-                      }),
+                      primaryAction: {
+                        label: t('autofixPrWatches.resume'),
+                        hint: t('autofixPrWatches.resumeHint', {
+                          pr: row.watch.pr,
+                        }),
+                        busy: isPrimaryBusy,
+                        onClick: () => resumeOrRestart(row, 'resume'),
+                      },
                     }
                   : {}),
                 onStop: () => stop(row),
               }
-            : !elsewhere && onStartWatch
+            : !elsewhere && rowCanStart
               ? phase === 'idle' || phase === 'abandonedFix'
                 ? {
-                    onPrimaryAction: () => resumeOrRestart(row, 'resume'),
-                    primaryActionLabel: t('autofixPrWatches.resume'),
-                    primaryActionHint: t('autofixPrWatches.resumeHint', {
-                      pr: row.watch.pr,
-                    }),
+                    primaryAction: {
+                      label: t('autofixPrWatches.resume'),
+                      hint: t('autofixPrWatches.resumeHint', {
+                        pr: row.watch.pr,
+                      }),
+                      busy: isPrimaryBusy,
+                      onClick: () => resumeOrRestart(row, 'resume'),
+                    },
                     onStop: () => stop(row),
                   }
                 : phase === 'ended' || phase === 'unscheduled'
                   ? {
-                      onPrimaryAction: () => resumeOrRestart(row, 'restart'),
-                      primaryActionLabel: t('autofixPrWatches.restart'),
-                      primaryActionHint: t('autofixPrWatches.restartHint', {
-                        pr: row.watch.pr,
-                      }),
+                      primaryAction: {
+                        label: t('autofixPrWatches.restart'),
+                        hint: t('autofixPrWatches.restartHint', {
+                          pr: row.watch.pr,
+                        }),
+                        busy: isPrimaryBusy,
+                        onClick: () => resumeOrRestart(row, 'restart'),
+                      },
                     }
                   : phase === 'merged' || phase === 'closed'
                     ? {
@@ -434,11 +461,11 @@ export function AutofixPrWatchesDialog({
                 watch={row.watch}
                 showPr
                 stopping={isStopping}
-                primaryActionBusy={isPrimaryBusy}
+                actionsDisabled={busyRow !== null}
                 outsideDaemon={!row.owner && elsewhere}
                 {...ownedSummaryProps}
               />
-              {!row.owner && !elsewhere && !onStartWatch && (
+              {!row.owner && !elsewhere && !rowCanStart && (
                 <div className={styles.hint}>
                   {t('autofixPrWatches.noOwner', { pr: row.watch.pr })}
                 </div>
@@ -457,8 +484,10 @@ export function AutofixPrWatchesDialog({
       </div>
       {showStartDialog && onStartWatch && (
         <StartAutofixPrDialog
-          workspaces={operable}
-          defaultWorkspaceCwd={defaultWorkspaceCwd ?? operable[0]?.cwd}
+          workspaces={startableWorkspaces}
+          defaultWorkspaceCwd={
+            defaultWorkspaceCwd ?? startableWorkspaces[0]?.cwd
+          }
           watchIndex={watchIndex}
           onStart={onStartWatch}
           onClose={() => setShowStartDialog(false)}

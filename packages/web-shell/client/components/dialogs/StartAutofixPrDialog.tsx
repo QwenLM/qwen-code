@@ -19,8 +19,11 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import {
+  AUTOFIX_PR_WATCH_INTERVALS,
+  DEFAULT_AUTOFIX_PR_WATCH_EVERY,
   buildAutofixPrStartCommand,
   findWatchForPr,
+  isValidAutofixPrWatchInterval,
   isWatchActivePhase,
   parseAutofixPrInput,
   type AutofixPrStartMode,
@@ -81,6 +84,7 @@ export function StartAutofixPrDialog({
   const workspaceSelectId = useId();
   const prInputId = useId();
   const everyInputId = useId();
+  const everyListId = useId();
   const instructionsInputId = useId();
 
   useEffect(() => {
@@ -135,11 +139,11 @@ export function StartAutofixPrDialog({
           return;
         }
         const value = Number(trimmedEvery);
-        if (!Number.isSafeInteger(value) || value <= 0) {
+        if (!isValidAutofixPrWatchInterval(value)) {
           setError(t('autofixPr.dialog.everyInvalid'));
           return;
         }
-        if (value !== 2) every = value;
+        if (value !== DEFAULT_AUTOFIX_PR_WATCH_EVERY) every = value;
       }
     }
 
@@ -184,10 +188,12 @@ export function StartAutofixPrDialog({
     <DialogShell
       title={t('autofixPr.dialog.title')}
       size="md"
+      dismissible={!submitting}
       onClose={onClose}
     >
       <form
         className={styles.form}
+        noValidate
         aria-busy={submitting}
         onSubmit={(event) => {
           event.preventDefault();
@@ -205,11 +211,8 @@ export function StartAutofixPrDialog({
               value={workspaceCwd ?? ''}
               disabled={submitting}
               onChange={(event) => {
-                const nextCwd = event.target.value;
-                setWorkspaceCwd(nextCwd);
-                if (openPrs?.some((pr) => pr.url === prInput.trim())) {
-                  setPrInput('');
-                }
+                setWorkspaceCwd(event.target.value);
+                setPrInput('');
                 setError(null);
               }}
             >
@@ -361,7 +364,9 @@ export function StartAutofixPrDialog({
                 id={everyInputId}
                 type="number"
                 min={1}
+                max={60}
                 step={1}
+                list={everyListId}
                 value={everyInput}
                 disabled={submitting}
                 onChange={(event) => {
@@ -369,6 +374,11 @@ export function StartAutofixPrDialog({
                   if (error) setError(null);
                 }}
               />
+              <datalist id={everyListId}>
+                {AUTOFIX_PR_WATCH_INTERVALS.map((minutes) => (
+                  <option key={minutes} value={minutes} />
+                ))}
+              </datalist>
             </div>
           )}
           <label className={styles.checkboxLabel}>

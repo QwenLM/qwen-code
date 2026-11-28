@@ -170,12 +170,18 @@ import {
   TOUCH_COMPOSER_QUERY,
 } from '../../hooks/useIsTouchComposer';
 import { SessionPrBadge, openableSessionPrs } from '../SessionPrBadge';
-import { useAutofixPrOptional } from '../autofixPr/AutofixPrContext';
 import {
+  isAutofixWatchStateReady,
+  useAutofixPrOptional,
+} from '../autofixPr/AutofixPrContext';
+import {
+  buildAutofixPrRestartCommand,
   buildAutofixPrStartCommand,
   findWatchForPr,
   isPrOpenForAutofix,
   isWatchActivePhase,
+  nonEmptyCwd,
+  parseAutofixPrInput,
   resumeCommand,
   summarizeAutofixPrWatches,
 } from '../../utils/autofixPrWatches';
@@ -5972,7 +5978,9 @@ export function WebShellSidebar({
             <SessionDetailsTooltip
               session={{
                 ...session,
-                workspaceCwd: getSessionWorkspaceCwd(session),
+                workspaceCwd:
+                  nonEmptyCwd(getSessionWorkspaceCwd(session)) ??
+                  session.workspaceCwd,
               }}
               workspaceLabel={
                 standalone || recent?.isStandalone
@@ -5982,6 +5990,11 @@ export function WebShellSidebar({
               label={label}
               time={time}
               completedUnread={completedUnread}
+              readOnly={
+                Boolean(standalone) ||
+                Boolean(recent?.isStandalone) ||
+                resolveSessionWorkspaceScope(session).kind === 'untrusted'
+              }
               // The starting spinner outranks the run dots, not the
               // actionable approval/question cues.
               statusLabel={
@@ -6295,7 +6308,8 @@ export function WebShellSidebar({
         sessionActionItems.has('bindPr') &&
         canMutateSessionMetadata(session);
       const sessionTargetCwd =
-        getSessionWorkspaceCwd(session) ?? session.workspaceCwd;
+        nonEmptyCwd(getSessionWorkspaceCwd(session)) ??
+        nonEmptyCwd(session.workspaceCwd);
       const autofixMenuActions: Array<{
         key: string;
         label: string;
@@ -6315,12 +6329,18 @@ export function WebShellSidebar({
                 kind: 'open' | 'resume' | 'start';
                 run: () => void;
               }>((pr, index) => {
-                const entry = findWatchForPr(autofixPrCtx.watchIndex, pr.url);
+                const parsedPrUrl = parseAutofixPrInput(pr.url);
+                if (!parsedPrUrl || parsedPrUrl.kind !== 'url') return [];
+                const canonicalPrUrl = parsedPrUrl.url;
+                const entry = findWatchForPr(
+                  autofixPrCtx.watchIndex,
+                  canonicalPrUrl,
+                );
                 if (entry && isWatchActivePhase(entry.phase)) {
                   const statusText =
-                    entry.watch.needsHuman.length > 0
+                    entry.needsHumanCount > 0
                       ? t('autofixPr.action.needsHuman', {
-                          count: entry.watch.needsHuman.length,
+                          count: entry.needsHumanCount,
                         })
                       : entry.phase === 'fixing'
                         ? t('autofixPr.action.fixing')
@@ -6341,8 +6361,21 @@ export function WebShellSidebar({
                     },
                   ];
                 }
-                const targetWorkspaceCwd =
-                  sessionTargetCwd ?? entry?.workspaceCwd;
+                if (
+                  entry &&
+                  (entry.phase === 'merged' || entry.phase === 'closed')
+                ) {
+                  return [];
+                }
+                const targetWorkspaceCwd = entry
+                  ? (nonEmptyCwd(entry.workspaceCwd) ?? sessionTargetCwd)
+                  : sessionTargetCwd;
+                if (
+                  !entry &&
+                  !isAutofixWatchStateReady(autofixPrCtx, targetWorkspaceCwd)
+                ) {
+                  return [];
+                }
                 if (!autofixPrCtx.canStartInWorkspace(targetWorkspaceCwd)) {
                   return [];
                 }
@@ -6364,6 +6397,13 @@ export function WebShellSidebar({
                     },
                   ];
                 }
+                const startPrompt = entry
+                  ? buildAutofixPrRestartCommand({
+                      pr: entry.watch.pr,
+                      url: entry.watch.url || canonicalPrUrl,
+                      inPlace: entry.watch.inPlace,
+                    })
+                  : buildAutofixPrStartCommand({ pr: canonicalPrUrl });
                 return [
                   {
                     key: `${index}:start:${pr.url}`,
@@ -6371,7 +6411,7 @@ export function WebShellSidebar({
                     kind: 'start' as const,
                     run: () => {
                       void autofixPrCtx.startInNewSession({
-                        prompt: buildAutofixPrStartCommand({ pr: pr.url }),
+                        prompt: startPrompt,
                         workspaceCwd: targetWorkspaceCwd,
                         sessionTitle: t('autofixPr.sessionTitle', {
                           number: pr.number,

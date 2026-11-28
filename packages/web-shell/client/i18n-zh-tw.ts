@@ -2128,7 +2128,8 @@ export const ZH_TW: Record<string, MessageValue> = {
   'autofixPr.dialog.modeWatch': '持續監視',
   'autofixPr.dialog.modeOnce': '僅修一輪（--once）',
   'autofixPr.dialog.every': '檢查間隔（分鐘）',
-  'autofixPr.dialog.everyInvalid': '請輸入正整數分鐘數。',
+  'autofixPr.dialog.everyInvalid':
+    '請選擇以下分鐘數之一：1、2、5、10、15、30、60。',
   'autofixPr.dialog.reply': '在 PR 上發表回覆評論',
   'autofixPr.dialog.instructions': '附加指令（可選）',
   'autofixPr.dialog.instructionsPlaceholder': '例如：不要修改公共 API',

@@ -58849,6 +58849,121 @@ describe('App PR watches from another context', () => {
       expect.any(Object),
     );
   });
+
+  it('exposes onStartWatch when primary is untrusted but a trusted secondary workspace exists', async () => {
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['autofix_pr_watches'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/untrusted-primary',
+          primary: true,
+          trusted: false,
+          kind: 'ordinary',
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/trusted-secondary',
+          primary: false,
+          trusted: true,
+          kind: 'ordinary',
+        },
+      ],
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-pr-watches"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(typeof testState.latestPrWatchesProps?.onStartWatch).toBe(
+      'function',
+    );
+  });
+
+  it('disarms the carried autofix manual title when the new-session latch times out and rejects on unmount', async () => {
+    vi.useFakeTimers();
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['autofix_pr_watches'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+          kind: 'ordinary',
+        },
+      ],
+    };
+    mockConnection.sessionId = 'stuck-session';
+    mockConnection.workspaceCwd = '/tmp/project';
+    mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
+
+    const { container, unmount } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-pr-watches"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    const onStartWatch = testState.latestPrWatchesProps!.onStartWatch!;
+
+    let timeoutErr: unknown;
+    await act(async () => {
+      const p = onStartWatch({
+        prompt: '/autofix-pr https://github.com/o/r/pull/55',
+        workspaceCwd: '/tmp/project',
+        sessionTitle: 'Autofix PR #55',
+      }).catch((err) => {
+        timeoutErr = err;
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      vi.advanceTimersByTime(31_000);
+      await p;
+    });
+    expect(timeoutErr).toBeInstanceOf(Error);
+
+    // Subsequent ordinary send on a fresh draft must NOT inherit the timed-out title.
+    mockConnection.sessionId = undefined;
+    mockSessionActions.createSession.mockResolvedValue({
+      sessionId: 'ordinary-session',
+    });
+    mockSessionActions.renameSession.mockClear();
+    testState.prompt = 'ordinary question';
+    await clickSubmit(container);
+    await flush();
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalledWith(
+      'Autofix PR #55',
+    );
+
+    // Unmounting while a latch waits settles cleanly instead of hanging.
+    mockConnection.sessionId = 'stuck-again';
+    let unmountSettled = false;
+    let unmountPromise!: Promise<void>;
+    await act(async () => {
+      unmountPromise = onStartWatch({
+        prompt: '/autofix-pr https://github.com/o/r/pull/56',
+        workspaceCwd: '/tmp/project',
+        sessionTitle: 'Autofix PR #56',
+      }).then(() => {
+        unmountSettled = true;
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    unmount();
+    await unmountPromise;
+    expect(unmountSettled).toBe(true);
+    vi.useRealTimers();
+  });
 });
 
 describe('App /goal command', () => {

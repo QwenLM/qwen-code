@@ -290,10 +290,9 @@ export function SessionDetailsTooltip({
         data-web-shell-session-details-content={detailsOwner}
         aria-label={label}
         onOpenAutoFocus={(event) => {
-          if (!openOnClick) {
-            event.preventDefault();
-            return;
-          }
+          event.preventDefault();
+          if (!openOnClick) return;
+          copyButtonRef.current?.focus({ preventScroll: true });
           requestAnimationFrame(() => {
             copyButtonRef.current?.scrollIntoView({ block: 'nearest' });
           });

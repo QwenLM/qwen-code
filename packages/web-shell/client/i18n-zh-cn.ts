@@ -2252,7 +2252,8 @@ export const ZH: Messages = {
   'autofixPr.dialog.modeWatch': '持续监视',
   'autofixPr.dialog.modeOnce': '只修一轮（--once）',
   'autofixPr.dialog.every': '检查间隔（分钟）',
-  'autofixPr.dialog.everyInvalid': '请输入正整数分钟数。',
+  'autofixPr.dialog.everyInvalid':
+    '请选择以下分钟数之一：1、2、5、10、15、30、60。',
   'autofixPr.dialog.reply': '在 PR 上发表回复评论',
   'autofixPr.dialog.instructions': '附加指令（可选）',
   'autofixPr.dialog.instructionsPlaceholder': '例如：不要修改公共 API',

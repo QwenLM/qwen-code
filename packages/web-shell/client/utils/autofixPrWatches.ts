@@ -101,12 +101,26 @@ export function resumeCommand(watch: Pick<DaemonAutofixPrWatch, 'pr'>): string {
   return `/autofix-pr resume ${watch.pr}`;
 }
 
-export type AutofixPrStartMode = 'watch' | 'once' | 'in-place';
+/** Allowed `--every` intervals accepted by `qwen autofix-pr schedule` (minutes). */
+export const AUTOFIX_PR_WATCH_INTERVALS = [1, 2, 5, 10, 15, 30, 60] as const;
+
+export const DEFAULT_AUTOFIX_PR_WATCH_EVERY = 2;
+
+export function isValidAutofixPrWatchInterval(minutes: number): boolean {
+  return (
+    Number.isInteger(minutes) &&
+    (AUTOFIX_PR_WATCH_INTERVALS as readonly number[]).includes(minutes)
+  );
+}
+
+export type AutofixPrStartMode = 'watch' | 'once';
 
 export interface AutofixPrStartOptions {
   pr: string | number;
   mode?: AutofixPrStartMode;
-  /** Polling interval in minutes (watch mode only). */
+  /** Restart an existing in-place watch as a scheduled watch (`--in-place --watch`). */
+  inPlaceWatch?: boolean;
+  /** Polling interval in minutes (watch mode only; must be in `AUTOFIX_PR_WATCH_INTERVALS`). */
   every?: number;
   /** Suppress public PR comments (`--no-reply`). */
   noReply?: boolean;
@@ -120,17 +134,18 @@ export function buildAutofixPrStartCommand(
 ): string {
   const target = String(options.pr).trim();
   const parts = ['/autofix-pr', target];
-  const mode = options.mode ?? 'watch';
-  if (mode === 'once') {
-    parts.push('--once');
-  } else if (mode === 'in-place') {
-    parts.push('--in-place');
-  } else if (
-    options.every !== undefined &&
-    Number.isInteger(options.every) &&
-    options.every > 0
-  ) {
-    parts.push('--every', String(options.every));
+  if (options.inPlaceWatch) {
+    parts.push('--in-place', '--watch');
+  } else {
+    const mode = options.mode ?? 'watch';
+    if (mode === 'once') {
+      parts.push('--once');
+    } else if (
+      options.every !== undefined &&
+      isValidAutofixPrWatchInterval(options.every)
+    ) {
+      parts.push('--every', String(options.every));
+    }
   }
   if (options.noReply) {
     parts.push('--no-reply');
@@ -142,7 +157,27 @@ export function buildAutofixPrStartCommand(
   return parts.join(' ');
 }
 
-const PR_URL_PATH_RE = /^\/([^/]+)\/([^/]+)\/pull\/([1-9]\d*)\/?$/i;
+/**
+ * Build the restart command for an existing `ended` or `unscheduled` watch,
+ * preserving `--in-place --watch` for in-place watches so `prepare` does not
+ * reject with an in-place mismatch.
+ */
+export function buildAutofixPrRestartCommand(
+  watch: Pick<DaemonAutofixPrWatch, 'url' | 'pr' | 'inPlace'>,
+): string {
+  return buildAutofixPrStartCommand({
+    pr: watch.url || watch.pr,
+    ...(watch.inPlace ? { inPlaceWatch: true } : {}),
+  });
+}
+
+/** Normalize an optional workspace cwd, treating empty/whitespace strings as absent. */
+export function nonEmptyCwd(cwd?: string): string | undefined {
+  const trimmed = cwd?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+const PR_URL_PATH_RE = /^\/([\w.-]+)\/([\w.-]+)\/pull\/([1-9]\d*)(?=[/.]|$)/i;
 const BARE_PR_NUMBER_RE = /^#?([1-9]\d*)$/;
 
 /**
@@ -222,6 +257,10 @@ export interface IndexedAutofixPrWatch {
   phase: AutofixPrWatchPhase;
   workspaceKey: string;
   workspaceCwd?: string;
+  /** Pending `needsHuman` items summed across distinct clones watching this PR. */
+  needsHumanCount: number;
+  /** Distinct clones currently in an active phase for this PR. */
+  activeCloneCount: number;
 }
 
 const PHASE_PRIORITY: Record<AutofixPrWatchPhase, number> = {
@@ -235,30 +274,68 @@ const PHASE_PRIORITY: Record<AutofixPrWatchPhase, number> = {
   closed: 0,
 };
 
+function watchPendingNeedsHumanCount(watch: DaemonAutofixPrWatch): number {
+  return watch.ended === null && watch.stopped === null
+    ? watch.needsHuman.length
+    : 0;
+}
+
 /**
  * Index all watches across operable workspaces by canonical PR URL key so
- * every PR surface can look up live watch state in O(1). When linked checkouts
- * of the same clone report the same watch, prefer the higher-priority phase.
+ * every PR surface can look up live watch state in O(1). Linked checkouts
+ * sharing the same clone `root` are deduplicated, while independent clones of
+ * the same repository retain the higher-priority phase winner and accumulate
+ * `needsHumanCount` and `activeCloneCount` across distinct clones.
  */
 export function indexAutofixPrWatches(
   lists: ReadonlyMap<string, DaemonAutofixPrWatchList>,
   workspaceCwdByKey?: ReadonlyMap<string, string>,
 ): ReadonlyMap<string, IndexedAutofixPrWatch> {
   const index = new Map<string, IndexedAutofixPrWatch>();
+  const seenClones = new Set<string>();
   for (const [workspaceKey, list] of lists.entries()) {
-    const workspaceCwd = workspaceCwdByKey?.get(workspaceKey);
+    const workspaceCwd = nonEmptyCwd(workspaceCwdByKey?.get(workspaceKey));
+    const cloneRoot = list.root ?? workspaceKey;
     for (const watch of list.watches) {
       const key = watchPrUrlKey(watch);
       if (!key) continue;
+      const cloneIdentity = `${cloneRoot}\n${key}`;
+      const isNewClone = !seenClones.has(cloneIdentity);
+      seenClones.add(cloneIdentity);
       const phase = watchPhase(watch);
+      const cloneNeedsHuman = isNewClone
+        ? watchPendingNeedsHumanCount(watch)
+        : 0;
+      const cloneActive = isNewClone && isWatchActivePhase(phase) ? 1 : 0;
       const existing = index.get(key);
-      if (!existing || PHASE_PRIORITY[phase] > PHASE_PRIORITY[existing.phase]) {
+      if (!existing) {
         index.set(key, {
           watch,
           phase,
           workspaceKey,
           ...(workspaceCwd ? { workspaceCwd } : {}),
+          needsHumanCount: cloneNeedsHuman,
+          activeCloneCount: cloneActive,
         });
+      } else {
+        const totalNeedsHuman = existing.needsHumanCount + cloneNeedsHuman;
+        const totalActiveClones = existing.activeCloneCount + cloneActive;
+        if (PHASE_PRIORITY[phase] > PHASE_PRIORITY[existing.phase]) {
+          index.set(key, {
+            watch,
+            phase,
+            workspaceKey,
+            ...(workspaceCwd ? { workspaceCwd } : {}),
+            needsHumanCount: totalNeedsHuman,
+            activeCloneCount: totalActiveClones,
+          });
+        } else {
+          index.set(key, {
+            ...existing,
+            needsHumanCount: totalNeedsHuman,
+            activeCloneCount: totalActiveClones,
+          });
+        }
       }
     }
   }
@@ -298,13 +375,12 @@ const ACTIVE_STATUS_PRIORITY: Record<AutofixPrActiveStatus, number> = {
 export function getWatchActiveStatus(
   watch: DaemonAutofixPrWatch,
   phase: AutofixPrWatchPhase = watchPhase(watch),
+  needsHumanCountOverride?: number,
 ): AutofixPrActiveStatusInfo | null {
-  if (
-    watch.ended === null &&
-    watch.stopped === null &&
-    watch.needsHuman.length > 0
-  ) {
-    return { status: 'needsHuman', needsHumanCount: watch.needsHuman.length };
+  const pendingNeedsHuman =
+    needsHumanCountOverride ?? watchPendingNeedsHumanCount(watch);
+  if (pendingNeedsHuman > 0) {
+    return { status: 'needsHuman', needsHumanCount: pendingNeedsHuman };
   }
   if (phase === 'fixing') return { status: 'fixing', needsHumanCount: 0 };
   if (phase === 'abandonedFix') {
@@ -323,11 +399,19 @@ export function summarizeSessionPrWatchStatus(
 ): AutofixPrActiveStatusInfo | null {
   let best: AutofixPrActiveStatusInfo | null = null;
   let totalNeedsHuman = 0;
+  const seenPrKeys = new Set<string>();
   for (const pr of prs) {
     if (!isPrOpenForAutofix(pr.state)) continue;
-    const entry = findWatchForPr(index, pr.url);
+    const prKey = normalizePrUrlKey(pr.url);
+    if (!prKey || seenPrKeys.has(prKey)) continue;
+    seenPrKeys.add(prKey);
+    const entry = index.get(prKey);
     if (!entry) continue;
-    const info = getWatchActiveStatus(entry.watch, entry.phase);
+    const info = getWatchActiveStatus(
+      entry.watch,
+      entry.phase,
+      entry.needsHumanCount,
+    );
     if (!info) continue;
     if (info.status === 'needsHuman') {
       totalNeedsHuman += info.needsHumanCount;
@@ -346,7 +430,7 @@ export function summarizeSessionPrWatchStatus(
 }
 
 export interface AutofixPrWatchesSummary {
-  /** Watches in an active phase (`watching`, `fixing`, or `abandonedFix`). */
+  /** Distinct clone watches in an active phase (`watching`, `fixing`, or `abandonedFix`). */
   activeCount: number;
   /** Total pending `needsHuman` items across non-ended, non-stopped watches. */
   needsHumanCount: number;
@@ -359,16 +443,8 @@ export function summarizeAutofixPrWatches(
   let activeCount = 0;
   let needsHumanCount = 0;
   for (const entry of index.values()) {
-    if (isWatchActivePhase(entry.phase)) {
-      activeCount += 1;
-    }
-    if (
-      entry.watch.ended === null &&
-      entry.watch.stopped === null &&
-      entry.watch.needsHuman.length > 0
-    ) {
-      needsHumanCount += entry.watch.needsHuman.length;
-    }
+    activeCount += entry.activeCloneCount;
+    needsHumanCount += entry.needsHumanCount;
   }
   return { activeCount, needsHumanCount };
 }

@@ -26,29 +26,30 @@ Web Shell already exposes `/autofix-pr` watch state (`GET /autofix-pr/watches`, 
 `App.tsx` polls `useAutofixPrWatches` once across operable workspaces whenever `autofix_pr_watches` and workspace project features are available (and not in managed mode). Watches are indexed in `indexAutofixPrWatches` by canonical PR URL key (`host/owner/repo#number`, case-insensitive) and exposed through `AutofixPrContext` alongside:
 
 - `canStartInWorkspace(workspaceCwd)` — enforces workspace trust and `lockedWorkspaceCwd`.
-- `startInNewSession({ prompt, workspaceCwd, sessionTitle })` — creates a dedicated session in the target workspace and submits the `/autofix-pr` prompt once the cleared draft commits.
+- `isWatchStateReady(workspaceCwd)` — requires watch state to be loaded without error (and present for the target workspace) before showing unwatched `Autofix` start triggers.
+- `startInNewSession({ prompt, workspaceCwd, sessionTitle })` — creates a dedicated session in the target workspace, submits the `/autofix-pr` prompt once the cleared draft commits, and disarms `pendingManualTitleRef` on every drop, timeout, supersede, or unmount path.
 - `openWatch(entry)` — resolves the watch's owning scheduled task across operable workspaces and opens that Web Shell session directly, falling back to the PR watches page when the watch is owned by an external CLI session.
 
-`AutofixPrWatchesDialog` consumes this shared watch state when mounted inside `AutofixPrContext` (triggering an immediate `reload()` on open) and retains its local `useAutofixPrWatches` fallback when rendered standalone.
+`indexAutofixPrWatches` deduplicates linked checkouts sharing a clone `root` while accumulating `needsHumanCount` and `activeCloneCount` across independent clones of the same repository. `AutofixPrWatchesDialog` consumes this shared watch state when mounted inside `AutofixPrContext` (triggering an immediate `reload()` on open) and retains its local `useAutofixPrWatches` fallback when rendered standalone.
 
 ### 2. State-Aware PR Row Action (`AutofixPrActionButton`)
 
 A single reusable action pill handles every PR state:
 
-- `merged` / `closed` PRs: renders nothing.
-- Actively watched PR (`watching` / `fixing` / `abandonedFix`): shows `Needs you (N)` (highest priority when `needsHuman.length > 0`), `Fixing`, `Retrying`, or `Watching`; clicking opens the owning session or PR watches page.
-- Idle watch (`idle`): shows `Resume`, launching `/autofix-pr resume <n>` in a new session of that workspace.
-- Unwatched, `ended`, or `unscheduled` open PR: shows `Autofix`, launching `/autofix-pr <prUrl>` in a new session of that workspace.
+- `merged` / `closed` PRs (or open PRs whose live watch phase is already `merged` / `closed`): renders nothing.
+- Actively watched PR (`watching` / `fixing` / `abandonedFix`): shows `Needs you (N)` (highest priority when `entry.needsHumanCount > 0`), `Fixing`, `Retrying`, or `Watching`; clicking opens the owning session or PR watches page.
+- Idle watch (`idle`): shows `Resume`, launching `/autofix-pr resume <n>` in a new session of the watch's own clone (`entry.workspaceCwd` taking precedence over the surface workspace).
+- Unwatched, `ended`, or `unscheduled` open PR: shows `Autofix`, launching `/autofix-pr <prUrl>` (or `/autofix-pr <prUrl> --in-place --watch` when restarting an existing `inPlace: true` watch) in a new session of the target workspace (gated on watch-state readiness when unwatched).
 
 ### 3. Integrated Surfaces
 
-1. **`SessionDetailsTooltip`** (covers sidebar session hover, chat header hover, and Sessions Overview details): renders a compact `AutofixPrActionButton` on the right of each open PR row, closes the popover without restoring focus to the anchor row when triggered, and hides actions on `readOnly` (untrusted workspace) rows.
+1. **`SessionDetailsTooltip`** (covers sidebar session hover, chat header hover, and Sessions Overview details): renders a compact `AutofixPrActionButton` on the right of each open PR row, closes the popover without restoring focus to the anchor row when triggered, pins click-opened focus onto Copy Session ID, and hides actions on `readOnly` (untrusted workspace) rows.
 2. **`GitHubPrsDialog`** (`GitDialog` PRs tab): splits each row into the existing GitHub link (`<a>`) and a right-aligned `AutofixPrActionButton`, highlighting PRs with `checks === 'failing'` or `reviewDecision === 'changes_requested'`, and closes `GitDialog` on click.
 3. **`GitDialog` Commit & Create PR follow-up**: renders a prominent `AutofixPrActionButton` directly inside the post-creation success banner once a PR is created, letting users hand a brand-new PR to `/autofix-pr` in one click and closing `GitDialog`.
-4. **`AutofixPrWatchesDialog` + `StartAutofixPrDialog`**: adds a **Watch a PR** button in the page header and empty state that opens a modal dialog with workspace selection, open-PR picker (marking already-watched PRs), PR URL / `#number` input, mode (`watch` vs `--once`), interval (`--every`), reply toggle (`--no-reply`), and optional instructions. Adds one-click **Resume watch**, **Restart watch**, and **Clean up** buttons on cards where appropriate while preserving the `outsideDaemon` notice for watches actively running in an external CLI session.
+4. **`AutofixPrWatchesDialog` + `StartAutofixPrDialog`**: adds a **Watch a PR** button in the page header and empty state whenever at least one operable trusted workspace exists, opening a modal dialog (`dismissible={!submitting}`) with workspace selection (resetting PR input on workspace switch), open-PR picker (marking already-watched PRs), PR URL / `#number` input (stripping GitHub PR sub-paths such as `/files` or `/checks`), mode (`watch` vs `--once`), CLI-validated check interval (`--every` restricted to `1, 2, 5, 10, 15, 30, 60` minutes), reply toggle (`--no-reply`), and optional instructions. Adds one-click **Resume watch**, **Restart watch** (preserving `--in-place --watch` for `inPlace: true` watches), and **Clean up** buttons on cards with global in-flight action disabling across cards, while preserving the `outsideDaemon` notice for watches actively running in an external CLI session.
 5. **Sidebar navigation badge, `SessionPrBadge` indicator, and session overflow (`...`) menu**:
    - The `PR watches` sidebar nav item shows an attention count pill (or corner dot when collapsed / in rail layout) whenever any non-ended watch has pending `needsHuman` items, and an active watch count pill/dot otherwise.
-   - `SessionPrBadge` displays a subtle status dot (green `watching`, pulsing primary `fixing`, amber `retrying` / `needsHuman`) alongside its accessible status suffix for open bound PRs without altering the compact pill text.
+   - `SessionPrBadge` displays a subtle status dot (green `watching`, pulsing blue `--status-running-fg` `fixing`, amber `retrying` / `needsHuman`) alongside its accessible `aria-label` / `title` status suffix for open bound PRs without altering the compact pill text.
    - The session `...` overflow menu exposes state-aware items (`Autofix PR #<n>`, `Resume autofix PR #<n>`, or `PR #<n> watch (<status>)`) for each open bound PR so touch, mobile, and keyboard users do not depend on hover.
 
 ## Design Decisions & Rationale

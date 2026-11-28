@@ -479,7 +479,8 @@ export const RU_PART3: Record<
   'autofixPr.dialog.modeWatch': 'Постоянное наблюдение',
   'autofixPr.dialog.modeOnce': 'Один проход (--once)',
   'autofixPr.dialog.every': 'Интервал проверки (мин)',
-  'autofixPr.dialog.everyInvalid': 'Введите положительное целое число минут.',
+  'autofixPr.dialog.everyInvalid':
+    'Выберите одно из допустимых значений в минутах: 1, 2, 5, 10, 15, 30 или 60.',
   'autofixPr.dialog.reply': 'Публиковать ответы в PR',
   'autofixPr.dialog.instructions': 'Дополнительные инструкции (необязательно)',
   'autofixPr.dialog.instructionsPlaceholder':
