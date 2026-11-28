@@ -277,6 +277,11 @@ export interface ToolCallResponseInfo {
   modelOverride?: string;
   terminateTurn?: boolean;
   /**
+   * A tool hook returned `continue: false` without blocking: the turn ends
+   * after this batch, and this is the reason shown to the user.
+   */
+  hookStopReason?: string;
+  /**
    * Set only when the call was denied because it needed user approval and the
    * session had no way to ask for it (non-interactive mode). Headless front
    * ends use it to suggest an approval mode; every other denial, such as a
@@ -539,6 +544,16 @@ export enum CompressionStatus {
    * apart from model output quality failures.
    */
   COMPRESSION_FAILED_API_ERROR,
+
+  /**
+   * The compression request could not leave the summary a usable output
+   * budget in the receiving model's window, even after its text was
+   * truncated (#9455).
+   * Either it was refused before it was sent, or the provider rejected it for
+   * context length and no smaller request could be built, or the one retry
+   * was rejected for context length too.
+   */
+  COMPRESSION_FAILED_INPUT_TOO_LARGE,
 }
 
 export function isCompressionFailureStatus(
@@ -549,7 +564,8 @@ export function isCompressionFailureStatus(
     status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
     status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
     status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED ||
-    status === CompressionStatus.COMPRESSION_FAILED_API_ERROR
+    status === CompressionStatus.COMPRESSION_FAILED_API_ERROR ||
+    status === CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE
   );
 }
 
@@ -625,6 +641,7 @@ export type ServerLlmCitationEvent = {
 export type ServerLlmHookSystemMessageEvent = {
   type: LlmEventType.HookSystemMessage;
   value: string;
+  isStopReason?: true;
 };
 
 export type ServerLlmGoalSettlementFailedEvent = {
@@ -678,6 +695,17 @@ export type ServerLlmStreamEvent =
   | ServerLlmUserCancelledEvent
   | ServerLlmSessionTokenLimitExceededEvent
   | ServerLlmRetryEvent;
+
+/**
+ * Whether a stream event restarts the current attempt from scratch: the
+ * failed attempt's partial output is discarded and streamed again.
+ */
+export function isAttemptRestartEvent(event: ServerLlmStreamEvent): boolean {
+  return (
+    event.type === LlmEventType.Retry ||
+    event.type === LlmEventType.ModelFallback
+  );
+}
 
 /** @deprecated Use `ServerLlmRetryEvent`; retained until a future major release. */
 export type ServerGeminiRetryEvent = ServerLlmRetryEvent;
@@ -802,6 +830,7 @@ export class Turn {
     private readonly isExplicitRetry?: boolean,
     private readonly isSessionTurn?: boolean,
     private readonly ledgerTurnKey?: string,
+    private readonly retractToolCallsOnRetry?: boolean,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -834,6 +863,9 @@ export class Turn {
         ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
         ...(this.retractDeliveredOutputOnRetry
           ? { retractDeliveredOutputOnRetry: true }
+          : {}),
+        ...(this.retractToolCallsOnRetry
+          ? { retractToolCallsOnRetry: true }
           : {}),
         ...(this.isExplicitRetry ? { isExplicitRetry: true } : {}),
         ...(this.ledgerTurnKey ? { ledgerTurnKey: this.ledgerTurnKey } : {}),

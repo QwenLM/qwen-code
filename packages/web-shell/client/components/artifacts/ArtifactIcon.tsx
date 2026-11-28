@@ -21,7 +21,7 @@ import {
   isAudioArtifact,
   normalizeArtifactMimeType,
   pathExtension,
-} from './artifactUtils';
+} from './artifact-mime';
 
 export type ArtifactIconKind =
   | 'csv'

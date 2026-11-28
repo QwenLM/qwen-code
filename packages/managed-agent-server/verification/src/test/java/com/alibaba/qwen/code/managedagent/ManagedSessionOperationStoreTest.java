@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
@@ -10,11 +11,10 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
@@ -229,6 +229,10 @@ class ManagedSessionOperationStoreTest {
                         .agentId("qwen-code")
                         .selection(new WorkspaceSelection("workspace", "."))
                         .build()).sessionId());
+        // D3: these witness v1 termination mechanics, so the Session rides
+        // external-files (ordinary files is v2 now).
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES, TENANT, sessionId);
         String operationId = store.beginWorkspaceLifecycle(TENANT, sessionId,
                 OperationKind.CLOSE, "owner", "a".repeat(64), "close",
                 "digest", true, 1).operation().operationId();
@@ -284,6 +288,10 @@ class ManagedSessionOperationStoreTest {
                         .agentId("qwen-code")
                         .selection(new WorkspaceSelection("workspace", "."))
                         .build()).sessionId());
+        // D3: these witness v1 termination mechanics, so the Session rides
+        // external-files (ordinary files is v2 now).
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES, TENANT, sessionId);
         String operationId = store.beginWorkspaceLifecycle(TENANT, sessionId,
                 OperationKind.CLOSE, "owner", "a".repeat(64), "close",
                 "digest", true, 1).operation().operationId();
@@ -453,13 +461,12 @@ class ManagedSessionOperationStoreTest {
         ManagedAgentStore store = store();
         String sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest", "qwen-code",
                 null, null, List.of(), null).sessionId();
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
-        String target = ManagedSchemaKeys.key(sessionId);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind, tenant_id, session_id,"
-                        + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, claim_until,"
-                        + " gmt_create, gmt_modified) VALUES (?, ?, 'background', 'WORKSPACE_RECOVERY', ?, ?, 'SESSION', ?,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id, operation_kind, tenant_id, session_id,"
+                        + " target_kind, target_id, request_digest, request_json, state, phase, delivery_state, claim_until,"
+                        + " gmt_create, gmt_modified) VALUES (?, 'SESSION', ?, 'background', 'WORKSPACE_RECOVERY', ?, ?, 'SESSION', ?,"
                         + " 'digest', '{}', 'RUNNING', 'CAPTURING', 'LEASED', ?, 0, 0)",
-                ManagedSchemaKeys.key("background"), scope, TENANT, sessionId, target, new java.sql.Timestamp(0));
+                ManagedIdentityRefs.operationRef("WORKSPACE_RECOVERY", TENANT, "SESSION", sessionId, sessionId, "background"),
+                sessionId, TENANT, sessionId, sessionId, new java.sql.Timestamp(0));
         assertThat(targets(store)).isEmpty();
         assertThat(store.findOperation(TENANT, sessionId, "background")).isEmpty();
         assertThat(store.claimOperation(TENANT, sessionId, "background", "worker", Duration.ofMinutes(1))).isEmpty();

@@ -7,6 +7,7 @@
 import {
   EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
   DaemonClient,
+  DaemonHttpError,
   type GoalControlRequest,
   type GoalSnapshotV2,
   type GoalStateResponse,
@@ -19,6 +20,7 @@ import type {
   DaemonDirectoryListing,
   DaemonFileStat,
   DaemonGoal,
+  DaemonInputHistoryKind,
   DaemonScheduledTask,
   DaemonWorkspaceActions,
   DaemonWorkspaceDirectoryPickerResult,
@@ -925,16 +927,35 @@ export function createDaemonWorkspaceActions({
         'Create scheduled task timed out',
       );
       if (!res.ok) {
-        throw new Error(await readDaemonError(res, `POST ${path}`));
+        const body = (await res
+          .clone()
+          .json()
+          .catch(() => undefined)) as unknown;
+        throw new DaemonHttpError(
+          res.status,
+          body,
+          await readDaemonError(res, `POST ${path}`),
+        );
       }
       return (await res.json()) as DaemonScheduledTask;
     },
 
-    async updateScheduledTask(id, patch, workspaceId) {
-      requireClient(getClient, 'Update scheduled task failed');
+    async assertScheduledTaskOwnerSelection(expectedSessionId) {
+      await requireScheduledOwnerSelection(
+        requireClient(getClient, 'Scheduled task owner selection failed'),
+        expectedSessionId,
+      );
+    },
+
+    async updateScheduledTask(id, patch, workspaceId, expectedSessionId) {
+      await requireScheduledOwnerSelection(
+        requireClient(getClient, 'Update scheduled task failed'),
+        expectedSessionId,
+      );
       const path = scheduledTasksPath(
         workspaceId,
         `/${encodeURIComponent(id)}`,
+        expectedSessionId,
       );
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
@@ -951,11 +972,15 @@ export function createDaemonWorkspaceActions({
       return (await res.json()) as DaemonScheduledTask;
     },
 
-    async runScheduledTask(id, workspaceId) {
-      requireClient(getClient, 'Run scheduled task failed');
+    async runScheduledTask(id, workspaceId, expectedSessionId) {
+      await requireScheduledOwnerSelection(
+        requireClient(getClient, 'Run scheduled task failed'),
+        expectedSessionId,
+      );
       const path = scheduledTasksPath(
         workspaceId,
         `/${encodeURIComponent(id)}/run`,
+        expectedSessionId,
       );
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
@@ -966,16 +991,28 @@ export function createDaemonWorkspaceActions({
         'Run scheduled task timed out',
       );
       if (!res.ok) {
-        throw new Error(await readDaemonError(res, `POST ${path}`));
+        const body = (await res
+          .clone()
+          .json()
+          .catch(() => undefined)) as unknown;
+        throw new DaemonHttpError(
+          res.status,
+          body,
+          await readDaemonError(res, `POST ${path}`),
+        );
       }
       return (await res.json()) as DaemonScheduledTask;
     },
 
-    async deleteScheduledTask(id, workspaceId) {
-      requireClient(getClient, 'Delete scheduled task failed');
+    async deleteScheduledTask(id, workspaceId, expectedSessionId) {
+      await requireScheduledOwnerSelection(
+        requireClient(getClient, 'Delete scheduled task failed'),
+        expectedSessionId,
+      );
       const path = scheduledTasksPath(
         workspaceId,
         `/${encodeURIComponent(id)}`,
+        expectedSessionId,
       );
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
@@ -1017,6 +1054,67 @@ export function createDaemonWorkspaceActions({
           ? { unreadable: data.unreadable }
           : {}),
       };
+    },
+
+    async loadInputHistory({ kind, limit, workspaceId, ifNoneMatch }) {
+      requireClient(getClient, 'Load input history failed');
+      const path = workspaceId
+        ? `/workspaces/${encodeURIComponent(workspaceId)}/input-history`
+        : '/workspace/input-history';
+      const url = createDaemonRequestUrl(baseUrl, path);
+      url.searchParams.set('kind', kind);
+      if (limit !== undefined) {
+        url.searchParams.set('limit', String(limit));
+      }
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      if (ifNoneMatch) headers['If-None-Match'] = ifNoneMatch;
+      const res = await withActionTimeout(
+        requestRest(url, { headers }),
+        'Load input history timed out',
+      );
+      if (res.status === 304) {
+        return { notModified: true };
+      }
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, `GET ${path}`));
+      }
+      const data = (await res.json()) as {
+        kind?: unknown;
+        entries?: unknown;
+        revision?: unknown;
+      };
+      const resolvedKind: DaemonInputHistoryKind =
+        data.kind === 'shell' ? 'shell' : kind;
+      return {
+        notModified: false,
+        kind: resolvedKind,
+        entries: Array.isArray(data.entries)
+          ? data.entries.filter(
+              (item): item is string => typeof item === 'string',
+            )
+          : [],
+        revision: typeof data.revision === 'string' ? data.revision : '',
+      };
+    },
+
+    async recordInputHistory({ kind, entry, workspaceId }) {
+      requireClient(getClient, 'Record input history failed');
+      const path = workspaceId
+        ? `/workspaces/${encodeURIComponent(workspaceId)}/input-history`
+        : '/workspace/input-history';
+      const url = createDaemonRequestUrl(baseUrl, path);
+      const res = await withActionTimeout(
+        requestRest(url, {
+          method: 'POST',
+          headers: createDaemonJsonHeaders(token),
+          body: JSON.stringify({ kind, entry }),
+        }),
+        'Record input history timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, `POST ${path}`));
+      }
     },
 
     // Goals. `GET /goals` is REST-only (like /scheduled-tasks) and not on the
@@ -1441,6 +1539,20 @@ export function createDaemonWorkspaceActions({
         options?.timeoutMs,
       );
     },
+
+    async artifactLibrary(workspaceSelector, options) {
+      const client = requireClient(getClient, 'Load artifact library failed');
+      return client
+        .workspaceByCwd(workspaceSelector)
+        .artifactLibrary({ signal: options?.signal });
+    },
+
+    artifactLibraryStream(workspaceSelector, options) {
+      const client = requireClient(getClient, 'Stream artifact library failed');
+      return client
+        .workspaceByCwd(workspaceSelector)
+        .artifactLibraryStream({ signal: options?.signal });
+    },
   };
 }
 
@@ -1455,6 +1567,19 @@ function requireClient(
     throw new Error(`${action}: DaemonClient is not connected`);
   }
   return client;
+}
+
+async function requireScheduledOwnerSelection(
+  client: DaemonClient,
+  expectedSessionId: string | null | undefined,
+): Promise<void> {
+  if (expectedSessionId === undefined) return;
+  const capabilities = await client.capabilities();
+  if (!capabilities.features.includes('scheduled_task_owner_selection')) {
+    throw new Error(
+      'This daemon cannot safely select a scheduled task by owner. Upgrade it before using expectedSessionId.',
+    );
+  }
 }
 
 function requireWorkspaceCwd(
@@ -1481,11 +1606,21 @@ function requireWorkspaceClient(
 // primary surface. `suffix` appends the task id (and `/run`) for item routes.
 // The aggregated view passes the primary workspace as `undefined`, so the
 // primary keeps its trust-free unqualified surface while secondaries use the
-// (trust-checked) qualified one.
-function scheduledTasksPath(workspaceId?: string, suffix = ''): string {
-  return workspaceId
+// (trust-checked) qualified one; the primary still applies the server-side
+// runtime trust gate.
+function scheduledTasksPath(
+  workspaceId?: string,
+  suffix = '',
+  expectedSessionId?: string | null,
+): string {
+  const path = workspaceId
     ? `/workspaces/${encodeURIComponent(workspaceId)}/scheduled-tasks${suffix}`
     : `/scheduled-tasks${suffix}`;
+  if (expectedSessionId === undefined) return path;
+  const query = new URLSearchParams({
+    expectedSessionId: expectedSessionId ?? '',
+  });
+  return `${path}?${query.toString()}`;
 }
 
 function createDaemonHeaders(token: string | undefined): HeadersInit {

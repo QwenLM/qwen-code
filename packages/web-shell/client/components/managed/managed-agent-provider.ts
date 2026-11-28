@@ -352,6 +352,22 @@ export interface ManagedAgentCommandOptions extends ManagedAgentRequestOptions {
   idempotencyKey: string;
 }
 
+export interface ManagedAgentOperationAdmission {
+  readonly sessionId: string;
+  readonly operationId: string;
+  readonly turnId?: string;
+}
+
+export interface ManagedAgentOperationSettlement
+  extends ManagedAgentOperationAdmission {
+  readonly status: components['schemas']['WebShellOperation']['status'];
+}
+
+export interface ManagedAgentOperationObserver {
+  readonly onAccepted?: (admission: ManagedAgentOperationAdmission) => void;
+  readonly onSettlement?: (settlement: ManagedAgentOperationSettlement) => void;
+}
+
 export type ManagedContextCompressionOperation =
   components['schemas']['WebShellContextCompressionOperation'];
 export type ManagedTask = components['schemas']['WebShellTask'];
@@ -641,7 +657,7 @@ export interface ManagedAgentProvider {
     respond(
       action: ManagedAgentPendingAction,
       response: ManagedAgentActionResponse,
-      options: ManagedAgentCommandOptions,
+      options: ManagedAgentCommandOptions & ManagedAgentOperationObserver,
     ): Promise<void>;
   };
   readonly toolResults?: ManagedToolResultReader;

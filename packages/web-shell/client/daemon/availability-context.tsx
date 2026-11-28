@@ -1,25 +1,25 @@
-import { createContext, useContext, useSyncExternalStore } from 'react';
+import type { Context } from 'react';
+import {
+  ServiceAvailabilityContext,
+  useServiceAvailability,
+  useServiceAvailabilityController,
+} from '../utils/service-availability.js';
 import type {
   DaemonAvailability,
   DaemonAvailabilityState,
 } from './availability.js';
 
-export const DaemonAvailabilityContext = createContext<
-  DaemonAvailability | undefined
->(undefined);
+export const DaemonAvailabilityContext =
+  ServiceAvailabilityContext as unknown as Context<
+    DaemonAvailability | undefined
+  >;
 
-const subscribe = () => () => {};
-const available = (): DaemonAvailabilityState => 'available';
-
-export function useDaemonAvailabilityController() {
-  return useContext(DaemonAvailabilityContext);
+export function useDaemonAvailabilityController():
+  | DaemonAvailability
+  | undefined {
+  return useServiceAvailabilityController() as DaemonAvailability | undefined;
 }
 
 export function useDaemonAvailability(): DaemonAvailabilityState {
-  const controller = useDaemonAvailabilityController();
-  return useSyncExternalStore(
-    controller?.subscribe ?? subscribe,
-    controller?.getSnapshot ?? available,
-    available,
-  );
+  return useServiceAvailability();
 }

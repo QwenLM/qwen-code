@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="740" height="71" viewBox="0 0 740 71">
+  <style>
+    text { font-family: Consolas, "Courier New", monospace; font-size: 14px; dominant-baseline: text-before-edge; white-space: pre; }
+  </style>
+  <rect width="740" height="71" fill="#000000" />
+  <g transform="translate(10, 10)">
+    <text x="0" y="19" fill="#ffffff" textLength="27" lengthAdjust="spacingAndGlyphs">⎿  </text>
+    <text x="27" y="19" fill="#d93025" textLength="396" lengthAdjust="spacingAndGlyphs">PreToolUse:Bash hook returned blocking error</text>
+    <text x="0" y="36" fill="#ffffff" textLength="27" lengthAdjust="spacingAndGlyphs">⎿  </text>
+    <text x="27" y="36" fill="#d93025" textLength="198" lengthAdjust="spacingAndGlyphs">Retained blocking body</text>
+  </g>
+</svg>

@@ -48,7 +48,9 @@ export const rememberCommand: SlashCommand = {
     if (useManagedMemory) {
       return {
         type: 'submit_prompt',
-        content: buildManagedRememberPrompt(fact, config.getProjectRoot()),
+        content: buildManagedRememberPrompt(fact, config.getProjectRoot(), {
+          projectMemoryOwner: config.getProjectMemoryOwner?.(),
+        }),
       };
     }
 

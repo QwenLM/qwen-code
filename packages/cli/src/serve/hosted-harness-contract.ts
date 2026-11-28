@@ -18,6 +18,7 @@ export const HOSTED_HARNESS_CAPABILITY_DIGEST_ENV =
 export const HOSTED_LIFECYCLE_V2_PROFILES_ENV =
   'QWEN_HOSTED_LIFECYCLE_V2_PROFILES';
 const LIFECYCLE_V2_PROFILES = [
+  'hosted-workspace-files/1',
   'hosted-workspace-shell/1',
   'hosted-workspace-shell/3',
   'hosted-workspace-shell/4',
@@ -42,7 +43,8 @@ export function createHostedHarnessContract(
   capabilityDigest: string,
   bootId: string = randomUUID(),
   lifecycleV2Profiles: readonly string[] = (
-    process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'
+    process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ??
+    'hosted-workspace-files/1,hosted-workspace-shell/1'
   )
     .split(',')
     .filter(Boolean),
@@ -115,6 +117,9 @@ export function createHostedHarnessContract(
       // GET /session/:id/events writes keepalive comments while no event
       // is committed, so a client may bound a stream by its silence.
       'event-keepalive/1',
+      // POST /events:ingest on the Session Store delivers an admitted
+      // Turn's events when its submission asks for it.
+      'event-ingest/1',
       'web-fetch/1',
       HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
       HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,

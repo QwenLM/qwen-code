@@ -797,6 +797,7 @@ export default {
   'Debug Keystroke Logging': '調試按鍵記錄',
   'Language: UI': '語言：界面',
   'Language: Model': '語言：模型',
+  'Language: Display Translation': '語言：顯示翻譯',
   'Output Format': '輸出格式',
   'Hide Window Title': '隱藏窗口標題',
   'Show Status in Title': '在標題中顯示狀態',
@@ -815,7 +816,6 @@ export default {
   'Screen Reader Mode': '屏幕閱讀器模式',
   'Max Session Turns': '最大會話輪次',
   'Skip Next Speaker Check': '跳過下一個說話者檢查',
-  'Skip Loop Detection': '跳過循環檢測',
   'Skip Startup Context': '跳過啟動上下文',
   'Enable OpenAI Logging': '啟用 OpenAI 日誌',
   'OpenAI Logging Directory': 'OpenAI 日誌目錄',
@@ -1103,7 +1103,10 @@ export default {
     '您的終端已配置為支持多行輸入（Shift+Enter 和 Ctrl+Enter）的最佳體驗。',
   'Manage Qwen Code hooks': '管理 Qwen Code Hook',
   'List all configured hooks': '列出所有已配置的 Hook',
+  'No hooks were loaded.': '未載入任何 Hook。',
+  'skipped (unsupported args)': '已略過（不支援 args）',
   Hooks: 'Hook',
+  'A hook stopped the turn: {{reason}}': 'Hook 已結束本輪對話：{{reason}}',
   'Loading hooks...': '正在加載 Hook...',
   'Error loading hooks:': '加載 Hook 出錯：',
   'Press Escape to close': '按 Escape 關閉',
@@ -1583,6 +1586,8 @@ export default {
     '由於壓縮摘要被截斷，無法壓縮聊天歷史。',
   'Could not compress chat history due to an API error.':
     '由於 API 錯誤，無法壓縮聊天歷史。',
+  'Could not compress chat history because it is too large for the context window.':
+    '聊天歷史過大，超出上下文窗口，無法壓縮。',
   'Configuration is not available.': '配置不可用。',
   'Please provide at least one path to add.': '請提供至少一個要添加的路徑。',
   'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.':
@@ -1728,6 +1733,18 @@ export default {
     '當前語音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 設置語音模型。',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     '當前視覺模型：{{visionModel}}\n使用 "/model --vision <model-id>" 設置視覺橋接模型。',
+  'Set the vision bridge timeout in seconds (use with --vision)':
+    '設置視覺橋接逾時（秒，搭配 --vision 使用）',
+  '--timeout can only be used with --vision.':
+    '--timeout 只能與 --vision 一起使用。',
+  'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
+    '無效的 --timeout 值 "{{value}}"。請使用正整數秒數，例如 60、60s 或 90000ms。',
+  'Vision bridge timeout: {{timeout}}': '視覺橋接逾時：{{timeout}}',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    '已儲存視覺橋接逾時 {{timeout}}{{scope}}。較高優先順序的設定使實際逾時為 {{effectiveTimeout}}。',
+  'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
+    '視覺橋接逾時：{{timeout}}\n使用 "/model --vision --timeout <seconds>" 修改。',
+  '{{timeout}} (default)': '{{timeout}}（預設）',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     '當前圖像模型：{{imageModel}}\n使用 "/model --image <model-id>" 設置圖像生成模型。',
   'Compaction model override cleared': '壓縮模型覆蓋已清除',
@@ -2120,6 +2137,8 @@ export default {
     '運行 /context detail 查看詳細分解。',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     '顯示上下文窗口使用情況分解。輸入 "/context detail" 查看詳細分解。',
+  'Save the context window for the current model.':
+    '儲存目前模型的上下文窗口。',
   'body loaded': '內容已加載',
   memory: '記憶',
   '{{region}} configuration updated successfully.': '{{region}} 配置更新成功。',
@@ -2663,6 +2682,8 @@ export default {
     'Qwen {{plan}} 已啟用 · 用量包含在你的方案中',
   'Recommended models · provider list unavailable, showing built-ins':
     '推薦模型 · 無法取得服務供應商清單，顯示內建模型',
+  'Could not list models. Enter model IDs manually.':
+    '無法取得模型清單，請手動輸入模型 ID。',
   'Sign out': '登出',
   'Signed in as {{email}}': '已登入 {{email}}',
   'Signed in successfully · {{email}}': '登入成功 · {{email}}',

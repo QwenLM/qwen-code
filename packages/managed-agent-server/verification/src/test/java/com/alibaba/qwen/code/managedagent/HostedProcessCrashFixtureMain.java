@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
@@ -68,11 +67,10 @@ public final class HostedProcessCrashFixtureMain {
                     + ");\nprocess.argv[1] = " + mapper.writeValueAsString(cliPath.toString())
                     + ";\nawait import(" + mapper.writeValueAsString(cliPath.toUri().toString()) + ");\n");
             arguments.addAll(List.of(
-                    "--server.port=" + (settlement ? args[5] : "0"),
+                    "--server.port=" + (brokerOnly ? args[7] : args[5]),
                     "--qwen.managed-agent.harness.enabled=" + settlement,
                     "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
                     "--qwen.managed-agent.runtime-broker.enabled=true",
-                    "--qwen.managed-agent.runtime-broker.port=" + (brokerOnly ? args[7] : "0"),
                     "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
                     "--qwen.managed-agent.runtime-broker.durable-local-process=" + workspaceRecovery,
                     "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
@@ -129,7 +127,7 @@ public final class HostedProcessCrashFixtureMain {
         if (brokerOnly) {
             Path ready = root.resolve("broker-ready.tmp");
             mapper.writeValue(ready.toFile(), Map.of(
-                    "brokerUrl", spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri().toString()));
+                    "brokerUrl", "http://127.0.0.1:" + spring.getWebServer().getPort()));
             Files.move(ready, root.resolve("broker-ready.json"), StandardCopyOption.ATOMIC_MOVE,
                     StandardCopyOption.REPLACE_EXISTING);
             return;
@@ -170,7 +168,7 @@ public final class HostedProcessCrashFixtureMain {
                 "directory", workspace.resolve("child").toString(), "fault", fault,
                 "storeUrl", "http://127.0.0.1:" + spring.getWebServer().getPort(),
                 "brokerUrl", settlement ? "http://127.0.0.1:" + args[7]
-                        : spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri().toString()));
+                        : "http://127.0.0.1:" + spring.getWebServer().getPort()));
         Files.move(ready, root.resolve("ready.json"), StandardCopyOption.ATOMIC_MOVE,
                 StandardCopyOption.REPLACE_EXISTING);
     }

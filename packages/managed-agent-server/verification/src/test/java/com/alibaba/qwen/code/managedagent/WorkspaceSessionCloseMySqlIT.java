@@ -12,7 +12,6 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -79,18 +78,16 @@ class WorkspaceSessionCloseMySqlIT {
     }
 
     private void seedAction(String tenant, String session, String action, String state, String options) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,record_kind,"
+        jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,record_kind,"
                         + "domain,record_id,action_id,revision,action_version,state,options_json,gmt_create,first_sequence)"
-                        + " VALUES (?,?,?,?,'ACTION','action',?,?,1,1,?,?,0,1)",
-                scope, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "ACTION", action),
+                        + " VALUES (?,?,'ACTION','action',?,?,1,1,?,?,0,1)",
                 tenant, session, action, action, state, options);
     }
 
     @Test
     void approvalExpiryUsesDatabaseTimeAndRetainsItsHistory() {
         var store = store(Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
-        var tenant = "mysql-close-expiry-" + UUID.randomUUID();
+        var tenant = UUID.randomUUID().toString();
         var session = create(store, tenant);
         var action = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
         long now = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW + "", java.sql.Timestamp.class).getTime();
@@ -113,7 +110,7 @@ class WorkspaceSessionCloseMySqlIT {
         var first = store(Clock.systemUTC());
         var second = store(Clock.systemUTC());
         var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
-        var tenant = "mysql-close-writer-" + UUID.randomUUID();
+        var tenant = UUID.randomUUID().toString();
         var session = create(first, tenant);
         try (var pool = Executors.newSingleThreadExecutor()) {
             var started = new CountDownLatch(1);
@@ -152,7 +149,7 @@ class WorkspaceSessionCloseMySqlIT {
         var first = store(Clock.systemUTC());
         var second = store(Clock.systemUTC());
         var actions = new JdbcManagedActionStore(jdbc, second);
-        var tenant = "mysql-close-admission-" + UUID.randomUUID();
+        var tenant = UUID.randomUUID().toString();
         var session = create(first, tenant);
         String action = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
         seedAction(tenant, session, action, "cancelled", "{}");
@@ -197,7 +194,7 @@ class WorkspaceSessionCloseMySqlIT {
         transactions.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         var store = store(Clock.systemUTC());
         var actions = new JdbcManagedActionStore(jdbc, store);
-        var tenant = "mysql-close-replay-" + UUID.randomUUID();
+        var tenant = UUID.randomUUID().toString();
         var session = create(store, tenant);
         var action = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
         long now = System.currentTimeMillis();
@@ -241,7 +238,7 @@ class WorkspaceSessionCloseMySqlIT {
     void expiredCloseClaimCannotRenewOrCompleteAndAnotherInstanceTakesOverUsingDatabaseTime() {
         var first = store(Clock.fixed(Instant.parse("2000-01-01T00:00:00Z"), ZoneOffset.UTC));
         var second = store(Clock.fixed(Instant.parse("2099-01-01T00:00:00Z"), ZoneOffset.UTC));
-        var tenant = "mysql-close-claim-" + UUID.randomUUID();
+        var tenant = UUID.randomUUID().toString();
         var session = create(first, tenant);
         OperationAdmission admitted = transaction(() -> first.beginWorkspaceClose(tenant, session, OWNER,
                 ACTOR_DIGEST, "close", "digest", true));
@@ -267,7 +264,7 @@ class WorkspaceSessionCloseMySqlIT {
         var first = store(Clock.systemUTC());
         var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         var otherJournal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(new ManagedSchemaJdbcTemplate(source));
-        var tenant = "mysql-close-renew-" + UUID.randomUUID();
+        var tenant = UUID.randomUUID().toString();
         var session = create(first, tenant);
         long generation = transaction(() -> journal.acquireWriter(tenant, session, TOKEN,
                 new AcquireWriterRequest("workspace", "original", 60_000L))).writerGeneration();

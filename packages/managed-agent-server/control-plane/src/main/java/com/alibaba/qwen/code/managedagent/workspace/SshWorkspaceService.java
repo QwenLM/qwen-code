@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.workspace;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.AcceptanceEvidence;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.SshWorkspaceFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
@@ -14,11 +15,16 @@ import com.alibaba.qwen.code.managedagent.settings.SshSettings;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
+import com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection;
 import com.alibaba.qwen.code.runtimebroker.spi.SshConnections;
+import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeAccess;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeNode;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeStorage;
 import jakarta.annotation.PreDestroy;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -42,8 +48,8 @@ import java.util.concurrent.TimeUnit;
  */
 @Service
 public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence,
-        com.alibaba.qwen.code.managedagent.contracts.workspace.SshWorkspaceFiles,
-        com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeAccess {
+        SshWorkspaceFiles,
+        SshRuntimeAccess {
     private final ManagedAgentSettings properties;
     private final SshWorkspaceStore store;
     private final Clock clock;
@@ -58,16 +64,16 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence,
         this(properties, store, connections, Clock.systemUTC());
     }
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public SshWorkspaceService(ManagedAgentSettings properties, SshWorkspaceStore store,
-            @org.springframework.lang.Nullable SshConnections connections, @Qualifier("managedAgentClock") Clock clock) {
+            @Nullable SshConnections connections, @Qualifier("managedAgentClock") Clock clock) {
         this.properties = properties;
         this.store = store;
         this.connections = connections;
         this.clock = clock;
         Map<String, SshSettings.Node> catalog = new LinkedHashMap<>();
-        if (com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection.from(properties)
-                .includes(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS)) {
+        if (RuntimeBackendSelection.from(properties)
+                .includes(RuntimeProviderKinds.SSH_PROCESS)) {
             for (var node : properties.getRuntimeBroker().getSsh().getNodes()) {
                 if (catalog.putIfAbsent(node.nodeId(), node) != null) {
                     throw new IllegalArgumentException("SSH node IDs must be unique");

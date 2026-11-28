@@ -75,6 +75,7 @@ describe('isCompressionFailureStatus', () => {
       CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
       CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
       CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+      CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
     ]) {
       expect(isCompressionFailureStatus(status)).toBe(true);
     }
@@ -358,6 +359,43 @@ describe('Turn', () => {
         {
           promptId: 'stable-prompt-id',
           retractDeliveredOutputOnRetry: true,
+        },
+      );
+    });
+
+    it('forwards retractToolCallsOnRetry to the chat send options', async () => {
+      turn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+        } as unknown as LlmChat,
+        'prompt-id-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      await run([textChunk('Hello')]);
+
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        'test-model',
+        expect.objectContaining({
+          config: { abortSignal: expect.any(AbortSignal) },
+        }),
+        'prompt-id-1',
+        undefined,
+        {
+          retractToolCallsOnRetry: true,
         },
       );
     });

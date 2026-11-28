@@ -69,6 +69,8 @@ export default {
   Retry: 'Retry',
   'Connecting…': 'Connecting…',
   'Loading models from provider…': 'Loading models from provider…',
+  'Could not list models. Enter model IDs manually.':
+    'Could not list models. Enter model IDs manually.',
   'Recommended models · provider list unavailable, showing built-ins':
     'Recommended models · provider list unavailable, showing built-ins',
   'Generated UI': 'Generated UI',
@@ -841,6 +843,7 @@ export default {
   'Debug Keystroke Logging': 'Debug Keystroke Logging',
   'Language: UI': 'Language: UI',
   'Language: Model': 'Language: Model',
+  'Language: Display Translation': 'Language: Display Translation',
   'Output Format': 'Output Format',
   'Hide Window Title': 'Hide Window Title',
   'Show Status in Title': 'Show Status in Title',
@@ -860,7 +863,6 @@ export default {
   'Screen Reader Mode': 'Screen Reader Mode',
   'Max Session Turns': 'Max Session Turns',
   'Skip Next Speaker Check': 'Skip Next Speaker Check',
-  'Skip Loop Detection': 'Skip Loop Detection',
   'Skip Startup Context': 'Skip Startup Context',
   'Enable OpenAI Logging': 'Enable OpenAI Logging',
   'OpenAI Logging Directory': 'OpenAI Logging Directory',
@@ -1183,8 +1185,11 @@ export default {
   // ============================================================================
   'Manage Qwen Code hooks': 'Manage Qwen Code hooks',
   'List all configured hooks': 'List all configured hooks',
+  'No hooks were loaded.': 'No hooks were loaded.',
+  'skipped (unsupported args)': 'skipped (unsupported args)',
   // Hooks - Dialog
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}': 'A hook stopped the turn: {{reason}}',
   'Loading hooks...': 'Loading hooks...',
   'Error loading hooks:': 'Error loading hooks:',
   'Press Escape to close': 'Press Escape to close',
@@ -1785,6 +1790,8 @@ export default {
     'Could not compress chat history because the compression summary was truncated.',
   'Could not compress chat history due to an API error.':
     'Could not compress chat history due to an API error.',
+  'Could not compress chat history because it is too large for the context window.':
+    'Could not compress chat history because it is too large for the context window.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -2004,6 +2011,18 @@ export default {
     'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
+  'Set the vision bridge timeout in seconds (use with --vision)':
+    'Set the vision bridge timeout in seconds (use with --vision)',
+  '--timeout can only be used with --vision.':
+    '--timeout can only be used with --vision.',
+  'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
+    'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.',
+  'Vision bridge timeout: {{timeout}}': 'Vision bridge timeout: {{timeout}}',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.',
+  'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
+    'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.',
+  '{{timeout}} (default)': '{{timeout}} (default)',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
@@ -2613,6 +2632,8 @@ export default {
     'Run /context detail for per-item breakdown.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     'Show context window usage breakdown. Use "/context detail" for per-item breakdown.',
+  'Save the context window for the current model.':
+    'Save the context window for the current model.',
   'body loaded': 'body loaded',
   memory: 'memory',
   '{{region}} configuration updated successfully.':

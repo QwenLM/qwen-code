@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionKey;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -8,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Condition;
@@ -32,6 +34,23 @@ public class SessionEventHub {
         }
     }
 
+    /** The Sessions with a subscriber on this instance. */
+    public Set<SessionKey> subscribedSessions() {
+        return Set.copyOf(buffers.keySet());
+    }
+
+    /**
+     * Tells this instance's subscribers that the store holds events through
+     * {@code lastSequence}, for commits made by another instance. Subscribers
+     * re-read the store once; a tail this hub already holds is ignored.
+     */
+    public void notifyCommitted(SessionKey key, long lastSequence) {
+        SessionBuffer buffer = buffers.get(key);
+        if (buffer != null) {
+            buffer.notifyCommitted(lastSequence);
+        }
+    }
+
     public Subscription subscribe(String tenantId, String sessionId) {
         SessionKey key = new SessionKey(tenantId, sessionId);
         SessionBuffer buffer = buffers.compute(key, (ignored, current) -> {
@@ -43,6 +62,12 @@ public class SessionEventHub {
         return new Subscription(key, buffer);
     }
 
+    /**
+     * Events the buffer can serve after a cursor. {@code overflowed} means
+     * the buffer cannot serve it, because events fell out of the buffer or
+     * another instance committed events it never received, so the
+     * subscriber reads the store instead.
+     */
     public record Delivery(List<EventRecord> events, boolean overflowed) {
     }
 
@@ -50,10 +75,13 @@ public class SessionEventHub {
         private final SessionKey key;
         private final SessionBuffer buffer;
         private boolean closed;
+        // Guarded by the buffer's lock.
+        private long noticesSeen;
 
         private Subscription(SessionKey key, SessionBuffer buffer) {
             this.key = key;
             this.buffer = buffer;
+            this.noticesSeen = buffer.notices();
         }
 
         public Delivery await(long afterSequence, Duration timeout)
@@ -61,7 +89,7 @@ public class SessionEventHub {
             if (closed) {
                 return new Delivery(List.of(), false);
             }
-            return buffer.await(afterSequence, timeout);
+            return buffer.await(this, afterSequence, timeout);
         }
 
         @Override
@@ -84,6 +112,9 @@ public class SessionEventHub {
                 new TreeMap<>();
         private int references;
         private long droppedThrough;
+        // Counts store notices, so one arriving while a subscriber is not
+        // waiting is still seen by its next await.
+        private long notices;
 
         void retain() {
             lock.lock();
@@ -104,10 +135,32 @@ public class SessionEventHub {
             }
         }
 
+        long notices() {
+            lock.lock();
+            try {
+                return notices;
+            } finally {
+                lock.unlock();
+            }
+        }
+
         void publish(List<EventRecord> committed) {
             lock.lock();
             try {
                 publishLocked(committed);
+                changed.signalAll();
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        void notifyCommitted(long lastSequence) {
+            lock.lock();
+            try {
+                if (!events.isEmpty() && events.lastKey() >= lastSequence) {
+                    return;
+                }
+                notices++;
                 changed.signalAll();
             } finally {
                 lock.unlock();
@@ -123,12 +176,17 @@ public class SessionEventHub {
             }
         }
 
-        Delivery await(long afterSequence, Duration timeout)
-                throws InterruptedException {
+        Delivery await(Subscription subscription, long afterSequence,
+                Duration timeout) throws InterruptedException {
             lock.lock();
             try {
-                if (!hasAfter(afterSequence)) {
+                if (!hasAfter(afterSequence)
+                        && subscription.noticesSeen == notices) {
                     changed.awaitNanos(Math.max(1, timeout.toNanos()));
+                }
+                if (subscription.noticesSeen != notices) {
+                    subscription.noticesSeen = notices;
+                    return new Delivery(List.of(), true);
                 }
                 return deliver(afterSequence);
             } finally {
@@ -160,8 +218,5 @@ public class SessionEventHub {
                     || !events.isEmpty()
                     && events.lastKey() > sequence;
         }
-    }
-
-    private record SessionKey(String tenantId, String sessionId) {
     }
 }

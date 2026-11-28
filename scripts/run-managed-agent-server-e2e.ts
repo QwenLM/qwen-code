@@ -879,7 +879,7 @@ function readCommandRewriteDomainRecords(
 ): Array<Record<string, unknown>> {
   const rows = runMysql(
     mysqlPort,
-    `SELECT HEX(r.inline_bytes) FROM qwen_managed_agent.ma_session_record sr JOIN qwen_managed_agent.ma_resource r ON r.session_scope_key=sr.session_scope_key AND r.resource_id=sr.record_resource_id WHERE sr.session_scope_key=(SELECT session_scope_key FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}) AND sr.record_kind='DOMAIN' AND sr.domain='${domain}' ORDER BY sr.gmt_create, sr.record_key`,
+    `SELECT HEX(r.inline_bytes) FROM qwen_managed_agent.ma_session_record sr JOIN qwen_managed_agent.ma_resource r ON r.tenant_id=sr.tenant_id AND r.session_id=sr.session_id AND r.resource_id=sr.record_resource_id WHERE (sr.tenant_id, sr.session_id)=(SELECT tenant_id, session_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}) AND sr.record_kind='DOMAIN' AND sr.domain='${domain}' ORDER BY sr.gmt_create, sr.record_id`,
   );
   return rows
     ? rows
@@ -2512,6 +2512,34 @@ function sqlString(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
+// Mirrors ManagedIdentityRef.encode (v1|arity|len:percent-encoded-component)
+// so probes can match the canonical owner_ref the server writes. Unreserved
+// octets pass through; everything else percent-encodes with uppercase hex.
+function identityRef(...components: string[]): string {
+  const hex = '0123456789ABCDEF';
+  const unreserved = (b: number) =>
+    (b >= 0x61 && b <= 0x7a) ||
+    (b >= 0x41 && b <= 0x5a) ||
+    (b >= 0x30 && b <= 0x39) ||
+    b === 0x2e ||
+    b === 0x5f ||
+    b === 0x7e ||
+    b === 0x3a ||
+    b === 0x2d;
+  let encoded = `v1|${components.length}|`;
+  components.forEach((component, index) => {
+    if (index > 0) encoded += '|';
+    const bytes = Buffer.from(component, 'utf8');
+    encoded += `${bytes.length}:`;
+    for (const b of bytes) {
+      encoded += unreserved(b)
+        ? String.fromCharCode(b)
+        : `%${hex[b >> 4]}${hex[b & 0x0f]}`;
+    }
+  });
+  return encoded;
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   if (!response.ok) {
@@ -2705,6 +2733,48 @@ function assertScheduledFireWitness(
     );
   }
   return { occurrenceKey };
+}
+
+// The classifier side-query answer for a respond_in_schema tool's properties,
+// or undefined when the schema is not the block schema. Other structured side
+// queries (title, tool-use summary, next speaker) also emit respond_in_schema;
+// answering them with a block allow is schema-invalid and would silently
+// mis-answer a real feature, so a non-block schema must yield undefined — never
+// a fallback allow. Kept a top-level pure declaration so the meta-test can
+// execute it against both block and non-block schemas (an additive fallback
+// that re-creates the mis-answer reddens the non-block direction).
+function classifierBlockAnswer(
+  blockProperties: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (blockProperties === undefined || !('shouldBlock' in blockProperties)) {
+    return undefined;
+  }
+  // Answer with the stage's own schema exactly: stage 1 permits only
+  // shouldBlock (additionalProperties is false), stage 2 adds thinking/reason.
+  const answer: Record<string, unknown> = { shouldBlock: false };
+  if ('thinking' in blockProperties) answer['thinking'] = '';
+  if ('reason' in blockProperties) answer['reason'] = '';
+  return answer;
+}
+
+// The minted schedule id printed by the create tool result, matched by
+// structured call id (not a substring of the delete fixture's own argument),
+// or undefined when no matching result exists. Returning undefined — never an
+// invented id — keeps the fixture failing loud with `?? 'missing-schedule-id'`
+// instead of retiring a schedule the store never minted. Kept a top-level pure
+// declaration so the meta-test can execute it against hostile histories.
+function mintedScheduleId(
+  messages: unknown[],
+  createCallId: string,
+): string | undefined {
+  const createResultText = messages
+    .filter((message) => {
+      const entry = message as { role?: string; tool_call_id?: string };
+      return entry.role === 'tool' && entry.tool_call_id === createCallId;
+    })
+    .map((message) => JSON.stringify(message))
+    .join('');
+  return /asch_[0-9a-f]{32}/.exec(createResultText)?.[0];
 }
 
 const failoverFirstMarker = 'MANAGED_SESSION_FAILOVER_FIRST_TURN';
@@ -3035,22 +3105,16 @@ try {
             };
           }
         | undefined;
-      // Match the block schema, not the tool name: other structured side
-      // queries (title, tool-use summary, next speaker) also emit
-      // respond_in_schema, and a {shouldBlock:false} answer is schema-invalid
-      // for them — it would silently mis-answer a real feature.
+      // Match the block schema, not the tool name (classifierBlockAnswer):
+      // other structured side queries (title, tool-use summary, next speaker)
+      // also emit respond_in_schema and must not be mis-answered with a
+      // schema-invalid allow.
       const blockProperties = schemaTool?.function?.parameters?.properties;
-      if (blockProperties !== undefined && 'shouldBlock' in blockProperties) {
-        // Answer with the stage's own schema exactly: stage 1 permits only
-        // shouldBlock (additionalProperties is false), stage 2 adds
-        // thinking/reason. Extra keys fail validation and report the
-        // classifier unavailable, denying cron_create unreviewed.
-        const answer: Record<string, unknown> = { shouldBlock: false };
-        if ('thinking' in blockProperties) answer['thinking'] = '';
-        if ('reason' in blockProperties) answer['reason'] = '';
+      const blockAnswer = classifierBlockAnswer(blockProperties);
+      if (blockAnswer !== undefined) {
         return {
           toolCalls: [
-            fakeToolCall('respond_in_schema', answer, 'loop-classifier'),
+            fakeToolCall('respond_in_schema', blockAnswer, 'loop-classifier'),
           ],
         };
       }
@@ -3089,19 +3153,7 @@ try {
         // The automation store mints the schedule id; reuse the one the
         // create result printed so the retire targets the live schedule
         // instead of a fabricated id the store answers 404 for.
-        const createResultText = messages
-          .filter((message) => {
-            const entry = message as {
-              role?: string;
-              tool_call_id?: string;
-            };
-            return (
-              entry.role === 'tool' && entry.tool_call_id === 'loop-cron-create'
-            );
-          })
-          .map((message) => JSON.stringify(message))
-          .join('');
-        const createdId = /asch_[0-9a-f]{32}/.exec(createResultText)?.[0];
+        const createdId = mintedScheduleId(messages, 'loop-cron-create');
         return {
           toolCalls: [
             fakeToolCall(
@@ -3153,13 +3205,15 @@ try {
           }
         | undefined;
       const blockProperties = schemaTool?.function?.parameters?.properties;
-      if (blockProperties !== undefined && 'shouldBlock' in blockProperties) {
-        const answer: Record<string, unknown> = { shouldBlock: false };
-        if ('thinking' in blockProperties) answer['thinking'] = '';
-        if ('reason' in blockProperties) answer['reason'] = '';
+      const blockAnswer = classifierBlockAnswer(blockProperties);
+      if (blockAnswer !== undefined) {
         return {
           toolCalls: [
-            fakeToolCall('respond_in_schema', answer, 'loop-fire-classifier'),
+            fakeToolCall(
+              'respond_in_schema',
+              blockAnswer,
+              'loop-fire-classifier',
+            ),
           ],
         };
       }
@@ -3191,19 +3245,7 @@ try {
         if (hasToolResult('loop-fire-delete')) {
           return { content: 'LOOP_FIRE_DONE' };
         }
-        const createResultText = messages
-          .filter((message) => {
-            const entry = message as {
-              role?: string;
-              tool_call_id?: string;
-            };
-            return (
-              entry.role === 'tool' && entry.tool_call_id === 'loop-fire-create'
-            );
-          })
-          .map((message) => JSON.stringify(message))
-          .join('');
-        const createdId = /asch_[0-9a-f]{32}/.exec(createResultText)?.[0];
+        const createdId = mintedScheduleId(messages, 'loop-fire-create');
         return {
           toolCalls: [
             fakeToolCall(
@@ -3240,8 +3282,8 @@ try {
   const mysqlPort = await freePort();
   dumpPort = mysqlPort;
   const springPort = await freePort();
+  const springUrl = `http://127.0.0.1:${springPort}`;
   const harnessPort = await freePort();
-  const brokerPort = await freePort();
   // C1/C2 replace the Harness's Session Store reply/write after the
   // payable checkpoint, so the store URL the control plane advertises
   // must point at this proxy from the first load onward. Other arms keep
@@ -3250,12 +3292,9 @@ try {
     approvalFault === 'terminal-reply-lost' ||
     approvalFault === 'terminal-write-failed'
   ) {
-    storeFaultProxy = await startStoreFaultProxy(
-      `http://127.0.0.1:${springPort}`,
-    );
+    storeFaultProxy = await startStoreFaultProxy(springUrl);
   }
-  const sessionStoreUrl =
-    storeFaultProxy?.baseUrl ?? `http://127.0.0.1:${springPort}`;
+  const sessionStoreUrl = storeFaultProxy?.baseUrl ?? springUrl;
 
   const initialized = spawnSync(
     mysqld,
@@ -3388,7 +3427,6 @@ try {
               QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '5s',
               QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
               QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED: 'true',
-              QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT: String(brokerPort),
               QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN: brokerToken,
               QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY: credentialKey,
               QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID: 'e2e-local-v1',
@@ -3399,7 +3437,6 @@ try {
             }
           : {
               QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED: 'true',
-              QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT: String(brokerPort),
               QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN: brokerToken,
               QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY: credentialKey,
               QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID: 'e2e-local-v1',
@@ -3417,7 +3454,6 @@ try {
     },
     'Spring Managed Agent Server',
   );
-  const springUrl = `http://127.0.0.1:${springPort}`;
   await waitUntil(
     'Spring Managed Agent Server',
     async () => {
@@ -3483,9 +3519,7 @@ try {
       )
     : undefined;
   if (inflightFailover) {
-    heldStartProxy = await startHeldExecutionStartProxy(
-      `http://127.0.0.1:${brokerPort}`,
-    );
+    heldStartProxy = await startHeldExecutionStartProxy(springUrl);
   }
 
   const harness = start(
@@ -3504,7 +3538,7 @@ try {
       '--workspace',
       workspace,
       '--managed-runtime-broker-url',
-      heldStartProxy?.baseUrl ?? `http://127.0.0.1:${brokerPort}`,
+      heldStartProxy?.baseUrl ?? springUrl,
       // Joined form: a base64url token can start with '-', which argv
       // would otherwise parse as another flag.
       `--managed-runtime-broker-token=${brokerToken}`,
@@ -3528,8 +3562,7 @@ try {
             }
           : {}),
         QWEN_RUNTIME_BROKER_TOKEN: brokerToken,
-        QWEN_RUNTIME_BROKER_URL:
-          heldStartProxy?.baseUrl ?? `http://127.0.0.1:${brokerPort}`,
+        QWEN_RUNTIME_BROKER_URL: heldStartProxy?.baseUrl ?? springUrl,
       },
     },
     hostedHarnessLabel,
@@ -4328,7 +4361,7 @@ try {
       );
       const privateHead = runMysql(
         mysqlPort,
-        `SELECT storage_version, latest_checkpoint_resource_id FROM qwen_managed_agent.ma_session_head WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
+        `SELECT has_activity_diagnostics, latest_checkpoint_resource_id FROM qwen_managed_agent.ma_session_head WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
       ).split('\t');
       const checkpoint = JSON.parse(
         runMysql(
@@ -4337,7 +4370,7 @@ try {
         ),
       );
       if (
-        privateHead[0] !== '4' ||
+        privateHead[0] !== '1' ||
         checkpoint.continuation?.phase !== 'await_action' ||
         checkpoint.approval?.requestId !== originalApprovalId
       ) {
@@ -4364,7 +4397,7 @@ try {
         options: originalApprovalOptions,
         plan: originalApprovalPlan,
         originalRuntime: runtime,
-        storageVersion: Number(privateHead[0]),
+        activityDiagnostics: privateHead[0] === '1',
         checkpointPhase: checkpoint.continuation.phase,
         executionCount,
         physicalFileExists: existsSync(inflightSideEffect),
@@ -4678,13 +4711,13 @@ try {
         approvalFault === 'cleanup-failed'
       ) {
         replacementBrokerProxy = await startHeldExecutionStartProxy(
-          `http://127.0.0.1:${brokerPort}`,
+          springUrl,
           approvalFault !== 'cleanup-failed',
           approvalFault === 'cleanup-failed',
         );
       }
       replacementBrokerUrl =
-        replacementBrokerProxy?.baseUrl ?? `http://127.0.0.1:${brokerPort}`;
+        replacementBrokerProxy?.baseUrl ?? replacementSpringUrl;
     } else {
       // Under --freeze the original Spring is dead, but the frozen Harness
       // still holds the session-store URL the original Spring handed it at
@@ -4694,7 +4727,6 @@ try {
       // every post-wake assertion would hold by disconnection, not fencing.
       const replacementSpringPort = freeze ? springPort : await freePort();
       replacementHarnessPort = await freePort();
-      const replacementBrokerPort = await freePort();
       replacementSpringUrl = `http://127.0.0.1:${replacementSpringPort}`;
       replacementSpring = start(
         java,
@@ -4748,9 +4780,6 @@ try {
             QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '5s',
             QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
             QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED: 'true',
-            QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT: String(
-              replacementBrokerPort,
-            ),
             QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN: brokerToken,
             QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY: credentialKey,
             QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID: 'e2e-local-v1',
@@ -4778,13 +4807,12 @@ try {
 
       if (inflightFailover) {
         replacementBrokerProxy = await startHeldExecutionStartProxy(
-          `http://127.0.0.1:${replacementBrokerPort}`,
+          replacementSpringUrl,
           false,
         );
       }
       replacementBrokerUrl =
-        replacementBrokerProxy?.baseUrl ??
-        `http://127.0.0.1:${replacementBrokerPort}`;
+        replacementBrokerProxy?.baseUrl ?? replacementSpringUrl;
     }
 
     // Every replacement generation answers on the same port with a fresh
@@ -5547,7 +5575,7 @@ try {
           } else {
             await replacementBrokerProxy.close();
             replacementBrokerProxy = undefined;
-            replacementBrokerUrl = `http://127.0.0.1:${brokerPort}`;
+            replacementBrokerUrl = replacementSpringUrl;
           }
         }
         // The crashed generation's disk is scrapped like every replaced
@@ -5821,7 +5849,7 @@ try {
         ] as const) {
           const decisionHex = runMysql(
             mysqlPort,
-            `SELECT HEX(r.inline_bytes) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.resource_key = rr.resource_key WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_key = (SELECT record_key FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND action_id=${sqlString(actionId)}) AND r.kind='managed-action-decision'`,
+            `SELECT HEX(r.inline_bytes) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.tenant_id=rr.tenant_id AND r.session_id=rr.session_id AND r.resource_id=rr.resource_id WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_ref = ${sqlString(identityRef(session.id, 'action', actionId))} AND r.kind='managed-action-decision'`,
           );
           if (!decisionHex || decisionHex === 'NULL')
             throw new Error(`A3 command decision is unavailable: ${actionId}`);
@@ -6019,7 +6047,7 @@ try {
             ? JSON.parse(
                 runMysql(
                   mysqlPort,
-                  `SELECT CONVERT(r.inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.resource_key = rr.resource_key WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_key = (SELECT record_key FROM qwen_managed_agent.ma_session_record WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND record_kind='ACTION' AND action_id=${sqlString(originalApprovalId!)}) AND r.kind='managed-action-decision'`,
+                  `SELECT CONVERT(r.inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.tenant_id=rr.tenant_id AND r.session_id=rr.session_id AND r.resource_id=rr.resource_id WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_ref = ${sqlString(identityRef(session.id, 'action', originalApprovalId!))} AND r.kind='managed-action-decision'`,
                 ),
               )
             : undefined;
@@ -6041,7 +6069,7 @@ try {
           const siblingDecision = JSON.parse(
             runMysql(
               mysqlPort,
-              `SELECT CONVERT(r.inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.resource_key = rr.resource_key WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_key = (SELECT record_key FROM qwen_managed_agent.ma_session_record WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND record_kind='ACTION' AND action_id=${sqlString(siblingApprovalId!)}) AND r.kind='managed-action-decision'`,
+              `SELECT CONVERT(r.inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.tenant_id=rr.tenant_id AND r.session_id=rr.session_id AND r.resource_id=rr.resource_id WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_ref = ${sqlString(identityRef(session.id, 'action', siblingApprovalId!))} AND r.kind='managed-action-decision'`,
             ),
           );
           if (
@@ -6961,7 +6989,7 @@ try {
             // the woken one writes ma_operation too; none of it may land here.
             operations: runMysql(
               mysqlPort,
-              `SELECT HEX(operation_key), operation_kind, state, phase, delivery_state, claim_owner FROM qwen_managed_agent.ma_operation WHERE ${sessionFilter} ORDER BY 1`,
+              `SELECT HEX(operation_ref), operation_kind, state, phase, delivery_state, claim_owner FROM qwen_managed_agent.ma_operation WHERE ${sessionFilter} ORDER BY 1`,
               probeMs,
             ),
             // The head's state, writer, checkpoint and recovery columns. Its
@@ -6969,7 +6997,7 @@ try {
             // activation renewal the live writer journals.
             head: runMysql(
               mysqlPort,
-              `SELECT state, storage_version, writer_generation, HEX(writer_id), HEX(latest_checkpoint_resource_id), compacted_through_revision, recovery_status, recovery_detail_code FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
+              `SELECT state, has_activity_diagnostics, writer_generation, HEX(writer_id), HEX(latest_checkpoint_resource_id), compacted_through_revision, recovery_status, recovery_detail_code FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
               probeMs,
             ),
             // Every journal transaction except those renewals, by writer

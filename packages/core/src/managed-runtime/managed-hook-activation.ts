@@ -17,6 +17,7 @@ import {
   uiTelemetryService,
   type SessionMetrics,
 } from '../telemetry/uiTelemetry.js';
+import { managedCommandId } from './managed-command-id.js';
 import type { ManagedSession } from './managed-session-assembly.js';
 import { ManagedSessionConflictError } from './managed-session-authority.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
@@ -210,17 +211,18 @@ class LocalManagedHookModelScope {
       usageRef: ManagedSessionDurableRef | null,
     ) => {
       this.assertOwner();
+      const commandId = managedCommandId(`${attemptId}:${state}`);
       await authority.appendExecutionEvent(
         {
           operation: 'hostedModelAttempt',
-          commandId: `${attemptId}:${state}`,
+          commandId,
           sessionKey: authority.sessionHeader.sessionKey,
           contentDigest: routeRef.digest,
         },
         (sequence) => ({
           v: 1,
           sequence,
-          eventId: `${attemptId}:${state}`,
+          eventId: commandId,
           sessionKey: authority.sessionHeader.sessionKey,
           kind: 'model.attempt',
           occurredAt: Date.now(),
@@ -272,6 +274,22 @@ class LocalManagedHookModelScope {
           route,
           success ? context : null,
         );
+      const legacyModels = diagnosticsRef
+        ? undefined
+        : structuredClone(
+            uiTelemetryService.getMetricsForSession(
+              authority.sessionHeader.sessionKey.sessionId,
+            ).models,
+          );
+      if (legacyModels) {
+        for (const model of Object.values(legacyModels)) {
+          // Legacy managed consumers validate an exact three-key api object.
+          delete model.api.totalErrorLatencyMs;
+          for (const source of Object.values(model.bySource)) {
+            delete source.api.totalErrorLatencyMs;
+          }
+        }
+      }
       const usageBytes = diagnosticsRef
         ? await this.session.resources.read(diagnosticsRef)
         : Buffer.from(
@@ -280,9 +298,7 @@ class LocalManagedHookModelScope {
               ...route,
               attempts: usage,
               budget,
-              models: uiTelemetryService.getMetricsForSession(
-                authority.sessionHeader.sessionKey.sessionId,
-              ).models,
+              models: legacyModels,
             }),
           );
       if (!finalChatRecord) {
@@ -345,10 +361,11 @@ class LocalManagedHookModelScope {
           ]),
         )
         .digest('hex');
+      const commandId = managedCommandId(`${attemptId}:output_committed`);
       await authority.appendExecutionEvents(
         {
           operation: 'hostedModelAttempt',
-          commandId: `${attemptId}:output_committed`,
+          commandId,
           sessionKey: authority.sessionHeader.sessionKey,
           contentDigest,
         },
@@ -362,7 +379,7 @@ class LocalManagedHookModelScope {
             {
               v: 1,
               sequence,
-              eventId: `${attemptId}:output_committed`,
+              eventId: commandId,
               sessionKey: authority.sessionHeader.sessionKey,
               kind: 'model.attempt',
               occurredAt: Date.now(),

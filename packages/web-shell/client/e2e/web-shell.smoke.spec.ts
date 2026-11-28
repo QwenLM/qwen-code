@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import {
   expect,
   test,
@@ -1247,6 +1248,47 @@ test('pastes long plain text as editable composer content @smoke', async ({
   );
 });
 
+test('allows drafting while session history loads and sends after replay @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  const loadPath = `/session/${encodeURIComponent(scenario.sessionId)}/load`;
+  const loadGate = Promise.withResolvers<void>();
+  await page.route(
+    (url) => url.pathname === loadPath,
+    async (route) => {
+      await loadGate.promise;
+      await route.fallback();
+    },
+  );
+  const loadStarted = page.waitForRequest(
+    (request) => new URL(request.url()).pathname === loadPath,
+  );
+  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await loadStarted;
+
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  const send = page.locator('[data-web-shell-composer-submit]');
+  const draft = 'Draft written while history is loading';
+  await expect(editor).toBeEditable();
+  await fillComposer(page, draft);
+  await expect(send).toBeDisabled();
+  await page.keyboard.press('Enter');
+  await expect(editor).toHaveText(draft);
+  expect(daemon.promptRequests()).toHaveLength(0);
+
+  loadGate.resolve();
+  await completeReplay(page, daemon, scenario.sessionId);
+  await expect(editor).toHaveText(draft);
+  await expect(send).toBeEnabled();
+  await send.click();
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  const request = firstRequest(daemon.promptRequests());
+  expect(request.path).toBe(`/session/${scenario.sessionId}/prompt`);
+  expectPromptBodyToContainText(requestBodyRecord(request), draft);
+});
+
 test('keeps later SSE connections alive when an earlier one is cancelled @smoke', async ({
   page,
 }, testInfo) => {
@@ -1337,6 +1379,9 @@ for (const width of [1280, 375]) {
     page,
   }, testInfo) => {
     await page.setViewportSize({ width, height: 800 });
+    await page.addInitScript(() => {
+      localStorage.setItem('qwen-code-web-shell-theme', 'light');
+    });
     const scenario = createWebShellDaemonScenario({
       events: [
         {
@@ -1396,22 +1441,19 @@ for (const width of [1280, 375]) {
     });
     const trigger = panel.getByRole('button', { name: 'Approval options' });
     await expect(panel.locator('[data-option-id]')).toHaveCount(2);
-    await expect(reject).toHaveCSS('border-top-style', 'solid');
-    await expect(allow).toHaveCSS(
-      'background-color',
-      await trigger.evaluate(
-        (element) => getComputedStyle(element).backgroundColor,
-      ),
-    );
-    expect(
-      await reject.evaluate(
-        (element) => getComputedStyle(element).backgroundColor,
-      ),
-    ).not.toBe(
-      await allow.evaluate(
-        (element) => getComputedStyle(element).backgroundColor,
-      ),
-    );
+    // Reproduce the embedded cascade with preflight after the component CSS.
+    await page.addStyleTag({
+      path: fileURLToPath(new URL('../styles/preflight.css', import.meta.url)),
+    });
+    await expect(reject).toHaveCSS('border-top-width', '1px');
+    await expect(reject).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+    await expect(reject).toHaveCSS('padding', '6px 12px');
+    for (const button of [allow, trigger]) {
+      await expect(button).toHaveCSS('background-color', 'rgb(21, 21, 23)');
+      await expect(button).toHaveCSS('color', 'rgb(250, 250, 250)');
+    }
+    await expect(allow).toHaveCSS('padding', '6px 12px');
+    await expect(trigger).toHaveCSS('padding', '6px 8px');
     const rejectBox = (await reject.boundingBox())!;
     const allowBox = (await allow.boundingBox())!;
     const triggerBox = (await trigger.boundingBox())!;

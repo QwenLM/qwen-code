@@ -7,6 +7,7 @@
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { ProjectMemoryOwner } from './paths.js';
 import {
   MAX_USAGE_SCENARIO_CHARS,
   rereadAutoMemoryDocument,
@@ -575,8 +576,11 @@ function filterExcludedAutoMemoryDocuments(
 
 async function rereadSelectedDocuments(
   docs: readonly ScannedAutoMemoryDocument[],
+  owner?: ProjectMemoryOwner,
 ): Promise<ScannedAutoMemoryDocument[]> {
-  const reread = await Promise.all(docs.map(rereadAutoMemoryDocument));
+  const reread = await Promise.all(
+    docs.map((doc) => rereadAutoMemoryDocument(doc, owner)),
+  );
   const dropped = docs.filter((_, index) => reread[index] === null);
   if (dropped.length > 0) {
     debugLogger.warn(
@@ -644,6 +648,7 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
   const legacy =
     (options.config?.getMemoryRecallMode?.() ?? 'legacy') === 'legacy';
   const teamMemoryEnabled = options.config?.getTeamMemoryEnabled?.() ?? false;
+  const projectMemoryOwner = options.config?.getProjectMemoryOwner?.();
   const snapshot = legacy
     ? await Promise.all([
         scanAllAutoMemoryTopicDocuments(
@@ -653,6 +658,7 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
           // Recall must not lose every scope to one unlistable root; forget
           // keeps the default strict scan because it deletes on the result.
           true,
+          projectMemoryOwner,
         ),
         scanAllUserAutoMemoryTopicDocuments(options.documentCache).catch(
           (error: unknown) => {
@@ -679,6 +685,7 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         scopes: teamMemoryEnabled ? [...AUTO_MEMORY_SCOPES] : undefined,
         teamMemoryEnabled,
         trustedProject: options.config?.isTrustedFolder?.() ?? false,
+        projectMemoryOwner,
         // Match the legacy branch's uncapped universe: capping here would
         // drop the oldest memories from every structured recall surface.
         uncapped: true,
@@ -800,8 +807,9 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
             matchesTitleOrKeyword(query, doc) ||
             matchesTitleOrKeyword(query, doc, true),
         ).length === 1 &&
-        (await rereadSelectedDocuments([uniqueStrongHit]))[0]?.mtimeMs ===
-          uniqueStrongHit.mtimeMs &&
+        (
+          await rereadSelectedDocuments([uniqueStrongHit], projectMemoryOwner)
+        )[0]?.mtimeMs === uniqueStrongHit.mtimeMs &&
         !bodyPresentVersions?.has(toAutoMemoryRef(uniqueStrongHit)) &&
         !options.abortSignal?.aborted
       ) {
@@ -834,7 +842,7 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
       selectorDurationMs = Date.now() - selectorStartedAt;
       const selectedDocs = legacy
         ? modelSelectedDocs
-        : await rereadSelectedDocuments(modelSelectedDocs);
+        : await rereadSelectedDocuments(modelSelectedDocs, projectMemoryOwner);
       const strategy: RelevantAutoMemoryPromptResult['strategy'] =
         selectedDocs.length > 0 ? 'model' : 'none';
       const result = createRecallResult(
@@ -901,7 +909,7 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
     );
   const freshSelectedDocs = legacy
     ? selectedDocs
-    : await rereadSelectedDocuments(selectedDocs);
+    : await rereadSelectedDocuments(selectedDocs, projectMemoryOwner);
   const strategy: RelevantAutoMemoryPromptResult['strategy'] =
     freshSelectedDocs.length > 0 ? 'heuristic' : 'none';
   const result = createRecallResult(

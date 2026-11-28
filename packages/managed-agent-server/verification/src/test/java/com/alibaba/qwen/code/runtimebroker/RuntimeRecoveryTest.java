@@ -2,7 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
+import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpControllerTestFixture;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
@@ -11,7 +11,6 @@ import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
-import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -98,8 +97,8 @@ class RuntimeRecoveryTest {
                 id -> { throw new AssertionError("Current authorization/mapping must not rewrite old receipts"); },
                 new StaticRuntimeProvisioner(fixture.binding.getLease()), noTransport,
                 bindings, sessions, executions, "restarted", Duration.ofSeconds(10), Duration.ofSeconds(10));
-                RuntimeBrokerHttpServer server = new RuntimeBrokerHttpServer(
-                        new InetSocketAddress("127.0.0.1", 0), "test-token", restarted);
+                RuntimeBrokerHttpControllerTestFixture server = new RuntimeBrokerHttpControllerTestFixture(
+                        "test-token", restarted);
                 HttpClient client = HttpClient.newHttpClient()) {
             server.start();
             for (boolean released : new boolean[] {false, true}) {
@@ -109,7 +108,7 @@ class RuntimeRecoveryTest {
                             java.time.Instant.now()));
                     bindings.recoverLost(sessions, executions, proof);
                 }
-                String path = RuntimeBrokerHttpServer.ROUTE_PREFIX + "/executions/" + prepared.getExecutionCallId();
+                String path = RuntimeBrokerHttpControllerTestFixture.ROUTE_PREFIX + "/executions/" + prepared.getExecutionCallId();
                 var response = client.send(HttpRequest.newBuilder(server.getBaseUri().resolve(path
                                 + "?requestId=read&harnessSessionId=" + prepared.getHarnessSessionId()
                                 + "&runtimeSessionId=" + prepared.getRuntimeSessionId()))

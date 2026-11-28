@@ -1802,6 +1802,11 @@ describe('package scripts', () => {
         'packages/core/src/test-utils',
         'packages/browser-use/src/test-utils',
       ],
+      'permission-bits.mocked-path.test.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+      ],
     };
     for (const [file, dirs] of Object.entries(copies)) {
       const [reference, ...others] = dirs.map((dir) =>
@@ -3005,7 +3010,7 @@ describe('package scripts', () => {
     );
     expect(setupGitIdx).toBeGreaterThan(exportTokenIdx);
     expect(setupGitIdx).toBeLessThan(
-      releaseStepScript.indexOf('git push --force --set-upstream'),
+      releaseStepScript.indexOf('git push --set-upstream'),
     );
     expect(buildStep).toContain('run-release-step.sh build-package');
   });

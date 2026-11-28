@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 import {
   gitScanArgs,
   isCredentialShaped,
@@ -478,7 +479,7 @@ describe('scanIgnoredCredentials', () => {
   });
 
   // POSIX permissions only: on Windows chmod 000 does not block reads.
-  it.skipIf(process.platform === 'win32')(
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses an unreadable worktree config instead of treating it as absent',
     () => {
       const dir = makeRepo(['src/app.ts'], []);

@@ -1551,6 +1551,8 @@ export interface StartHookSpanOptions {
 export interface HookSpanMetadata {
   /** Whether the hook fire site completed without throwing. */
   success?: boolean;
+  /** The turn stopped waiting before the hook outcome was available. */
+  waitInterrupted?: boolean;
   /** PreToolUse: false means the hook blocked tool execution. */
   shouldProceed?: boolean;
   /** PostToolUse: true means the hook stopped further processing. */
@@ -1646,6 +1648,8 @@ export function endHookSpan(span: Span, metadata?: HookSpanMetadata): void {
     if (metadata) {
       if (metadata.success !== undefined)
         endAttributes['success'] = metadata.success;
+      if (metadata.waitInterrupted !== undefined)
+        endAttributes['wait_interrupted'] = metadata.waitInterrupted;
       if (metadata.shouldProceed !== undefined)
         endAttributes['should_proceed'] = metadata.shouldProceed;
       if (metadata.shouldStop !== undefined)

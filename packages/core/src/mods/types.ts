@@ -10,7 +10,11 @@ import type {
   ModToolCheckResult,
   ModToolResult,
 } from './tool-events.js';
-import type { ModRenderInput, ModRenderSite } from './render-tree.js';
+import type {
+  ModRenderInput,
+  ModRenderSite,
+  ModRenderSurface,
+} from './render-tree.js';
 
 export const MOD_MAX_BYTES = 262_144;
 export const MOD_MAX_DEPTH = 512;
@@ -51,6 +55,8 @@ export interface ModCommand {
   name: string;
   description: string;
   argumentHint?: string;
+  aliases?: string[];
+  isTerminalOnly?: true;
 }
 
 export interface ModCommandPresentation {
@@ -225,7 +231,7 @@ export type ModRequest =
       type: 'load';
       plugins: ModPlugin[];
       cwd: string;
-      surface: 'terminal' | null;
+      surface: ModRenderSurface | null;
       version: string;
       /** The render sites this host draws; `ui.render` runs only where one is offered. */
       sites?: readonly ModRenderSite[];

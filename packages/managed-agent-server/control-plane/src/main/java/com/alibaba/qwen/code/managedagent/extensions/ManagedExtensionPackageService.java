@@ -14,6 +14,8 @@ import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionS
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedSkillCatalogSource;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.repository.ExtensionPackageRepository;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
@@ -22,21 +24,33 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.binary.Hex;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.Semaphore;
+import java.util.function.Supplier;
 
 @Service
 public class ManagedExtensionPackageService implements ExtensionPackages {
@@ -48,14 +62,14 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
     private HarnessConnector harness;
     private Map<String, ManagedExtensionSource> sources = Map.of();
     private List<ManagedSkillCatalogSource> skillSources = List.of();
-    private final java.util.concurrent.Semaphore sourceStaging = new java.util.concurrent.Semaphore(4);
+    private final Semaphore sourceStaging = new Semaphore(4);
 
-    @org.springframework.beans.factory.annotation.Autowired
-    public void configurePreparation(@org.springframework.context.annotation.Lazy HarnessConnector value) { harness = value; }
+    @Autowired
+    public void configurePreparation(@Lazy HarnessConnector value) { harness = value; }
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    @Autowired(required = false)
     public void configureSources(List<ManagedExtensionSource> providers) {
-        Map<String, ManagedExtensionSource> registry = new java.util.LinkedHashMap<>();
+        Map<String, ManagedExtensionSource> registry = new LinkedHashMap<>();
         for (ManagedExtensionSource source : providers) {
             if (source.id() == null || !source.id().matches("[a-z][a-z0-9-]{0,63}")
                     || registry.putIfAbsent(source.id(), source) != null) {
@@ -87,11 +101,11 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
 
     private List<ManagedSkillCatalogSource.Entry> skillCatalog(ManagedExtensionSource.Context context) {
         requireAccess(context.tenantId(), context.actorId(), context.workspaceId(), false);
-        if (org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()) {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new IllegalStateException("Business skill discovery must run outside Managed SQL transactions");
         }
-        var entries = new java.util.ArrayList<ManagedSkillCatalogSource.Entry>();
-        var seen = new java.util.HashSet<ManagedExtensionSource.Reference>();
+        var entries = new ArrayList<ManagedSkillCatalogSource.Entry>();
+        var seen = new HashSet<ManagedExtensionSource.Reference>();
         try {
             for (var source : skillSources) {
                 context.checkDeadline();
@@ -126,7 +140,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
                 entry.reference().resourceId())).distinct().count() != defaults.size()) {
             throw invalidSkillCatalog();
         }
-        var pins = new java.util.ArrayList<Pin>();
+        var pins = new ArrayList<Pin>();
         try {
             for (var entry : defaults) {
                 context.checkDeadline();
@@ -189,7 +203,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
     }
 
     private ManagedExtensionSource.Resolved resolveSource(ManagedExtensionSource.Context context, ManagedExtensionSource.Reference reference) {
-        if (org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()) {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new IllegalStateException("Business extension sources must be resolved outside Managed SQL transactions");
         }
         var provider = sources.get(reference.providerId());
@@ -253,7 +267,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
         if (!sourceStaging.tryAcquire()) {
             throw new ManagedAgentException(503, "extension_staging_busy", "Extension source staging is busy.");
         }
-        java.nio.file.Path temporary = null;
+        Path temporary = null;
         try {
             temporary = Files.createTempFile("managed-extension-source-", ".archive");
             var hash = DigestUtils.getSha256Digest();
@@ -275,7 +289,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
             } catch (IOException error) {
                 throw new ManagedAgentException(503, "extension_source_unavailable", "The extension source archive cannot be read.", error);
             }
-            String sourceDigest = org.apache.commons.codec.binary.Hex.encodeHexString(hash.digest());
+            String sourceDigest = Hex.encodeHexString(hash.digest());
             if (length == 0 || resolved.expectedDigest() != null && !resolved.expectedDigest().equals(sourceDigest)) {
                 throw new ManagedAgentException(409, "extension_source_changed", "The source archive does not match its revision.");
             }
@@ -294,7 +308,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
                 var reference = resolved.reference();
                 String id = "ext_" + UUID.nameUUIDFromBytes(ManagedSchemaKeys.key("source", tenant, workspace,
                         reference.providerId(), reference.kind(), reference.resourceId()).getBytes(StandardCharsets.UTF_8));
-                var previous = repository.list(tenant, workspace).stream().filter(entry -> id.equals(entry.pin().extensionId())).findFirst();
+                var previous = repository.findLatestCatalogPackage(tenant, workspace, id);
                 if (previous.isPresent() && !previous.get().manifest().name().equals(manifest.name())) {
                     throw new ManagedAgentException(409, "extension_namespace_conflict", "An update must retain the package namespace.");
                 }
@@ -416,7 +430,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
         var input = decodeImportMetadata(encodedMetadata);
         if (extensionId != null) {
             requireId(extensionId);
-            if (repository.list(tenant, workspace).stream().noneMatch(entry -> extensionId.equals(entry.pin().extensionId()))) {
+            if (repository.findLatestCatalogPackage(tenant, workspace, extensionId).isEmpty()) {
                 throw missing();
             }
         }
@@ -444,7 +458,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
         Package saved = get(tenant, actor, workspace, pin.extensionId(), pin.packageRevision(), pin.packageDigest());
         var input = new ManagedExtensionPackages.ImportMetadata("extension", saved.manifest().target(), pin.packageDigest(), 1, null);
         try (var lease = archive(tenant, actor, workspace, pin.extensionId(), pin.packageRevision(), pin.packageDigest());
-                var source = Files.newInputStream(lease.path(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                var source = Files.newInputStream(lease.path(), LinkOption.NOFOLLOW_LINKS)) {
             JsonNode result = json.valueToTree(prepareCall(() -> harness.inspectPackage(envelope(tenant, actor, workspace, input), source)));
             if (!result.isObject() || !result.path("files").isArray() || result.path("files").size() > 256
                     || !result.path("fileCount").canConvertToInt() || result.path("fileCount").asInt() < result.path("files").size()
@@ -475,7 +489,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
 
     private Map<String, Object> envelope(String tenant, String actor, String workspace, ManagedExtensionPackages.ImportMetadata input) {
         return Map.of("tenantId", tenant, "workspaceId", workspace, "actorKey", DigestUtils.sha256Hex(actor),
-                "input", json.convertValue(input, json.getTypeFactory().constructMapType(java.util.LinkedHashMap.class, String.class, Object.class)));
+                "input", json.convertValue(input, json.getTypeFactory().constructMapType(LinkedHashMap.class, String.class, Object.class)));
     }
 
     private void requirePreparation() {
@@ -484,17 +498,17 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
         }
     }
 
-    private <T> T prepareCall(java.util.function.Supplier<T> call) {
+    private <T> T prepareCall(Supplier<T> call) {
         try {
             return call.get();
-        } catch (com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure error) {
+        } catch (HarnessHttpFailure error) {
             int status = error.getStatusCode();
             String code = error.getErrorCode();
             if (status >= 400 && status < 500 && code != null && code.matches("[a-z][a-z0-9_]{0,127}")) {
                 throw new ManagedAgentException(status, code, "Managed package preparation was refused.");
             }
             throw new ManagedAgentException(503, "package_preparation_unavailable", "Managed package preparation is unavailable.");
-        } catch (com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure error) {
+        } catch (HarnessFailure error) {
             throw new ManagedAgentException(503, "package_preparation_unavailable", "Managed package preparation is unavailable.");
         }
     }
@@ -512,7 +526,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
 
     public Selection authorizeSelection(String tenant, String actor, String workspace, List<Pin> pins) {
         var saved = selection(tenant, actor, workspace, pins);
-        var skills = new java.util.ArrayList<ManagedExtensionPackages.StandaloneSkill>();
+        var skills = new ArrayList<ManagedExtensionPackages.StandaloneSkill>();
         for (Package entry : saved) {
             authorizeSource(tenant, actor, workspace, entry);
             var skill = repository.standaloneSkill(tenant, workspace, entry.pin());
@@ -537,11 +551,11 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
 
     private List<Package> selection(String tenant, String actor, String workspace, List<Pin> pins) {
         requireExecutionAccess(tenant, actor, workspace);
-        if (pins == null || pins.size() > 32 || pins.stream().anyMatch(java.util.Objects::isNull)
+        if (pins == null || pins.size() > 32 || pins.stream().anyMatch(Objects::isNull)
                 || pins.stream().map(Pin::extensionId).distinct().count() != pins.size()) {
             throw invalid();
         }
-        var saved = new java.util.ArrayList<Package>();
+        var saved = new ArrayList<Package>();
         for (Pin pin : pins) {
             saved.add(repository.get(tenant, workspace, pin));
             if (pin.settingsRevision() != null && !repository.hasSettings(tenant, workspace, pin)) {
@@ -566,7 +580,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
                     || manifest.version() == null || manifest.version().isBlank() || manifest.version().length() > 128
                     || !validTarget(manifest.target())
                     || manifest.components() == null || manifest.components().size() > ManagedExtensionPackages.COMPONENTS.size()
-                    || manifest.components().stream().anyMatch(java.util.Objects::isNull)
+                    || manifest.components().stream().anyMatch(Objects::isNull)
                     || !ManagedExtensionPackages.COMPONENTS.containsAll(manifest.components())
                     || Set.copyOf(manifest.components()).size() != manifest.components().size()
                     || (manifest.sourceType() == null) != (manifest.sourceRevision() == null)
@@ -594,8 +608,8 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
         requireDigest(digest);
         if (extensionId != null) {
             requireExecutionAccess(tenant, actor, workspace);
-            Package previous = repository.list(tenant, workspace).stream()
-                    .filter(entry -> extensionId.equals(entry.pin().extensionId())).findFirst().orElseThrow(ManagedExtensionPackageService::missing);
+            Package previous = repository.findLatestCatalogPackage(tenant, workspace, extensionId)
+                    .orElseThrow(ManagedExtensionPackageService::missing);
             if (previous.source() != null) {
                 throw new ManagedAgentException(409, "extension_source_conflict", "Source-bound extensions require a source import.");
             }
@@ -675,8 +689,8 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
 
     private void authorizeExtension(String tenant, String actor, String workspace, String extensionId) {
         requireAccess(tenant, actor, workspace, false);
-        Package saved = repository.list(tenant, workspace).stream().filter(entry -> extensionId.equals(entry.pin().extensionId()))
-                .findFirst().orElseThrow(ManagedExtensionPackageService::missing);
+        Package saved = repository.findLatestCatalogPackage(tenant, workspace, extensionId)
+                .orElseThrow(ManagedExtensionPackageService::missing);
         authorizeSource(tenant, actor, workspace, saved);
     }
 

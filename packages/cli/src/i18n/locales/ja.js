@@ -431,7 +431,6 @@ export default {
   'Screen Reader Mode': 'スクリーンリーダーモード',
   'Max Session Turns': '最大セッションターン数',
   'Skip Next Speaker Check': '次の発言者チェックをスキップ',
-  'Skip Loop Detection': 'ループ検出をスキップ',
   'Skip Startup Context': '起動時コンテキストをスキップ',
   'Enable OpenAI Logging': 'OpenAI ログを有効化',
   'OpenAI Logging Directory': 'OpenAI ログディレクトリ',
@@ -553,6 +552,8 @@ export default {
   'List all configured hooks': '設定済みのフックをすべて表示する',
   // Hooks - Dialog
   Hooks: 'フック',
+  'A hook stopped the turn: {{reason}}':
+    'フックがこのターンを終了しました：{{reason}}',
   'Loading hooks...': 'フックを読み込んでいます...',
   'Error loading hooks:': 'フックの読み込みエラー：',
   'Press Escape to close': 'Escape キーで閉じる',
@@ -903,6 +904,8 @@ export default {
     '圧縮サマリーが切り詰められたため、チャット履歴を圧縮できませんでした',
   'Could not compress chat history due to an API error.':
     'API エラーのため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history because it is too large for the context window.':
+    'チャット履歴がコンテキストウィンドウに収まらないため、圧縮できませんでした',
   // Directory
   'Configuration is not available.': '設定が利用できません',
   'Please provide at least one path to add.':
@@ -1630,6 +1633,7 @@ export default {
   'Auto-connect to IDE': 'IDE に自動接続',
   'Language: UI': '言語: UI',
   'Language: Model': '言語: モデル',
+  'Language: Display Translation': '言語: 表示翻訳',
   'Show Line Numbers in Code': 'コードの行番号を表示',
   'Show Welcome Back Dialog': 'おかえりダイアログを表示',
   'Enable User Feedback': 'ユーザーフィードバックを有効化',

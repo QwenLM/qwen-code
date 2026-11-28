@@ -202,6 +202,88 @@ describe('CronListTool', () => {
     expect(result.returnDisplay).toContain('[session-only, gated]');
   });
 
+  it('keeps live gate status scoped to each durable owner', async () => {
+    await writeCronTasks(tmpDir, [
+      makeDurableTask({
+        id: 'shared',
+        sessionId: 'session-a',
+        prompt: 'owner-a',
+        gate: './probe-a',
+      }),
+      makeDurableTask({
+        id: 'shared',
+        sessionId: 'session-b',
+        prompt: 'owner-b',
+        gate: './probe-b',
+      }),
+    ]);
+    await config._scheduler.enableDurable('session-a');
+    for (const [sessionId, count] of [
+      ['session-a', 2],
+      ['session-b', 9],
+    ] as const) {
+      const job = config._scheduler
+        .list()
+        .find((candidate) => candidate.boundSessionId === sessionId);
+      job!.gateStatus = {
+        lastAt: 1,
+        lastOutcome: 'quiet',
+        quietSinceDelivery: count,
+        consecutiveFailures: 0,
+      };
+    }
+
+    const result = await tool.build({}).execute(new AbortController().signal);
+
+    expect(result.llmContent).toContain('owner-a\n    gate: ./probe-a');
+    expect(result.llmContent).toContain('quiet ×2');
+    expect(result.llmContent).toContain('owner-b\n    gate: ./probe-b');
+    expect(result.llmContent).toContain('quiet ×9');
+  });
+
+  it('does not let a same-id session-only job overwrite an unbound durable gate status', async () => {
+    await writeCronTasks(tmpDir, [
+      makeDurableTask({
+        id: 'shared-unbound',
+        prompt: 'durable-unbound',
+        gate: './probe-durable',
+      }),
+    ]);
+    await config._scheduler.enableDurable('session-a');
+    const durableJob = config._scheduler
+      .list()
+      .find(
+        (candidate) => candidate.durable && candidate.id === 'shared-unbound',
+      );
+    durableJob!.gateStatus = {
+      lastAt: 1,
+      lastOutcome: 'quiet',
+      quietSinceDelivery: 4,
+      consecutiveFailures: 0,
+    };
+    // Inject a same-id session-only job into the scheduler list without gateStatus.
+    const sessionOnly = config._scheduler.create(
+      '* * * * *',
+      'session-only-same-id',
+      true,
+    );
+    const jobsMap = (
+      config._scheduler as unknown as {
+        jobs: Map<string, typeof sessionOnly>;
+      }
+    ).jobs;
+    jobsMap.delete(sessionOnly.id);
+    sessionOnly.id = 'shared-unbound';
+    jobsMap.set('shared-unbound', sessionOnly);
+
+    const result = await tool.build({}).execute(new AbortController().signal);
+
+    expect(result.llmContent).toContain(
+      'durable-unbound\n    gate: ./probe-durable',
+    );
+    expect(result.llmContent).toContain('quiet ×4');
+  });
+
   it('merges file-backed durable jobs with session-only jobs', async () => {
     await writeCronTasks(tmpDir, [makeDurableTask()]);
     config._scheduler.create('*/10 * * * *', 'session task', true);

@@ -896,6 +896,9 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
     });
     try {
       expect(await waitForChildGone(pty)).toBe(true);
+      // A reaped pid can disappear before its native callback enters the
+      // drain window. Wait for that state before tripping the write limit.
+      expect(await waitFor(() => pty.stats.pendingNativeExit)).toBe(true);
       killSpy.mockClear();
 
       pty.write(Buffer.alloc(8192));
