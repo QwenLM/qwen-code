@@ -68,4 +68,6 @@ Enable `qwen.managed-agent.session-resource-gc.enabled` for MySQL-only collectio
 
 Each wakeup attempts one page through the same claim and page transactions as SQL polling. The one-second polling worker drives further pages, deferred work, historical backfill, and recovery from missing messages or expired claims. API replicas can set `worker-enabled=false` and still publish. Keep at least one worker enabled. Clearing all three MQ settings reverts to polling only. Sessions with external resources, captures, or journal packs are deferred. The implementation uses the existing V1 schema and the existing legacy tool-publication schedule.
 
+The SDK Java multi-node job reuses its MySQL and RocketMQ fixtures for `rocketMqWakeupsAndPolling`. It provisions a dedicated DELAY topic and ordinary consumer group alongside the existing LiteTopic fixtures. The Maven profile requires the GC coordinates, and the Failsafe report check requires that exact case to pass. Missing, skipped, or failed evidence fails the job.
+
 [Configuration reference](../users/managed-agent-configuration-reference.md#qwenmanaged-agentsession-resource-gc)
