@@ -7,6 +7,51 @@
 // Chinese translations for Qwen Code CLI
 
 export default {
+  user: '用户',
+  assistant: '助手',
+  thinking: '思考',
+  task: '任务',
+  compaction: '压缩',
+  info: '信息',
+  warning: '警告',
+  retry: '重试',
+  'stop-hook': '停止钩子',
+  'away-recap': '离开摘要',
+  'user-shell': '用户命令',
+  advisor: '顾问',
+  'arena-agent': '竞技场智能体',
+  'arena-session': '竞技场会话',
+  goal: '目标',
+  'Protected input': '受保护的输入',
+  'Focused input. Cursor: {{position}}': '输入已聚焦。光标：{{position}}',
+  'Unfocused input.': '输入未聚焦。',
+  'Focused Prompt: {{value}}': '已聚焦的提示输入：{{value}}',
+  'Prompt: {{value}}': '提示输入：{{value}}',
+  'Focused Input: {{value}}': '已聚焦的输入：{{value}}',
+  'Input: {{value}}': '输入：{{value}}',
+  'Placeholder: {{value}}': '占位提示：{{value}}',
+  'Cursor: {{position}}': '光标：{{position}}',
+  'Selected {{value}}': '已选择 {{value}}',
+  'Disabled {{value}}': '已禁用 {{value}}',
+  'Focused Toggle on: {{value}}': '已聚焦，开关已开启：{{value}}',
+  'Focused Toggle off: {{value}}': '已聚焦，开关已关闭：{{value}}',
+  'Toggle on: {{value}}': '开关已开启：{{value}}',
+  'Toggle off: {{value}}': '开关已关闭：{{value}}',
+  'Conversation cleared.': '对话已清空。',
+  '{{role}}: {{value}}': '{{role}}：{{value}}',
+  'Revision {{value}}': '修订 {{value}}',
+  Dialog: '对话框',
+  'Dialog closed. Focus: prompt.': '对话框已关闭。焦点：提示输入。',
+  'Dialog closed.': '对话框已关闭。',
+  'Waiting for confirmation': '等待确认',
+  'Working. Escape to cancel.': '处理中。按 Escape 取消。',
+  'History items {{start}}-{{end}} of {{total}}':
+    '历史记录 {{start}}-{{end}}，共 {{total}} 条。',
+  'Worktree: {{value}}': '工作树：{{value}}',
+  'Workflow mode: on': '工作流模式：已开启',
+  'Workflow mode: on (unavailable)': '工作流模式：已开启（不可用）',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    '按 Shift+上/下或 PageUp/PageDown 阅读历史；按 Ctrl+Home/End 跳到最早/最新。',
   "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
     '周额度已用完{{reset}}。您可以等待额度恢复，或运行 /upgrade 升级套餐以获取更多额度。',
   "You've used up your weekly credits.{{reset}} Please try again after the reset.":
@@ -23,6 +68,8 @@ export default {
   Retry: '重试',
   'Connecting…': '正在连接…',
   'Loading models from provider…': '正在加载服务商模型…',
+  'Could not list models. Enter model IDs manually.':
+    '无法获取模型列表，请手动填写模型 ID。',
   'Recommended models · provider list unavailable, showing built-ins':
     '推荐模型 · 无法获取服务商列表，显示内置模型',
   'Generated UI': 'Generated UI 生成式界面',
@@ -359,6 +406,7 @@ export default {
   Auth: '认证',
   Model: '模型',
   'Fast Model': '快速模型',
+  'Agent Loop': 'Agent 循环',
   Sandbox: '沙箱',
   'Session ID': '会话 ID',
   'Base URL': 'Base URL',
@@ -376,6 +424,8 @@ export default {
   'Open the skills panel (browse, search, toggle, pick).':
     '打开技能面板（浏览、搜索、启停、选择）。',
   'Move this session to a new working directory': '将此会话移动到新的工作目录',
+  'Wait for background agents to finish or stop them in /tasks before changing directories.':
+    '请等待后台智能体完成，或在 /tasks 中停止它们后再切换目录。',
   // SkillsManagerDialog (`/skills` 弹出的面板)
   'Manage Skills': '管理技能',
   'Skills configuration saved.': '技能配置已保存。',
@@ -775,8 +825,8 @@ export default {
   // ============================================================================
   'Code Mode Only (Experimental)': '仅代码模式（实验性）',
   'Mods (Experimental)': 'Mods（实验性）',
-  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
-    '在受信任的本地交互终端和无界面会话中加载已启用扩展的实验性 Mods。修改后需重启。',
+  'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.':
+    '在受信任的本地交互终端、无界面会话和 ACP 会话中加载已启用扩展的实验性 Mods。修改后需重启。',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '终端响铃通知',
@@ -787,6 +837,7 @@ export default {
   'Debug Keystroke Logging': '调试按键记录',
   'Language: UI': '语言：界面',
   'Language: Model': '语言：模型',
+  'Language: Display Translation': '语言：显示翻译',
   'Output Format': '输出格式',
   'Hide Window Title': '隐藏窗口标题',
   'Show Status in Title': '在标题中显示状态',
@@ -805,7 +856,6 @@ export default {
   'Screen Reader Mode': '屏幕阅读器模式',
   'Max Session Turns': '最大会话轮次',
   'Skip Next Speaker Check': '跳过下一个说话者检查',
-  'Skip Loop Detection': '跳过循环检测',
   'Skip Startup Context': '跳过启动上下文',
   'Enable OpenAI Logging': '启用 OpenAI 日志',
   'OpenAI Logging Directory': 'OpenAI 日志目录',
@@ -1101,8 +1151,11 @@ export default {
   // ============================================================================
   'Manage Qwen Code hooks': '管理 Qwen Code Hook',
   'List all configured hooks': '列出所有已配置的 Hook',
+  'No hooks were loaded.': '未加载任何 Hook。',
+  'skipped (unsupported args)': '已跳过（不支持 args）',
   // Hooks - Dialog
   Hooks: 'Hook',
+  'A hook stopped the turn: {{reason}}': 'Hook 已结束本轮对话：{{reason}}',
   'Loading hooks...': '正在加载 Hook...',
   'Error loading hooks:': '加载 Hook 出错：',
   'Press Escape to close': '按 Escape 关闭',
@@ -1362,6 +1415,26 @@ export default {
   'Usage: /forget <memory text to remove>': '用法：/forget <要删除的记忆文本>',
   'No managed auto-memory entries matched: {{query}}':
     '没有匹配的托管自动记忆条目：{{query}}',
+  'Bind a GitHub pull request to this session':
+    '将 GitHub 拉取请求绑定到本会话',
+  'Usage: /pr <number | url>': '用法：/pr <编号 | url>',
+  'No PRs bound to this session.': '本会话尚未绑定 PR。',
+  'Bound PRs: {{list}}': '已绑定 PR：{{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    '无效的 PR 引用。用法：/pr <编号 | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    '无法通过 gh 解析 PR #{{number}}。请改用完整 PR URL。',
+  'Bound PR #{{number}} to this session: {{url}}':
+    '已将 PR #{{number}} 绑定到本会话：{{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} 已绑定到本会话：{{url}}',
+  'Failed to bind PR #{{number}}.': '绑定 PR #{{number}} 失败。',
+  'Failed to bind PR #{{number}}: {{message}}':
+    '绑定 PR #{{number}} 失败：{{message}}',
+  'Could not read the PR bindings for this session.':
+    '无法读取本会话的 PR 绑定。',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) 不可用或超时。请改用完整 PR URL 直接绑定。',
   'Consolidate managed auto-memory topic files.': '整理托管自动记忆主题文件',
   'Import MCP servers from Claude configs': '从 Claude 配置导入 MCP 服务器',
   'Open MCP management dialog': '打开 MCP 管理对话框',
@@ -1640,6 +1713,8 @@ export default {
     '由于压缩摘要被截断，无法压缩聊天历史。',
   'Could not compress chat history due to an API error.':
     '由于 API 错误，无法压缩聊天历史。',
+  'Could not compress chat history because it is too large for the context window.':
+    '聊天历史过大，超出上下文窗口，无法压缩。',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1768,10 +1843,10 @@ export default {
   'Signed in successfully · {{email}}': '登录成功 · {{email}}',
   'Current plan: Qwen {{plan}}. Qwen Code is ready.':
     '当前套餐：Qwen {{plan}}，已可使用 Qwen Code',
-  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.':
-    '模型：{{model}}，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型。',
-  'Common commands: /usage   /upgrade   /model   /status   /logout':
-    '常用命令：/usage   /upgrade   /model   /status   /logout',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.':
+    '模型：{{model}}，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型，/effort 修改思考强度。',
+  'Common commands: /usage   /upgrade   /model   /effort   /status   /logout':
+    '常用命令：/usage   /upgrade   /model   /effort   /status   /logout',
   'Signed in as {{email}} (Qwen {{plan}})':
     '已登录为 {{email}}（Qwen {{plan}}）',
   'Qwen {{plan}} is active · usage is included with your plan':
@@ -1849,6 +1924,18 @@ export default {
     '当前语音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 设置语音模型。',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     '当前视觉模型：{{visionModel}}\n使用 "/model --vision <model-id>" 设置视觉桥接模型。',
+  'Set the vision bridge timeout in seconds (use with --vision)':
+    '设置视觉桥接超时（秒，配合 --vision 使用）',
+  '--timeout can only be used with --vision.':
+    '--timeout 只能与 --vision 一起使用。',
+  'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
+    '无效的 --timeout 值 "{{value}}"。请使用正整数秒数，例如 60、60s 或 90000ms。',
+  'Vision bridge timeout: {{timeout}}': '视觉桥接超时：{{timeout}}',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    '已保存视觉桥接超时 {{timeout}}{{scope}}。更高优先级的设置使实际超时为 {{effectiveTimeout}}。',
+  'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
+    '视觉桥接超时：{{timeout}}\n使用 "/model --vision --timeout <seconds>" 修改。',
+  '{{timeout}} (default)': '{{timeout}}（默认）',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     '当前图像模型：{{imageModel}}\n使用 "/model --image <model-id>" 设置图像生成模型。',
   'Compaction model override cleared': '压缩模型覆盖已清除',
@@ -2028,6 +2115,8 @@ export default {
     '对话太长？用 /compress 总结历史，释放上下文。',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     '显示上下文窗口使用情况明细。使用 "/context detail" 查看逐项明细。',
+  'Save the context window for the current model.':
+    '保存当前模型的上下文窗口。',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -2055,6 +2144,7 @@ export default {
   'Model Usage': '模型使用情况',
   'Input Tokens': '输入 token 数',
   'Output Tokens': '输出 token 数',
+  'Output (incl. Reasoning)': '输出（含推理）',
   'Savings Highlight:': '节省亮点：',
   'of input tokens were served from the cache, reducing costs.':
     '从缓存载入 token ，降低了成本',
@@ -2418,6 +2508,8 @@ export default {
   'Advisor review failed: {{error}}': '审查失败：{{error}}',
   'No conversation context available for /advisor':
     '没有可供 /advisor 使用的对话上下文',
+  'No conversation context available for /btw':
+    '没有可供 /btw 使用的对话上下文',
   'Focus too long (max {{max}} chars)': '关注点过长（最多 {{max}} 个字符）',
   'Another operation is in progress, wait for it to complete before running /advisor':
     '另一个操作正在进行中，请等待其完成后再运行 /advisor',
@@ -2843,4 +2935,17 @@ export default {
   'Signed out of Qwen. Use /auth to sign in with another account.':
     '已退出 Qwen，请使用 /auth 登录其他账号。',
   'Tip: Run /usage to see your plan usage.': '提示：运行 /usage 查看套餐用量。',
+  'Copied to clipboard': '已复制到剪贴板',
+  'Copy failed': '复制失败',
+  '(API error: {{error}})': '（API 错误：{{error}}）',
+  'API error': 'API 错误',
+  '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}':
+    '{{reason}} · {{seconds}} 秒后重试 · 第 {{attempt}}/{{max}} 次',
+  '←/→ browse earlier answers': '←/→ 浏览之前的回答',
+  'c copy': 'c 复制',
+  'x clear history': 'x 清空历史',
+  'Tip: Use /btw to ask a quick side question without interrupting the current work':
+    '提示：用 /btw 顺带问一个旁路问题，不打断当前工作',
+  '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
+    '（模型试图调用 {{tool}}，而没有直接回答。请换个问法，或在主对话中提问。）',
 };

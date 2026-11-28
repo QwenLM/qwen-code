@@ -22,12 +22,7 @@ import type {
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import type {
-  CallableTool,
-  FunctionCall,
-  Part,
-  PartListUnion,
-} from '@google/genai';
+import type { CallableTool, FunctionCall, Part } from '@google/genai';
 import { StructuredToolError, ToolErrorType } from './tool-error.js';
 import type { Config, MCPServerConfig } from '../config/config.js';
 import { BUNDLED_GENERATED_UI_URI } from '../config/generated-ui.js';
@@ -58,10 +53,10 @@ import {
   LEGACY_REDUCTION_HEAD_LENGTH,
   normalizeToolNameForProvider,
 } from '../utils/tool-name-utils.js';
-import { isImagePart } from '../services/visionBridge/image-part-utils.js';
 import { buildMcpClassifierInput } from './mcp-classifier-input.js';
 import {
   boundedAppLimit,
+  effectiveAppResourceTimeoutMs,
   MCP_APP_RESOURCE_MAX_BYTES_CEILING,
   MCP_APP_RESOURCE_MAX_BYTES_DEFAULT,
   MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS,
@@ -301,9 +296,16 @@ const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
 // that actually declares the server — a `mcpServers.<name>` settings path is
 // destructive advice for an extension-declared server (a same-named settings
 // entry replaces the whole server object) and ineffective for a project one.
+// `timeout` is the raw written value: `mcpTimeout` arrives already defaulted
+// (`timeout ?? MCP_DEFAULT_TIMEOUT_MSEC`), so only this field tells a written
+// server `timeout` apart from the default.
 type McpAppResourceLimits = Pick<
   MCPServerConfig,
-  'appResourceMaxBytes' | 'appResourceTimeoutMs' | 'extensionName' | 'scope'
+  | 'appResourceMaxBytes'
+  | 'appResourceTimeoutMs'
+  | 'extensionName'
+  | 'scope'
+  | 'timeout'
 >;
 
 // Discriminated union for MCP Content Blocks to ensure type safety.
@@ -431,27 +433,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     return confirmationDetails;
   }
 
-  // MCP spec: errors are returned inside the CallToolResult, not as exceptions.
-  // ref: https://modelcontextprotocol.io/specification/2025-06-18/schema#calltoolresult
-  isMCPToolError(rawResponseParts: Part[]): boolean {
-    const functionResponse = rawResponseParts?.[0]?.functionResponse;
-    const response = functionResponse?.response;
-
-    interface McpError {
-      isError?: boolean | string;
-    }
-
-    if (response) {
-      const error = (response as { error?: McpError })?.error;
-      const isError = error?.isError;
-
-      if (error && (isError === true || isError === 'true')) {
-        return true;
-      }
-    }
-    return false;
-  }
-
   private async attemptReconnect(): Promise<DiscoveredMCPTool | null> {
     if (!this.cliConfig) {
       return null;
@@ -534,7 +515,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           this.params,
           this.cliConfig,
           newTool['mcpClient'],
-          this.mcpTimeout,
+          newTool['mcpTimeout'],
           this.mcpToolIdleTimeoutMs,
           newTool.annotations,
           newTool['allowInvocationContext'] === true,
@@ -758,48 +739,23 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         return {
           llmContent: summary,
           returnDisplay: summary,
-          ...(callToolResult.isError
-            ? {
-                error: { message: summary, type: ToolErrorType.MCP_TOOL_ERROR },
-              }
-            : {}),
+          ...(callToolResult.isError ? { isError: true } : {}),
         };
       }
 
-      // Wrap the raw CallToolResult into the Part[] format that the
-      // existing transform/display functions expect.
-      const rawResponseParts = await this.boundImages(
+      const result = await this.buildMcpToolResult(
         wrapMcpCallToolResultAsParts(this.serverToolName, callToolResult),
         signal,
       );
+      if (result.isError) return result;
 
-      if (this.isMCPToolError(rawResponseParts)) {
-        return await this.buildMcpToolError(rawResponseParts, {
-          name: this.serverToolName,
-          args: this.params,
-        });
-      }
-
-      const transformedParts = await this.clampInlineMedia(
-        transformMcpContentToParts(rawResponseParts),
-      );
-      const truncated = await this.truncateTextParts(transformedParts);
-      const fallbackText = getDisplayFromPartsWithPersistedOutput(
-        transformedParts,
-        truncated.persistedOutputFiles,
-      );
       const appDisplay = await this.loadMcpAppDisplay(
         callToolResult,
-        fallbackText,
+        result.returnDisplay,
         signal,
       );
 
-      return {
-        llmContent: truncated.parts,
-        rawOutputSize: measureToolOutput(transformedParts, this.cliConfig),
-        returnDisplay: appDisplay ?? fallbackText,
-        persistedOutputFiles: truncated.persistedOutputFiles,
-      };
+      return appDisplay ? { ...result, returnDisplay: appDisplay } : result;
     } catch (error) {
       if (this.onAppResult) {
         if (signal.aborted) throw createToolCallAbortError();
@@ -847,21 +803,25 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
    * dropped without a trace while the limit warning names the key.
    */
   private appResourceLimit(
-    value: number | undefined,
+    value: number | null | undefined,
     fallback: number,
     min: number,
     max: number,
-    key: 'appResourceMaxBytes' | 'appResourceTimeoutMs',
+    key: 'appResourceMaxBytes' | 'appResourceTimeoutMs' | 'timeout',
   ): number {
-    if (
-      value !== undefined &&
-      (typeof value !== 'number' || !Number.isFinite(value))
-    ) {
+    // `!= null`, not `!== undefined`, for every key routed through here:
+    // `mcpServers` carries no per-key runtime validation, so a hand-written
+    // `null` reaches this helper, and every other reader of those fields
+    // treats null as unset -- production resolves the server timeout with
+    // `timeout ?? MCP_DEFAULT_TIMEOUT_MSEC` and the pool fingerprint collapses
+    // the two spellings. Warning on it would announce, on every App load, a
+    // discard the rest of the codebase does not make.
+    if (value != null && effectiveAppResourceTimeoutMs(value) === null) {
       debugLogger.warn(
         `Ignoring non-finite MCP App resource limit ${this.appLimitSettingRef(key)} (${typeof value === 'string' ? JSON.stringify(value) : String(value)}); falling back to ${fallback}`,
       );
     }
-    return boundedAppLimit(value, fallback, min, max);
+    return boundedAppLimit(value ?? undefined, fallback, min, max);
   }
 
   /**
@@ -912,6 +872,27 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       MCP_APP_RESOURCE_TIMEOUT_MIN_MS,
       MCP_APP_RESOURCE_TIMEOUT_MAX_MS,
       'appResourceTimeoutMs',
+    );
+    // Warn on a written-but-non-finite server `timeout` here, beside the two
+    // sibling keys, rather than on the failure path: the operator must learn
+    // the value was ignored on every load, not only when a read times out.
+    // The returned number is deliberately unused -- `defaultTimeoutMs` above
+    // owns the deadline and must stay on the already-defaulted `mcpTimeout`.
+    //
+    // A written `null` is read as unset for this key exactly as it is for the
+    // two siblings -- the policy and its rationale live in
+    // `appResourceLimit`, so this call is passed unguarded like they are.
+    //
+    // The fallback named is `timeoutMs`, the deadline this read is actually
+    // given: an explicit `appResourceTimeoutMs` outranks the App resource
+    // default, so naming the constant would point the operator at a number
+    // the read never uses.
+    this.appResourceLimit(
+      this.appResourceLimits?.timeout,
+      timeoutMs,
+      1,
+      MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS,
+      'timeout',
     );
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     try {
@@ -970,18 +951,45 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     } catch (error) {
       if (signal.aborted) return undefined;
       const cause = getErrorMessage(error);
-      // Raising the general timeout cannot exceed the App resource ceiling.
-      const timeoutKey =
-        (typeof configuredTimeoutMs === 'number' &&
-          Number.isFinite(configuredTimeoutMs)) ||
-        defaultTimeoutMs === MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS
-          ? 'appResourceTimeoutMs'
-          : 'timeout';
+      // Name the key that produced this deadline -- and, when that key is
+      // already pinned at the App resource cap, the one that can go past it.
+      //
+      // Without an explicit `appResourceTimeoutMs` the deadline derives from
+      // the server `timeout` through
+      // `boundedAppLimit(mcpTimeout, DEFAULT, 1, DEFAULT)`, so a `timeout`
+      // at or above DEFAULT yields exactly DEFAULT. Reporting only
+      // `appResourceTimeoutMs` there hides both which key produced the limit
+      // and why raising it changed nothing, and points at a key the operator
+      // never set. Below DEFAULT the cap is not binding and raising
+      // `timeout` does work, so naming the cap would only mislead.
+      //
+      // "Derived from `timeout`" is decided on the WRITTEN value, never on
+      // `mcpTimeout`: that one is `timeout ?? MCP_DEFAULT_TIMEOUT_MSEC` and is
+      // finite even when nothing was written. A written value that is not a
+      // finite number (a hand-edited `"60000"` string -- `mcpServers` is not
+      // validated at runtime) is ignored by `boundedAppLimit` too, so the
+      // App resource default owns the deadline and is the key to name.
+      const hasExplicitAppTimeout =
+        effectiveAppResourceTimeoutMs(configuredTimeoutMs) !== null;
+      const writtenServerTimeout = this.appResourceLimits?.timeout;
+      const derivedFromServerTimeout =
+        !hasExplicitAppTimeout &&
+        effectiveAppResourceTimeoutMs(writtenServerTimeout) !== null;
+      const capIsBinding =
+        derivedFromServerTimeout &&
+        defaultTimeoutMs === MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS;
+      const timeoutRef = capIsBinding
+        ? `${this.appLimitSettingRef('timeout')}, capped at ${MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS} ms; only appResourceTimeoutMs lifts that cap`
+        : derivedFromServerTimeout
+          ? this.appLimitSettingRef('timeout')
+          : hasExplicitAppTimeout
+            ? this.appLimitSettingRef('appResourceTimeoutMs')
+            : `${this.appLimitSettingRef('appResourceTimeoutMs')} (default ${MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS} ms)`;
       const reason =
         timeoutSignal.aborted ||
         (error instanceof Error && error.name === 'TimeoutError') ||
         isMcpSdkRequestTimeout(error)
-          ? `resource read timed out (limit: ${timeoutMs} ms; ${this.appLimitSettingRef(timeoutKey)})`
+          ? `resource read timed out (limit: ${timeoutMs} ms; ${timeoutRef})`
           : cause;
       const warning = `Warning: MCP App '${this.appResourceUri}' from '${this.serverName}' could not be displayed: ${reason}`;
       // On the timeout branch `reason` replaces the underlying message, so
@@ -1035,26 +1043,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       if (isParentAbortOutcome(outcome)) {
         throw outcome.reason;
       }
-      const rawResponseParts = await this.boundImages(outcome, signal);
-
-      if (this.isMCPToolError(rawResponseParts)) {
-        return await this.buildMcpToolError(rawResponseParts, functionCalls[0]);
-      }
-
-      const transformedParts = await this.clampInlineMedia(
-        transformMcpContentToParts(rawResponseParts),
-      );
-      const truncated = await this.truncateTextParts(transformedParts);
-
-      return {
-        llmContent: truncated.parts,
-        rawOutputSize: measureToolOutput(transformedParts, this.cliConfig),
-        returnDisplay: getDisplayFromPartsWithPersistedOutput(
-          transformedParts,
-          truncated.persistedOutputFiles,
-        ),
-        persistedOutputFiles: truncated.persistedOutputFiles,
-      };
+      return await this.buildMcpToolResult(outcome, signal);
     } catch (error) {
       if (isExecutionTimeoutFailure(error, this.serverName, signal)) {
         throw new StructuredToolError(
@@ -1068,45 +1057,41 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
   }
 
-  private async buildMcpToolError(
+  private async buildMcpToolResult(
     rawResponseParts: Part[],
-    functionCall: FunctionCall,
-  ): Promise<ToolResult> {
-    // The body is replaced by `error` below and observeProducerOutput
-    // short-circuits on error results, so no raw size is declared here
-    // (#13652 R4-1).
-    const imageContent = getMcpErrorImageContent(rawResponseParts);
-    let llmContent: PartListUnion;
-    let errorMessage: string;
-    let persistedOutputFiles: string[] | undefined;
-    if (imageContent) {
-      const truncatedContent = await this.truncateTextParts(
-        await this.clampInlineMedia(imageContent),
-      );
-      llmContent = truncatedContent.parts;
-      persistedOutputFiles = truncatedContent.persistedOutputFiles;
-      errorMessage = `MCP tool '${
-        this.serverToolName
-      }' reported tool error for function call: ${safeJsonStringify(
-        functionCall,
-      )} with response: ${getDisplayFromParts(truncatedContent.parts)}`;
-    } else {
-      errorMessage = `MCP tool '${
-        this.serverToolName
-      }' reported tool error for function call: ${safeJsonStringify(
-        functionCall,
-      )} with response: ${safeJsonStringify(rawResponseParts)}`;
-      llmContent = errorMessage;
-    }
+    signal: AbortSignal,
+  ) {
+    const functionResponse = rawResponseParts[0]?.functionResponse;
+    const response = functionResponse?.response;
+    // The SDK nests the entire CallToolResult under error on failure.
+    const error = response?.['error'] as typeof response;
+    const isError =
+      error?.['isError'] === true || error?.['isError'] === 'true';
+    const parts =
+      isError && functionResponse
+        ? [
+            {
+              functionResponse: {
+                ...functionResponse,
+                response: { content: [], ...error, ...response },
+              },
+            },
+          ]
+        : rawResponseParts;
+    const transformedParts = await this.clampInlineMedia(
+      transformMcpContentToParts(await this.boundImages(parts, signal)),
+    );
+    const truncated = await this.truncateTextParts(transformedParts);
 
     return {
-      llmContent,
-      returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
-      error: {
-        message: errorMessage,
-        type: ToolErrorType.MCP_TOOL_ERROR,
-      },
-      ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
+      llmContent: truncated.parts,
+      rawOutputSize: measureToolOutput(transformedParts, this.cliConfig),
+      returnDisplay: getDisplayFromPartsWithPersistedOutput(
+        isError ? truncated.parts : transformedParts,
+        truncated.persistedOutputFiles,
+      ),
+      persistedOutputFiles: truncated.persistedOutputFiles,
+      ...(isError ? { isError: true } : {}),
     };
   }
 
@@ -1538,9 +1523,7 @@ function wrapMcpCallToolResultAsParts(
     isError?: boolean;
   },
 ): Part[] {
-  const response = result.isError
-    ? { error: result, content: result.content }
-    : result;
+  const response = result.isError ? { error: result } : result;
   return [
     {
       functionResponse: {
@@ -1784,11 +1767,6 @@ function transformMcpContentToParts(sdkResponse: Part[]): Part[] {
   return contentParts.some((part) => part.text === structuredParts[0]?.text)
     ? contentParts
     : [...structuredParts, ...contentParts];
-}
-
-function getMcpErrorImageContent(rawResponseParts: Part[]): Part[] | undefined {
-  const transformedParts = transformMcpContentToParts(rawResponseParts);
-  return transformedParts.some(isImagePart) ? transformedParts : undefined;
 }
 
 /**

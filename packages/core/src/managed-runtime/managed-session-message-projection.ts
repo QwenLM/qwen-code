@@ -4,11 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import {
+  getManagedExecutionDiagnostics,
+  executionDiagnosticDigest,
+  type ManagedInvocationObservation,
+} from './managed-execution-diagnostics.js';
 import {
   assertManagedSessionDurableRef,
   MANAGED_SESSION_FORMAT_VERSION,
-  MANAGED_SESSION_LIMITS,
   ManagedSessionRecordError,
   managedSessionReaderFacingBody,
   safeErrorValue,
@@ -25,6 +30,7 @@ import {
   type ManagedSessionCommitReceipt,
 } from './managed-session-authority.js';
 import {
+  MANAGED_MESSAGE_KIND,
   publishManagedMessageBody,
   readManagedMessageBody,
 } from './managed-message-chunks.js';
@@ -36,6 +42,24 @@ import type {
   ManagedSessionJournalScan,
   ManagedSessionResourceStore,
 } from './managed-session-storage.js';
+
+/**
+ * Raised while projecting a Managed journal when the caller supplied a byte
+ * budget and the next reader-facing record would cross it. Thrown before the
+ * remaining resource bodies are read, so an all-replay budget bounds decode
+ * allocation rather than only the already-materialized record list.
+ */
+export class ManagedSessionProjectionLimitError extends Error {
+  constructor(
+    readonly measuredBytes: number,
+    readonly maxBytes: number,
+  ) {
+    super(
+      `Managed session projection exceeds ${maxBytes} bytes (measured ${measuredBytes})`,
+    );
+    this.name = 'ManagedSessionProjectionLimitError';
+  }
+}
 
 /**
  * Charged bytes (bodies plus a fixed per-entry overhead) of the verified
@@ -69,16 +93,29 @@ interface StoreBodies {
   oversized: boolean;
 }
 
+function bodyKey(ref: ManagedSessionDurableRef): string {
+  return [
+    ref.resourceId,
+    ref.kind,
+    ref.schemaVersion,
+    ref.byteLength,
+    ref.digest,
+  ].join('\u0000');
+}
+
 /**
- * Message bodies already read through a projection. A body is immutable and
+ * Message bodies already read through a projection, or handed over by a caller
+ * that read them through the same store (`remember`). A body is immutable and
  * its ref names its kind, length and digest, so an entry is exactly the body
  * the store's verified read returned for that ref, assembled whole for a
  * chunked one. A cached body is not read through the store again, so a store
  * check that runs on every read, such as a writer fence, no longer runs for
  * it. Entries are kept per resource store, so Sessions never share them, and a
  * store's entries are released when the store itself is collected. Only reads
- * fill the cache: a body a projection has never read is still read from the
- * store, and fails the projection if the store no longer has it.
+ * fill the cache, a projection's own or one the caller made through the same
+ * store and hands over (`remember`): a body nobody has read through the store
+ * is still read from it, and fails the projection if the store no longer has
+ * it.
  *
  * The resource store's own read contract does not change. Readers that open
  * their own store, such as `readManagedSessionRecords`, read it on every call,
@@ -137,19 +174,8 @@ export class ManagedMessageBodyCache {
     resources: ManagedSessionResourceStore,
     ref: ManagedSessionDurableRef,
   ): Promise<Buffer> {
-    let bodies = this.stores.get(resources);
-    if (bodies === undefined) {
-      bodies = { entries: new Map(), bytes: 0, oversized: false };
-      this.stores.set(resources, bodies);
-      this.collected.register(resources, bodies);
-    }
-    const key = [
-      ref.resourceId,
-      ref.kind,
-      ref.schemaVersion,
-      ref.byteLength,
-      ref.digest,
-    ].join('\u0000');
+    const bodies = this.bodiesOf(resources);
+    const key = bodyKey(ref);
     const cached = bodies.entries.get(key);
     if (cached !== undefined) {
       bodies.entries.delete(key);
@@ -161,8 +187,50 @@ export class ManagedMessageBodyCache {
       (bodyRef) => resources.read(bodyRef),
       ref,
     );
+    return this.keep(bodies, key, body);
+  }
+
+  /**
+   * Keeps a body as if a projection had read it, so the next projection of
+   * that store does not read it again. The caller must have read `body`
+   * through `resources.read` itself, the store's verified read, for example
+   * while verifying the resources a journal references before projecting it.
+   *
+   * Only a `managed-message` body qualifies. The entry of a chunked one
+   * (`managed-message-chunks`) is the body assembled from its parts, not the
+   * manifest its ref names. Bytes that do not match the ref's length and
+   * digest are not kept. The cache may keep `body` itself, so the caller must
+   * not modify it afterwards; a slice of a larger buffer is kept as a copy.
+   */
+  remember(
+    resources: ManagedSessionResourceStore,
+    ref: ManagedSessionDurableRef,
+    body: Buffer,
+  ): void {
+    if (
+      ref.kind !== MANAGED_MESSAGE_KIND ||
+      body.byteLength !== ref.byteLength ||
+      createHash('sha256').update(body).digest('hex') !== ref.digest
+    )
+      return;
+    this.keep(this.bodiesOf(resources), bodyKey(ref), body);
+  }
+
+  private bodiesOf(resources: ManagedSessionResourceStore): StoreBodies {
+    let bodies = this.stores.get(resources);
+    if (bodies === undefined) {
+      bodies = { entries: new Map(), bytes: 0, oversized: false };
+      this.stores.set(resources, bodies);
+      this.collected.register(resources, bodies);
+    }
+    return bodies;
+  }
+
+  /** Keeps `body` under `key` if the bound allows, and returns what to serve. */
+  private keep(bodies: StoreBodies, key: string, body: Buffer): Buffer {
     const cost = body.byteLength + this.entryBytes;
-    // A concurrent read of the same ref may have kept it while this one waited.
+    // An entry may exist already: a concurrent read of the same ref, or a
+    // handed-over body, kept it.
     if (cost > this.limitBytes || bodies.entries.has(key)) return body;
     if (bodies.bytes + cost > this.limitBytes) {
       bodies.oversized = true;
@@ -241,7 +309,11 @@ export class ManagedSessionMessageProjection {
    */
   async commit(
     command: ManagedSessionCommand,
-    input: { record: ChatRecord; modelAttemptId?: string | null },
+    input: {
+      record: ChatRecord;
+      modelAttemptId?: string | null;
+      diagnostics?: readonly ManagedInvocationObservation[];
+    },
     actor: ManagedSessionActor,
   ): Promise<{ receipt: ManagedSessionCommitReceipt; messageId: string }> {
     const record = input.record;
@@ -252,6 +324,9 @@ export class ManagedSessionMessageProjection {
     }
     const body = Buffer.from(JSON.stringify(record), 'utf8');
     const contentRef = await publishManagedMessageBody(this.resources, body);
+    const diagnosticsRef = await getManagedExecutionDiagnostics(
+      this.authority,
+    )?.message(record, input.diagnostics);
     const subject =
       actor.class === 'harness' && actor.activation !== undefined
         ? {
@@ -262,7 +337,15 @@ export class ManagedSessionMessageProjection {
           }
         : undefined;
     const receipt = await this.authority.appendExecutionEvent(
-      command,
+      diagnosticsRef
+        ? {
+            ...command,
+            contentDigest: executionDiagnosticDigest(
+              contentRef.digest,
+              diagnosticsRef,
+            ),
+          }
+        : command,
       (sequence) => ({
         v: MANAGED_SESSION_FORMAT_VERSION,
         sequence,
@@ -275,6 +358,7 @@ export class ManagedSessionMessageProjection {
           messageId: record.uuid,
           role: record.type,
           contentRef,
+          ...(diagnosticsRef ? { diagnosticsRef } : {}),
           parentMessageId: record.parentUuid,
           ...(input.modelAttemptId === undefined
             ? {}
@@ -303,6 +387,15 @@ export class ManagedSessionMessageProjection {
     return this.projectRecords(throughSequence, false);
   }
 
+  /**
+   * Hands a message body the caller read through this projection's own
+   * store to the body cache, so that projecting does not read it again (see
+   * `ManagedMessageBodyCache.remember`).
+   */
+  rememberBody(ref: ManagedSessionDurableRef, body: Buffer): void {
+    this.bodies.remember(this.resources, ref, body);
+  }
+
   async projectModelRecords(throughSequence?: number): Promise<ChatRecord[]> {
     return this.projectRecords(throughSequence, true);
   }
@@ -311,50 +404,63 @@ export class ManagedSessionMessageProjection {
     throughSequence: number | undefined,
     includeCompactions: boolean,
   ): Promise<ChatRecord[]> {
-    const records: ChatRecord[] = [];
-    const checkpoints = new Map<string, number>();
-    let after = 0;
-    for (;;) {
-      const page = this.authority.readEvents({
-        afterSequence: after,
-        limit: MANAGED_SESSION_LIMITS.maxReadEvents,
-      });
-      if (page.length === 0) break;
-      for (const event of page) {
-        if (throughSequence !== undefined && event.sequence > throughSequence)
-          return records;
-        after = event.sequence;
-        const branch = await readManagedBranchCheckpoint(
-          event,
-          this.resources,
-          (id) => checkpoints.get(id),
-          throughSequence ?? this.authority.committedSequence,
-        );
-        if (event.kind === 'checkpoint.committed') {
-          checkpoints.set(
-            event.payload['checkpointId'] as string,
-            event.sequence,
-          );
-        }
-        if (branch !== undefined) {
-          records.push(branch);
-        } else if (
-          event.kind === 'message.committed' ||
-          (includeCompactions && event.kind === 'context.compacted')
-        ) {
-          const ref = assertManagedSessionDurableRef(
-            event.payload[
-              event.kind === 'context.compacted' ? 'summaryRef' : 'contentRef'
-            ],
-            `${event.kind} event ${event.eventId} body`,
-          );
-          const body = await this.bodies.read(this.resources, ref);
-          records.push(JSON.parse(body.toString('utf8')) as ChatRecord);
-        }
-      }
-    }
-    return records;
+    return projectManagedModelRecords(
+      this.authority.eventsInSequenceRange(
+        1,
+        throughSequence ?? this.authority.committedSequence,
+      ),
+      this.resources,
+      throughSequence ?? this.authority.committedSequence,
+      {
+        includeCompactions,
+        readBody: (ref) => this.bodies.read(this.resources, ref),
+      },
+    );
   }
+}
+
+/** Pure journal projection shared by live Sessions and frozen side queries. */
+export async function projectManagedModelRecords(
+  events: Iterable<ManagedSessionEvent>,
+  resources: ManagedSessionResourceStore,
+  throughSequence: number,
+  options: {
+    includeCompactions?: boolean;
+    readBody?: (ref: ManagedSessionDurableRef) => Promise<Buffer>;
+  } = {},
+): Promise<ChatRecord[]> {
+  const records: ChatRecord[] = [];
+  const checkpoints = new Map<string, number>();
+  const readBody =
+    options.readBody ??
+    ((ref) => readManagedMessageBody((part) => resources.read(part), ref));
+  for (const event of events) {
+    if (event.sequence > throughSequence) break;
+    const branch = await readManagedBranchCheckpoint(
+      event,
+      resources,
+      (id) => checkpoints.get(id),
+      throughSequence,
+    );
+    if (event.kind === 'checkpoint.committed')
+      checkpoints.set(event.payload['checkpointId'] as string, event.sequence);
+    if (branch !== undefined) records.push(branch);
+    else if (
+      event.kind === 'message.committed' ||
+      (options.includeCompactions && event.kind === 'context.compacted')
+    ) {
+      const ref = assertManagedSessionDurableRef(
+        event.payload[
+          event.kind === 'context.compacted' ? 'summaryRef' : 'contentRef'
+        ],
+        `${event.kind} event ${event.eventId} body`,
+      );
+      records.push(
+        JSON.parse((await readBody(ref)).toString('utf8')) as ChatRecord,
+      );
+    }
+  }
+  return records;
 }
 
 async function readRecordBody(
@@ -387,13 +493,21 @@ export async function readManagedSessionRecords(options: {
   readonly sessionKey: ManagedSessionKey;
   /** Bounds the projection to a frozen snapshot's byte length. */
   readonly maxBytes?: number;
+  /** Stops projection before the next body would exceed this retained size. */
+  readonly maxBodyBytes?: number;
 }): Promise<ChatRecord[]> {
   const scan = await readManagedSessionLog(options);
   const resources = LocalManagedSessionResourceStore.create({
     runtimeBaseDir: options.runtimeBaseDir,
     sessionKey: options.sessionKey,
   });
-  return projectManagedSessionRecords({ scan, resources });
+  return projectManagedSessionRecords({
+    scan,
+    resources,
+    ...(options.maxBodyBytes !== undefined
+      ? { maxBodyBytes: options.maxBodyBytes }
+      : {}),
+  });
 }
 
 /**
@@ -409,31 +523,62 @@ export async function readManagedSessionRecordsAndTitle(options: {
   readonly sessionKey: ManagedSessionKey;
   /** Bounds the projection to a frozen snapshot's byte length. */
   readonly maxBytes?: number;
+  /** Stops projection before the next body would exceed this retained size. */
+  readonly maxBodyBytes?: number;
+  readonly signal?: AbortSignal;
 }): Promise<{
   records: ChatRecord[];
   titleInfo: { title?: string; source?: 'auto' | 'manual' };
 }> {
+  options.signal?.throwIfAborted();
   const scan = await readManagedSessionLog(options);
+  options.signal?.throwIfAborted();
   const resources = LocalManagedSessionResourceStore.create({
     runtimeBaseDir: options.runtimeBaseDir,
     sessionKey: options.sessionKey,
   });
-  const records = await projectManagedSessionRecords({ scan, resources });
+  const records = await projectManagedSessionRecords({
+    scan,
+    resources,
+    ...(options.maxBodyBytes !== undefined
+      ? { maxBodyBytes: options.maxBodyBytes }
+      : {}),
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
+  });
+  options.signal?.throwIfAborted();
   let titleInfo: { title?: string; source?: 'auto' | 'manual' } = {};
   try {
     titleInfo = await projectManagedSessionTitleInfo({ scan, resources });
   } catch {
     // Reported as no title.
   }
+  options.signal?.throwIfAborted();
   return { records, titleInfo };
+}
+
+function accountProjectedBytes(
+  total: number,
+  record: ChatRecord,
+  maxBodyBytes: number | undefined,
+): number {
+  if (maxBodyBytes === undefined) return total;
+  const next = total + Buffer.byteLength(JSON.stringify(record), 'utf8');
+  if (next > maxBodyBytes) {
+    throw new ManagedSessionProjectionLimitError(next, maxBodyBytes);
+  }
+  return next;
 }
 
 /** Projects an already-verified durable journal through its resource store. */
 export async function projectManagedSessionRecords(options: {
   readonly scan: ManagedSessionJournalScan;
   readonly resources: ManagedSessionResourceStore;
+  /** Stops before reading the body that would cross this retained size. */
+  readonly maxBodyBytes?: number;
+  readonly signal?: AbortSignal;
 }): Promise<ChatRecord[]> {
-  const { scan, resources } = options;
+  const { scan, resources, maxBodyBytes, signal } = options;
+  signal?.throwIfAborted();
   if (scan.header === undefined) {
     throw new ManagedSessionRecordError(
       'session log has no Managed header, so it cannot be projected.',
@@ -441,7 +586,9 @@ export async function projectManagedSessionRecords(options: {
   }
   const records: ChatRecord[] = [];
   const checkpoints = new Map<string, number>();
+  let projectedBytes = 0;
   for (const event of scan.events) {
+    signal?.throwIfAborted();
     const branch = await readManagedBranchCheckpoint(
       event,
       resources,
@@ -452,13 +599,17 @@ export async function projectManagedSessionRecords(options: {
       checkpoints.set(event.payload['checkpointId'] as string, event.sequence);
     }
     if (branch !== undefined) {
-      records.push(
-        requireProjectedRecord(
-          branch,
-          scan.header.sessionKey.sessionId,
-          `${event.kind} event ${event.eventId} ref`,
-        ),
+      const projected = requireProjectedRecord(
+        branch,
+        scan.header.sessionKey.sessionId,
+        `${event.kind} event ${event.eventId} ref`,
       );
+      projectedBytes = accountProjectedBytes(
+        projectedBytes,
+        projected,
+        maxBodyBytes,
+      );
+      records.push(projected);
       continue;
     }
     const carried = managedSessionReaderFacingBody(event);
@@ -468,17 +619,21 @@ export async function projectManagedSessionRecords(options: {
       carried.ref,
       `${event.kind} event ${event.eventId} ref`,
     );
-    records.push(
-      requireProjectedRecord(
-        carried.inDomainEnvelope
-          ? body !== null && typeof body === 'object'
-            ? (body as { readonly record?: unknown }).record
-            : undefined
-          : body,
-        scan.header.sessionKey.sessionId,
-        `${event.kind} event ${event.eventId} ref`,
-      ),
+    const projected = requireProjectedRecord(
+      carried.inDomainEnvelope
+        ? body !== null && typeof body === 'object'
+          ? (body as { readonly record?: unknown }).record
+          : undefined
+        : body,
+      scan.header.sessionKey.sessionId,
+      `${event.kind} event ${event.eventId} ref`,
     );
+    projectedBytes = accountProjectedBytes(
+      projectedBytes,
+      projected,
+      maxBodyBytes,
+    );
+    records.push(projected);
   }
   return records;
 }

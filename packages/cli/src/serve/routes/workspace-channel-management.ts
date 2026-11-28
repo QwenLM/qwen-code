@@ -374,6 +374,10 @@ const ERROR_STATUS = new Map<string, number>([
   ['channel_worker_stop_failed', 500],
   ['daemon_draining', 503],
   ['channel_worker_unavailable', 503],
+  ['channel_qr_login_channel_missing', 404],
+  ['channel_qr_login_unsupported', 400],
+  ['channel_qr_login_not_found', 404],
+  ['channel_qr_login_limit_reached', 409],
 ]);
 
 function sendManagementError(res: Response, error: unknown): void {
@@ -458,6 +462,9 @@ export function registerWorkspaceChannelManagementRoutes(
     );
 
   const register = (prefix: string, resolveRuntime: RuntimeResolver) => {
+    const qrLoginStart = deps.mutate({ strict: true });
+    const qrLoginRead = deps.mutate({ strict: true });
+    const qrLoginCancel = deps.mutate({ strict: true });
     const pairingRead = deps.mutate({ strict: true });
     const pairingApprove = deps.mutate({ strict: true });
     const pairingApprovalsRead = deps.mutate({ strict: true });
@@ -576,6 +583,118 @@ export function registerWorkspaceChannelManagementRoutes(
         sendManagementError(res, error);
       }
     });
+
+    app.post(
+      `${prefix}/channels/:name/qr-login`,
+      qrLoginStart,
+      async (req, res) => {
+        const resolved = await target(req, res);
+        if (!resolved) return;
+        const clientId = deps.parseAndValidateClientId(
+          req,
+          res,
+          resolved.runtime,
+        );
+        if (clientId === null) return;
+        const name = parseInstanceName(req, res);
+        if (!name) return;
+        try {
+          noStore(res);
+          const { view, attached } = await resolved.run(() =>
+            resolved.service.startQrLogin(name, clientId ?? undefined),
+          );
+          res.status(attached ? 200 : 201).json({ ...view, attached });
+        } catch (error) {
+          sendManagementError(res, error);
+        }
+      },
+    );
+
+    app.get(
+      `${prefix}/channel-qr-logins/:loginId`,
+      qrLoginRead,
+      async (req, res) => {
+        const resolved = await target(req, res);
+        if (!resolved) return;
+        const clientId = deps.parseAndValidateClientId(
+          req,
+          res,
+          resolved.runtime,
+        );
+        if (clientId === null) return;
+        const loginId = req.params['loginId'];
+        if (!loginId) {
+          res.status(404).json({
+            error: 'QR login id required',
+            code: 'channel_qr_login_not_found',
+          });
+          return;
+        }
+        try {
+          noStore(res);
+          const view = resolved.service.qrLoginState(
+            loginId,
+            clientId ?? undefined,
+          );
+          if (!view) {
+            res.status(404).json({
+              error: `QR login ${loginId} not found`,
+              code: 'channel_qr_login_not_found',
+            });
+            return;
+          }
+          res.status(200).json(view);
+        } catch (error) {
+          sendManagementError(res, error);
+        }
+      },
+    );
+
+    app.delete(
+      `${prefix}/channel-qr-logins/:loginId`,
+      qrLoginCancel,
+      async (req, res) => {
+        const resolved = await target(req, res);
+        if (!resolved) return;
+        const clientId = deps.parseAndValidateClientId(
+          req,
+          res,
+          resolved.runtime,
+        );
+        if (clientId === null) return;
+        const loginId = req.params['loginId'];
+        if (!loginId) {
+          res.status(404).json({
+            error: 'QR login id required',
+            code: 'channel_qr_login_not_found',
+          });
+          return;
+        }
+        try {
+          noStore(res);
+          const cancelled = resolved.service.cancelQrLogin(
+            loginId,
+            clientId ?? undefined,
+          );
+          const view = resolved.service.qrLoginState(
+            loginId,
+            clientId ?? undefined,
+          );
+          if (!cancelled || !view) {
+            res.status(404).json({
+              error: `QR login ${loginId} not found`,
+              code: 'channel_qr_login_not_found',
+            });
+            return;
+          }
+          // Return the terminal view rather than an empty 204 so the caller can
+          // render the outcome without a second read, matching sibling routes.
+          res.status(200).json(view);
+        } catch (error) {
+          sendManagementError(res, error);
+        }
+      },
+    );
 
     app.get(
       `${prefix}/channels/:name/pairing-requests`,

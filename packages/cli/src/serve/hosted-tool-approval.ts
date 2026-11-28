@@ -55,7 +55,10 @@ export interface HostedApprovalSettings {
 // Session's own team board (H4e-b1). `todo_write` only writes the Session's
 // own task list, so it is as safe to pre-approve as a read. A tool that
 // reaches the network would not join this list: it contacts a URL nobody in
-// the Session chose.
+// the Session chose. `cron_list` reads the Session's own pending loop wakeups
+// and `cron_delete` cancels one — the autonomous loop's list/cancel arm must
+// not stall on an operator dialog (its sibling loop_wakeup is exempt via the
+// funnel admission instead).
 const PREAPPROVED_TOOLS: Readonly<
   Record<Exclude<HostedApprovalMode, 'yolo'>, readonly string[]>
 > = {
@@ -65,6 +68,8 @@ const PREAPPROVED_TOOLS: Readonly<
     'todo_write',
     'exit_plan_mode',
     'team_plan_approval',
+    'cron_list',
+    'cron_delete',
   ],
   auto: [
     'read_file',
@@ -72,6 +77,8 @@ const PREAPPROVED_TOOLS: Readonly<
     'todo_write',
     'exit_plan_mode',
     'team_plan_approval',
+    'cron_list',
+    'cron_delete',
   ],
   'auto-edit': [
     'read_file',
@@ -81,6 +88,8 @@ const PREAPPROVED_TOOLS: Readonly<
     'todo_write',
     'exit_plan_mode',
     'team_plan_approval',
+    'cron_list',
+    'cron_delete',
   ],
 };
 
@@ -176,20 +185,15 @@ interface HostedActionOptionsBase {
 
 export type HostedActionOptions = HostedActionOptionsBase &
   (
-    | ({
+    | {
+        readonly v: 3;
         readonly options: ReadonlyArray<{
           readonly id: string;
           readonly label: string;
         }>;
-      } & (
-        | { readonly v: 1 }
-        | { readonly v: 2; readonly inputRef: ManagedSessionDurableRef }
-        | {
-            readonly v: 3;
-            readonly inputRef?: ManagedSessionDurableRef;
-            readonly continuationRef: ManagedSessionDurableRef;
-          }
-      ))
+        readonly inputRef?: ManagedSessionDurableRef;
+        readonly continuationRef?: ManagedSessionDurableRef;
+      }
     | {
         readonly v: 4;
         readonly questions: readonly HostedActionQuestion[];
@@ -226,15 +230,13 @@ export function parseHostedActionOptions(bytes: Buffer): HostedActionOptions {
       throw new Error('Invalid Hosted Action human decision floor.');
     fields.push('requiresHumanDecision');
   }
+  if (Object.hasOwn(options, 'inputRef')) fields.push('inputRef');
+  if (Object.hasOwn(options, 'continuationRef')) fields.push('continuationRef');
   if (
-    question ||
-    options['v'] === 2 ||
-    (options['v'] === 3 && options['inputRef'])
-  )
-    fields.push('inputRef');
-  if (question || options['v'] === 3) fields.push('continuationRef');
-  if (
-    ![1, 2, 3, 4].includes(options['v'] as number) ||
+    ![3, 4].includes(options['v'] as number) ||
+    (question &&
+      (!Object.hasOwn(options, 'inputRef') ||
+        !Object.hasOwn(options, 'continuationRef'))) ||
     Object.keys(options).length !== fields.length ||
     fields.some((field) => !Object.hasOwn(options, field)) ||
     !Number.isSafeInteger(options['inputRevision']) ||
@@ -289,6 +291,13 @@ export function parseHostedActionOptions(bytes: Buffer): HostedActionOptions {
     )
       throw new Error('Invalid Hosted Action reference.');
   }
+  if (
+    Object.hasOwn(options, 'inputRef') &&
+    (options['inputRef'] as { kind?: unknown }).kind ===
+      'managed-extension-command-input' &&
+    !Object.hasOwn(options, 'continuationRef')
+  )
+    throw new Error('Invalid Hosted Action reference.');
   return options as unknown as HostedActionOptions;
 }
 
@@ -333,9 +342,16 @@ export function hostedActionAllowed(
   );
 }
 
+interface HostedApprovalWaiter {
+  readonly resolve: () => void;
+  readonly clear: () => void;
+  readonly polling: () => boolean;
+}
+
 /** Wakes a waiting tool turn when its Action is answered. */
 export class HostedApprovalWaiters {
-  private readonly waiting = new Map<string, () => void>();
+  private readonly waiting = new Map<string, HostedApprovalWaiter>();
+  private readonly resolving = new Map<string, number>();
 
   /**
    * Resolves once `isFinal` holds, the expiry passes, or the signal aborts.
@@ -354,7 +370,16 @@ export class HostedApprovalWaiters {
     try {
       await new Promise<void>((resolve, reject) => {
         let polling = false;
-        this.waiting.set(requestId, resolve);
+        const clear = (): void => {
+          clearTimeout(timer);
+          clearInterval(poll);
+          signal.removeEventListener('abort', onAbort);
+        };
+        this.waiting.set(requestId, {
+          resolve,
+          clear,
+          polling: () => polling,
+        });
         onAbort = resolve;
         signal.addEventListener('abort', onAbort, { once: true });
         timer = setTimeout(resolve, Math.max(0, expiresAt - Date.now()));
@@ -387,8 +412,27 @@ export class HostedApprovalWaiters {
     }
   }
 
+  park(requestId: string): boolean {
+    const waiter = this.waiting.get(requestId);
+    if (!waiter || waiter.polling() || (this.resolving.get(requestId) ?? 0) > 0)
+      return false;
+    waiter.clear();
+    this.waiting.delete(requestId);
+    return true;
+  }
+
+  beginResolution(requestId: string): void {
+    this.resolving.set(requestId, (this.resolving.get(requestId) ?? 0) + 1);
+  }
+
+  endResolution(requestId: string): void {
+    const remaining = (this.resolving.get(requestId) ?? 0) - 1;
+    if (remaining > 0) this.resolving.set(requestId, remaining);
+    else this.resolving.delete(requestId);
+  }
+
   notify(requestId: string): void {
-    this.waiting.get(requestId)?.();
+    this.waiting.get(requestId)?.resolve();
   }
 }
 
@@ -500,6 +544,27 @@ const ENDED_CODES = {
  * checked just before each write, since the Turn may block meanwhile.
  */
 export async function resolveHostedAction(
+  session: ManagedSession,
+  waiters: HostedApprovalWaiters,
+  requestId: string,
+  body: unknown,
+  isBlocked: () => boolean = () => false,
+): Promise<HostedActionResolution> {
+  waiters.beginResolution(requestId);
+  try {
+    return await resolveHostedActionRegistered(
+      session,
+      waiters,
+      requestId,
+      body,
+      isBlocked,
+    );
+  } finally {
+    waiters.endResolution(requestId);
+  }
+}
+
+async function resolveHostedActionRegistered(
   session: ManagedSession,
   waiters: HostedApprovalWaiters,
   requestId: string,

@@ -5,9 +5,9 @@ import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationComma
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.persistence.FaultingExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.persistence.StoreFaultGate;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -73,7 +73,7 @@ class HostedMcpStoreFaultGatesIT {
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3)).build();
-    private final String tenant = "mcp-restart-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final List<ProxyCall> proxyCalls = new CopyOnWriteArrayList<>();
     private final java.util.concurrent.atomic.AtomicInteger proxySequence =
             new java.util.concurrent.atomic.AtomicInteger();
@@ -156,7 +156,7 @@ class HostedMcpStoreFaultGatesIT {
                 + json.writeValueAsString(cli.toUri().toString()) + ");\n");
         port = reservePort();
         harnessPort = reservePort();
-        brokerPort = reservePort();
+        brokerPort = port;
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelExecutor = Executors.newVirtualThreadPerTaskExecutor();
         model.setExecutor(modelExecutor);
@@ -575,7 +575,7 @@ class HostedMcpStoreFaultGatesIT {
                 Integer.class, tenant, session.id(), configuration);
         assertThat(rows).as("one logical chain per id").isEqualTo(1);
         Integer keys = jdbc.queryForObject("SELECT COUNT(DISTINCT"
-                + " record_key) FROM ma_session_record WHERE record_kind ="
+                + " record_id) FROM ma_session_record WHERE record_kind ="
                 + " 'DOMAIN' AND tenant_id = ? AND session_id = ? AND"
                 + " domain = 'mcp_configuration'", Integer.class, tenant,
                 session.id());
@@ -629,14 +629,14 @@ class HostedMcpStoreFaultGatesIT {
     private String holderIdentity() {
         List<String> rows = jdbc.queryForList("SELECT CONCAT(CONVERT(binding_id USING utf8mb4),"
                 + " ':', runtime_generation, ':', CONVERT(runtime_session_id USING utf8mb4),"
-                + " ':', execution_storage_key) FROM ma_runtime_session"
-                + " WHERE tenant_id = ? AND execution_storage_key IS NOT NULL", String.class, tenant);
+                + " ':', CONVERT(execution_storage_id USING utf8mb4)) FROM ma_runtime_session"
+                + " WHERE tenant_id = ? AND execution_storage_id IS NOT NULL", String.class, tenant);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
     private int storageHolds() {
         return jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session"
-                + " WHERE tenant_id = ? AND execution_storage_key IS NOT NULL", Integer.class, tenant);
+                + " WHERE tenant_id = ? AND execution_storage_id IS NOT NULL", Integer.class, tenant);
     }
 
     private int drainReceipts(SessionRef session) {
@@ -784,12 +784,11 @@ class HostedMcpStoreFaultGatesIT {
     }
 
     private JsonNode published(String session, JsonNode ref) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
         String body = jdbc.queryForObject(
                 "SELECT CONVERT(inline_bytes USING utf8mb4) FROM ma_resource"
-                        + " WHERE session_scope_key = ? AND resource_id = ?"
+                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?"
                         + " AND tenant_id = ? AND session_id = ?",
-                String.class, scope, ref.path("resourceId").asText(), tenant,
+                String.class, tenant, session, ref.path("resourceId").asText(), tenant,
                 session);
         assertThat(body).as("published response body").isNotBlank();
         try {
@@ -1076,8 +1075,6 @@ class HostedMcpStoreFaultGatesIT {
                         "--qwen.managed-agent.harness.capability-digest="
                                 + CAPABILITY,
                         "--qwen.managed-agent.runtime-broker.enabled=true",
-                        "--qwen.managed-agent.runtime-broker.port="
-                                + brokerPort,
                         "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                         "--qwen.managed-agent.runtime-broker.durable-local-process=true",
                         "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
@@ -1408,9 +1405,9 @@ class HostedMcpStoreFaultGatesIT {
     static class StoreFaultConfiguration {
         @Bean
         @Primary
-        ManagedExtensionRecordStore faultingExtensionRecordStore(
+        JdbcManagedExtensionRecordStore faultingExtensionRecordStore(
                 JdbcTemplate jdbc, AgentStateStore sessions,
-                ManagedTaskEventStore taskEvents) {
+                JdbcManagedTaskEventStore taskEvents) {
             return new FaultingExtensionRecordStore(jdbc, sessions, taskEvents,
                     StoreFaultGate.INSTANCE);
         }

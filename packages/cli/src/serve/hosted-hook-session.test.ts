@@ -38,7 +38,9 @@ import {
   HostedHookInputConflictError,
   HostedHookRecoveryRequiredError,
   parseHostedHookPin,
+  hostedConfigScopedOwnerId,
   hostedHookOccurrenceId,
+  isHostedConfigScopedOwner,
   semanticInputDigest,
   type HostedToolInputOrder,
 } from './hosted-hook-session.js';
@@ -315,6 +317,33 @@ it.each([HookEventName.SessionEnd, HookEventName.SessionDelete])(
     expect(hooks.hasPendingOperations).toBe(false);
   },
 );
+
+it('recognises every owner id its own builder produces (R1-6)', () => {
+  // The producers and the predicate must agree: a renamed prefix or a
+  // different hashed tuple at any construction site would otherwise leave
+  // the predicate compiling and returning false, handing every detach the
+  // terminal arm and bringing the R13-1 tombstone back with the suite green.
+  const sessionKey = {
+    tenantId: 'tenant',
+    workspaceId: 'workspace',
+    sessionId: 'session',
+  };
+  for (const revision of [1, 2, 17])
+    expect(
+      isHostedConfigScopedOwner(
+        hostedConfigScopedOwnerId(sessionKey, revision),
+      ),
+    ).toBe(true);
+  // The round trip above moves builder and predicate together, so it cannot
+  // see a reordered tuple or a renamed prefix — while every id already
+  // persisted under the old derivation stops matching what a reload
+  // computes. One literal pins the derivation itself (R3-3).
+  expect(hostedConfigScopedOwnerId(sessionKey, 1)).toBe(
+    'extensions-components-ce4d6156e1132eef477c4c5a8cb8f1813945abdfe281612862d3575d8efc2de4',
+  );
+  expect(isHostedConfigScopedOwner('hooks-activation-1')).toBe(false);
+  expect(isHostedConfigScopedOwner('turn-ordinary')).toBe(false);
+});
 
 it('keeps a lifecycle Hook intent retryable when its original owner cannot be restored', async () => {
   let lifecycle = false;
@@ -918,6 +947,21 @@ it('keeps its mount while a Hook outcome is unknown (#13800)', async () => {
   );
   // A shared MCP broker's mount goes back through its owner.
   expect(linked.mountHandback()).toBeUndefined();
+});
+
+it('still disowns a shared broker while holding the mount', async () => {
+  await hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
+  expect(hooks.mountHeld).toBe(true);
+  const shared = hooks.broker;
+  // The no-argument handover keeps the same broker, so the mount stays valid.
+  expect(() => hooks.delegateBrokerToMcp()).not.toThrow();
+  expect(hooks.broker).toBe(shared);
+  // Disown hands the release to MCP: close must not release the shared broker
+  // again. Without ownsBroker=false, close releases it (a double release).
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  release.mockClear();
+  await hooks.close();
+  expect(release).not.toHaveBeenCalled();
 });
 
 it('aggregates parallel results in plan order rather than reply order', async () => {
@@ -2903,7 +2947,7 @@ it('preserves the original Session message snapshot when a function occurrence i
 });
 
 it.each(['decision', 'continue'] as const)(
-  'restores a Stop %s continuation only for the originating prompt after Session reopen',
+  'restores a Stop %s outcome only for the originating prompt after Session reopen',
   async (kind) => {
     catalog = {
       ...catalog,
@@ -2912,7 +2956,7 @@ it.each(['decision', 'continue'] as const)(
     expect(await hooks.wasStopBlocked('prompt-1')).toBe(false);
     execute = async () => ({
       success: true,
-      outcome: 'blocking',
+      outcome: 'success',
       duration: 0,
       output:
         kind === 'decision'
@@ -2925,21 +2969,174 @@ it.each(['decision', 'continue'] as const)(
       { prompt_id: 'prompt-1' },
       signal(),
     );
-    const sessionKey = session.authority.sessionHeader.sessionKey;
-    await session.close();
-    session = await openManagedSession({
-      runtimeBaseDir: root,
-      cwd: root,
-      transcriptPath: path.join(root, 'session.jsonl'),
-      sessionId: sessionKey.sessionId,
-      sessionKey,
-      version: 'test',
-      workerId: 'replacement',
-      activationLeaseDurationMs: 60_000,
-    });
+    await reopenSession();
     const restored = new HostedHookSession(options, session, pin);
-    expect(await restored.wasStopBlocked('prompt-1')).toBe(true);
+    expect(await restored.wasStopBlocked('prompt-1')).toBe(kind === 'decision');
     expect(await restored.wasStopBlocked('prompt-2')).toBe(false);
+  },
+);
+
+it('restores a legacy command exit 2 from a saved Stop result without dispatching it again', async () => {
+  catalog = {
+    ...catalog,
+    hooks: [{ ...catalog.hooks[0], eventName: HookEventName.Stop }],
+  };
+  const output = { continue: false, stopReason: 'Retry the checks.' };
+  const fields = { prompt_id: 'prompt-1', stop_hook_active: false };
+  execute = async () => ({
+    success: false,
+    outcome: 'blocking',
+    duration: 1,
+    stderr: JSON.stringify(output),
+    output,
+  });
+  const publish = session.resources.publish.bind(session.resources);
+  const legacyMarker = vi
+    .spyOn(session.resources, 'publish')
+    .mockImplementation((kind, bytes) => {
+      if (kind === 'managed-hook-result') {
+        const saved = JSON.parse(Buffer.from(bytes).toString()) as {
+          outcome?: string;
+        };
+        if (saved.outcome === undefined) {
+          return publish(kind, Buffer.from(JSON.stringify({ output })));
+        }
+      }
+      return publish(kind, bytes);
+    });
+  await hooks.fire(HookEventName.Stop, 'stop-1', fields, signal());
+  legacyMarker.mockRestore();
+  execute = async () => ({ success: true, outcome: 'success', duration: 1 });
+  await hooks.fire(
+    HookEventName.Stop,
+    'stop-2',
+    { ...fields, stop_hook_active: true },
+    signal(),
+  );
+
+  await reopenSession();
+  const restored = new HostedHookSession(options, session, pin);
+  const active = await restored.wasStopBlocked('prompt-1');
+  expect(active).toBe(true);
+  expect(await restored.wasStopBlocked('prompt-2')).toBe(false);
+  await expect(
+    restored.fire(HookEventName.Stop, 'stop-1', fields, signal()),
+  ).resolves.toMatchObject({ ...output, decision: 'deny' });
+  await expect(
+    restored.fire(
+      HookEventName.Stop,
+      'stop-2',
+      { ...fields, stop_hook_active: active },
+      signal(),
+    ),
+  ).resolves.toBeUndefined();
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(2);
+});
+
+it.each(['status', 'fire'] as const)(
+  'restores a legacy command exit 2 from a saved Stop child via %s',
+  async (recovery) => {
+    catalog = {
+      ...catalog,
+      hooks: [{ ...catalog.hooks[0], eventName: HookEventName.Stop }],
+    };
+    const output = { continue: false, stopReason: 'Retry the checks.' };
+    const fields = { prompt_id: 'prompt-1', stop_hook_active: false };
+    execute = async () => ({
+      success: false,
+      outcome: 'blocking',
+      duration: 1,
+      stderr: JSON.stringify(output),
+      output,
+    });
+    const lost = loseFinalMarkerWrite();
+    await expect(
+      hooks.fire(HookEventName.Stop, 'stop-1', fields, signal()),
+    ).rejects.toThrow('lost final marker write');
+    lost.mockRestore();
+
+    await reopenSession();
+    const restored = new HostedHookSession(options, session, pin);
+    if (recovery === 'status') await restored.status('stop-1');
+
+    await expect(
+      restored.fire(HookEventName.Stop, 'stop-1', fields, signal()),
+    ).resolves.toMatchObject({ ...output, decision: 'deny' });
+    expect(await restored.wasStopBlocked('prompt-1')).toBe(true);
+    expect(
+      requests.filter((request) => request.kind === 'hook-execute'),
+    ).toHaveLength(1);
+  },
+);
+
+it.each(['status', 'fire'] as const)(
+  'keeps a late async Stop receipt out of the recovered decision via %s',
+  async (recovery) => {
+    catalog = {
+      ...catalog,
+      hooks: [
+        { ...catalog.hooks[0], eventName: HookEventName.Stop, async: true },
+      ],
+    };
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+    const originalControl = control.getMockImplementation()!;
+    control.mockImplementation(async function (
+      this: HostedWorkspaceBroker,
+      operation,
+    ) {
+      if (operation.kind === 'hook-execute') {
+        requests.push(operation);
+        return { operationId: operation.operationId, state: 'running' };
+      }
+      return originalControl.call(this, operation);
+    });
+    const fields = { prompt_id: 'prompt-1', stop_hook_active: false };
+    const lost = loseFinalMarkerWrite();
+    await expect(
+      hooks.fire(HookEventName.Stop, 'stop-1', fields, signal()),
+    ).rejects.toThrow('lost final marker write');
+    lost.mockRestore();
+
+    const dispatch = requests.find(
+      (request) => request.kind === 'hook-execute',
+    )!;
+    const result: ManagedHookResult = {
+      success: false,
+      outcome: 'blocking',
+      duration: 1,
+      output: { decision: 'deny' },
+    };
+    replies.set(dispatch.operationId, {
+      operationId: dispatch.operationId,
+      state: 'settled',
+      result,
+    });
+    const childRecord = () =>
+      session.authority.extensionRecord('hook_execution', dispatch.operationId);
+    await vi.waitFor(
+      () => expect(childRecord()?.run.execution).toBe('settled'),
+      { timeout: isSlowTestHost() ? 30_000 : 1_000 },
+    );
+    const resultRef = parseHookExecution(childRecord()!.record).resultRef!;
+
+    await reopenSession();
+    const restored = new HostedHookSession(options, session, pin);
+    if (recovery === 'status') await restored.status('stop-1');
+    await expect(
+      restored.fire(HookEventName.Stop, 'stop-1', fields, signal()),
+    ).resolves.toBeUndefined();
+    expect(await restored.wasStopBlocked('prompt-1')).toBe(false);
+    expect(parseHookExecution(childRecord()!.record).resultRef).toEqual(
+      resultRef,
+    );
+    expect(
+      JSON.parse((await session.resources.read(resultRef)).toString()),
+    ).toEqual(result);
+    expect(
+      requests.filter((request) => request.kind === 'hook-execute'),
+    ).toHaveLength(1);
   },
 );
 
@@ -3174,6 +3371,7 @@ it.each([
   [HookEventName.PermissionRequest, false],
   [HookEventName.PreToolUse, true],
   [HookEventName.PermissionRequest, true],
+  [HookEventName.Stop, true],
 ] as const)(
   'persists a hard capacity refusal for fail-open %s Hooks across reconstruction (async: %s)',
   async (eventName, async) => {
@@ -3216,6 +3414,41 @@ it.each([
     ).toHaveLength(1);
   },
 );
+
+it('keeps a fail-closed async Stop quota refusal when rebuilding the result', async () => {
+  catalog = {
+    ...catalog,
+    hooks: [
+      { ...catalog.hooks[0], eventName: HookEventName.Stop, async: true },
+    ],
+  };
+  execute = async () => ({
+    success: false,
+    outcome: 'non_blocking_error',
+    duration: 0,
+    error: 'Managed hook execution quota exceeded before dispatch.',
+  });
+  const fields = { prompt_id: 'prompt-1', stop_hook_active: false };
+  const lost = loseFinalMarkerWrite();
+  await expect(
+    hooks.fire(HookEventName.Stop, 'stop-1', fields, signal()),
+  ).rejects.toThrow('lost final marker write');
+  lost.mockRestore();
+
+  await reopenSession();
+  const restored = new HostedHookSession(options, session, pin);
+  await restored.status('stop-1');
+  await expect(
+    restored.fire(HookEventName.Stop, 'stop-1', fields, signal()),
+  ).resolves.toMatchObject({
+    decision: 'block',
+    reason: 'Hook evaluation failed.',
+  });
+  expect(await restored.wasStopBlocked('prompt-1')).toBe(true);
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(1);
+});
 
 it.each([false, true])(
   'settles parallel quota refusals after a lost reply using the saved fail policy (closed: %s)',
@@ -3928,7 +4161,273 @@ it('retains historical Hook ownership for cleanup without claiming a live MCP mo
   ).toHaveLength(0);
   const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
   release.mockClear();
-  await restored.closeResources();
+  await restored.closeResources({ terminal: true });
   expect(release).toHaveBeenCalledOnce();
   expect(restored.mountHeld).toBe(false);
+});
+
+it.each([
+  'runtime_session_busy',
+  'runtime_session_conflict',
+  'workspace_writer_unproven',
+  'runtime_admission_closed',
+])(
+  'names a refused non-terminal mount handback as recovery-required (R14-2: %s)',
+  async (code) => {
+    // A deterministic config-scoped owner closing non-terminally hands its
+    // mount back; the handback sweeps nothing, so live or unproven work
+    // refuses it. The refusal must be named as recovery-required (the Session
+    // stays attached and retryable), never escape as a raw Broker rejection,
+    // and never fall back to a terminal release that would tombstone the id.
+    const deterministic = new HostedHookSession(
+      options,
+      session,
+      pin,
+      undefined,
+      () => false,
+      `extensions-components-${'e'.repeat(64)}`,
+    );
+    await deterministic.acquire();
+    expect(deterministic.mountHeld).toBe(true);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'det-claim',
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(409, code),
+    );
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    release.mockClear();
+    await expect(deterministic.close()).rejects.toBeInstanceOf(
+      HostedHookRecoveryRequiredError,
+    );
+    expect(release).not.toHaveBeenCalled();
+  },
+);
+
+it('names a Broker-restart handback refusal as recovery-required, not a broken close (R15-2)', async () => {
+  // A Broker that restarted beside the Harness holds no resident Session
+  // Context, so releaseMount answers 503 runtime_reconciliation_required —
+  // proof nothing was handed back. It must be named recovery-required (the
+  // Session stays attached and retryable), exactly as the close's held-Runtime
+  // drain already tolerates it, never escape as a raw rejection that takes the
+  // whole close down, and never be read as a successful handback.
+  const deterministic = new HostedHookSession(
+    options,
+    session,
+    pin,
+    undefined,
+    () => false,
+    `extensions-components-${'e'.repeat(64)}`,
+  );
+  await deterministic.acquire();
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'det-claim',
+  );
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(503, 'runtime_reconciliation_required'),
+  );
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  release.mockClear();
+  await expect(deterministic.close()).rejects.toBeInstanceOf(
+    HostedHookRecoveryRequiredError,
+  );
+  expect(release).not.toHaveBeenCalled();
+});
+
+it('terminally releases the deterministic owner on DELETE of a reloaded, never-acquired instance (R15-4)', async () => {
+  const owner = `extensions-components-${'a'.repeat(64)}`;
+  const first = new HostedHookSession(
+    options,
+    session,
+    pin,
+    undefined,
+    () => false,
+    owner,
+  );
+  await first.acquire();
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'det-claim',
+  );
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockResolvedValue();
+  // Detach hands the mount back and keeps the owner re-acquirable.
+  await first.close();
+  const releasedIds: string[] = [];
+  vi.mocked(HostedWorkspaceBroker.prototype.release).mockImplementation(
+    async function (this: HostedWorkspaceBroker) {
+      releasedIds.push(this.runtimeSessionId);
+      Object.defineProperty(this, 'acquired', {
+        value: false,
+        configurable: true,
+      });
+    },
+  );
+  // Reload: a fresh instance carrying the same deterministic id, never
+  // acquired, so mountHeld is false. A DELETE must still terminally release the
+  // owner instead of orphaning it.
+  const reloaded = new HostedHookSession(
+    options,
+    session,
+    pin,
+    undefined,
+    () => false,
+    owner,
+  );
+  expect(reloaded.mountHeld).toBe(false);
+  await reloaded.close({ terminal: true });
+  // The close also retires the session's per-load hooks-activation-* earlier
+  // owner; pin the deterministic owner's terminal release specifically.
+  expect(releasedIds.filter((id) => id === owner)).toHaveLength(1);
+});
+
+it('absorbs a 404 on terminal release of a never-acquired deterministic owner (R17-1)', async () => {
+  const owner = `extensions-components-${'e'.repeat(64)}`;
+  // A reloaded instance that never acquired: mountHeld stays false and no
+  // Runtime Session row exists under the deterministic id, so the Broker's
+  // terminal release answers 404. close() must book the owner released and
+  // resolve instead of letting the refusal escape and wedging the session
+  // undeletable.
+  const absent = new HostedHookSession(
+    options,
+    session,
+    pin,
+    undefined,
+    () => false,
+    owner,
+  );
+  expect(absent.mountHeld).toBe(false);
+  vi.mocked(HostedWorkspaceBroker.prototype.release).mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(404, 'runtime_session_not_found'),
+  );
+  await absent.close({ terminal: true });
+});
+
+it('absorbs a 503 reconciliation on terminal release of a never-acquired deterministic owner (R17-1)', async () => {
+  // After a Broker restart a never-acquired deterministic owner can answer 503
+  // reconciliation-required; that is benign for an un-acquired owner too.
+  const restarted = new HostedHookSession(
+    options,
+    session,
+    pin,
+    undefined,
+    () => false,
+    `extensions-components-${'d'.repeat(64)}`,
+  );
+  expect(restarted.mountHeld).toBe(false);
+  // Only the deterministic owner's terminal release answers 503; the per-load
+  // earlier-owner releases resolve so the witness isolates the terminal arm.
+  const restartedOwner = `extensions-components-${'d'.repeat(64)}`;
+  vi.mocked(HostedWorkspaceBroker.prototype.release).mockImplementation(
+    async function (this: HostedWorkspaceBroker) {
+      if (this.runtimeSessionId === restartedOwner)
+        throw new HostedWorkspaceBrokerRejection(
+          503,
+          'runtime_reconciliation_required',
+        );
+      Object.defineProperty(this, 'acquired', {
+        value: false,
+        configurable: true,
+      });
+    },
+  );
+  await restarted.close({ terminal: true });
+});
+
+it('keeps a shared Hook+MCP deterministic owner re-acquirable on a non-terminal close (R14-1)', async () => {
+  // The load builds the MCP first and hands its broker to the Hook, so the
+  // Hook borrows (ownsBroker=false) and the MCP owns the shared deterministic
+  // owner. A detach closes the Hook (which must not release a broker it does
+  // not own) then the MCP (which must hand the mount back, not tombstone).
+  const owner = `extensions-components-${'f'.repeat(64)}`;
+  const shared = new HostedWorkspaceBroker(
+    options,
+    session.authority.sessionHeader.sessionKey,
+    owner,
+  );
+  const mcpShared = new HostedMcpSession(
+    options,
+    session,
+    [],
+    undefined,
+    shared,
+    true,
+  );
+  const hooksShared = new HostedHookSession(options, session, pin, shared);
+  // Fire a Hook so the shared owner acquires and holds the mount.
+  await hooksShared.fire(
+    HookEventName.PreToolUse,
+    'shared-hook',
+    { tool_name: 'read_file' },
+    signal(),
+  );
+  expect(hooksShared.mountHeld).toBe(true);
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'shared-claim',
+  );
+  const releaseMount = vi
+    .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+    .mockResolvedValue();
+  const releasedOwners = new Set<string>();
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  release.mockImplementation(async function (this: HostedWorkspaceBroker) {
+    releasedOwners.add(this.runtimeSessionId);
+  });
+  await hooksShared.close();
+  await mcpShared.closeResources();
+  // Neither owner may terminally release the shared deterministic id a reload
+  // recomputes; the mount goes back through releaseMount instead.
+  expect(release).not.toHaveBeenCalled();
+  expect(releaseMount).toHaveBeenCalledWith('shared-claim');
+  expect(releasedOwners.has(owner)).toBe(false);
+  // The reload recomputes the identical deterministic id and must re-acquire
+  // it: refuse any re-acquire of a terminally released owner, exactly as
+  // acquireNewSession refuses a non-ACQUIRING row.
+  vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockImplementation(
+    async function (this: HostedWorkspaceBroker) {
+      if (releasedOwners.has(this.runtimeSessionId))
+        throw new HostedWorkspaceBrokerRejection(
+          409,
+          'runtime_session_not_acquirable',
+        );
+      this.runtime = {
+        bindingId: 'binding',
+        generation: '1',
+        workspaceGeneration: '1',
+      };
+    },
+  );
+  const reloaded = new HostedWorkspaceBroker(
+    options,
+    session.authority.sessionHeader.sessionKey,
+    owner,
+  );
+  await reloaded.acquire();
+});
+
+it.each([
+  ['hands the mount back when it owns its broker', true],
+  ['leaves a mount shared with MCP alone', false],
+])('on a non-terminal close %s', async (_name, ownsBroker) => {
+  const owner = `extensions-components-${'b'.repeat(64)}`;
+  const shared = new HostedWorkspaceBroker(
+    options,
+    session.authority.sessionHeader.sessionKey,
+    owner,
+  );
+  const closing = new HostedHookSession(
+    options,
+    session,
+    pin,
+    ownsBroker ? undefined : shared,
+    () => false,
+    owner,
+  );
+  await closing.acquire();
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'close-claim',
+  );
+  const releaseMount = vi
+    .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+    .mockResolvedValue();
+  await closing.close({ terminal: false });
+  expect(releaseMount).toHaveBeenCalledTimes(ownsBroker ? 1 : 0);
 });

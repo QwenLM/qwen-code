@@ -3,7 +3,10 @@ import { ArrowLeftIcon } from 'lucide-react';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import { AgentsManagerPage } from '../agents/AgentsManagerPage';
 import { ExtensionsManagerPage } from '../extensions/ExtensionsManagerPage';
-import type { ManagedExtensionsManagerPageProps } from '../managed/ManagedExtensionsManagerPage';
+import {
+  ManagedExtensionsManagerPage,
+  type ManagedExtensionsManagerPageProps,
+} from '../managed/ManagedExtensionsManagerPage';
 import { McpManagerPage } from '../mcp/McpManagerPage';
 import {
   ManagedMcpManagerPage,
@@ -31,6 +34,8 @@ interface PluginManagerPageProps {
   showBackButton?: boolean;
   initialFocusRef?: Ref<HTMLButtonElement>;
   initialTab?: PluginTab;
+  initialWorkspaceCwd?: string;
+  navigationRequest?: number;
   skillsWorkspaceCwd?: string;
   onSkillsWorkspaceChange?: (cwd: string) => void;
   managedSkills?: boolean;
@@ -44,6 +49,8 @@ export function PluginManagerPage({
   showBackButton = false,
   initialFocusRef,
   initialTab = 'extensions',
+  initialWorkspaceCwd,
+  navigationRequest,
   skillsWorkspaceCwd,
   onSkillsWorkspaceChange,
   managedSkills = false,
@@ -79,7 +86,7 @@ export function PluginManagerPage({
       'workspace_skills_config_runtime',
     ) === true;
   const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState(
-    () => skillsWorkspaceCwd ?? defaultWorkspaceCwd,
+    () => initialWorkspaceCwd ?? skillsWorkspaceCwd ?? defaultWorkspaceCwd,
   );
   const [activeTab, setActiveTab] = useState<PluginTab>(initialTab);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -87,6 +94,16 @@ export function PluginManagerPage({
   const skillsWorkspace = splitSkillsRuntimeAvailable
     ? selectedWorkspaceCwd
     : workspace.workspaceCwd;
+
+  useEffect(() => {
+    if (navigationRequest === undefined) return;
+    setActiveTab(initialTab);
+    if (initialWorkspaceCwd !== undefined) {
+      setSelectedWorkspaceCwd(initialWorkspaceCwd);
+    }
+    setDetailOpen(false);
+    setPageRevision((revision) => revision + 1);
+  }, [initialTab, initialWorkspaceCwd, navigationRequest]);
 
   useEffect(() => {
     if (
@@ -126,7 +143,8 @@ export function PluginManagerPage({
   };
 
   const workspaceSelect = (disabled: boolean) =>
-    ((activeTab === 'mcp' && !managedMcp) ||
+    ((activeTab === 'extensions' && !managedExtensions) ||
+      (activeTab === 'mcp' && !managedMcp) ||
       (activeTab === 'skills' && splitSkillsRuntimeAvailable)) &&
     workspaces.length > 1 ? (
       <Select
@@ -205,17 +223,25 @@ export function PluginManagerPage({
       ) : null}
 
       <TabsContent value={activeTab} className="mt-0">
-        {activeTab === 'skills' && managedSkills && (
+        {activeTab === 'skills' && managedSkills && !managedExtensions && (
           <p className="my-2 text-sm text-muted-foreground">
             {t('managed.creationSkillsFromSettings')}
           </p>
         )}
         {activeTab === 'extensions' ? (
           <ExtensionsManagerPage
-            key={`extensions-${pageRevision}`}
+            key={`extensions-${pageRevision}-${selectedWorkspaceCwd ?? ''}`}
             managed={managedExtensions}
             onClose={onClose}
             embedded={embedded}
+            workspaceCwd={selectedWorkspaceCwd}
+            workspaceControl={workspaceSelect(true)}
+          />
+        ) : activeTab === 'skills' && managedExtensions ? (
+          <ManagedExtensionsManagerPage
+            {...managedExtensions}
+            view="skills"
+            onClose={onClose}
           />
         ) : activeTab === 'skills' ? (
           <SkillsManagerPage
@@ -233,7 +259,14 @@ export function PluginManagerPage({
             embedded={embedded}
           />
         ) : managedMcp ? (
-          <ManagedMcpManagerPage {...managedMcp} />
+          <ManagedMcpManagerPage
+            {...managedMcp}
+            onOpenExtensions={
+              managedExtensions
+                ? () => setActiveTab('extensions')
+                : managedMcp.onOpenExtensions
+            }
+          />
         ) : (
           <McpManagerPage
             key={`mcp-${pageRevision}-${selectedWorkspaceCwd ?? ''}`}

@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -21,7 +22,10 @@ import {
   useStreamingState,
   useWorkspace,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import { SIDEBAR_SESSION_PREVIEW_LIMIT } from '../../constants/sessions';
+import {
+  SIDEBAR_SESSION_EXPAND_STEP,
+  SIDEBAR_SESSION_PREVIEW_LIMIT,
+} from '../../constants/sessions';
 import {
   getDaemonErrorCode,
   isSessionWriterBlockedCode,
@@ -31,6 +35,11 @@ import { DialogShell } from '../dialogs/DialogShell';
 import { SessionRenameDialog } from '../dialogs/SessionRenameDialog';
 import { Button } from '../ui/button';
 import {
+  compareArchivedSessions,
+  matchesArchivedSearch,
+  type ArchivedSessionSort,
+} from './archived-session-sort';
+import {
   readWorkspaceExpanded,
   writeWorkspaceExpanded,
 } from './workspaceExpansion';
@@ -38,12 +47,17 @@ import sidebarStyles from './WebShellSidebar.module.css';
 import workspaceStyles from './WorkspaceSection.module.css';
 
 interface StandaloneRecentsProps {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
+  clientSort?: ArchivedSessionSort;
   archiveState: DaemonSessionArchiveState;
   currentSessionId?: string;
   currentSessionReady?: boolean;
   refreshKey?: number;
   searchQuery?: string;
+  hideWhenSearchEmpty?: boolean;
+  groupCountLabel?: (count: number, hasMore: boolean) => string;
   onNewSession?: () => void;
+  newSessionDisabled?: boolean;
   renderSession: (
     session: DaemonStandaloneSessionSummary,
     options: {
@@ -66,6 +80,8 @@ interface StandaloneRecentsProps {
   onMutated?: () => void;
   onStatusChange?: (status: {
     count: number;
+    matchedCount?: number;
+    hasMore?: boolean;
     loading: boolean;
     error: boolean;
   }) => void;
@@ -116,12 +132,17 @@ function downloadExport(result: {
 }
 
 export function StandaloneRecents({
+  sortBy,
+  clientSort,
   archiveState,
   currentSessionId,
   currentSessionReady = false,
   refreshKey,
   searchQuery = '',
+  hideWhenSearchEmpty = false,
+  groupCountLabel,
   onNewSession,
+  newSessionDisabled = false,
   renderSession,
   onLoadSession,
   onRenameSession,
@@ -151,7 +172,11 @@ export function StandaloneRecents({
   const [expanded, setExpanded] = useState(() =>
     readWorkspaceExpanded(expansionId),
   );
-  const [showAll, setShowAll] = useState(false);
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+  const [visibleCount, setVisibleCount] = useState(
+    SIDEBAR_SESSION_PREVIEW_LIMIT,
+  );
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState<{ cursor?: string }>();
@@ -179,10 +204,14 @@ export function StandaloneRecents({
       loadGenerationRef.current = generation;
       setLoadingMore(false);
       setLoading(true);
+      // A discarded page must not leave its cursor behind: it is bound to the
+      // sort that produced it, and the daemon rejects it under another sort.
+      if (!preservePages) setCursor(undefined);
       try {
         const targetCount = preservePages ? sessionsRef.current.length : 0;
         let page = await workspace.client.listStandaloneSessionsPage({
           archiveState,
+          ...(sortBy !== undefined ? { sortBy } : {}),
           pageSize: PAGE_SIZE,
         });
         if (loadGenerationRef.current !== generation) return;
@@ -190,6 +219,7 @@ export function StandaloneRecents({
         while (page.nextCursor && loaded.length < targetCount) {
           page = await workspace.client.listStandaloneSessionsPage({
             archiveState,
+            ...(sortBy !== undefined ? { sortBy } : {}),
             cursor: page.nextCursor,
             pageSize: PAGE_SIZE,
           });
@@ -208,7 +238,7 @@ export function StandaloneRecents({
         if (loadGenerationRef.current === generation) setLoading(false);
       }
     },
-    [archiveState, supported, workspace.client],
+    [archiveState, sortBy, supported, workspace.client],
   );
 
   useEffect(() => {
@@ -229,11 +259,16 @@ export function StandaloneRecents({
     }
   }, [currentSessionId, currentSessionReady]);
 
+  const previousSortRef = useRef(sortBy);
   useEffect(() => {
     const refreshRequested = previousRefreshKeyRef.current !== refreshKey;
     previousRefreshKeyRef.current = refreshKey;
-    if (!loadedRef.current || refreshRequested) void load(true);
-  }, [load, refreshKey]);
+    const sortChanged = previousSortRef.current !== sortBy;
+    previousSortRef.current = sortBy;
+    if (sortChanged) setVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
+    if (!loadedRef.current || refreshRequested || sortChanged)
+      void load(!sortChanged);
+  }, [load, refreshKey, sortBy]);
 
   useEffect(() => {
     const previous = previousStreamingStateRef.current;
@@ -248,28 +283,75 @@ export function StandaloneRecents({
     }
   }, [archiveState, connection.sessionContext?.kind, load, streamingState]);
 
+  const query = searchQuery.trim().toLowerCase();
+  const visibleSessions = useMemo(() => {
+    const filtered = query
+      ? sessions.filter((session) =>
+          archiveState === 'archived'
+            ? matchesArchivedSearch(session, query)
+            : sessionLabel(session).toLowerCase().includes(query) ||
+              session.sessionId.toLowerCase().includes(query),
+        )
+      : sessions;
+    if (
+      archiveState === 'archived' &&
+      (clientSort === 'createdAt' || clientSort === 'alphabetical')
+    ) {
+      return [...filtered].sort((a, b) =>
+        compareArchivedSessions(a, b, clientSort),
+      );
+    }
+    return filtered;
+  }, [archiveState, clientSort, query, sessions]);
+
+  const hasMore = Boolean(cursor);
   useEffect(() => {
-    onStatusChange?.({ count: sessions.length, loading, error: !!loadError });
-  }, [loadError, loading, onStatusChange, sessions.length]);
+    onStatusChange?.({
+      count: sessions.length,
+      matchedCount: visibleSessions.length,
+      hasMore,
+      loading,
+      error: !!loadError,
+    });
+  }, [
+    hasMore,
+    loadError,
+    loading,
+    onStatusChange,
+    sessions.length,
+    visibleSessions.length,
+  ]);
 
   useEffect(() => {
-    if (!expanded) setShowAll(false);
+    if (!expanded) setVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
   }, [expanded]);
 
   const loadMore = useCallback(async () => {
-    if (!cursor || loadingMore) return;
+    if (!cursor || loadingMore || loading) return;
     const generation = loadGenerationRef.current;
     setLoadingMore(true);
     try {
       const page = await workspace.client.listStandaloneSessionsPage({
         archiveState,
+        ...(sortBy !== undefined ? { sortBy } : {}),
         cursor,
         pageSize: PAGE_SIZE,
       });
       if (loadGenerationRef.current !== generation) return;
-      setSessions((current) =>
-        appendUnique(current, withoutChildren(page.sessions)),
-      );
+      const appended = withoutChildren(page.sessions);
+      setSessions((current) => appendUnique(current, appended));
+      // A fetched page must stay visible in full: reveal the already-loaded
+      // catalog plus the appended page, rather than adding the page length to
+      // a count that may still trail the catalog (e.g. the five-row preview).
+      // Skip the reveal if the group collapsed while the page was in flight —
+      // the collapse reset already returned it to the preview, and writing a
+      // reveal here would re-expand it on the next open. The data is kept.
+      if (expandedRef.current) {
+        setVisibleCount(
+          (count) =>
+            Math.max(count, sessionsRef.current.length) + appended.length,
+        );
+      }
       setCursor(page.nextCursor);
       setLoadError(undefined);
     } catch (error) {
@@ -280,7 +362,7 @@ export function StandaloneRecents({
     } finally {
       if (loadGenerationRef.current === generation) setLoadingMore(false);
     }
-  }, [archiveState, cursor, loadingMore, workspace.client]);
+  }, [archiveState, sortBy, cursor, loading, loadingMore, workspace.client]);
 
   const run = useCallback(
     async (
@@ -454,21 +536,58 @@ export function StandaloneRecents({
   ) {
     return null;
   }
-  const query = searchQuery.trim().toLowerCase();
-  const visibleSessions = query
-    ? sessions.filter(
-        (session) =>
-          sessionLabel(session).toLowerCase().includes(query) ||
-          session.sessionId.toLowerCase().includes(query),
-      )
-    : sessions;
+  if (
+    hideWhenSearchEmpty &&
+    Boolean(query) &&
+    !loadError &&
+    !sessionError &&
+    !loading &&
+    !hasMore &&
+    visibleSessions.length === 0
+  ) {
+    return null;
+  }
   const sessionsLimited =
+    archiveState === 'active' &&
     !query &&
-    !showAll &&
-    visibleSessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT;
+    visibleSessions.length > visibleCount;
   const displayedSessions = sessionsLimited
-    ? visibleSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT)
+    ? visibleSessions.slice(0, visibleCount)
     : visibleSessions;
+
+  const renderRows = () =>
+    displayedSessions.map((session) => {
+      const isCurrent = session.sessionId === currentSessionId;
+      return renderSession(session, {
+        active: isCurrent,
+        busy: busySessionId === session.sessionId,
+        isArchived: archiveState === 'archived',
+        onOpen: () => void openSession(session.sessionId),
+        onRename: () => {
+          setRenameCandidate(session);
+          setRenameValue(sessionLabel(session));
+        },
+        onExport: () => {
+          void run(session.sessionId, async () => {
+            downloadExport(
+              await workspace.client.exportStandaloneSession(
+                session.sessionId,
+                { format: 'html' },
+              ),
+            );
+          });
+        },
+        onArchive:
+          archiveState === 'active'
+            ? () => void archiveSession(session)
+            : undefined,
+        onUnarchive:
+          archiveState === 'archived'
+            ? () => void unarchiveSession(session)
+            : undefined,
+        onDelete: () => setDeleteCandidate(session),
+      });
+    });
 
   return (
     <>
@@ -533,6 +652,11 @@ export function StandaloneRecents({
               </>
             )}
           </button>
+          {archiveState === 'archived' && groupCountLabel && (
+            <span className="ml-auto shrink-0 pr-1 text-xs tabular-nums text-muted-foreground">
+              {groupCountLabel(visibleSessions.length, Boolean(cursor))}
+            </span>
+          )}
           {archiveState === 'active' && onNewSession && (
             <div className={sidebarStyles.projectsHeaderActions}>
               <button
@@ -540,6 +664,7 @@ export function StandaloneRecents({
                 type="button"
                 title={t('sidebar.newTask')}
                 aria-label={t('sidebar.newTask')}
+                disabled={newSessionDisabled}
                 onClick={onNewSession}
               >
                 <SquarePenIcon size={16} strokeWidth={1.2} />
@@ -582,64 +707,51 @@ export function StandaloneRecents({
             className={
               archiveState === 'active'
                 ? sidebarStyles.pinnedSessionList
-                : 'flex flex-col gap-0.5'
+                : 'flex flex-col gap-1.5'
             }
           >
-            {displayedSessions.map((session) => {
-              const isCurrent = session.sessionId === currentSessionId;
-              return renderSession(session, {
-                active: isCurrent,
-                busy: busySessionId === session.sessionId,
-                isArchived: archiveState === 'archived',
-                onOpen: () => void openSession(session.sessionId),
-                onRename: () => {
-                  setRenameCandidate(session);
-                  setRenameValue(sessionLabel(session));
-                },
-                onExport: () => {
-                  void run(session.sessionId, async () => {
-                    downloadExport(
-                      await workspace.client.exportStandaloneSession(
-                        session.sessionId,
-                        { format: 'html' },
-                      ),
-                    );
-                  });
-                },
-                onArchive:
-                  archiveState === 'active'
-                    ? () => void archiveSession(session)
-                    : undefined,
-                onUnarchive:
-                  archiveState === 'archived'
-                    ? () => void unarchiveSession(session)
-                    : undefined,
-                onDelete: () => setDeleteCandidate(session),
-              });
-            })}
-            {!loading && !loadError && visibleSessions.length === 0 && (
-              <div className={workspaceStyles.empty}>
-                {archiveState === 'active'
-                  ? t('sidebar.noSessions')
-                  : t('sidebar.archivedEmpty')}
-              </div>
-            )}
+            {archiveState === 'archived'
+              ? displayedSessions.length > 0 && (
+                  <div className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
+                    {renderRows()}
+                  </div>
+                )
+              : renderRows()}
+            {!loading &&
+              !loadError &&
+              visibleSessions.length === 0 &&
+              (archiveState === 'active' || !hasMore) && (
+                <div className={workspaceStyles.empty}>
+                  {archiveState === 'active'
+                    ? t('sidebar.noSessions')
+                    : t('sidebar.archivedEmpty')}
+                </div>
+              )}
             {sessionsLimited && (
               <button
                 type="button"
                 className={sidebarStyles.showAllSessions}
-                onClick={() => setShowAll(true)}
+                onClick={() =>
+                  setVisibleCount(
+                    (count) => count + SIDEBAR_SESSION_EXPAND_STEP,
+                  )
+                }
               >
-                {t('sidebar.showAllSessions')}
+                {t('sidebar.showMoreSessions', {
+                  count: Math.min(
+                    SIDEBAR_SESSION_EXPAND_STEP,
+                    visibleSessions.length - visibleCount,
+                  ),
+                })}
               </button>
             )}
-            {cursor && !sessionsLimited && (
+            {cursor && (
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
                 className="w-full"
-                disabled={loadingMore}
+                disabled={loading || loadingMore}
                 onClick={() => void loadMore()}
               >
                 {t('sidebar.showAllSessions')}

@@ -19,6 +19,10 @@ import {
   type WorkflowSnapshot,
   type WorkflowTask,
 } from '@qwen-code/qwen-code-core';
+import {
+  nextCronJobFireMs,
+  type CronJob,
+} from '@qwen-code/qwen-code-core/services/cronScheduler.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import pLimit from 'p-limit';
@@ -27,6 +31,7 @@ import {
   type ServeSessionAgentsStatus,
   type ServeSessionAgentTaskStatus,
   type ServeSessionMonitorTaskStatus,
+  type ServeSessionScheduledTaskStatus,
   type ServeSessionShellTaskStatus,
   type ServeSessionTaskStatus,
   type ServeSessionTasksStatus,
@@ -187,6 +192,15 @@ function serializeMonitorTask(
   };
 }
 
+function plannedPhases(
+  meta: WorkflowTask['meta'] | undefined,
+): ServeSessionWorkflowTaskStatus['plannedPhases'] {
+  if (!meta?.phases?.length) return undefined;
+  return meta.phases.map(({ title, detail }) =>
+    detail === undefined ? { title } : { title, detail },
+  );
+}
+
 function serializeWorkflowTask(
   entry: WorkflowTask,
   now: number,
@@ -219,6 +233,7 @@ function serializeWorkflowTask(
     isBackgrounded: entry.isBackgrounded === true,
     currentPhase: entry.currentPhase,
     phaseVisits: entry.phaseVisits.map((visit) => ({ ...visit })),
+    ...optionalField('plannedPhases', plannedPhases(entry.meta)),
     dispatches: entry.dispatches.map((dispatch) => ({
       ...dispatch,
       dependsOn: [...dispatch.dependsOn],
@@ -293,6 +308,7 @@ function serializeWorkflowSnapshot(
     isBackgrounded: false,
     currentPhase: snapshot.phases.at(-1) ?? null,
     phaseVisits: (snapshot.phaseVisits ?? []).map((visit) => ({ ...visit })),
+    ...optionalField('plannedPhases', plannedPhases(snapshot.meta)),
     dispatches: (snapshot.dispatches ?? []).map((dispatch) => ({
       ...dispatch,
       dependsOn: [...dispatch.dependsOn],
@@ -313,6 +329,25 @@ function serializeWorkflowSnapshot(
     ),
     pendingApprovalCount: 0,
     ...optionalField('error', snapshot.error),
+  };
+}
+
+function serializeSessionScheduledTask(
+  job: CronJob,
+  schedulerDisabled: boolean,
+): ServeSessionScheduledTaskStatus {
+  return {
+    id: job.id,
+    source: job.cronExpr === '@wakeup' ? 'wakeup' : 'cron',
+    cronExpr: job.cronExpr,
+    prompt: job.prompt,
+    recurring: job.recurring,
+    createdAt: job.createdAt,
+    expiresAt: Number.isFinite(job.expiresAt) ? job.expiresAt : null,
+    lastFiredAt: job.lastFiredAt ?? null,
+    nextRunAt: nextCronJobFireMs(job),
+    enabled: !schedulerDisabled,
+    ...optionalField('gate', job.gate),
   };
 }
 
@@ -353,11 +388,24 @@ export function buildSessionTasksStatus(
       : []),
   ].sort((a, b) => a.startTime - b.startTime);
 
+  const scheduler = config.isCronEnabled?.()
+    ? config.getCronScheduler?.()
+    : undefined;
+  const scheduledTasks: ServeSessionScheduledTaskStatus[] = (
+    scheduler?.list() ?? []
+  )
+    .filter((job) => !job.durable)
+    .map((job) =>
+      serializeSessionScheduledTask(job, scheduler?.disabled === true),
+    )
+    .sort((a, b) => a.createdAt - b.createdAt);
+
   return {
     v: STATUS_SCHEMA_VERSION,
     sessionId,
     now,
     tasks,
+    scheduledTasks,
   };
 }
 

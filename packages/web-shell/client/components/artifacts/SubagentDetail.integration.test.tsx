@@ -16,6 +16,9 @@ const {
   animationFrameBlocks,
   connection,
   messagesFromBlocks,
+  registrationActions,
+  registrationOwnerGuard,
+  sessionArtifactsState,
   workspaceActions,
   workspaceClient,
   latestMessageListProps,
@@ -26,6 +29,7 @@ const {
 } = vi.hoisted(() => ({
   previewTest: { enabled: false },
   previewCapabilities: {
+    features: [] as string[],
     workspaceCwd: '/work/project',
     workspaces: [
       { id: 'primary', cwd: '/work/project', trusted: true, primary: true },
@@ -33,17 +37,32 @@ const {
   },
   animationFrameBlocks: [{ id: 'frame-block' }],
   connection: {
+    status: 'connected',
     sessionId: 'subagent-session',
     workspaceCwd: '/work/project',
     loadingTranscript: false,
     catchingUp: true,
+    capabilities: undefined as { features: string[] } | undefined,
   },
   messagesFromBlocks: vi.fn(),
+  registrationActions: {
+    addArtifact: vi.fn(async () => ({})),
+  },
+  registrationOwnerGuard: {
+    capture: () => ({ isCurrent: () => true }),
+  },
+  sessionArtifactsState: {
+    artifacts: [] as unknown[],
+    hydrated: false,
+    refresh: async () => {},
+  },
   workspaceActions: {
     readFile: vi.fn(),
     stat: vi.fn().mockResolvedValue({ type: 'file' }),
   },
   workspaceClient: {
+    sessionStatus: vi.fn().mockResolvedValue({}),
+    workspaceByCwd: vi.fn(),
     resolveSubagentSession: vi.fn(),
     cancelSubagentSession: vi.fn(),
   },
@@ -76,6 +95,8 @@ const {
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: ({ children }: { children: ReactNode }) => children,
   useConnection: () => connection,
+  useActions: () => registrationActions,
+  useDaemonSessionOwnerGuard: () => registrationOwnerGuard,
   useWorkspace: () => ({
     client: workspaceClient,
     status: 'connected',
@@ -98,7 +119,7 @@ vi.mock('../../hooks/useAnimationFrameTranscriptBlocks', () => ({
 }));
 
 vi.mock('../../hooks/useSessionArtifacts', () => ({
-  useSessionArtifacts: () => ({ artifacts: [] }),
+  useSessionArtifacts: () => sessionArtifactsState,
 }));
 
 vi.mock('../../WebShellContexts', async () => {
@@ -110,6 +131,9 @@ vi.mock('../MessageList', async () => {
   const React = await import('react');
   const { ToolFilePreviewButton } = await import(
     '../messages/ToolFilePreviewButton'
+  );
+  const { WorkspaceRuntimeContext } = await import(
+    '../../utils/workspace-context.js'
   );
   const { CompactModeContext } = await import('../../WebShellContexts');
   const { useSubagentDetails } = await import('../../subagentDetailsContext');
@@ -125,18 +149,29 @@ vi.mock('../MessageList', async () => {
           'data-compact-mode': String(compactMode),
         },
         previewTest.enabled
-          ? React.createElement(ToolFilePreviewButton, {
-              tool: {
-                callId: 'read-1',
-                toolName: 'read_file',
-                status: 'completed',
-                args: { file_path: '/work/project/note.txt' },
+          ? React.createElement(
+              WorkspaceRuntimeContext.Provider,
+              {
+                value: {
+                  client: workspaceClient,
+                  status: 'connected',
+                  capabilities: previewCapabilities,
+                  actions: workspaceActions,
+                } as never,
               },
-              workspaceCwd: props['workspaceCwd'] as string,
-              onOpen: props['onTurnOutputOpen'] as Parameters<
-                typeof ToolFilePreviewButton
-              >[0]['onOpen'],
-            })
+              React.createElement(ToolFilePreviewButton, {
+                tool: {
+                  callId: 'read-1',
+                  toolName: 'read_file',
+                  status: 'completed',
+                  args: { file_path: '/work/project/note.txt' },
+                },
+                workspaceCwd: props['workspaceCwd'] as string,
+                onOpen: props['onTurnOutputOpen'] as Parameters<
+                  typeof ToolFilePreviewButton
+                >[0]['onOpen'],
+              }),
+            )
           : null,
       );
     },
@@ -160,11 +195,93 @@ afterEach(() => {
   latestOpenSubagent.current = undefined;
   messagesFromBlocks.mockClear();
   previewTest.enabled = false;
+  connection.status = 'connected';
   connection.sessionId = 'subagent-session';
   workspaceActions.stat.mockReset().mockResolvedValue({ type: 'file' });
   workspaceClient.resolveSubagentSession.mockReset();
+  workspaceClient.sessionStatus.mockReset().mockResolvedValue({});
+  workspaceClient.workspaceByCwd.mockReset();
+  previewCapabilities.features = [];
+  messages.splice(1);
+  connection.catchingUp = true;
+  connection.capabilities = undefined;
+  sessionArtifactsState.hydrated = false;
+  animationFrameBlocks.splice(1);
+  registrationActions.addArtifact.mockClear();
   vi.useRealTimers();
 });
+
+it.each([false, true])(
+  'uses a virtual subagent real parent to classify worktree edits (recovery=%s)',
+  async (recover) => {
+    const virtual = `subagent.${btoa('parent-session').replace(/=+$/, '')}.YWdlbnQ`;
+    connection.sessionId = virtual;
+    const cwd = '/work/project/.qwen/worktrees/one';
+    previewCapabilities.features = ['workspace_git_check_ignore'];
+    workspaceClient.sessionStatus.mockImplementation(async (id: string) => {
+      if (id !== 'parent-session')
+        throw new Error('virtual session has no status');
+      return { worktree: { path: cwd } };
+    });
+    if (recover)
+      workspaceClient.sessionStatus.mockRejectedValueOnce(new Error('offline'));
+    const ignored = vi.fn().mockResolvedValue({ v: 1, ignoredPaths: [] });
+    workspaceClient.workspaceByCwd.mockReturnValue({
+      workspaceGitIgnoredPaths: ignored,
+    });
+    workspaceClient.resolveSubagentSession.mockResolvedValue({
+      sessionId: virtual,
+      status: 'completed',
+    });
+    messages.push(
+      { id: 'turn', role: 'user', content: 'edit' },
+      {
+        id: 'write',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'write-file',
+            toolName: 'write_file',
+            status: 'completed',
+            args: { file_path: `${cwd}/src/app.ts`, content: 'source' },
+          },
+        ],
+      },
+    );
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const renderDetail = () =>
+      root!.render(
+        <I18nProvider language="en">
+          <SubagentDetail
+            sessionId="parent-session"
+            rootToolCallId="agent-1"
+            initialRootTool={
+              (messages[0] as Extract<Message, { role: 'tool_group' }>).tools[0]
+            }
+            workspaceCwd="/work/project"
+          />
+        </I18nProvider>,
+      );
+    await act(async () => renderDetail());
+    if (recover) {
+      expect(ignored).not.toHaveBeenCalled();
+      connection.status = 'disconnected';
+      await act(async () => renderDetail());
+      connection.status = 'connected';
+      await act(async () => renderDetail());
+    }
+    expect(workspaceClient.sessionStatus).toHaveBeenCalledWith(
+      'parent-session',
+    );
+    expect(ignored).toHaveBeenCalledWith(['src/app.ts'], cwd, 'parent-session');
+    const changes = latestMessageListProps.current?.[
+      'turnFileChanges'
+    ] as ReadonlyMap<string, readonly { path: string }[]>;
+    expect(changes.get('turn')?.[0].path).toBe(`${cwd}/src/app.ts`);
+  },
+);
 
 async function mountRecoveringDetail(
   availability: DaemonAvailability,
@@ -349,6 +466,7 @@ it('opens subagent and fork transcript outputs in source-scoped panel tabs', asy
     title: 'Review',
     turnId: 'turn-1',
     changes: [],
+    unfilteredChanges: [],
     sourceSessionId: 'subagent-session',
     workspaceCwd: '/work/project',
     workspaceId: 'project-id',
@@ -616,3 +734,56 @@ it.each([true, false])(
     }
   },
 );
+
+it('registers reported artifacts for the subagent session (R6-1)', async () => {
+  // The detail view runs under its own DaemonSessionProvider for the
+  // subagent session; App's registration mount only covers the main session.
+  connection.catchingUp = false;
+  connection.capabilities = { features: ['session_artifacts'] };
+  sessionArtifactsState.hydrated = true;
+  animationFrameBlocks.push({
+    kind: 'assistant',
+    meta: {
+      source: 'slash_command',
+      sessionArtifacts: [
+        {
+          title: 'report',
+          workspacePath: 'report.html',
+          kind: 'html',
+          storage: 'workspace',
+        },
+      ],
+    },
+  });
+  workspaceClient.resolveSubagentSession.mockResolvedValue({
+    sessionId: 'subagent-session',
+    status: 'completed',
+  });
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(
+      <I18nProvider language="en">
+        <SubagentDetail
+          sessionId="parent-session"
+          rootToolCallId="agent-1"
+          initialRootTool={
+            (messages[0] as Extract<Message, { role: 'tool_group' }>).tools[0]
+          }
+          workspaceCwd="/work/project"
+        />
+      </I18nProvider>,
+    );
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(registrationActions.addArtifact).toHaveBeenCalledTimes(1);
+  expect(registrationActions.addArtifact).toHaveBeenCalledWith({
+    title: 'report',
+    workspacePath: 'report.html',
+    kind: 'html',
+    storage: 'workspace',
+  });
+});

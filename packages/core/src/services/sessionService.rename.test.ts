@@ -25,6 +25,13 @@ vi.mock('node:path');
 vi.mock('../utils/paths.js');
 vi.mock('../utils/jsonl-utils.js');
 vi.mock('../utils/runtimeStatus.js');
+// These renames use mocked JSONL and stat calls rather than actual paths.
+vi.mock('./session-archive-write-fence.js', () => ({
+  acquireSessionArchiveWriteLock: vi.fn(async () => ({
+    assertHeld: vi.fn(),
+    release: vi.fn(async () => {}),
+  })),
+}));
 
 describe('SessionService - rename and custom title', () => {
   let sessionService: SessionService;
@@ -393,6 +400,8 @@ describe('SessionService - rename and custom title', () => {
       vi.mocked(readRuntimeStatus).mockResolvedValue({
         schemaVersion: 1,
         pid: 123,
+        procStart: null,
+        pidNs: null,
         sessionId: sessionIdA,
         workDir: '/test/project/root',
         hostname: 'host',

@@ -5,11 +5,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   buildMissedCronNotification,
   CronScheduler,
+  nextCronJobFireMs,
   nextDurableFireMs,
   type CronJob,
 } from './cronScheduler.js';
 import { nextFireTime } from '../utils/cronParser.js';
 import { getLockFilePath } from './cronTasksLock.js';
+import * as cronTasksFile from './cronTasksFile.js';
 import {
   getCronFilePath,
   readCronTasks,
@@ -19,6 +21,8 @@ import {
   type DurableCronTask,
 } from './cronTasksFile.js';
 import { Storage } from '../config/storage.js';
+import type { CronGateResult } from './cron-gate.js';
+import { CronDeleteTool } from '../tools/cron-delete.js';
 
 // Gates for the pass-through mock below. readGate holds the startup read
 // while stop() runs, or fails it (a transient fs error). updateGate holds a
@@ -26,23 +30,23 @@ import { Storage } from '../config/storage.js';
 // (the real module's addCronTask/removeCronTasks bind the unmocked one).
 // Its `fail` runs the mutator but returns the input array, skipping the
 // tasks write (an unchanged reference is a no-op) before throwing; any
-// deletionIds tombstone still lands. removeGate injects a rejection since
-// real failures are platform-divergent (POSIX ENOTDIR for a corrupt .qwen,
-// Windows ENOENT → "nothing to remove").
-const { readGate, updateGate, removeGate } = vi.hoisted(() => {
+// deletionIds tombstone still lands.
+const { readGate, updateGate } = vi.hoisted(() => {
   const gate = () => ({
     block: null as Promise<void> | null,
     onHit: null as (() => void) | null,
     fail: null as Error | null,
   });
-  const remove = { fail: null as Error | null };
-  return { readGate: gate(), updateGate: gate(), removeGate: remove };
+  return { readGate: gate(), updateGate: gate() };
 });
+
+const generatedId = vi.hoisted(() => ({ next: null as string | null }));
 
 vi.mock('./cronTasksFile.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./cronTasksFile.js')>();
   return {
     ...actual,
+    generateCronTaskId: () => generatedId.next ?? actual.generateCronTaskId(),
     readCronTasks: async (projectRoot: string) => {
       if (readGate.block) {
         readGate.onHit?.();
@@ -73,12 +77,6 @@ vi.mock('./cronTasksFile.js', async (importOriginal) => {
         throw updateGate.fail;
       }
       return actual.updateCronTasks(...args);
-    },
-    removeCronTasks: async (
-      ...args: Parameters<typeof actual.removeCronTasks>
-    ) => {
-      if (removeGate.fail) throw removeGate.fail;
-      return actual.removeCronTasks(...args);
     },
   };
 });
@@ -112,7 +110,7 @@ describe('CronScheduler', () => {
     for (const gate of [readGate, updateGate]) {
       Object.assign(gate, { block: null, onHit: null, fail: null });
     }
-    removeGate.fail = null;
+    generatedId.next = null;
   });
 
   const at = (h: number, m: number, sec = 0, ms = 0) =>
@@ -128,6 +126,61 @@ describe('CronScheduler', () => {
     scheduler.tick(when);
     return fired;
   };
+
+  it('attributes pending gate work to its owner without changing global accounting', async () => {
+    const pendingGates: Array<(result: CronGateResult) => void> = [];
+    scheduler = new CronScheduler(null, DAY, {
+      runGate: () =>
+        new Promise<CronGateResult>((resolve) => pendingGates.push(resolve)),
+    });
+    const fire = (job: CronJob) => {
+      (
+        scheduler as unknown as {
+          fire(job: CronJob, onFire: () => void): void;
+        }
+      ).fire(job, () => {});
+    };
+
+    fire({
+      id: 'owned-one-shot',
+      prompt: 'run in a child',
+      cronExpr: '* * * * *',
+      recurring: false,
+      sessionMode: 'per_run',
+      durable: true,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + DAY,
+      jitterMs: 0,
+      boundSessionId: 'owner-a',
+      gate: 'node gate.js',
+    });
+    await vi.waitFor(() => expect(pendingGates).toHaveLength(1));
+    expect(scheduler.hasGatesInFlight()).toBe(true);
+    expect(scheduler.hasGatesInFlight('owner-a')).toBe(true);
+    expect(scheduler.hasGatesInFlight('owner-b')).toBe(false);
+    pendingGates.shift()!({ kind: 'blocked', reason: 'held for assertion' });
+    await vi.waitFor(() =>
+      expect(scheduler.hasGatesInFlight('owner-a')).toBe(false),
+    );
+
+    fire({
+      id: 'unbound-one-shot',
+      prompt: 'do not pin an unrelated owner',
+      cronExpr: '* * * * *',
+      recurring: false,
+      sessionMode: 'per_run',
+      durable: true,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + DAY,
+      jitterMs: 0,
+      gate: 'node gate.js',
+    });
+    await vi.waitFor(() => expect(pendingGates).toHaveLength(1));
+    expect(scheduler.hasGatesInFlight()).toBe(true);
+    expect(scheduler.hasGatesInFlight('owner-a')).toBe(false);
+    pendingGates.shift()!({ kind: 'blocked', reason: 'held for assertion' });
+    await vi.waitFor(() => expect(scheduler.hasGatesInFlight()).toBe(false));
+  });
   const createJobs = (n: number, cron = '*/1 * * * *', label = 'job-') =>
     Array.from({ length: n }, (_, i) =>
       scheduler.create(cron, `${label}${i}`, true),
@@ -149,6 +202,9 @@ describe('CronScheduler', () => {
     pendingPersist: Promise<void>;
     pendingRelease: Promise<void> | null;
     pendingRemoval: Set<string>;
+    removeMissedFromDisk(
+      delivered: Array<Pick<Task, 'id' | 'sessionId'>>,
+    ): void;
     firePersistPending: Map<string, number>;
     restorablePerRunOneShots: Map<string, unknown>;
     consumedPerRunOneShots: Set<string>;
@@ -665,6 +721,26 @@ describe('CronScheduler', () => {
       expect(scheduler.cancelWakeup(w.id)).toBe(false);
     });
 
+    it('cancels a same-id session cron without selecting its wakeup or durable sibling', () => {
+      const job = scheduler.create('*/1 * * * *', 'session cron', true);
+      generatedId.next = job.id;
+      const wakeup = scheduler.scheduleWakeup(300, 'same-id wakeup');
+      expect(
+        scheduler.list().filter((task) => task.id === job.id),
+      ).toHaveLength(2);
+
+      expect(scheduler.cancelSessionCron(job.id)).toBe(true);
+      expect(scheduler.list().map((task) => task.cronExpr)).toEqual([
+        '@wakeup',
+      ]);
+      expect(scheduler.cancelWakeup(wakeup.id)).toBe(true);
+      (scheduler as unknown as { jobs: Map<string, CronJob> }).jobs.set(
+        job.id,
+        { ...job, durable: true },
+      );
+      expect(scheduler.cancelSessionCron(job.id)).toBe(false);
+    });
+
     it('cancelAllWakeups cancels the pending wakeup and returns the count', () => {
       scheduler.scheduleWakeup(120, 'a');
       scheduler.scheduleWakeup(240, 'b');
@@ -1005,6 +1081,47 @@ describe('CronScheduler', () => {
   describe('durable ownership', () => {
     useDurableTmpDir('cron-owner-test-');
 
+    it('retains session-only gates during scoped close before enableDurable is called', async () => {
+      const local = scheduler.create(
+        '* * * * *',
+        'standalone gate',
+        true,
+        'gate.sh',
+      );
+      collectFires();
+      expect(scheduler.forceFireJob(local.id)).toBe(true);
+      expect(scheduler.hasGatesInFlight('standalone-session')).toBe(true);
+      await expect(scheduler.delete(local.id)).resolves.toBe(true);
+      expect(scheduler.hasGatesInFlight('standalone-session')).toBe(false);
+    });
+
+    it('retains session-only and unbound gates during scoped close', async () => {
+      await scheduler.enableDurable('session-owner');
+      const local = scheduler.create(
+        '* * * * *',
+        'local gate',
+        true,
+        'gate.sh',
+      );
+      collectFires();
+      expect(scheduler.forceFireJob(local.id)).toBe(true);
+      expect(scheduler.hasGatesInFlight('session-owner')).toBe(true);
+      await expect(scheduler.delete(local.id)).resolves.toBe(true);
+      expect(scheduler.hasGatesInFlight('session-owner')).toBe(false);
+
+      const durable = await scheduler.createDurable(
+        '* * * * *',
+        'unbound gate',
+        true,
+        'gate.sh',
+      );
+      expect(scheduler.forceFireJob(durable.id)).toBe(true);
+      expect(scheduler.hasGatesInFlight('session-owner')).toBe(true);
+      expect(scheduler.hasGatesInFlight('foreign-owner')).toBe(false);
+      await expect(scheduler.delete(durable.id)).resolves.toBe(true);
+      expect(scheduler.hasGatesInFlight('session-owner')).toBe(false);
+    });
+
     // Own (alive) pid honors the lock; the foreign sessionId isn't ours.
     const lockAsOtherSession = () =>
       writeRaw(
@@ -1062,12 +1179,19 @@ describe('CronScheduler', () => {
       return slot;
     };
     // A consumed per-run one-shot restored after its dispatch failed.
-    const pausedAfterFailure = (t: Task, firedAt: number, o: Over = {}) => ({
+    const pausedAfterFailure = (
+      t: Task,
+      firedAt: number,
+      o: Over = {},
+      runId?: string,
+    ) => ({
       ...t,
       ...o,
       enabled: false,
       lastFiredAt: firedAt,
-      runs: [{ at: firedAt, kind: 'scheduled', sessionDispatchFailed: true }],
+      runs: [
+        { at: firedAt, kind: 'scheduled', runId, sessionDispatchFailed: true },
+      ],
     });
     // onFire restores each fired one-shot (after `dispatch`, when given).
     type Restoring = { fired: CronJob[]; restoration?: Promise<boolean> };
@@ -1076,8 +1200,16 @@ describe('CronScheduler', () => {
       scheduler.start((job) => {
         r.fired.push(job);
         r.restoration = dispatch
-          ? dispatch.then(() => scheduler.restoreConsumedOneShot(job.id))
-          : scheduler.restoreConsumedOneShot(job.id);
+          ? dispatch.then(() =>
+              scheduler.restoreConsumedOneShot(
+                job.id,
+                job.boundSessionId ?? null,
+              ),
+            )
+          : scheduler.restoreConsumedOneShot(
+              job.id,
+              job.boundSessionId ?? null,
+            );
       });
       return r;
     }
@@ -1191,6 +1323,7 @@ describe('CronScheduler', () => {
       const run = (minute: number) => ({
         at: at(10, minute).getTime(),
         kind: 'scheduled',
+        runId: expect.any(String),
         sessionId: 'session-1',
       });
       const waitForRuns = (...runs: object[]) =>
@@ -1207,6 +1340,84 @@ describe('CronScheduler', () => {
       await waitForRuns(run(30), run(31));
     });
 
+    it('preserves a natural run when a manual run wins the file lock', async () => {
+      const original = perRunOneShot('manual-first', {
+        cron: '30 10 * * *',
+        recurring: true,
+      });
+      await load([original]);
+      let manualWrite!: Promise<unknown>;
+      const fired: CronJob[] = [];
+      scheduler.start((job) => {
+        fired.push(job);
+        const manualAt = job.lastFiredAt! + 1000;
+        manualWrite = updateCronTasks(tmpDir, (tasks) =>
+          tasks.map((task) =>
+            task.id === original.id
+              ? {
+                  ...task,
+                  lastFiredAt: manualAt,
+                  runs: [
+                    {
+                      at: manualAt,
+                      kind: 'manual' as const,
+                      runId: 'manual-before-natural',
+                    },
+                  ],
+                }
+              : task,
+          ),
+        );
+      });
+
+      const fireAt = nextDurableFireMs(original)!;
+      scheduler.tick(new Date(fireAt + 1000));
+      expect(fired).toHaveLength(1);
+      await manualWrite;
+      await internals().pendingPersist;
+      const manuallyStampedTask = (await readCronTasks(tmpDir))[0]!;
+      const naturalAt = fired[0]!.lastFiredAt!;
+      expect(naturalAt).toBe(
+        nextFireTime(original.cron, new Date(original.createdAt)).getTime(),
+      );
+      expect(manuallyStampedTask.lastFiredAt).toBe(naturalAt + 1000);
+      expect(manuallyStampedTask.runs).toEqual([
+        {
+          at: naturalAt,
+          kind: 'scheduled',
+          runId: fired[0]!.runId,
+        },
+        {
+          at: naturalAt + 1000,
+          kind: 'manual',
+          runId: 'manual-before-natural',
+        },
+      ]);
+
+      await scheduler.annotateRunSession(
+        original.id,
+        naturalAt,
+        { sessionId: 'natural-child' },
+        original.sessionId ?? null,
+        fired[0]!.runId,
+      );
+      const annotated = (await readCronTasks(tmpDir))[0]!;
+      expect(annotated.lastFiredAt).toBe(naturalAt + 1000);
+      expect(annotated.runs).toEqual([
+        {
+          at: naturalAt,
+          kind: 'scheduled',
+          runId: fired[0]!.runId,
+          sessionId: 'natural-child',
+        },
+        {
+          at: naturalAt + 1000,
+          kind: 'manual',
+          runId: 'manual-before-natural',
+        },
+      ]);
+    });
+
     it('attributes a per-run fire to its fresh session after dispatch', async () => {
       await load([
         diskTask('fresh1', {
@@ -1219,19 +1430,481 @@ describe('CronScheduler', () => {
       const minute = at(10, 30).getTime();
       await vi.waitFor(async () => {
         expect((await readCronTasks(tmpDir))[0]?.runs).toEqual([
-          { at: minute, kind: 'scheduled' },
+          { at: minute, kind: 'scheduled', runId: expect.any(String) },
         ]);
       });
       expect(fired[0]?.sessionMode).toBe('per_run');
       expect(fired[0]?.modelServiceId).toBe('qwen-max(openai)');
       expect(fired[0]?.groupId).toBe('group-1');
 
-      await scheduler.annotateRunSession('fresh1', minute, {
-        sessionId: 'child-1',
-      });
+      await scheduler.annotateRunSession(
+        'fresh1',
+        minute,
+        { sessionId: 'child-1' },
+        null,
+      );
       expect((await readCronTasks(tmpDir))[0]?.runs).toEqual([
-        { at: minute, kind: 'scheduled', sessionId: 'child-1' },
+        {
+          at: minute,
+          kind: 'scheduled',
+          runId: expect.any(String),
+          sessionId: 'child-1',
+        },
       ]);
+    });
+
+    it('attributes a same-id natural fire only to the fired task owner', async () => {
+      await load([diskTask('fresh1', { sessionMode: 'per_run' })]);
+      const [fired] = startAndTick();
+      expect(fired?.boundSessionId).toBeUndefined();
+      const owner = fired!.boundSessionId ?? null;
+      const minute = at(10, 30).getTime();
+      await vi.waitFor(async () => {
+        const tasks = await readCronTasks(tmpDir);
+        expect(tasks).toHaveLength(1);
+        expect(tasks[0]?.runs).toEqual([
+          { at: minute, kind: 'scheduled', runId: expect.any(String) },
+        ]);
+      });
+
+      const [firedTask] = await readCronTasks(tmpDir);
+      await writeCronTasks(tmpDir, [
+        { ...firedTask!, sessionId: 'other-owner' },
+        firedTask!,
+      ]);
+      await scheduler.annotateRunSession(
+        'fresh1',
+        minute,
+        { sessionId: 'owned-child' },
+        owner,
+      );
+
+      const tasks = await readCronTasks(tmpDir);
+      expect(tasks[1]?.runs).toEqual([
+        {
+          at: minute,
+          kind: 'scheduled',
+          runId: expect.any(String),
+          sessionId: 'owned-child',
+        },
+      ]);
+      expect(tasks[0]?.runs).toEqual([
+        { at: minute, kind: 'scheduled', runId: expect.any(String) },
+      ]);
+    });
+
+    it('scopes natural one-shot consumption and failed restoration to its owner', async () => {
+      const sibling = perRunOneShot('shared-once', {
+        sessionId: 'session-other',
+        prompt: 'untouched sibling',
+      });
+      const original = perRunOneShot('shared-once', {
+        sessionId: 'session-1',
+        prompt: 'selected owner task',
+      });
+      await load([sibling, original]);
+      const dispatch = deferred();
+      const r = startRestoring(dispatch.promise);
+      const fireAt = tickPastFirstFire(original);
+      await internals().pendingPersist;
+      expect(internals().consumedPerRunRemovalGenerations.size).toBe(1);
+      expect(await readCronTasks(tmpDir)).toEqual([sibling]);
+      expect(r.fired[0]?.boundSessionId).toBe('session-1');
+
+      // A later sibling-only deletion must not veto the original owner's restore.
+      await updateCronTasks(
+        tmpDir,
+        (tasks) => tasks.filter((task) => task.sessionId !== sibling.sessionId),
+        {
+          deletionIds: [
+            JSON.stringify([sibling.sessionId, original.id]),
+            'session:session-other',
+          ],
+        },
+      );
+      dispatch.resolve();
+      expect(await r.restoration).toBe(true);
+      expect(await readCronTasks(tmpDir)).toEqual([
+        pausedAfterFailure(original, fireAt, {}, r.fired[0]!.runId),
+      ]);
+    });
+
+    it('stamps only the owned same-id recurring task', async () => {
+      const original = perRunOneShot('shared-recurring', {
+        cron: '30 10 * * *',
+        recurring: true,
+      });
+      const sibling = {
+        ...original,
+        sessionId: 'session-other',
+        prompt: 'untouched recurring sibling',
+      };
+      const boundary = nextFireTime(original.cron, new Date()).getTime();
+      const fireAt = nextDurableFireMs(original);
+      expect(fireAt).not.toBeNull();
+      await load([sibling, original]);
+      const [fired] = startAndTick(new Date(fireAt! + 1000));
+
+      expect(fired?.boundSessionId).toBe('session-1');
+      await internals().pendingPersist;
+      const tasks = await readCronTasks(tmpDir);
+      expect(tasks[0]).toEqual(sibling);
+      expect(tasks[1]).toMatchObject({
+        lastFiredAt: boundary,
+        runs: [{ at: boundary, kind: 'scheduled' }],
+      });
+    });
+
+    it('selects the owned same-id one-shot regardless of file order', async () => {
+      const original = perRunOneShot('shared-once', {
+        sessionId: 'session-1',
+        prompt: 'selected owner task',
+      });
+      const sibling = perRunOneShot('shared-once', {
+        sessionId: 'session-other',
+        prompt: 'untouched sibling',
+      });
+      await load([original, sibling]);
+      const r = startRestoring();
+      tickPastFirstFire(original);
+
+      expect(r.fired.map((job) => job.boundSessionId)).toEqual(['session-1']);
+      expect(await r.restoration).toBe(true);
+      expect(await readCronTasks(tmpDir)).toEqual([
+        expect.objectContaining({
+          id: 'shared-once',
+          sessionId: 'session-1',
+          prompt: 'selected owner task',
+          enabled: false,
+        }),
+        sibling,
+      ]);
+    });
+
+    it.each(['shared-once', 'other-once'])(
+      'removes only the selected missed one-shot when its sibling id is %s',
+      async (siblingId) => {
+        const original = missedOneShot('shared-once', 'selected missed owner', {
+          sessionId: 'session-1',
+          sessionMode: 'per_run',
+        });
+        const sibling = missedOneShot(siblingId, 'untouched future sibling', {
+          sessionId: 'session-other',
+          sessionMode: 'per_run',
+          createdAt: Date.now(),
+        });
+        const fired = await loadStarted([original, sibling]);
+
+        expectOnly(fired, { missed: true });
+        await internals().pendingPersist;
+        expect(await readCronTasks(tmpDir)).toEqual([sibling]);
+      },
+    );
+
+    it('stamps only the selected same-id catch-up task', async () => {
+      const original = hourly(
+        'shared-catch',
+        'selected catch-up',
+        hoursAgo(3),
+        {
+          sessionId: 'session-1',
+          sessionMode: 'per_run',
+        },
+      );
+      const sibling = { ...original, sessionId: 'session-other' };
+      const fired = await loadStarted([sibling, original]);
+
+      expect(fired.map((job) => job.boundSessionId)).toEqual(['session-1']);
+      await internals().pendingPersist;
+      const now = Date.now();
+      const tasks = await readCronTasks(tmpDir);
+      expect(tasks[0]).toEqual(sibling);
+      expect(tasks[1]).toMatchObject({
+        lastFiredAt: now - (now % 60_000),
+        runs: [{ kind: 'catch-up' }],
+      });
+    });
+
+    it('preserves catch-up history when a manual run wins the file lock', async () => {
+      const original = hourly('manual-first-catch', 'catch', hoursAgo(3), {
+        sessionId: 'session-1',
+        sessionMode: 'per_run',
+      });
+      await writeCronTasks(tmpDir, [original]);
+      const fired: CronJob[] = [];
+      let manualWrite!: Promise<unknown>;
+      scheduler.start((job) => {
+        fired.push(job);
+        const manualAt = job.lastFiredAt! + 1000;
+        manualWrite = updateCronTasks(tmpDir, (tasks) =>
+          tasks.map((task) =>
+            task.id === original.id
+              ? {
+                  ...task,
+                  lastFiredAt: manualAt,
+                  runs: [
+                    {
+                      at: manualAt,
+                      kind: 'manual' as const,
+                      runId: 'manual-before-catch-up',
+                    },
+                  ],
+                }
+              : task,
+          ),
+        );
+      });
+
+      await scheduler.enableDurable('session-1');
+      await manualWrite;
+      await internals().pendingPersist;
+      expect(fired).toHaveLength(1);
+      const naturalAt = fired[0]!.lastFiredAt!;
+      const task = (await readCronTasks(tmpDir))[0]!;
+      expect(task.lastFiredAt).toBe(naturalAt + 1000);
+      expect(task.runs).toEqual([
+        {
+          at: naturalAt,
+          kind: 'catch-up',
+          runId: fired[0]!.runId,
+        },
+        {
+          at: naturalAt + 1000,
+          kind: 'manual',
+          runId: 'manual-before-catch-up',
+        },
+      ]);
+    });
+
+    it('preserves a same-id sibling through a final fire', async () => {
+      const original = hourly(
+        'shared-final',
+        'selected final task',
+        Date.now() - 30 * DAY,
+        { sessionId: 'session-1', sessionMode: 'per_run' },
+      );
+      const sibling = {
+        ...original,
+        sessionId: 'session-other',
+        createdAt: Date.now(),
+        lastFiredAt: Date.now(),
+      };
+      const fired = await loadStarted([sibling, original]);
+
+      expect(fired.map((job) => job.boundSessionId)).toEqual(['session-1']);
+      await internals().pendingPersist;
+      expect(await readCronTasks(tmpDir)).toEqual([sibling]);
+    });
+
+    it('preserves a same-id sibling through a persistent one-shot fire', async () => {
+      const original = perRunOneShot('shared-persistent', {
+        sessionMode: 'persistent',
+      });
+      const sibling = { ...original, sessionId: 'session-other' };
+      await load([original, sibling]);
+      collectFires();
+
+      scheduler.tick(new Date(nextDurableFireMs(original)! + 1000));
+      await internals().pendingPersist;
+
+      expect(await readCronTasks(tmpDir)).toEqual([sibling]);
+    });
+
+    it('delivers an unbound catch-up rather than a same-id foreign task', async () => {
+      const original = hourly('shared-unbound', 'THE UNBOUND TASK');
+      const sibling = {
+        ...original,
+        sessionId: 'session-other',
+        prompt: 'THE FOREIGN TASK',
+      };
+      const fired = await loadStarted([original, sibling]);
+
+      expect(scheduler.list()).toHaveLength(2);
+      expect(fired.map((job) => job.prompt)).toEqual(['THE UNBOUND TASK']);
+      await internals().pendingPersist;
+      expect(
+        (await readCronTasks(tmpDir)).find(
+          (task) => task.sessionId === sibling.sessionId,
+        ),
+      ).toEqual(sibling);
+    });
+
+    it('delivers bound and unbound same-id catch-ups exactly once each', async () => {
+      const bound = hourly('shared-dual', 'BOUND CATCH-UP', hoursAgo(3), {
+        sessionId: 'session-1',
+        sessionMode: 'per_run',
+      });
+      const unbound = hourly('shared-dual', 'UNBOUND CATCH-UP');
+      const fired = await loadStarted([bound, unbound]);
+
+      expect(fired.map((job) => job.prompt).sort()).toEqual([
+        'BOUND CATCH-UP',
+        'UNBOUND CATCH-UP',
+      ]);
+    });
+
+    it('settles a gate without writing another owner’s history', async () => {
+      scheduler = new CronScheduler(tmpDir, DAY, {
+        runGate: async () => {
+          await reload(false);
+          return {
+            kind: 'output',
+            stdout: 'owner delivered',
+            stderr: '',
+            durationMs: 1,
+            truncated: false,
+          };
+        },
+      });
+      const fireAt = Date.now();
+      vi.setSystemTime(fireAt);
+      const manual = {
+        at: fireAt,
+        kind: 'manual' as const,
+        runId: 'manual-run',
+        sessionId: 'child-manual',
+      };
+      const original = perRunOneShot('shared-gated', {
+        recurring: true,
+        gate: 'probe owner',
+        runs: [manual],
+      });
+      const sibling = {
+        ...original,
+        sessionId: 'session-other',
+        runs: undefined,
+      };
+      await load([sibling, original]);
+      scheduler.approveGate(
+        original.id,
+        'probe owner',
+        original.sessionId ?? null,
+      );
+      const fired = collectFires();
+      expect(
+        scheduler.forceFireJob(original.id, original.sessionId ?? null),
+      ).toBe(true);
+      await vi.waitFor(() => expect(fired).toHaveLength(1));
+      await internals().pendingPersist;
+      expect(fired[0]?.runId).toEqual(expect.any(String));
+      await scheduler.annotateRunSession(
+        original.id,
+        fireAt,
+        { sessionId: 'child-natural' },
+        original.sessionId ?? null,
+        fired[0]?.runId,
+      );
+
+      const tasks = await readCronTasks(tmpDir);
+      expect(tasks[0]?.runs).toBeUndefined();
+      expect(tasks[0]?.gateStatus).toBeUndefined();
+      expect(tasks[1]?.runs?.at(0)).toEqual(manual);
+      expect(tasks[1]?.runs?.at(1)).toEqual({
+        at: fireAt,
+        kind: 'scheduled',
+        gate: 'delivered',
+        runId: fired[0]?.runId,
+        sessionId: 'child-natural',
+      });
+    });
+
+    it('keeps an earlier gate runId when its write lands after another fire', async () => {
+      scheduler = new CronScheduler(tmpDir, DAY, {
+        runGate: async () => ({
+          kind: 'output',
+          stdout: 'delivered',
+          stderr: '',
+          durationMs: 1,
+          truncated: false,
+        }),
+      });
+      const original = perRunOneShot('queued-gated', {
+        recurring: true,
+        gate: 'probe owner',
+      });
+      await load([original]);
+      scheduler.approveGate(
+        original.id,
+        'probe owner',
+        original.sessionId ?? null,
+      );
+      const fired = collectFires();
+      const firstAt = Date.now();
+      vi.setSystemTime(firstAt);
+      const barrier = hold(updateGate);
+      try {
+        expect(
+          scheduler.forceFireJob(original.id, original.sessionId ?? null),
+        ).toBe(true);
+        await barrier.hit;
+        await vi.waitFor(() => expect(fired).toHaveLength(1));
+        const firstRunId = fired[0]?.runId;
+        expect(firstRunId).toEqual(expect.any(String));
+
+        vi.setSystemTime(firstAt + 60_000);
+        expect(
+          scheduler.forceFireJob(original.id, original.sessionId ?? null),
+        ).toBe(true);
+        await vi.waitFor(() => expect(fired).toHaveLength(2));
+        expect(fired[1]?.runId).not.toBe(firstRunId);
+      } finally {
+        barrier.release();
+        updateGate.block = null;
+      }
+      await internals().pendingPersist;
+
+      const tasks = await readCronTasks(tmpDir);
+      expect(tasks[0]?.runs).toHaveLength(2);
+      expect(tasks[0]?.runs?.at(0)).toMatchObject({
+        at: firstAt,
+        runId: fired[0]?.runId,
+      });
+      expect(tasks[0]?.runs?.at(1)).toMatchObject({
+        at: firstAt + 60_000,
+        runId: fired[1]?.runId,
+      });
+    });
+
+    it('keeps unbound ids disjoint from bound composite keys', async () => {
+      const jsonShapedId = JSON.stringify(['session-1', 'shared-key']);
+      const tasks = [
+        diskTask(jsonShapedId, { prompt: 'distinct unbound task' }),
+        diskTask('shared-key', {
+          prompt: 'bound owner task',
+          sessionId: 'session-1',
+        }),
+      ];
+      await load(tasks);
+      expect(scheduler.list()).toHaveLength(2);
+      const fired = collectFires();
+
+      expect(scheduler.forceFireJob(jsonShapedId)).toBe(true);
+      expect(scheduler.forceFireJob('shared-key', 'session-1')).toBe(true);
+      expect(fired.map((job) => job.prompt).sort()).toEqual([
+        'bound owner task',
+        'distinct unbound task',
+      ]);
+    });
+
+    it('keeps another natural removal from vetoing one-shot restoration', async () => {
+      const original = await loadOneShot('restoration-no-session-removal');
+      const dispatch = deferred();
+      const r = startRestoring(dispatch.promise);
+      tickPastFirstFire(original);
+      await internals().pendingPersist;
+      const sibling = missedOneShot(
+        'independent-task',
+        'independent owner work',
+        {
+          sessionId: 'session-1',
+          sessionMode: 'per_run',
+        },
+      );
+      await updateCronTasks(tmpDir, (tasks) => [...tasks, sibling]);
+      internals().removeMissedFromDisk([sibling]);
+      await internals().pendingPersist;
+      dispatch.resolve();
+      expect(await r.restoration).toBe(true);
     });
 
     it('does not accrue run history for a one-shot (deleted on fire)', async () => {
@@ -1263,11 +1936,21 @@ describe('CronScheduler', () => {
       scheduler.stop();
 
       expect(await r.restoration).toBe(true);
+      const expectedFailure = pausedAfterFailure(
+        original,
+        fireAt,
+        {},
+        r.fired[0]!.runId,
+      );
       expect(await readCronTasks(tmpDir)).toEqual([
         tasks[0],
-        pausedAfterFailure(original, fireAt),
+        expectedFailure,
         tasks[2],
       ]);
+      const restored = (await readCronTasks(tmpDir)).find(
+        (task) => task.id === original.id,
+      )!;
+      expect(restored.runs?.[0]?.runId).toBe(r.fired[0]!.runId);
     });
 
     it('keeps a restored one-shot through the watcher debounce without a missed fire', async () => {
@@ -1320,7 +2003,12 @@ describe('CronScheduler', () => {
 
         expect(restartedFires).toHaveLength(0);
         expect(await readCronTasks(tmpDir)).toEqual([
-          pausedAfterFailure(original, fireAt, { prompt: 'edited' }),
+          pausedAfterFailure(
+            original,
+            fireAt,
+            { prompt: 'edited' },
+            r.fired[0]!.runId,
+          ),
         ]);
       } finally {
         await settle(restarted);
@@ -1357,7 +2045,7 @@ describe('CronScheduler', () => {
       scheduler.tick(new Date(firedAt + 61_000));
       expect(r.fired).toHaveLength(1);
       expect(await readCronTasks(tmpDir)).toEqual([
-        pausedAfterFailure(original, firedAt),
+        pausedAfterFailure(original, firedAt, {}, r.fired[0]!.runId),
       ]);
       await settle(scheduler);
       const restarted = new CronScheduler(tmpDir);
@@ -1430,7 +2118,12 @@ describe('CronScheduler', () => {
 
       expect(await r.restoration).toBe(true);
       expect(await readCronTasks(tmpDir)).toEqual([
-        pausedAfterFailure(original, fireAt, { prompt: 'edited' }),
+        pausedAfterFailure(
+          original,
+          fireAt,
+          { prompt: 'edited' },
+          r.fired[0]!.runId,
+        ),
       ]);
     });
 
@@ -1444,6 +2137,45 @@ describe('CronScheduler', () => {
       expect(await removeCronTasks(tmpDir, [original.id])).toBe(0);
       dispatch.resolve();
 
+      expect(await r.restoration).toBe(false);
+      expect(await readCronTasks(tmpDir)).toEqual([]);
+    });
+
+    it('persists a tool miss-delete so another session cannot restore its consumed one-shot', async () => {
+      const original = await loadOneShot('once-tool-miss-delete');
+      const dispatch = deferred();
+      const r = startRestoring(dispatch.promise);
+      tickPastFirstFire(original);
+      await internals().pendingPersist;
+      const other = new CronScheduler(tmpDir);
+      const deleteTool = new CronDeleteTool({
+        getCronScheduler: () => other,
+        getProjectRoot: () => tmpDir,
+      } as unknown as import('../config/config.js').Config);
+      try {
+        const result = await deleteTool
+          .build({ id: original.id })
+          .execute(new AbortController().signal);
+        expect(result.llmContent).toContain('not found');
+        dispatch.resolve();
+        expect(await r.restoration).toBe(false);
+        expect(await readCronTasks(tmpDir)).toEqual([]);
+      } finally {
+        dispatch.resolve();
+        await settle(other);
+      }
+    });
+
+    it('honors reserved-id tombstones from a public miss-delete during one-shot restoration', async () => {
+      const original = await loadOneShot(
+        JSON.stringify(['session-1', 'reserved-once']),
+      );
+      const dispatch = deferred();
+      const r = startRestoring(dispatch.promise);
+      tickPastFirstFire(original);
+      await internals().pendingPersist;
+      expect(await removeCronTasks(tmpDir, [original.id])).toBe(0);
+      dispatch.resolve();
       expect(await r.restoration).toBe(false);
       expect(await readCronTasks(tmpDir)).toEqual([]);
     });
@@ -1466,9 +2198,73 @@ describe('CronScheduler', () => {
         deletionIds: ['session:session-1'],
       });
 
-      expect(await scheduler.restoreConsumedOneShot(original.id)).toBe(false);
+      expect(
+        await scheduler.restoreConsumedOneShot(
+          original.id,
+          original.sessionId ?? null,
+        ),
+      ).toBe(false);
       expect(await readCronTasks(tmpDir)).toEqual([]);
     });
+
+    it.each([
+      'corrupt-rebuild',
+      'eviction',
+      'intact-unrelated-delete',
+    ] as const)(
+      'guards consumed one-shot restoration across sidecar history state (%s)',
+      async (scenario) => {
+        const original = await loadOneShot(`once-history-${scenario}`);
+        const fired = collectFires();
+        tickPastFirstFire(original);
+        expectOnly(fired, { missed: undefined });
+        await internals().pendingPersist;
+        expect(await readCronTasks(tmpDir)).toEqual([]);
+
+        if (scenario === 'corrupt-rebuild') {
+          await deleteOnDisk(original.id);
+          const sidecarPath = `${getCronFilePath(tmpDir)}.deletions`;
+          await fs.writeFile(sidecarPath, '{torn-json');
+          const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+          try {
+            await updateCronTasks(tmpDir, (tasks) => tasks, {
+              deletionIds: ['unrelated-rebuild'],
+            });
+          } finally {
+            warn.mockRestore();
+          }
+        } else if (scenario === 'eviction') {
+          await deleteOnDisk(original.id);
+          await updateCronTasks(tmpDir, (tasks) => tasks, {
+            deletionIds: Array.from(
+              { length: 10_000 },
+              (_, i) => `unrelated-evict-${i}`,
+            ),
+          });
+        } else {
+          await updateCronTasks(tmpDir, (tasks) => tasks, {
+            deletionIds: ['unrelated-intact'],
+          });
+        }
+
+        const restored = await scheduler.restoreConsumedOneShot(
+          original.id,
+          original.sessionId ?? null,
+        );
+        if (scenario === 'intact-unrelated-delete') {
+          expect(restored).toBe(true);
+          const onDisk = await readCronTasks(tmpDir);
+          expect(onDisk).toHaveLength(1);
+          expect(onDisk[0]).toMatchObject({
+            id: original.id,
+            enabled: false,
+          });
+        } else {
+          expect(restored).toBe(false);
+          expect(await readCronTasks(tmpDir)).toEqual([]);
+        }
+      },
+    );
 
     it('does not restore after a cross-process delete follows a failed fire removal', async () => {
       const original = await loadOneShot('once-delete-after-failed-persist');
@@ -1494,7 +2290,11 @@ describe('CronScheduler', () => {
       const fireAt = tickPastFirstFire(original);
 
       await expect(r.restoration).rejects.toThrow('ENOSPC');
-      expect(internals().pendingRemoval.has(original.id)).toBe(true);
+      expect(
+        internals().pendingRemoval.has(
+          JSON.stringify([original.sessionId, original.id]),
+        ),
+      ).toBe(true);
       updateGate.fail = null;
       await reload(true);
       scheduler.tick(new Date(fireAt + 2000));
@@ -1515,21 +2315,23 @@ describe('CronScheduler', () => {
       updateGate.fail = fsError('ENOSPC', 'disk full');
       try {
         await expect(
-          scheduler.restoreConsumedOneShot(original.id),
+          scheduler.restoreConsumedOneShot(
+            original.id,
+            original.sessionId ?? null,
+          ),
         ).rejects.toThrow('ENOSPC');
       } finally {
         updateGate.fail = null;
       }
 
       const state = internals();
+      const key = JSON.stringify([original.sessionId, original.id]);
       // The failed restore releases the consumed state (unpinning reload GC)...
-      expect(state.restorablePerRunOneShots.has(original.id)).toBe(false);
-      expect(state.consumedPerRunOneShots.has(original.id)).toBe(false);
-      expect(state.consumedPerRunRemovalGenerations.has(original.id)).toBe(
-        false,
-      );
+      expect(state.restorablePerRunOneShots.has(key)).toBe(false);
+      expect(state.consumedPerRunOneShots.has(key)).toBe(false);
+      expect(state.consumedPerRunRemovalGenerations.has(key)).toBe(false);
       // ...while the re-fire guard survives.
-      expect(state.pendingRemoval.has(original.id)).toBe(true);
+      expect(state.pendingRemoval.has(key)).toBe(true);
       // ...and the loss leaves an operator-facing breadcrumb.
       expect(warn).toHaveBeenCalledWith(expect.stringContaining(original.id));
       warn.mockRestore();
@@ -1694,11 +2496,19 @@ describe('CronScheduler', () => {
       scheduler.tick(new Date(minute + 90_000));
       await gate.hit;
       expect(fired.map((j) => j.id)).toEqual(['boundTick']);
-      expect(internals().firePersistPending.has('boundTick')).toBe(true); // guarded
+      expect(
+        internals().firePersistPending.has(
+          JSON.stringify(['sess-B', 'boundTick']),
+        ),
+      ).toBe(true);
 
       gate.release();
       await settle(scheduler);
-      expect(internals().firePersistPending.has('boundTick')).toBe(false); // cleared
+      expect(
+        internals().firePersistPending.has(
+          JSON.stringify(['sess-B', 'boundTick']),
+        ),
+      ).toBe(false);
     });
 
     it('ref-counts firePersistPending so overlapping persists for one id do not clear early', () => {
@@ -1756,7 +2566,9 @@ describe('CronScheduler', () => {
       // Lingering in pendingRemoval would keep it out of the job map and
       // reconciliation forever (race-free: delivery is sync). Mutation
       // check: drop pendingRemoval.delete.
-      expect(internals().pendingRemoval.has('loopmd')).toBe(false);
+      expect(
+        internals().pendingRemoval.has(JSON.stringify([null, 'loopmd'])),
+      ).toBe(false);
 
       // The sentinel survives on disk; only the fired sibling is removed.
       await vi.waitFor(async () => expect(await diskIds()).toEqual(['loopmd']));
@@ -1814,7 +2626,9 @@ describe('CronScheduler', () => {
       expect(fired.map((j) => j.prompt)).toEqual(['aged recurring']);
 
       // Same limbo guard as the missed branch.
-      expect(internals().pendingRemoval.has('loopmd-f')).toBe(false);
+      expect(
+        internals().pendingRemoval.has(JSON.stringify([null, 'loopmd-f'])),
+      ).toBe(false);
 
       // The fired sibling is deleted; the skipped sentinel stays on disk.
       await vi.waitFor(async () => {
@@ -1830,6 +2644,99 @@ describe('CronScheduler', () => {
         scheduler.createDurable('* * * * *', 'doomed', true),
       ).rejects.toThrow(/Malformed JSON/);
       expect(scheduler.list()).toHaveLength(0);
+    });
+
+    it('preserves the incumbent in-memory job when a duplicate id is rejected', async () => {
+      const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+      try {
+        const original = await scheduler.createDurable(
+          '* * * * *',
+          'ORIGINAL_B',
+          true,
+        );
+        await expect(
+          scheduler.createDurable('* * * * *', 'REJECTED_A', true),
+        ).rejects.toThrow('scheduled task id already exists: aaaaaaaa');
+
+        expect(scheduler.list().find((job) => job.id === original.id)).toBe(
+          original,
+        );
+        expect(
+          (await readCronTasks(tmpDir)).map((task) => task.prompt),
+        ).toEqual(['ORIGINAL_B']);
+
+        random.mockReturnValue(1); // zzzzzzzz: a non-colliding control
+        const unique = await scheduler.createDurable(
+          '* * * * *',
+          'UNIQUE_A',
+          true,
+        );
+        expect(jobIds()).toEqual(
+          expect.arrayContaining([original.id, unique.id]),
+        );
+        expect(
+          (await readCronTasks(tmpDir)).map((task) => task.prompt),
+        ).toEqual(['ORIGINAL_B', 'UNIQUE_A']);
+      } finally {
+        random.mockRestore();
+      }
+    });
+
+    it('preserves a session-only incumbent when a durable id collides', async () => {
+      const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+      try {
+        const original = scheduler.create(
+          '* * * * *',
+          'ORIGINAL_SESSION_ONLY',
+          true,
+        );
+
+        await expect(
+          scheduler.createDurable('* * * * *', 'REJECTED_DURABLE', true),
+        ).rejects.toThrow('scheduled task id already exists: aaaaaaaa');
+
+        expect(scheduler.list().find((job) => job.id === original.id)).toBe(
+          original,
+        );
+        expect(await readCronTasks(tmpDir)).toEqual([]);
+      } finally {
+        random.mockRestore();
+      }
+    });
+
+    it('does not write again after deleting a loaded durable job', async () => {
+      const actualUpdate = (
+        await vi.importActual<typeof import('./cronTasksFile.js')>(
+          './cronTasksFile.js',
+        )
+      ).updateCronTasks;
+      const mockedUpdate = vi.spyOn(cronTasksFile, 'updateCronTasks');
+      let writes = 0;
+      mockedUpdate.mockImplementation(async (...args) => {
+        writes++;
+        if (writes === 2) throw new Error('second durable delete write failed');
+        return actualUpdate(...args);
+      });
+      try {
+        const job = await scheduler.createDurable('* * * * *', 'loaded', true);
+
+        await expect(scheduler.removeDurable(job.id)).resolves.toBeUndefined();
+
+        expect(writes).toBe(1);
+        expect(await readCronTasks(tmpDir)).toEqual([]);
+      } finally {
+        mockedUpdate.mockRestore();
+      }
+    });
+
+    it('still removes a disk-only durable task when it shares an id with a wakeup', async () => {
+      const wakeup = scheduler.scheduleWakeup(300, 'wakeup sharing task id');
+      await writeCronTasks(tmpDir, [diskTask(wakeup.id)]);
+
+      await scheduler.removeDurable(wakeup.id);
+
+      expect(scheduler.list()).toEqual([]);
+      expect(await readCronTasks(tmpDir)).toEqual([]);
     });
 
     it('reloads durable tasks when the file changes on disk', async () => {
@@ -2226,14 +3133,14 @@ describe('CronScheduler', () => {
     it('restores the job and throws when durable removal cannot persist', async () => {
       const job = await scheduler.createDurable('* * * * *', 'sticky', true);
 
-      removeGate.fail = fsError('EACCES', 'permission denied');
+      updateGate.fail = fsError('EACCES', 'permission denied');
 
       await expect(scheduler.delete(job.id)).rejects.toThrow();
       // Deletion didn't persist, so the job must not vanish here either.
       expect(jobIds()).toContain(job.id);
 
       // Obstruction cleared: it deletes cleanly from memory and disk.
-      removeGate.fail = null;
+      updateGate.fail = null;
       await expect(scheduler.delete(job.id)).resolves.toBe(true);
       expect(scheduler.list()).toHaveLength(0);
       expect(await readCronTasks(tmpDir)).toHaveLength(0);
@@ -2347,5 +3254,96 @@ describe('nextDurableFireMs', () => {
 
   it('returns null for a cron that cannot be projected', () => {
     expect(nextDurableFireMs(recurring({ cron: 'not a cron' }))).toBeNull();
+  });
+});
+
+describe('nextCronJobFireMs', () => {
+  const anchor = Date.parse('2026-06-01T08:00:00Z');
+
+  it('returns fireAtMs verbatim for wakeup jobs', () => {
+    expect(
+      nextCronJobFireMs({
+        id: 'wk-1',
+        cronExpr: '@wakeup',
+        recurring: false,
+        createdAt: anchor,
+        jitterMs: 0,
+        fireAtMs: anchor + 120_000,
+      }),
+    ).toBe(anchor + 120_000);
+  });
+
+  it('projects recurring session cron jobs from lastFiredAt with jitter', () => {
+    const first = nextCronJobFireMs({
+      id: 'cron-1',
+      cronExpr: '*/5 * * * *',
+      recurring: true,
+      createdAt: anchor,
+      lastFiredAt: anchor,
+      jitterMs: 3_000,
+    });
+    const later = nextCronJobFireMs({
+      id: 'cron-1',
+      cronExpr: '*/5 * * * *',
+      recurring: true,
+      createdAt: anchor,
+      lastFiredAt: anchor + 5 * 60_000,
+      jitterMs: 3_000,
+    });
+    expect(first).not.toBeNull();
+    expect(later).not.toBeNull();
+    expect(later!).toBeGreaterThan(first!);
+  });
+
+  it('returns null for unparseable cron expressions', () => {
+    expect(
+      nextCronJobFireMs({
+        id: 'bad-1',
+        cronExpr: 'not valid',
+        recurring: true,
+        createdAt: anchor,
+        jitterMs: 0,
+      }),
+    ).toBeNull();
+  });
+
+  it('adds the exact jitter milliseconds onto the projected fire time', () => {
+    const base = nextCronJobFireMs({
+      id: 'exact-jitter',
+      cronExpr: '0 0 * * *',
+      recurring: true,
+      createdAt: anchor,
+      jitterMs: 0,
+    });
+    const jittered = nextCronJobFireMs({
+      id: 'exact-jitter',
+      cronExpr: '0 0 * * *',
+      recurring: true,
+      createdAt: anchor,
+      jitterMs: 3_000,
+    });
+    const localMidnight = new Date(anchor);
+    localMidnight.setHours(24, 0, 0, 0);
+    expect(base).toBe(localMidnight.getTime());
+    expect(jittered).toBe(base! + 3_000);
+  });
+
+  it('preserves negative jitter for a one-shot session job', () => {
+    const withoutJitter = nextCronJobFireMs({
+      id: 'one-shot-negative-jitter',
+      cronExpr: '*/5 * * * *',
+      recurring: false,
+      createdAt: anchor,
+      jitterMs: 0,
+    });
+    const early = nextCronJobFireMs({
+      id: 'one-shot-negative-jitter',
+      cronExpr: '*/5 * * * *',
+      recurring: false,
+      createdAt: anchor,
+      jitterMs: -3_000,
+    });
+    expect(withoutJitter).not.toBeNull();
+    expect(early).toBe(withoutJitter! - 3_000);
   });
 });

@@ -10,6 +10,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type HTMLAttributes,
   type ReactNode,
 } from 'react';
 import type {
@@ -36,6 +37,7 @@ import { useI18n } from '../../i18n';
 import { formatDateTime } from '../../utils/formatDateTime';
 import {
   SESSION_LIST_PAGE_SIZE,
+  SIDEBAR_SESSION_EXPAND_STEP,
   SIDEBAR_SESSION_PREVIEW_LIMIT,
 } from '../../constants/sessions';
 import {
@@ -159,11 +161,18 @@ interface WorkspaceSectionProps {
   sessionCatalogRequestsEnabled?: boolean;
   sessionGroupCatalog?: DaemonSessionGroupCatalog;
   sessionLiveStateEnabled?: boolean;
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   sourceType?: string;
   channelGroupingEnabled?: boolean;
   ungroupedLabel: string;
   searchQuery?: string;
   expanded?: boolean;
+  expansionRequest?: { expanded: boolean };
+  temporarilyCollapsed?: boolean;
+  dragHandleProps?: Pick<
+    HTMLAttributes<HTMLButtonElement>,
+    'draggable' | 'onDragStart' | 'onDragEnd'
+  >;
   autoExpandKey?: string;
   forceAutoExpand?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
@@ -265,6 +274,13 @@ interface WorkspaceSectionProps {
   onOpenGitDiff?: (workspaceCwd: string) => void;
   /** Commit entry for the same picker; the row still opens without it. */
   onOpenCommit?: (workspaceCwd: string) => void;
+  /** Opens the management view for a clicked overview facet in this workspace. */
+  onOpenOverviewItem?: (
+    item: WorkspaceOverviewItem,
+    workspaceCwd: string,
+  ) => void;
+  /** Facets that render as interactive rows in the hover details popover. */
+  manageableOverviewItems?: ReadonlySet<WorkspaceOverviewItem>;
 }
 
 export function WorkspaceSection({
@@ -286,11 +302,15 @@ export function WorkspaceSection({
   sessionCatalogRequestsEnabled = true,
   sessionGroupCatalog,
   sessionLiveStateEnabled = false,
+  sortBy,
   sourceType,
   channelGroupingEnabled = false,
   ungroupedLabel,
   searchQuery = '',
   expanded: controlledExpanded,
+  expansionRequest,
+  temporarilyCollapsed = false,
+  dragHandleProps,
   autoExpandKey,
   forceAutoExpand = false,
   onExpandedChange,
@@ -318,6 +338,8 @@ export function WorkspaceSection({
   onOpenTerminalLocally,
   onOpenGitDiff,
   onOpenCommit,
+  onOpenOverviewItem,
+  manageableOverviewItems,
 }: WorkspaceSectionProps) {
   const available = useDaemonAvailability() === 'available';
   const availability = useDaemonAvailabilityController();
@@ -335,7 +357,9 @@ export function WorkspaceSection({
   );
   const [actionsVisible, setActionsVisible] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [showAllSessions, setShowAllSessions] = useState(false);
+  const [visibleSessionCount, setVisibleSessionCount] = useState(
+    SIDEBAR_SESSION_PREVIEW_LIMIT,
+  );
   const [gitStatus, setGitStatus] = useState<DaemonWorkspaceGitStatus>();
   const fulfilledPendingSessions = useRef(new Set<string>());
   const channelCatalogLoadRequestId = useRef(0);
@@ -343,6 +367,7 @@ export function WorkspaceSection({
   const sessionPollFailed = useRef(false);
   const { t } = useI18n();
   const expanded = controlledExpanded ?? internalExpanded;
+  const headerExpanded = expanded && !temporarilyCollapsed;
   const readOnly = !workspace.primary && !workspace.trusted;
   const disabled = workspace.primary && !workspace.trusted;
   const searchActive = searchQuery.trim().length > 0;
@@ -355,9 +380,16 @@ export function WorkspaceSection({
   }, [controlledExpanded, storageId]);
 
   useEffect(() => {
-    // The five-row preview is scoped per source; reset the one-shot
-    // show-all when the section collapses or the source changes.
-    setShowAllSessions(false);
+    if (!expansionRequest || controlledExpanded !== undefined) return;
+    setInternalExpanded(expansionRequest.expanded);
+    setVisibleSessionCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
+    writeWorkspaceExpanded(storageId, expansionRequest.expanded);
+  }, [expansionRequest, controlledExpanded, storageId]);
+
+  useEffect(() => {
+    // The five-row preview is scoped per source; reset the expanded count
+    // when the section collapses or the source changes.
+    setVisibleSessionCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
   }, [expanded, sourceType]);
 
   // The render site keys this component by workspace id, so an id change
@@ -385,13 +417,14 @@ export function WorkspaceSection({
       options: {
         pageSize: SESSION_LIST_PAGE_SIZE,
         archiveState: 'active',
+        ...(sortBy !== undefined ? { sortBy } : {}),
         ...(sourceType ? { sourceType } : {}),
         ...(organizationEnabled
           ? { view: 'organized' as const, group: 'all' }
           : {}),
       },
     }),
-    [organizationEnabled, sourceType, workspace.cwd],
+    [organizationEnabled, sortBy, sourceType, workspace.cwd],
   );
   const sessionsResult = useSessionCatalogQuery(client, sessionsQuery, {
     autoLoad: sessionCatalogRequestsEnabled && !sessionLiveStateEnabled,
@@ -837,13 +870,20 @@ export function WorkspaceSection({
     sessions,
   ]);
   // Same rule the sidebar applies to its own catalog: an open rename keeps
-  // its row mounted when a refresh reorders other sessions ahead of it.
+  // its row mounted when a refresh reorders other sessions ahead of it. The
+  // shared index test is measured in whichever sequence the caller slices:
+  // group sections pass the raw catalog against the fixed preview bound (their
+  // expansion count lives inside SessionGroupSection), while the flat list
+  // passes rendered tree rows against its live visible count below.
+  const editingIndexBeyond = (index: number, bound: number): boolean =>
+    editingSessionId !== undefined && index >= bound;
   const revealsEditingSession = (
     items: readonly DaemonSessionSummary[],
   ): boolean =>
-    editingSessionId !== undefined &&
-    items.findIndex((session) => session.sessionId === editingSessionId) >=
-      SIDEBAR_SESSION_PREVIEW_LIMIT;
+    editingIndexBeyond(
+      items.findIndex((session) => session.sessionId === editingSessionId),
+      SIDEBAR_SESSION_PREVIEW_LIMIT,
+    );
 
   const sessionTree = useSessionTree(storageId, searchedSessions, searchActive);
   const buildSessionTreeRows = (
@@ -907,13 +947,22 @@ export function WorkspaceSection({
         expanded: false,
       }))
     : sessionTree.buildRows(visibleSessions);
+  // Measure the edited row in the rendered tree-row sequence (the one actually
+  // sliced), not the raw catalog: collapsed parents hide their children, so a
+  // raw-array index diverges from the rendered row count.
+  const editingRowBeyondBound = editingIndexBeyond(
+    directTreeRows.findIndex(
+      (row) => row.session.sessionId === editingSessionId,
+    ),
+    visibleSessionCount,
+  );
   const directSessions =
     searchActive ||
-    showAllSessions ||
     !limitSessions ||
-    revealsEditingSession(visibleSessions)
+    editingRowBeyondBound ||
+    directTreeRows.length <= visibleSessionCount
       ? directTreeRows
-      : directTreeRows.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
+      : directTreeRows.slice(0, visibleSessionCount);
 
   const groupedSessions = useMemo(() => {
     // The grouped branch has no trust gate of its own; untrusted secondary
@@ -1006,18 +1055,22 @@ export function WorkspaceSection({
         className={styles.header}
         type="button"
         disabled={disabled}
-        aria-expanded={expanded}
+        aria-expanded={headerExpanded}
         onClick={toggleExpanded}
+        {...dragHandleProps}
       >
         {renderHeader ? (
-          renderHeader(expanded)
+          renderHeader(headerExpanded)
         ) : (
           <>
             <span
-              className={cx(styles.chevron, expanded && styles.chevronOpen)}
+              className={cx(
+                styles.chevron,
+                headerExpanded && styles.chevronOpen,
+              )}
             >
               <WorkspaceFolderIcon
-                open={expanded}
+                open={headerExpanded}
                 remote={remote || !!workspace.ssh}
               />
             </span>
@@ -1092,6 +1145,15 @@ export function WorkspaceSection({
               ? () => onOpenTerminalLocally(workspace.cwd)
               : undefined
           }
+          onOpenOverviewItem={
+            onOpenOverviewItem &&
+            gitPollCwd &&
+            workspace.trusted &&
+            !workspace.ssh
+              ? (item) => onOpenOverviewItem(item, workspace.cwd)
+              : undefined
+          }
+          manageableItems={manageableOverviewItems}
         >
           {headerRow}
         </WorkspaceDetailsTooltip>
@@ -1101,7 +1163,10 @@ export function WorkspaceSection({
       {renderSessions &&
         (expanded || Boolean(searchQuery.trim())) &&
         !disabled && (
-          <div className={styles.sessions}>
+          <div
+            className={styles.sessions}
+            style={temporarilyCollapsed ? { display: 'none' } : undefined}
+          >
             {pendingSession &&
             !pendingSessionMatched &&
             !fulfilledPendingSessions.current.has(pendingSession.key)
@@ -1281,15 +1346,23 @@ export function WorkspaceSection({
                 })}
                 {limitSessions &&
                   !searchActive &&
-                  !showAllSessions &&
-                  !revealsEditingSession(visibleSessions) &&
-                  directTreeRows.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
+                  !editingRowBeyondBound &&
+                  directTreeRows.length > visibleSessionCount && (
                     <button
                       type="button"
                       className={sidebarStyles.showAllSessions}
-                      onClick={() => setShowAllSessions(true)}
+                      onClick={() =>
+                        setVisibleSessionCount(
+                          (count) => count + SIDEBAR_SESSION_EXPAND_STEP,
+                        )
+                      }
                     >
-                      {t('sidebar.showAllSessions')}
+                      {t('sidebar.showMoreSessions', {
+                        count: Math.min(
+                          SIDEBAR_SESSION_EXPAND_STEP,
+                          directTreeRows.length - visibleSessionCount,
+                        ),
+                      })}
                     </button>
                   )}
               </>

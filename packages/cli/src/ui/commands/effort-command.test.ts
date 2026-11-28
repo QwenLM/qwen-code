@@ -35,6 +35,7 @@ describe('effortCommand', () => {
         config: {
           getReasoningEffort,
           setReasoningEffort,
+          getModelPreferenceKey: () => undefined,
           getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
         } as unknown as Config,
         settings: {
@@ -140,6 +141,33 @@ describe('effortCommand', () => {
       'high',
     );
     expect(res).toMatchObject({ messageType: 'info' });
+  });
+
+  it('persists effort for the active model route when preferences are enabled', async () => {
+    const route = 'openai/model.v2';
+    const settings = context.services.settings!;
+    const preferences = { [route]: { reasoning: { effort: 'high' } } };
+    const setModelPreferences = vi.fn();
+    Object.assign(settings, {
+      forScope: () => ({ settings: {} }),
+      merged: { model: { preferences } },
+    });
+    Object.assign(context.services.config!, {
+      getModelPreferenceKey: () => route,
+      setModelPreferences,
+    });
+
+    await effortCommand.action!(context, 'high');
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      ['model', 'preferences', route, 'reasoning', 'effort'],
+      'high',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+    expect(setModelPreferences).toHaveBeenCalledWith(preferences, 'reasoning');
+    expect(setReasoningEffort).not.toHaveBeenCalled();
   });
 
   it('keeps a valid tier session-local when persistence is disabled', async () => {
@@ -256,6 +284,21 @@ describe('effortCommand', () => {
     const res = await effortCommand.action!(context, 'low');
     expect(res).toMatchObject({ messageType: 'error' });
     expect(setReasoningEffort).not.toHaveBeenCalled();
+  });
+
+  it('rejects a tier the built-in table rules out, with no declaration', async () => {
+    // gpt-5-pro accepts only `high`, and the wire path already re-tiers anything
+    // else, so the command must not offer or persist it (#17411).
+    Object.assign(context.services.config!, {
+      getModel: () => 'gpt-5-pro',
+      getAuthType: () => 'openai',
+      getResolvedModelConfig: () => undefined,
+    });
+    const res = await effortCommand.action!(context, 'low');
+    expect(res).toMatchObject({ messageType: 'error' });
+    expect((res as { content: string }).content).toContain('Choose one of:');
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
   });
 
   it('does not offer tier autocompletion (tiers are hinted via argumentHint)', () => {

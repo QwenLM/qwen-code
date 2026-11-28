@@ -19,10 +19,16 @@ export function handleEditorKey(
   buffer: TextBuffer,
   key: KeyEvent,
   includeNavigation = false,
+  screenReader = false,
 ): boolean {
   if (key.eventType === 'release') return false;
   const original = toOriginalKey(key);
   const name = original.name;
+  // Shift+Up/Down is the screen-reader history scroll binding. Claiming it
+  // here would select the whole draft, and the next keystroke would replace
+  // that selection — preventDefault does not stop the app-level listener.
+  if (screenReader && key.shift && (name === 'up' || name === 'down'))
+    return false;
   const wordLeft =
     ((original.ctrl || original.meta) && original.name === 'left') ||
     (original.meta && !original.ctrl && original.name === 'b');

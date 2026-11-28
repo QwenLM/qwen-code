@@ -41,6 +41,7 @@ import {
 import { applyVerifyPrCoordinateEnv } from './verify-pr-coordinates.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
+  deleteNestedPropertySafe,
   setNestedPropertySafe,
   WORKSPACE_NON_OVERRIDING_SETTINGS,
   WORKSPACE_RESTRICTED_ROOT_SETTINGS,
@@ -258,6 +259,8 @@ export interface SettingsFile {
   rawJson?: string;
 }
 
+const REMOVED_MODEL_SETTINGS = ['loopProtection', 'skipLoopDetection'];
+
 function getSettingsFileKeyWarnings(
   settings: Record<string, unknown>,
   settingsFilePath: string,
@@ -294,8 +297,19 @@ function getSettingsFileKeyWarnings(
 
     ignoredLegacyKeys.add(oldKey);
     warnings.push(
-      `Warning: Legacy setting '${oldKey}' will be ignored in ${settingsFilePath}. Please use '${newPath}' instead.`,
+      REMOVED_MODEL_SETTINGS.some((key) => newPath === `model.${key}`)
+        ? `Warning: Legacy setting '${oldKey}' was removed (loop detection no longer exists) and will be ignored in ${settingsFilePath}.`
+        : `Warning: Legacy setting '${oldKey}' will be ignored in ${settingsFilePath}. Please use '${newPath}' instead.`,
     );
+  }
+
+  const model = settings['model'];
+  for (const key of REMOVED_MODEL_SETTINGS) {
+    if (isPlainObject(model) && model[key] !== undefined) {
+      warnings.push(
+        `Warning: Setting 'model.${key}' was removed (loop detection no longer exists) and will be ignored in ${settingsFilePath}.`,
+      );
+    }
   }
 
   // Unknown top-level keys — log silently to debug output.
@@ -843,7 +857,7 @@ export class LoadedSettings {
 
   setValue(
     scope: SettingScope,
-    key: string,
+    key: string | readonly string[],
     value: unknown,
     assertCanCommit?: () => void,
     opts: { throwOnWriteFailure?: boolean } = {},
@@ -865,12 +879,27 @@ export class LoadedSettings {
         },
       );
     }
-    setNestedPropertySafe(settingsFile.settings, key, value);
-    setNestedPropertySafe(settingsFile.originalSettings, key, value);
+    if (typeof key !== 'string' && value === undefined) {
+      deleteNestedPropertySafe(settingsFile.settings, key);
+      deleteNestedPropertySafe(settingsFile.originalSettings, key);
+    } else {
+      setNestedPropertySafe(settingsFile.settings, key, value);
+      setNestedPropertySafe(settingsFile.originalSettings, key, value);
+    }
     this._merged = this.computeMergedSettings();
     if (!opts.throwOnWriteFailure) {
       saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
     }
+  }
+
+  setTopLevelValues(scope: SettingScope, values: Partial<Settings>): void {
+    const settingsFile = this.forScope(scope);
+    saveSettings(settingsFile, values, [], { throwOnWriteFailure: true });
+    for (const [key, value] of Object.entries(values)) {
+      setNestedPropertySafe(settingsFile.settings, key, value);
+      setNestedPropertySafe(settingsFile.originalSettings, key, value);
+    }
+    this._merged = this.computeMergedSettings();
   }
 
   setValues(
@@ -1232,8 +1261,15 @@ function readSettingsLayers(
     // This is okay. The path might not exist yet, and that's a valid state.
   }
 
-  // We expect homedir to always exist and be resolvable.
-  const realHomeDir = resolveHomeDirectory();
+  // The home directory may not exist (e.g. a container user created without
+  // `-m`); like the workspace path above, that's a valid state. Fall back to
+  // the unresolved path so the home-vs-workspace comparison still works.
+  let realHomeDir = path.resolve(homedir());
+  try {
+    realHomeDir = resolveHomeDirectory();
+  } catch (_e) {
+    // This is okay. The path might not exist yet, and that's a valid state.
+  }
 
   const workspaceSettingsPath = new Storage(
     workspaceDir,
@@ -1684,7 +1720,7 @@ function readSettingsLayers(
 }
 
 function createSettingsUpdate(
-  key: string,
+  key: string | readonly string[],
   value: unknown,
 ): Record<string, unknown> {
   const root: Record<string, unknown> = {};

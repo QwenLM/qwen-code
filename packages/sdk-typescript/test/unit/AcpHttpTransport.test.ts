@@ -7,6 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { AcpHttpTransport } from '../../src/daemon/AcpHttpTransport.js';
 import { DaemonClient } from '../../src/daemon/DaemonClient.js';
+import { DaemonSessionClient } from '../../src/daemon/DaemonSessionClient.js';
 import { DaemonTransportClosedError } from '../../src/daemon/DaemonTransport.js';
 
 // ---------------------------------------------------------------------------
@@ -452,6 +453,46 @@ describe('AcpHttpTransport', () => {
       transport.dispose();
     });
 
+    it('overrides authorization case-insensitively at the request boundary', async () => {
+      const { fetch } = initAwareFetch({ connectionIdHeader: 'conn-1' });
+      let rawHeaders: Record<string, string> | undefined;
+      const captureFetch: typeof globalThis.fetch = async (input, init) => {
+        if (
+          typeof init?.body === 'string' &&
+          JSON.parse(init.body).method === 'session/new'
+        ) {
+          rawHeaders = init.headers as Record<string, string>;
+        }
+        return fetch(input, init);
+      };
+      const transport = new AcpHttpTransport(
+        'http://d',
+        'transport',
+        captureFetch,
+      );
+
+      try {
+        const response = await transport.fetch('http://d/session', {
+          method: 'POST',
+          headers: { authorization: 'Bearer caller' },
+          body: JSON.stringify({ model: 'test' }),
+        });
+
+        expect(response.status).toBe(200);
+        expect(rawHeaders).toBeDefined();
+        const authorization = Object.entries(rawHeaders!).filter(
+          ([name]) => name.toLowerCase() === 'authorization',
+        );
+        expect(authorization).toHaveLength(1);
+        expect(authorization[0][1]).toBe('Bearer caller');
+        const headers = new Headers(rawHeaders);
+        expect(headers.get('authorization')).toBe('Bearer caller');
+        expect(headers.get('acp-connection-id')).toBe('conn-1');
+      } finally {
+        transport.dispose();
+      }
+    });
+
     it('returns 404 for unknown routes', async () => {
       const { fetch } = initAwareFetch();
       const transport = new AcpHttpTransport('http://d', undefined, fetch);
@@ -710,6 +751,30 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
     }
     return out;
   }
+
+  it('unblocks prompt submission on an accepted idle ACP HTTP stream', async () => {
+    const { fetch } = initAwareFetch({
+      subsequentReply: () =>
+        new Response(new ReadableStream(), {
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    });
+    const transport = new AcpHttpTransport('http://d', undefined, fetch);
+    const client = new DaemonClient({ baseUrl: 'http://d', transport });
+    const session = new DaemonSessionClient({
+      client,
+      session: { sessionId: 'sa-1', workspaceCwd: '', attached: false },
+    });
+    const controller = new AbortController();
+    const read = session.events({ signal: controller.signal }).next();
+    try {
+      await session.waitForEventStream(AbortSignal.timeout(1000));
+    } finally {
+      controller.abort();
+      await read.catch(() => undefined);
+      transport.dispose();
+    }
+  });
 
   it('opens GET /acp with Acp-Session-Id + Acp-Connection-Id (not REST /session/:id/events)', async () => {
     const { fetch, calls } = sessionStreamFetch([]);

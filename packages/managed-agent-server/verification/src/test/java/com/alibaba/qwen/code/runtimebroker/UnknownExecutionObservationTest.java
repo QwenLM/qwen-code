@@ -1,25 +1,26 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.fastjson2.JSON;
-import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpControllerTestFixture;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 
-import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.time.Clock;
 import java.time.Duration;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -243,29 +244,33 @@ class UnknownExecutionObservationTest {
                 new RuntimeLease("instance", URI.create("http://127.0.0.1:1234"),
                         "token", "lease", 1));
         private final HttpClient client = HttpClient.newHttpClient();
-        private final InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository(Clock.systemUTC());
-        private final InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
+        private final ToolExecutionRepository executions;
+        private final RuntimeBindingRepository bindings;
         private final RuntimeBrokerService service;
-        private final RuntimeBrokerHttpServer server;
+        private final RuntimeBrokerHttpControllerTestFixture server;
 
         private Fixture() throws Exception {
+            var source = new JdbcDataSource();
+            source.setURL("jdbc:h2:mem:unknown-observation-" + UUID.randomUUID()
+                    + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+            executions = new JdbcToolExecutionRepository(source);
+            bindings = new JdbcRuntimeBindingRepository(source,
+                    new AesGcmSecretProtector("test", new byte[32]));
             RuntimeScope scope = new RuntimeScope("tenant", "workspace",
                     "generation", "/workspace", "capability", "workspace");
             service = new RuntimeBrokerService(
                     id -> CompletableFuture.completedFuture(scope),
                     provisioner, transport, bindings,
-                    new InMemoryRuntimeSessionRepository(),
+                    new JdbcRuntimeSessionRepository(source),
                     executions,
                     "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
-            server = new RuntimeBrokerHttpServer(new InetSocketAddress("127.0.0.1", 0),
-                    "secret", service);
+            server = new RuntimeBrokerHttpControllerTestFixture("secret", service);
             server.start();
         }
 
         private URI uri(String path) {
-            return server.getBaseUri().resolve(RuntimeBrokerHttpServer.ROUTE_PREFIX + path);
+            return server.getBaseUri().resolve(RuntimeBrokerHttpControllerTestFixture.ROUTE_PREFIX + path);
         }
 
         private HttpResponse<String> post(String path, Map<String, Object> body) throws Exception {
@@ -277,7 +282,7 @@ class UnknownExecutionObservationTest {
         }
 
         @Override
-        public void close() {
+        public void close() throws Exception {
             server.close();
             client.close();
         }
@@ -313,9 +318,9 @@ class UnknownExecutionObservationTest {
         private Map<String, Object> runtimeStatus = Map.of("state", "unknown");
 
         @Override
-        public CompletionStage<Void> installPublisher(RuntimeLease lease, RuntimeSession session,
-                Map<String, Object> publisher) {
-            return CompletableFuture.completedFuture(null);
+        public CompletionStage<Map<String, Object>> installPublisher(RuntimeLease lease, RuntimeSession session,
+                Map<String, Object> publisher, Long writerGeneration) {
+            return CompletableFuture.completedFuture(Map.of());
         }
 
         @Override

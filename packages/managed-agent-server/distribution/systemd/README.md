@@ -53,7 +53,7 @@ or when its Broker token is set together with
 Keep each credential, and the Broker URL, in `harness.env` as `KEY=value` on
 one line, with LF line endings, no whitespace around the `=`, and only letters,
 digits and `._:/+=-` in the value (the Broker URL may also use `[` and `]` to
-bracket an IPv6 literal, as in `http://[::1]:4182`), and start comments with
+bracket an IPv6 literal, as in `http://[::1]:8080`), and start comments with
 `#`. The control plane refuses anything else, such as a continuation, a `;`
 comment or text after a closing quote, since systemd or a shell would read it
 differently.
@@ -65,10 +65,14 @@ reads it any more. The Harness never moves off port 4170: if the port is in
 use, it exits instead of running where `QWEN_MANAGED_AGENT_HARNESS_BASE_URL`
 cannot reach it, and systemd restarts it every 5 seconds;
 `journalctl -u qwen-hosted-harness` shows the port message.
-The Session Store needs no setting of its own: the control plane derives its
-URL from its own listener, which does not follow the Harness port, and its
-workspace ID from `QWEN_MANAGED_AGENT_WORKSPACE_CWD`, the directory created
-above.
+The Session Store and an enabled Runtime Broker share the control plane's
+Spring listener. The generated Broker URL is `http://127.0.0.1:8080`, the same
+origin the Session Store derives from that listener; there is no independent
+Broker port. The Store's workspace ID derives from
+`QWEN_MANAGED_AGENT_WORKSPACE_CWD`, the directory created above. When the
+standalone main listener binds beyond loopback, enabling the Broker requires a
+separate Managed Agent internal connector. Remote Harness calls use the
+deployment's TLS-protected internal ingress.
 
 Alternatively, generate all three files with these owners and modes, as root:
 
@@ -100,23 +104,55 @@ Check with `readlink -f "$(command -v qwen)"`.
 
 ## Verify
 
-Load the same environment file the unit uses, then run the preflight while the
-service is stopped:
+Run the preflight while the service is stopped, the way the unit runs the
+server: as its account, with its environment file, in its working directory
+and inside its sandbox:
 
 ```bash
 sudo systemd-run --wait --pipe --collect \
   --property=User=qwen-managed-agent \
+  --property=Group=qwen-managed-agent \
   --property=EnvironmentFile=/etc/qwen-managed-agent/server.env \
+  --working-directory=/opt/qwen-managed-agent \
+  --property=StateDirectory=qwen-managed-agent \
+  --property=StateDirectoryMode=0750 \
+  --property="ReadWritePaths=/var/lib/qwen-managed-agent /srv/qwen-workspace" \
+  --property=NoNewPrivileges=true \
+  --property=PrivateTmp=true \
+  --property=ProtectSystem=strict \
+  --property=ProtectHome=true \
   /opt/qwen-managed-agent/bin/qwen-managed-agent-server --check
 curl --fail http://127.0.0.1:8080/actuator/health
 ```
 
-`--check` binds the configured ports, and its `workers` row warns about Runtime
-workers still running from an earlier start, so run it while the service is
-stopped. While the service runs, add `--online`: the port rows then check that
-the server and Broker listen, and the `workers` row reports only workers a
-stopped server left behind, or is skipped for a durable Broker, which adopts
-them.
+The preflight reads the configuration as the server does, and the server
+also reads `application.yml` and `config/application.yml` in its working
+directory beside the file `SPRING_CONFIG_ADDITIONAL_LOCATION` names, so
+`--working-directory` must match the unit's `WorkingDirectory`. The sandbox
+properties repeat the unit's, so the preflight sees the files the server sees:
+the unit hides `/home`, `/root`, `/run/user`, and the host's `/tmp` and
+`/var/tmp`, and writes only to its `ReadWritePaths`. Keep them in step when
+you change the unit. The preflight prints a `config` row for each file it
+read, and fails that row where the server would not start, or where this run
+cannot check what it reads:
+
+- a named file that does not exist;
+- a file the service account cannot read;
+- a file only the account running `--check` cannot read, or cannot reach past
+  a directory on its path; the fix is then to run it as the service account;
+- a YAML error, with its line, and with its file unless an import inside
+  another file named it.
+
+A file that holds a secret and that group or others can read gets a `WARN` row
+with its `chmod 600`; a `WARN` does not fail the check.
+
+`--check` binds the server's configured Spring port; the Broker has no
+independent port. Its `workers` row warns about Runtime workers still running
+from an earlier start, so run it while the service is stopped. While the
+service runs, add `--online`: the `server-port` row then checks that listener,
+and the `broker-url` row compares the Harness origin with the shared listener.
+The `workers` row reports only workers a stopped server left behind, or is
+skipped for a durable Broker, which adopts them.
 
 ## Why the kill modes differ
 
@@ -144,6 +180,18 @@ starts the new release after its preflight passes. Its first `install` moves
 puts a link in its place, so the units keep their paths. It never edits these
 units: when its `check` reports a changed template, carry the change over and
 run `systemctl daemon-reload` before `start`.
+
+When upgrading from a release with a dedicated Broker listener, replace the old
+`QWEN_MANAGED_RUNTIME_BROKER_URL` (default `http://127.0.0.1:4182`) with the
+shared Managed Agent origin (the standalone default is
+`http://127.0.0.1:8080`) and remove
+`QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST`,
+`QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT` and
+`QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK`, including their matching
+YAML keys. Keep the Broker token unchanged. Rolling back to that older release
+requires restoring its old URL and listener settings together from the
+configuration backup; the deployment guide gives the matching configuration
+pairs.
 
 ## Paths
 

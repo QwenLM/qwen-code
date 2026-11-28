@@ -2,8 +2,8 @@
 
 Keep the `com.alibaba.qwen.code.runtimebroker` core classes independent of Spring,
 Qwen Code CLI internals, and any specific Runtime scheduler. Repository contracts define the persistence
-boundary; in-memory implementations are reference implementations for tests
-and single-process prototypes only. Production integrations should provide a
+boundary, and the JDBC repositories are their only storage implementations;
+tests run them on H2 or MySQL. Production integrations should provide a
 shared `DataSource`, initialize the JDBC schema through their normal migration
 system, and inject the JDBC repositories. `JdbcRuntimeBindingRepository` also
 requires a `SecretProtector` (`AesGcmSecretProtector` is included) whose key

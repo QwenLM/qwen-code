@@ -29,7 +29,7 @@ install -m 0600 -o qwen-managed-agent -g qwen-managed-agent \
 
 控制面以 `qwen-managed-agent` 身份读取 `application.yml` 和 `harness.env`，因此这两个文件由服务账号拥有、权限 `0600`。含 secret 的文件对 group 或 others 可读时，预检会在 `config` 和 `credentials` 行给出警告；WARN 不会让 `--check` 失败，请执行它给出的 `chmod 600`。`root` 拥有的 `0600` `harness.env` 服务读不到，`credentials` 行会将其报告为 FAIL。`server.env` 设置了 `QWEN_MANAGED_AGENT_SERVICE_USER=qwen-managed-agent`，因此即使以 root 身份运行 `--check`，这两行也按该账号检查访问权限，包括文件路径上以及任何符号链接目标路径上的每一级目录；`service-user` 行会显示该账号及其所属组。`systemd` 以 root 读取环境文件，因此 `server.env` 保持 `0640 root:qwen-managed-agent` 即可。
 
-Harness token 和 capability digest 只保存在 `harness.env` 中：`server.env` 通过 `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` 指向它；若该文件与 `QWEN_MANAGED_AGENT_HARNESS_TOKEN` 或 `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST` 同时设置，或其中的 Broker token 与 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` 同时设置，控制面会拒绝启动。`harness.env` 中的每项凭据和 Broker URL 都应在一行内写成 `KEY=value`，使用 LF 换行，`=` 两侧不留空白，值只用字母、数字和 `._:/+=-`（Broker URL 还可以用 `[` 和 `]` 括起 IPv6 字面量，例如 `http://[::1]:4182`），注释以 `#` 开头。其余写法（例如续行、`;` 注释或闭引号之后的文字）都会被控制面拒绝，因为 systemd 或 shell 会以不同方式读取它们。开启工具路径时，取消 `harness.env` 中 `QWEN_MANAGED_RUNTIME_BROKER_URL` 和 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 的注释。控制面从同一文件读取该 token，因此 `server.env` 不含 Broker token。升级的主机请把 `QWEN_HOSTED_HARNESS_BROKER_ARGS` 行换成这两行：已经没有组件读取它。Harness 不会离开端口 4170：端口被占用时，它会退出，而不是运行在 `QWEN_MANAGED_AGENT_HARNESS_BASE_URL` 访问不到的端口上；systemd 每 5 秒重启一次，`journalctl -u qwen-hosted-harness` 中可以看到端口信息。Session Store 无需单独配置：控制面从自己的监听推导其 URL（不随 Harness 端口变化），并从 `QWEN_MANAGED_AGENT_WORKSPACE_CWD`（即上文创建的目录）推导其 workspace ID。
+Harness token 和 capability digest 只保存在 `harness.env` 中：`server.env` 通过 `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` 指向它；若该文件与 `QWEN_MANAGED_AGENT_HARNESS_TOKEN` 或 `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST` 同时设置，或其中的 Broker token 与 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` 同时设置，控制面会拒绝启动。`harness.env` 中的每项凭据和 Broker URL 都应在一行内写成 `KEY=value`，使用 LF 换行，`=` 两侧不留空白，值只用字母、数字和 `._:/+=-`（Broker URL 还可以用 `[` 和 `]` 括起 IPv6 字面量，例如 `http://[::1]:8080`），注释以 `#` 开头。其余写法（例如续行、`;` 注释或闭引号之后的文字）都会被控制面拒绝，因为 systemd 或 shell 会以不同方式读取它们。开启工具路径时，取消 `harness.env` 中 `QWEN_MANAGED_RUNTIME_BROKER_URL` 和 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 的注释。控制面从同一文件读取该 token，因此 `server.env` 不含 Broker token。升级的主机请把 `QWEN_HOSTED_HARNESS_BROKER_ARGS` 行换成这两行：已经没有组件读取它。Harness 不会离开端口 4170：端口被占用时，它会退出，而不是运行在 `QWEN_MANAGED_AGENT_HARNESS_BASE_URL` 访问不到的端口上；systemd 每 5 秒重启一次，`journalctl -u qwen-hosted-harness` 中可以看到端口信息。Session Store 与启用后的 Runtime Broker 共用控制面的 Spring 监听器。bootstrap 生成的 Broker URL 为 `http://127.0.0.1:8080`，与 Session Store 从该监听器推导出的 origin 相同；不再有独立的 Broker 端口。Store 的 workspace ID 从 `QWEN_MANAGED_AGENT_WORKSPACE_CWD`（即上文创建的目录）推导。独立部署的主监听器绑定非回环地址时，启用 Broker 必须配置独立的 Managed Agent 内部连接器；远端 Harness 通过部署提供的 TLS 内部入口访问。
 
 也可以以 root 身份一次生成这三个文件，并直接设好上述属主与权限：
 
@@ -55,17 +55,35 @@ systemctl enable --now qwen-hosted-harness qwen-managed-agent-server
 
 ## 验证
 
-加载 unit 使用的同一份环境文件，并在服务停止时运行预检：
+在服务停止时，按 unit 运行服务端的方式运行预检：使用它的账号、它的环境文件、它的工作目录，并处于它的沙箱中：
 
 ```bash
 sudo systemd-run --wait --pipe --collect \
   --property=User=qwen-managed-agent \
+  --property=Group=qwen-managed-agent \
   --property=EnvironmentFile=/etc/qwen-managed-agent/server.env \
+  --working-directory=/opt/qwen-managed-agent \
+  --property=StateDirectory=qwen-managed-agent \
+  --property=StateDirectoryMode=0750 \
+  --property="ReadWritePaths=/var/lib/qwen-managed-agent /srv/qwen-workspace" \
+  --property=NoNewPrivileges=true \
+  --property=PrivateTmp=true \
+  --property=ProtectSystem=strict \
+  --property=ProtectHome=true \
   /opt/qwen-managed-agent/bin/qwen-managed-agent-server --check
 curl --fail http://127.0.0.1:8080/actuator/health
 ```
 
-`--check` 会实际绑定配置端口，其 `workers` 行还会对上次启动遗留、仍在运行的 Runtime worker 给出警告，因此请在服务停止时运行。服务运行期间请加上 `--online`：端口相关的行改为检查服务端与 Broker 是否在监听；`workers` 行只报告已停止的服务端遗留的 worker，对持久模式的 Broker 则跳过，因为它会接管这些 worker。
+预检按服务端的方式读取配置。除了 `SPRING_CONFIG_ADDITIONAL_LOCATION` 指定的文件，服务端还会读取其工作目录下的 `application.yml` 和 `config/application.yml`，因此 `--working-directory` 必须与 unit 的 `WorkingDirectory` 一致。沙箱相关的属性与 unit 的一致，使预检看到的文件与服务端相同：unit 会隐藏 `/home`、`/root`、`/run/user`，以及主机的 `/tmp` 和 `/var/tmp`，并且只能写入它的 `ReadWritePaths`。修改 unit 时请同步修改这些属性。预检为读到的每个文件打印一行 `config`；在服务端会拒绝启动，或本次运行无法检查服务端所读内容的地方，该行失败：
+
+- 指定的文件不存在；
+- 服务账号读不了的文件；
+- 只有运行 `--check` 的账号读不了的文件，或被其路径上某个目录挡住、它够不着的文件，修复方法是改用服务账号运行；
+- YAML 错误：给出行号；除非它位于由另一个文件内部 import 的文件中，否则也给出文件。
+
+含 secret 的文件对 group 或 others 可读时，该行为 `WARN` 并给出 `chmod 600`；`WARN` 不使检查失败。
+
+`--check` 会实际绑定服务端配置的 Spring 端口；Broker 不再有独立端口。其 `workers` 行还会对上次启动遗留、仍在运行的 Runtime worker 给出警告，因此请在服务停止时运行。服务运行期间请加上 `--online`：`server-port` 行改为检查该监听器，`broker-url` 行则把 Harness origin 与共享监听器比对；`workers` 行只报告已停止的服务端遗留的 worker，对持久模式的 Broker 则跳过，因为它会接管这些 worker。
 
 ## 两处 kill mode 的差异
 
@@ -78,6 +96,8 @@ JVM 收到 `SIGTERM` 并正常关闭后以状态码 143 退出，因此 unit 设
 ## 升级
 
 使用新分发产物中的 `bin/qwen-managed-agent-upgrade` 升级，步骤见部署指南的“升级”一节。它会停止这两个 unit、回收 Runtime worker、备份数据库、Runtime 状态与配置，并在新版本的预检通过后启动它。第一次 `install` 会把 `/opt/qwen-managed-agent` 移到 `/opt/qwen-managed-agent-releases/<version>`，并在原位置放一个链接，因此 unit 中的路径不变。它从不修改这两个 unit：`check` 提示模板有变化时，请在 `start` 之前把变化同步过来并执行 `systemctl daemon-reload`。
+
+从使用独立 Broker 监听器的版本升级时，把旧的 `QWEN_MANAGED_RUNTIME_BROKER_URL`（默认 `http://127.0.0.1:4182`）替换为共享的 Managed Agent origin（独立部署默认为 `http://127.0.0.1:8080`），并删除 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST`、`QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT`、`QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK` 以及对应的 YAML 键。Broker token 保持不变。回滚到该旧版本时，必须从配置备份中成对恢复旧 URL 与旧监听器设置；部署指南列出了对应的配置组合。
 
 ## 路径
 

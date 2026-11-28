@@ -41,8 +41,10 @@ const debugLogger = createDebugLogger('FILE_COMMAND_LOADER');
  */
 const TomlCommandDefSchema = z.object({
   prompt: z.string({
-    required_error: "The 'prompt' field is required.",
-    invalid_type_error: "The 'prompt' field must be a string.",
+    error: (issue) =>
+      issue.input === undefined
+        ? "The 'prompt' field is required."
+        : "The 'prompt' field must be a string.",
   }),
   description: z.string().optional(),
 });
@@ -210,7 +212,7 @@ export class FileCommandLoader implements ICommandLoader {
       const configPath = path.join(ext.path, EXTENSIONS_CONFIG_FILENAME);
       if (fsSync.existsSync(configPath)) {
         const configContent = fsSync.readFileSync(configPath, 'utf-8');
-        const config = JSON.parse(configContent);
+        const config = JSON.parse(stripUtf8Bom(configContent));
 
         if (config.commands) {
           const commandsArray = Array.isArray(config.commands)

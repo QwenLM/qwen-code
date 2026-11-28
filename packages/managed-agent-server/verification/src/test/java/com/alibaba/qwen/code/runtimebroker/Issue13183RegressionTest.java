@@ -2,10 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpControllerTestFixture;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
@@ -23,8 +20,6 @@ import org.junit.jupiter.api.condition.OS;
 import javax.sql.DataSource;
 
 import java.io.IOException;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -69,9 +64,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * Regression coverage for the code-audit findings of issue #13183: the
  * release decision and the no-active-execution check commit in one
  * transaction, renewals run on their own pool, v3 result polling backs off,
- * UNKNOWN observations carry a cooldown, non-loopback listen addresses are
- * refused unless opted in, a LOST reclaim drains the whole generation, and
- * a released worker that ignores SIGTERM is destroyed forcibly.
+ * UNKNOWN observations carry a cooldown, a LOST reclaim drains the whole
+ * generation, and a released worker that ignores SIGTERM is destroyed forcibly.
  */
 @org.junit.jupiter.api.Timeout(180)
 class Issue13183RegressionTest {
@@ -176,10 +170,10 @@ class Issue13183RegressionTest {
     @Test
     void dispatchRenewalsRunOnTheRenewalPool() throws Exception {
         AtomicReference<String> renewalThread = new AtomicReference<>();
+        DataSource dataSource = dataSource("dispatch-renewal");
         DelegatingToolExecutionRepository executions =
                 new DelegatingToolExecutionRepository(
-                        new InMemoryToolExecutionRepository(
-                                Clock.systemUTC())) {
+                        new JdbcToolExecutionRepository(dataSource)) {
                     @Override
                     public ToolExecutionRecord renewDispatch(
                             String executionCallId, String owner,
@@ -209,8 +203,9 @@ class Issue13183RegressionTest {
                 new StaticRuntimeProvisioner(new RuntimeLease("instance",
                         URI.create("http://127.0.0.1:1234"), "token",
                         "lease", 1)),
-                transport, new InMemoryRuntimeBindingRepository(),
-                new InMemoryRuntimeSessionRepository(), executions, "broker",
+                transport, new JdbcGuardBindings(new JdbcRuntimeBindingRepository(
+                        dataSource, protector("dispatch-renewal"))),
+                new JdbcRuntimeSessionRepository(dataSource), executions, "broker",
                 Duration.ofMinutes(1), Duration.ofSeconds(3));
         try {
             service.acquire("harness", runtime, "bootstrap")
@@ -256,14 +251,16 @@ class Issue13183RegressionTest {
             }
         };
         String runtime = "550e8400-e29b-41d4-a716-446655440398";
+        DataSource dataSource = dataSource("renewal-pool");
         RuntimeBrokerService service = new RuntimeBrokerService(
                 harnessId -> CompletableFuture.completedFuture(SCOPE),
                 new StaticRuntimeProvisioner(new RuntimeLease("instance",
                         URI.create("http://127.0.0.1:1234"), "token", "lease",
                         1)),
-                transport, new InMemoryRuntimeBindingRepository(),
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(Clock.systemUTC()),
+                transport, new JdbcRuntimeBindingRepository(dataSource,
+                        protector("renewal-pool")),
+                new JdbcRuntimeSessionRepository(dataSource),
+                new JdbcToolExecutionRepository(dataSource),
                 "broker", Duration.ofMinutes(1), Duration.ofSeconds(3));
         Set<Long> started = new HashSet<>();
         try {
@@ -357,74 +354,6 @@ class Issue13183RegressionTest {
                     first.getBindingId(), first.getGeneration()));
             assertEquals(RuntimeBindingRecord.State.RELEASED,
                     bindings.findById(first.getBindingId()).getState());
-        }
-    }
-
-    /**
-     * Finding 3: the HTTP face refuses a wildcard or otherwise non-loopback
-     * listen address unless the deployment explicitly opts in; loopback is
-     * the default and keeps the single-token guard.
-     */
-    @Test
-    void nonLoopbackListenAddressIsRefusedWithoutOptIn() throws Exception {
-        RuntimeBrokerService refused = httpService(new NoopTransport());
-        try {
-            IllegalArgumentException wildcard = assertThrows(
-                    IllegalArgumentException.class,
-                    () -> new RuntimeBrokerHttpServer(
-                            new InetSocketAddress("0.0.0.0", 0), "secret",
-                            refused));
-            assertTrue(wildcard.getMessage().contains("non-loopback"),
-                    wildcard.getMessage());
-            assertThrows(IllegalArgumentException.class,
-                    () -> new RuntimeBrokerHttpServer(
-                            InetSocketAddress.createUnresolved(
-                                    "broker.internal", 4182),
-                            "secret", refused));
-        } finally {
-            refused.close();
-        }
-
-        // The explicit opt-in binds for deployments that terminate TLS and
-        // authorize callers in front.
-        try (RuntimeBrokerHttpServer optedIn = new RuntimeBrokerHttpServer(
-                new InetSocketAddress("0.0.0.0", 0), "secret",
-                httpService(new NoopTransport()), true)) {
-            optedIn.start();
-            assertTrue(InetAddress.getByName(optedIn.getBaseUri().getHost())
-                    .isAnyLocalAddress());
-        }
-
-        try (RuntimeBrokerHttpServer loopback = new RuntimeBrokerHttpServer(
-                new InetSocketAddress("127.0.0.1", 0), "secret",
-                httpService(new NoopTransport()))) {
-            loopback.start();
-            HttpClient client = HttpClient.newHttpClient();
-            try {
-                HttpResponse<String> warm = client.send(
-                        HttpRequest.newBuilder(warmUri(loopback))
-                                .header("Authorization", "Bearer secret")
-                                .header("Content-Type", "application/json")
-                                .POST(HttpRequest.BodyPublishers.ofString(
-                                        "{\"protocolVersion\":1,"
-                                                + "\"requestId\":\"warm-1\","
-                                                + "\"harnessSessionId\":\"alice\"}"))
-                                .build(),
-                        HttpResponse.BodyHandlers.ofString());
-                assertEquals(200, warm.statusCode(), warm.body());
-                HttpResponse<String> anonymous = client.send(
-                        HttpRequest.newBuilder(warmUri(loopback))
-                                .header("Content-Type", "application/json")
-                                .POST(HttpRequest.BodyPublishers.ofString(
-                                        "{\"protocolVersion\":1,"
-                                                + "\"requestId\":\"warm-2\","
-                                                + "\"harnessSessionId\":\"alice\"}"))
-                                .build(),
-                        HttpResponse.BodyHandlers.ofString());
-                assertEquals(401, anonymous.statusCode());
-            } finally {
-                client.close();
-            }
         }
     }
 
@@ -587,7 +516,7 @@ class Issue13183RegressionTest {
                     harness.prepared, harness.runtime, 0).statusCode());
             assertEquals(1, harness.transport.statusCalls.get());
             URI uri = harness.server.getBaseUri().resolve(
-                    RuntimeBrokerHttpServer.ROUTE_PREFIX + "/executions/"
+                    RuntimeBrokerHttpControllerTestFixture.ROUTE_PREFIX + "/executions/"
                             + harness.prepared.getExecutionCallId()
                             + "?requestId=explicit&harnessSessionId=harness"
                             + "&runtimeSessionId=" + harness.runtime
@@ -611,11 +540,12 @@ class Issue13183RegressionTest {
     @Test
     void cooledObservationNeverPairsASettledAnswerWithAStaleRecord()
             throws Exception {
-        InMemoryToolExecutionRepository real =
-                new InMemoryToolExecutionRepository(Clock.systemUTC());
+        DataSource dataSource = dataSource("cooldown-settled");
+        JdbcToolExecutionRepository real =
+                new JdbcToolExecutionRepository(dataSource);
         StaleReadExecutions executions = new StaleReadExecutions(real);
         try (UnknownObservationHarness harness =
-                new UnknownObservationHarness(executions)) {
+                new UnknownObservationHarness(dataSource, executions)) {
             String executionId = harness.prepared.getExecutionCallId();
             ToolExecutionRecord unknownSnapshot =
                     real.findByExecutionCallId(executionId);
@@ -669,11 +599,12 @@ class Issue13183RegressionTest {
      */
     @Test
     void cooledObservationServesTheFresherUnknownRecord() throws Exception {
-        InMemoryToolExecutionRepository real =
-                new InMemoryToolExecutionRepository(Clock.systemUTC());
+        DataSource dataSource = dataSource("cooldown-fresher");
+        JdbcToolExecutionRepository real =
+                new JdbcToolExecutionRepository(dataSource);
         StaleReadExecutions executions = new StaleReadExecutions(real);
         try (UnknownObservationHarness harness =
-                new UnknownObservationHarness(executions)) {
+                new UnknownObservationHarness(dataSource, executions)) {
             String executionId = harness.prepared.getExecutionCallId();
             // B's snapshot predates the cancel.
             ToolExecutionRecord preCancel =
@@ -719,11 +650,12 @@ class Issue13183RegressionTest {
     @Test
     void cooledObservationServesACancelThatLandsAfterTheCachedLookup()
             throws Exception {
-        InMemoryToolExecutionRepository real =
-                new InMemoryToolExecutionRepository(Clock.systemUTC());
+        DataSource dataSource = dataSource("cooldown-late-cancel");
+        JdbcToolExecutionRepository real =
+                new JdbcToolExecutionRepository(dataSource);
         StaleReadExecutions executions = new StaleReadExecutions(real);
         try (UnknownObservationHarness harness =
-                new UnknownObservationHarness(executions)) {
+                new UnknownObservationHarness(dataSource, executions)) {
             String executionId = harness.prepared.getExecutionCallId();
             // A observes first; the cached record carries no cancel.
             ExecutionReconciliation first = harness.service
@@ -775,6 +707,72 @@ class Issue13183RegressionTest {
             ToolExecutionRecord snapshot = stale;
             return snapshot != null ? snapshot
                     : super.findByExecutionCallId(executionCallId);
+        }
+    }
+
+    /**
+     * The JDBC transactional admission guards require the raw JDBC execution
+     * repository on the same DataSource, so a read-instrumenting double handed
+     * to the service is unwrapped back to its JDBC delegate for those calls.
+     * The service's own reads still go through the double.
+     */
+    private static ToolExecutionRepository jdbcExecutions(
+            ToolExecutionRepository executions) {
+        ToolExecutionRepository current = executions;
+        while (current instanceof DelegatingToolExecutionRepository delegating) {
+            current = delegating.delegate;
+        }
+        return current;
+    }
+
+    /** Unwraps read-instrumenting execution doubles for the JDBC guards. */
+    private static final class JdbcGuardBindings extends DelegatingBindingRepository {
+        JdbcGuardBindings(RuntimeBindingRepository delegate) {
+            super(delegate);
+        }
+
+        @Override
+        public ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions, ToolExecutionRecord candidate) {
+            return delegate.admitExecution(sessions, jdbcExecutions(executions),
+                    candidate);
+        }
+
+        @Override
+        public ToolExecutionRecord authorizeDispatch(RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions, ToolExecutionRecord expected,
+                String owner, long generation) {
+            return delegate.authorizeDispatch(sessions, jdbcExecutions(executions),
+                    expected, owner, generation);
+        }
+
+        @Override
+        public RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions, RuntimeBindingRecord expected) {
+            return delegate.recoverLost(sessions, jdbcExecutions(executions),
+                    expected);
+        }
+
+        @Override
+        public RuntimeBindingRecord finishLostRecovery(RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions, RuntimeBindingRecord expected) {
+            return delegate.finishLostRecovery(sessions, jdbcExecutions(executions),
+                    expected);
+        }
+
+        @Override
+        public RuntimeSessionRecord beginSessionRelease(RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions, RuntimeSessionRecord expected) {
+            return delegate.beginSessionRelease(sessions, jdbcExecutions(executions),
+                    expected);
+        }
+
+        @Override
+        public RuntimeSessionRecord completeStoppedSessionRelease(
+                RuntimeSessionRepository sessions, ToolExecutionRepository executions,
+                RuntimeSessionRecord expected, RuntimeBindingRecord claim) {
+            return delegate.completeStoppedSessionRelease(sessions,
+                    jdbcExecutions(executions), expected, claim);
         }
     }
 
@@ -898,12 +896,14 @@ class Issue13183RegressionTest {
     @Test
     void releaseRetryOverAPersistedReleasingRowRefusesALiveExecution()
             throws Exception {
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository(Clock.systemUTC());
+        DataSource dataSource = dataSource("release-retry");
+        JdbcRuntimeBindingRepository bindings =
+                new JdbcRuntimeBindingRepository(dataSource,
+                        protector("release-retry"));
+        JdbcRuntimeSessionRepository sessions =
+                new JdbcRuntimeSessionRepository(dataSource);
+        JdbcToolExecutionRepository executions =
+                new JdbcToolExecutionRepository(dataSource);
         AtomicInteger releaseCalls = new AtomicInteger();
         RuntimeTransport transport = new NoopTransport() {
             @Override
@@ -1286,14 +1286,16 @@ class Issue13183RegressionTest {
                                 "bindingGeneration", "1"));
             }
         };
+        DataSource dataSource = dataSource("v3");
         return com.alibaba.qwen.code.runtimebroker.service.BrokerServiceTestAccess.create(
                 harnessId -> CompletableFuture.completedFuture(SCOPE),
                 new StaticRuntimeProvisioner(new RuntimeLease("instance",
                         URI.create("http://127.0.0.1:1234"), "token", "lease",
                         1)),
-                transport, new InMemoryRuntimeBindingRepository(),
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(Clock.systemUTC()),
+                transport, new JdbcRuntimeBindingRepository(dataSource,
+                        protector("v3")),
+                new JdbcRuntimeSessionRepository(dataSource),
+                new JdbcToolExecutionRepository(dataSource),
                 "broker", Duration.ofMinutes(1), Duration.ofMinutes(1),
                 verifier, v3ResultWindow);
     }
@@ -1319,11 +1321,11 @@ class Issue13183RegressionTest {
     }
 
     private static HttpResponse<String> observeUnknown(
-            RuntimeBrokerHttpServer server, HttpClient client,
+            RuntimeBrokerHttpControllerTestFixture server, HttpClient client,
             ToolExecutionRecord prepared, String runtime, int index)
             throws IOException, InterruptedException {
         URI uri = server.getBaseUri().resolve(
-                RuntimeBrokerHttpServer.ROUTE_PREFIX + "/executions/"
+                RuntimeBrokerHttpControllerTestFixture.ROUTE_PREFIX + "/executions/"
                         + prepared.getExecutionCallId() + "?requestId=obs-"
                         + index + "&harnessSessionId=harness"
                         + "&runtimeSessionId=" + runtime);
@@ -1348,20 +1350,6 @@ class Issue13183RegressionTest {
                 Duration.ofSeconds(3));
     }
 
-    private static RuntimeBrokerService httpService(RuntimeTransport transport) {
-        return new RuntimeBrokerService(
-                harnessId -> CompletableFuture.completedFuture(new RuntimeScope(
-                        "tenant-" + harnessId, "workspace", "generation",
-                        "/workspace", "capability", "workspace")),
-                new StaticRuntimeProvisioner(new RuntimeLease("instance",
-                        URI.create("http://127.0.0.1:1234"), "token", "lease",
-                        1)),
-                transport, new InMemoryRuntimeBindingRepository(),
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(Clock.systemUTC()),
-                "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
-    }
-
     private static String failureCode(CompletionStage<?> stage)
             throws Exception {
         // Bounded: a regression that never answers must fail red, not hang.
@@ -1373,11 +1361,6 @@ class Issue13183RegressionTest {
         assertTrue(cause instanceof RuntimeBrokerException,
                 () -> "unexpected failure " + cause);
         return ((RuntimeBrokerException) cause).getCode();
-    }
-
-    private static URI warmUri(RuntimeBrokerHttpServer server) {
-        return server.getBaseUri().resolve(
-                RuntimeBrokerHttpServer.ROUTE_PREFIX + "/runtimes:warm");
     }
 
     static DataSource dataSource(String name) {
@@ -1588,15 +1571,28 @@ class Issue13183RegressionTest {
         final CountingTransport transport = new CountingTransport();
         final String runtime = "550e8400-e29b-41d4-a716-446655440302";
         final RuntimeBrokerService service;
-        final RuntimeBrokerHttpServer server;
+        final RuntimeBrokerHttpControllerTestFixture server;
         final ToolExecutionRecord prepared;
 
-        UnknownObservationHarness() throws IOException {
-            this(new InMemoryToolExecutionRepository(Clock.systemUTC()));
+        UnknownObservationHarness() throws Exception {
+            this(dataSource("cooldown"), null);
         }
 
-        UnknownObservationHarness(ToolExecutionRepository executions)
-                throws IOException {
+        UnknownObservationHarness(DataSource dataSource, StaleReadExecutions stale)
+                throws Exception {
+            JdbcRuntimeBindingRepository jdbcBindings =
+                    new JdbcRuntimeBindingRepository(dataSource,
+                            protector("cooldown"));
+            JdbcRuntimeSessionRepository sessions =
+                    new JdbcRuntimeSessionRepository(dataSource);
+            JdbcToolExecutionRepository rawExecutions =
+                    new JdbcToolExecutionRepository(dataSource);
+            // A read-instrumenting double stays the service's execution
+            // repository; the JDBC admission guards see the raw delegate.
+            RuntimeBindingRepository bindings = stale == null ? jdbcBindings
+                    : new JdbcGuardBindings(jdbcBindings);
+            ToolExecutionRepository executions = stale == null ? rawExecutions
+                    : stale;
             service = com.alibaba.qwen.code.runtimebroker.service.BrokerServiceTestAccess.create(
                     harnessId -> CompletableFuture.completedFuture(
                             new RuntimeScope("tenant-cooldown", "workspace",
@@ -1605,16 +1601,14 @@ class Issue13183RegressionTest {
                     new StaticRuntimeProvisioner(new RuntimeLease("instance",
                             URI.create("http://127.0.0.1:1234"), "token",
                             "lease", 1)),
-                    transport, new InMemoryRuntimeBindingRepository(),
-                    new InMemoryRuntimeSessionRepository(), executions,
+                    transport, bindings, sessions, executions,
                     "broker", Duration.ofMinutes(1), Duration.ofMinutes(1),
                     clock, () -> UUID.randomUUID().toString());
-            server = new RuntimeBrokerHttpServer(
-                    new InetSocketAddress("127.0.0.1", 0), "secret", service);
+            server = new RuntimeBrokerHttpControllerTestFixture("secret", service);
             try {
                 server.start();
-            } catch (RuntimeException failure) {
-                service.close();
+            } catch (Exception failure) {
+                server.close();
                 throw failure;
             }
             service.acquire("harness", runtime, "bootstrap")
@@ -1655,7 +1649,7 @@ class Issue13183RegressionTest {
         }
 
         @Override
-        public void close() {
+        public void close() throws Exception {
             server.close();
         }
     }

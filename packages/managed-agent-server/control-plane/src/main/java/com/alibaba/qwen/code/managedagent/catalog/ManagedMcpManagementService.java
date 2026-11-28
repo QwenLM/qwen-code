@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.catalog;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionPolicyStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
@@ -8,10 +9,12 @@ import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.ManagedMcpManagementCommand;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import java.util.LinkedHashMap;
@@ -69,7 +72,7 @@ public class ManagedMcpManagementService {
         try {
             request.put("operationId", UUID.nameUUIDFromBytes(json.writeValueAsBytes(
                     List.of("managed-mcp-command", tenantId, actorId, sessionId, idempotencyKey))).toString());
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException("Cannot encode MCP command identity", error);
         }
         SessionRecord session = store.requireMcpManagement(tenantId, actorId, sessionId, (String) request.get("operationId"));
@@ -112,7 +115,7 @@ public class ManagedMcpManagementService {
             requireSnapshot(result);
             return result;
         } catch (HarnessHttpFailure refusal) {
-            org.springframework.http.HttpStatus status = org.springframework.http.HttpStatus.resolve(refusal.getStatusCode());
+            HttpStatus status = HttpStatus.resolve(refusal.getStatusCode());
             String code = refusal.getErrorCode();
             if (status == null || !status.is4xxClientError() || code == null || !code.matches("[a-z][a-z0-9_]{0,127}")) {
                 throw new ManagedAgentException(503, "managed_mcp_management_unavailable",
@@ -130,11 +133,13 @@ public class ManagedMcpManagementService {
         if (!body.isObject() || body.size() != (body.has("operation") ? 6 : 5)
                 || !body.path("sessionId").isTextual() || !body.path("supported").isBoolean()
                 || !counter(body.path("revision"), 0) || !body.path("servers").isArray()
-                || body.path("servers").size() > 32 || !body.path("availableServers").isArray()) {
+                || body.path("servers").size() > ManagedExtensionRecords.MAX_MCP_SELECTION_ENTRIES
+                || !body.path("availableServers").isArray()) {
             throw new HarnessFailure("Invalid MCP management snapshot");
         }
         for (String field : List.of("servers", "availableServers")) {
             boolean published = "availableServers".equals(field);
+            int selected = 0;
             for (JsonNode server : body.get(field)) {
                 if (!server.isObject() || server.size() != 4 || !server.path("serverId").isTextual()
                         || !server.path("serverId").asText().matches("[A-Za-z0-9._:-]{1,128}")
@@ -144,6 +149,12 @@ public class ManagedMcpManagementService {
                                 : Set.of("enabled", "disabled", "removed").contains(server.path("state").asText()))) {
                     throw new HarnessFailure("Invalid MCP management server");
                 }
+                if (!published && !"removed".equals(server.path("state").asText())) {
+                    selected++;
+                }
+            }
+            if (!published && selected > 32) {
+                throw new HarnessFailure("MCP management selection capacity exceeded");
             }
         }
         if (body.has("operation")) {

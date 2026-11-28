@@ -5,15 +5,24 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
+import type { Terminal } from '@xterm/xterm';
+import type { FitAddon } from '@xterm/addon-fit';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
-import '@xterm/xterm/css/xterm.css';
-import { useTheme, type WebShellTheme } from '../../themeContext';
+import { useTheme } from '../../themeContext';
 import { getDaemonToken } from '../../config/daemon';
 import { useI18n } from '../../i18n';
 import { findDaemonAvailability } from '../../daemon/availability.js';
 import { useDaemonAvailabilityController } from '../../daemon/availability-context.js';
+import {
+  CONTROL_FRAME_PREFIX,
+  NON_RETRYABLE_CLOSE_CODES,
+  RECONNECT_INITIAL_MS,
+  RECONNECT_MAX_MS,
+  WS_AUTH_SUBPROTOCOL,
+  WS_BEARER_SUBPROTOCOL_PREFIX,
+  xtermTheme,
+} from './terminal-protocol';
+import { useTerminalRuntime } from './use-terminal-runtime';
 
 interface TerminalPanelProps {
   /** Stable id shared with the backend PTY session; reconnects reuse it. */
@@ -23,11 +32,6 @@ interface TerminalPanelProps {
   enabled?: boolean;
 }
 
-const CONTROL_FRAME_PREFIX = '\x00';
-/** Exponential backoff bounds for automatic WebSocket reconnection. */
-const RECONNECT_INITIAL_MS = 500;
-const RECONNECT_MAX_MS = 10_000;
-const NON_RETRYABLE_CLOSE_CODES = new Set([4000, 4001, 4002, 4004]);
 const releaseCallbacks = new Map<string, () => void>();
 
 export function releaseWebTerminal(terminalId: string): void {
@@ -85,9 +89,6 @@ function releaseTerminal(
 // Browsers cannot set Authorization on a WebSocket. The daemon decodes this
 // bearer subprotocol during the upgrade; keep the prefix in sync with it
 // (see packages/cli/src/serve/acp-http/index.ts).
-const WS_BEARER_SUBPROTOCOL_PREFIX = 'qwen-bearer.';
-const WS_AUTH_SUBPROTOCOL = 'qwen-ws';
-
 function bearerSubprotocol(token: string): string {
   const bytes = new TextEncoder().encode(token);
   let binary = '';
@@ -125,25 +126,6 @@ function buildWsUrl(
   return url.toString();
 }
 
-function xtermTheme(theme: WebShellTheme) {
-  return theme === 'light'
-    ? {
-        background: '#ffffff',
-        foreground: '#1a1a1a',
-        cursor: '#1a1a1a',
-        // An unset selectionBackground defaults to white in xterm and blends
-        // into the white terminal background, leaving text selection with no
-        // visible highlight in the light theme. Pin the light-theme selection
-        // blue instead so selected terminal text stays visible.
-        selectionBackground: '#bdd8fe',
-      }
-    : {
-        background: '#0a0a0a',
-        foreground: '#e0e6f0',
-        cursor: '#e0e6f0',
-      };
-}
-
 export function TerminalPanel({
   terminalId,
   cwd,
@@ -154,6 +136,7 @@ export function TerminalPanel({
   const { baseUrl } = useWorkspace();
   const { t } = useI18n();
   const availability = useDaemonAvailabilityController();
+  const runtime = useTerminalRuntime(enabled);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -169,7 +152,7 @@ export function TerminalPanel({
   }, [theme]);
 
   useEffect(() => {
-    if (!enabled) {
+    if (!runtime || runtime === 'failed') {
       const release = () =>
         releaseDetachedWebTerminal(baseUrl, terminalId, cwd);
       releaseCallbacks.set(terminalId, release);
@@ -180,6 +163,7 @@ export function TerminalPanel({
       };
     }
     if (!containerRef.current) return;
+    const { Terminal, FitAddon } = runtime;
 
     function createTerminal(handlesPrimaryDa = false) {
       const term = new Terminal({
@@ -499,7 +483,7 @@ export function TerminalPanel({
       wsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, availability]);
+  }, [enabled, runtime, availability]);
 
   useEffect(() => {
     const term = termRef.current;
@@ -537,6 +521,7 @@ export function TerminalPanel({
         background: theme !== 'light' ? '#0a0a0a' : '#ffffff',
       }}
     >
+      {runtime && runtime !== 'failed' && <style>{runtime.styles}</style>}
       <div
         ref={containerRef}
         style={{
@@ -544,7 +529,13 @@ export function TerminalPanel({
           overflow: 'hidden',
           padding: '0.25rem 0.5rem',
         }}
-      />
+      >
+        {enabled && (!runtime || runtime === 'failed') && (
+          <div role={runtime === 'failed' ? 'alert' : 'status'}>
+            {t(runtime === 'failed' ? 'common.failedToLoad' : 'common.loading')}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

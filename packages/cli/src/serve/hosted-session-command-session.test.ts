@@ -1688,45 +1688,55 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     });
   });
 
-  it("counts the lead's plain sends toward the run's 64-message budget (R1-6)", async () => {
-    const lead = await leadWithMembers(['alice']);
-    const relay = leadRelay(lead);
-    // 64 plain sends fill H4d-b's per-run budget; each is accepted at
-    // once, so the shared in-flight window never nears its 8.
-    for (let i = 0; i < 64; i += 1) {
-      const messageId = `msg_plain_${i}`;
-      const route = await lead.children.sendToChild({
-        taskId: lead.children.taskIdOf('run-alice'),
-        text: `plain work ${i}`,
-        messageId,
-        continuationRunId: `cont_plain_${i}`,
-        executionCallId: `plain-${i}`,
-        closing: false,
+  it(
+    "counts the lead's plain sends toward the run's 64-message budget (R1-6)",
+    async () => {
+      const lead = await leadWithMembers(['alice']);
+      const relay = leadRelay(lead);
+      // 64 plain sends fill H4d-b's per-run budget; each is accepted at
+      // once, so the shared in-flight window never nears its 8.
+      for (let i = 0; i < 64; i += 1) {
+        const messageId = `msg_plain_${i}`;
+        const route = await lead.children.sendToChild({
+          taskId: lead.children.taskIdOf('run-alice'),
+          text: `plain work ${i}`,
+          messageId,
+          continuationRunId: `cont_plain_${i}`,
+          executionCallId: `plain-${i}`,
+          closing: false,
+        });
+        expect(route.kind).toBe('message');
+        await relay.handover(messageId, attachedSessionOf(lead, 'run-alice'));
+        await relay.accepted(messageId, sessionMessageInputId(messageId));
+      }
+      const commandId = commandIdOf('cap-64-next');
+      const reply = await lead.commands.execute(lead.teams, {
+        commandId,
+        kind: 'member_message',
+        childRunId: LEAF_RUN,
+        senderSessionId: CHILD,
+        args: { to: 'alice', message: 'one more' },
       });
-      expect(route.kind).toBe('message');
-      await relay.handover(messageId, attachedSessionOf(lead, 'run-alice'));
-      await relay.accepted(messageId, sessionMessageInputId(messageId));
-    }
-    const commandId = commandIdOf('cap-64-next');
-    const reply = await lead.commands.execute(lead.teams, {
-      commandId,
-      kind: 'member_message',
-      childRunId: LEAF_RUN,
-      senderSessionId: CHILD,
-      args: { to: 'alice', message: 'one more' },
-    });
-    expect(reply).toEqual({
-      outcome: 'refused',
-      text: 'The message was not sent:\n- alice: not reached: it has received its 64 messages (budget_exhausted).',
-    });
-    expect(
-      lead.session.authority.extensionRecord(
-        'session_message',
-        memberMessageIdOf(commandId, 2),
-      ),
-    ).toBeUndefined();
-    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
-  });
+      expect(reply).toEqual({
+        outcome: 'refused',
+        text: 'The message was not sent:\n- alice: not reached: it has received its 64 messages (budget_exhausted).',
+      });
+      expect(
+        lead.session.authority.extensionRecord(
+          'session_message',
+          memberMessageIdOf(commandId, 2),
+        ),
+      ).toBeUndefined();
+      expect(lead.commands.command(commandId)?.direction).toBe('inbound');
+      // The budget count is deterministic, but the 64 serial send/handover/
+      // accept round trips each await the store's write chain: under fleet
+      // contention all three attempts hit the ECS lane's 60s per-test ceiling
+      // (run 42994647525, 183754ms total). Only the wall-clock allowance grows,
+      // and only on a slow host; off the pool the 15s config ceiling
+      // (packages/cli/vitest.config.ts) still exposes a real hang.
+    },
+    isSlowTestHost() ? 120_000 : 15_000,
+  );
 
   it('counts only member messages toward the member in-flight sub-cap (R1-6)', async () => {
     const lead = await leadWithMembers(['alice']);

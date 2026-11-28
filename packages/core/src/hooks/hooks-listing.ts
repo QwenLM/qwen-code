@@ -6,7 +6,10 @@
 
 import type { Config } from '../config/config.js';
 import type { HookConfig } from './types.js';
-import { hookRegistryIdentity } from './hookRegistry.js';
+import {
+  hasUnsupportedCommandHookArgs,
+  hookRegistryIdentity,
+} from './hookRegistry.js';
 import { HookEventName, HookType, HooksConfigSource } from './types.js';
 
 /**
@@ -283,7 +286,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * reaches display text is coerced to a string.
  */
 function displayableSettingsHook(raw: unknown): HookConfig | undefined {
-  if (!isRecord(raw)) return undefined;
+  if (!isRecord(raw) || hasUnsupportedCommandHookArgs(raw)) return undefined;
   const literalField = LITERAL_FIELD[String(raw['type'])];
   const literal = literalField === undefined ? undefined : raw[literalField];
   if (typeof literal !== 'string' || literal === '') return undefined;

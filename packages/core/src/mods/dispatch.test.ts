@@ -74,6 +74,71 @@ describe('Mod middleware through real isolated realms', () => {
     expect(logs.some((log) => /already registered/.test(log.text))).toBe(true);
   });
 
+  it('takes the command fields of Claude Code 2.1.332 and keeps the ones it runs', async () => {
+    const runtime = await group(`export function register(on) {
+      on('session.start', async ($, e, next) => {
+        await $.command.register({
+          name: 'hello', description: 'Hello', aliases: ['hi', 'Hey'],
+          immediate: true, isHidden: true, isTerminalOnly: true, isWorkspaceFree: true,
+        });
+        return next(e);
+      });
+      on('command.run', {command:'hello'}, ($, e) => ({text: e.command, isTextDisplayOnly: true}));
+    }`);
+    expect(runtime.getCommands('id0')).toEqual([
+      {
+        name: 'hello',
+        description: 'Hello',
+        aliases: ['hi', 'Hey'],
+        isTerminalOnly: true,
+      },
+    ]);
+    expect(await runtime.runCommand('hello', '', signal())).toBe('hello');
+  });
+
+  it.each([
+    ['an unknown field', `{name:'x',description:'X',color:'red'}`],
+    ['a flag that is not true', `{name:'x',description:'X',isHidden:false}`],
+    ['an alias with a space', `{name:'x',description:'X',aliases:['a b']}`],
+    [
+      'more than eight aliases',
+      `{name:'x',description:'X',aliases:['a','b','c','d','e','f','g','h','i']}`,
+    ],
+  ])('refuses a command specification with %s', async (_, spec) => {
+    const runtime = await group(`export function register(on) {
+      on('session.start', async ($, e, next) => {
+        try { await $.command.register(${spec}); } catch (error) { $.ui.log(error.message); }
+        return next(e);
+      });
+    }`);
+    expect(runtime.getCommands('id0')).toEqual([]);
+    expect(logs.map((log) => log.text)).toEqual([
+      'Error: Invalid Mod command specification.',
+    ]);
+  });
+
+  it('refuses an alias another Mod command holds, in any case', async () => {
+    const register = (spec: string) => `export function register(on) {
+      on('session.start', async ($, e, next) => {
+        try { await $.command.register(${spec}); } catch (error) { $.ui.log(error.message); }
+        return next(e);
+      });
+    }`;
+    const runtime = await group(
+      register(`{name:'hello',description:'Hello',aliases:['hi']}`),
+      register(`{name:'other',description:'Other',aliases:['HELLO']}`),
+      register(`{name:'HI',description:'Upper'}`),
+      register(`{name:'third',description:'Third',aliases:['third-x']}`),
+    );
+    expect(runtime.getCommands('id1')).toEqual([]);
+    expect(runtime.getCommands('id2')).toEqual([]);
+    expect(runtime.getCommands('id3')).toHaveLength(1);
+    expect(logs.map((log) => log.text)).toEqual([
+      'Error: Mod command name already registered: HELLO',
+      'Error: Mod command name already registered: HI',
+    ]);
+  });
+
   it('registers and logs at the group and command capacity', async () => {
     const runtime = await group(
       ...Array.from(

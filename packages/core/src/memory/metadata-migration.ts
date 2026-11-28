@@ -20,10 +20,13 @@ import { deriveConfig, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { runForkedAgent } from '../agents/forkedAgent.js';
+import { terminateReasonMessage } from '../agents/runtime/terminate-reason.js';
 import { stringify as stringifyYaml } from '../utils/yaml-parser.js';
 import {
   rebuildAutoMemoryIndexAtRoot,
+  rebuildProjectMemoryIndexLocked,
   rebuildTeamAutoMemoryIndex,
+  recoverProjectMemoryIndex,
 } from './indexer.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
@@ -32,6 +35,7 @@ import {
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
   getMemoryRootTrustedAnchor,
+  type ProjectMemoryOwner,
 } from './paths.js';
 import {
   listTrustedMemoryMarkdownFiles,
@@ -51,6 +55,10 @@ import {
 } from './types.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
 import { MEMORY_METADATA_ITEM_BOUNDS } from './prompt.js';
+import {
+  markProjectMemoryIndexPendingLocked,
+  withProjectMemoryCommit,
+} from './project-commit.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_MIGRATION');
 
@@ -162,11 +170,12 @@ function splitFrontmatter(filePath: string, content: string): FrontmatterParts {
 async function listMemoryFiles(
   root: string,
   onUnreadableDir?: (relativeDir: string) => void,
+  owner?: ProjectMemoryOwner,
 ) {
   return (
     await listTrustedMemoryMarkdownFiles(
       root,
-      getMemoryRootTrustedAnchor(root),
+      getMemoryRootTrustedAnchor(root, owner),
       AUTO_MEMORY_INDEX_FILENAME,
       { onUnreadableDir },
     )
@@ -181,12 +190,13 @@ export async function scanMemoryMetadataMigrationCandidates(
   root: string,
   scope: AutoMemoryScope,
   abortSignal?: AbortSignal,
+  owner?: ProjectMemoryOwner,
 ): Promise<MemoryMetadataMigrationCandidate[]> {
   const candidates: MemoryMetadataMigrationCandidate[] = [];
   for (const {
     relativePath,
     resolvedPath: trustedFile,
-  } of await listMemoryFiles(root)) {
+  } of await listMemoryFiles(root, undefined, owner)) {
     // The scan reads every file in the corpus; let a shutdown cancel it
     // instead of holding the exit window hostage.
     abortSignal?.throwIfAborted();
@@ -222,12 +232,14 @@ export async function scanMemoryMetadataMigrationCandidates(
 export function getProjectMetadataMigrationRoots(
   projectRoot: string,
   trustedProject = true,
+  owner?: ProjectMemoryOwner,
 ): string[] {
-  return getProjectAutoMemoryRoots(projectRoot, trustedProject);
+  return getProjectAutoMemoryRoots(projectRoot, trustedProject, owner);
 }
 
 export async function scanMemoryMetadataCorpusStatus(params: {
   projectRoot: string;
+  projectMemoryOwner?: ProjectMemoryOwner;
   teamMemoryEnabled: boolean;
   trustedProject: boolean;
 }): Promise<MemoryMetadataCorpusStatus> {
@@ -235,6 +247,7 @@ export async function scanMemoryMetadataCorpusStatus(params: {
     ...getProjectMetadataMigrationRoots(
       params.projectRoot,
       params.trustedProject,
+      params.projectMemoryOwner,
     ).map((root) => ({ root, scope: 'project' as const })),
     { root: getUserAutoMemoryRoot(), scope: 'user' },
   ];
@@ -257,6 +270,7 @@ export async function scanMemoryMetadataCorpusStatus(params: {
         () => {
           unreadableDirs += 1;
         },
+        params.projectMemoryOwner,
       )) {
         let content: string;
         try {
@@ -408,48 +422,67 @@ export async function commitMigratedMemoryMetadata(
   candidate: MemoryMetadataMigrationCandidate,
   metadata: GeneratedMemoryMetadata,
   canCommit: () => boolean = () => true,
+  owner?: ProjectMemoryOwner,
 ): Promise<'committed' | 'conflict' | 'invalid'> {
   const merged = mergeMetadata(candidate, metadata);
   if (!merged || !merged.validation.valid) return 'invalid';
-  if (!canCommit()) return 'conflict';
-  const trustedFile = await resolveTrustedMemoryFile(
-    candidate.root,
-    getMemoryRootTrustedAnchor(candidate.root),
-    candidate.relativePath,
-  );
-  if (
-    !trustedFile ||
-    (await fs.realpath(candidate.filePath).catch(() => undefined)) !==
-      trustedFile
-  ) {
-    return 'conflict';
-  }
-  const current = await fs.readFile(trustedFile, 'utf-8').catch(() => null);
-  if (current === null || hash(current) !== candidate.sourceHash) {
-    return 'conflict';
-  }
-  try {
-    await atomicWriteFile(trustedFile, merged.content, {
-      encoding: 'utf-8',
-      noFollow: true,
-      assertCanCommit: () => {
-        if (!canCommit()) throw new MigrationConflictError();
-        let latest: string;
-        try {
-          latest = fsSync.readFileSync(trustedFile, 'utf-8');
-        } catch {
-          throw new MigrationConflictError();
-        }
-        if (hash(latest) !== candidate.sourceHash) {
-          throw new MigrationConflictError();
-        }
-      },
-    });
-  } catch (error) {
-    if (error instanceof MigrationConflictError) return 'conflict';
-    throw error;
-  }
-  return 'committed';
+  const commit = async (): Promise<'committed' | 'conflict'> => {
+    if (!canCommit()) return 'conflict';
+    const trustedFile = await resolveTrustedMemoryFile(
+      candidate.root,
+      getMemoryRootTrustedAnchor(candidate.root, owner),
+      candidate.relativePath,
+    );
+    if (
+      !trustedFile ||
+      (await fs.realpath(candidate.filePath).catch(() => undefined)) !==
+        trustedFile
+    ) {
+      return 'conflict';
+    }
+    const current = await fs.readFile(trustedFile, 'utf-8').catch(() => null);
+    if (current === null || hash(current) !== candidate.sourceHash) {
+      return 'conflict';
+    }
+    if (candidate.scope === 'project') {
+      await markProjectMemoryIndexPendingLocked(candidate.root, owner);
+    }
+    try {
+      await atomicWriteFile(trustedFile, merged.content, {
+        encoding: 'utf-8',
+        noFollow: true,
+        assertCanCommit: () => {
+          if (!canCommit()) throw new MigrationConflictError();
+          let latest: string;
+          try {
+            latest = fsSync.readFileSync(trustedFile, 'utf-8');
+          } catch {
+            throw new MigrationConflictError();
+          }
+          if (hash(latest) !== candidate.sourceHash) {
+            throw new MigrationConflictError();
+          }
+        },
+      });
+    } catch (error) {
+      if (error instanceof MigrationConflictError) return 'conflict';
+      throw error;
+    }
+    if (candidate.scope === 'project') {
+      try {
+        await rebuildProjectMemoryIndexLocked(candidate.root, owner);
+      } catch (error) {
+        debugLogger.warn(
+          'Topic metadata was saved but index repair is pending:',
+          error,
+        );
+      }
+    }
+    return 'committed';
+  };
+  return candidate.scope === 'project'
+    ? withProjectMemoryCommit(candidate.root, commit, owner)
+    : commit();
 }
 
 function parseAgentMetadata(text: string | undefined): GeneratedMemoryMetadata {
@@ -509,8 +542,14 @@ async function generateMemoryMetadataWithAgent(
     suppressChatRecording: true,
   });
   if (result.status !== 'completed') {
+    // No cancelled arm: the caller only rethrows this on an aborted
+    // signal, and the manager then logs a cancelled event without the
+    // message, so the text would never reach anyone.
     throw new Error(
-      result.terminateReason || 'Metadata migration agent failed',
+      terminateReasonMessage(
+        result.terminateReason,
+        'Metadata migration agent failed',
+      ),
     );
   }
   return {
@@ -527,12 +566,15 @@ async function generateMemoryMetadataWithAgent(
 export async function runMemoryMetadataMigration(params: {
   config: Config;
   projectRoot: string;
+  projectMemoryOwner?: ProjectMemoryOwner;
   root?: string;
   roots?: readonly string[];
   scope: MetadataMigrationScope;
   abortSignal?: AbortSignal;
   generateMetadata?: GenerateMetadata;
 }): Promise<MemoryMetadataMigrationResult> {
+  const owner =
+    params.projectMemoryOwner ?? params.config.getProjectMemoryOwner?.();
   const generateMetadata =
     params.generateMetadata ?? generateMemoryMetadataWithAgent;
   const result: MemoryMetadataMigrationResult = {
@@ -566,12 +608,19 @@ export async function runMemoryMetadataMigration(params: {
     }),
   );
   result.filesScanned = (
-    await Promise.all(roots.map((root) => listMemoryFiles(root)))
+    await Promise.all(
+      roots.map((root) => listMemoryFiles(root, undefined, owner)),
+    )
   ).reduce((count, files) => count + files.length, 0);
   const initialCandidates = (
     await Promise.all(
       roots.map((root) =>
-        scanMemoryMetadataMigrationCandidates(root, params.scope),
+        scanMemoryMetadataMigrationCandidates(
+          root,
+          params.scope,
+          params.abortSignal,
+          owner,
+        ),
       ),
     )
   ).flat();
@@ -588,6 +637,7 @@ export async function runMemoryMetadataMigration(params: {
         ? (
             await scanAutoMemorySnapshot(params.projectRoot, {
               scopes: ['project'],
+              projectMemoryOwner: owner,
               trustedProject: params.config.isTrustedFolder?.() ?? false,
               uncapped: true,
             })
@@ -618,6 +668,10 @@ export async function runMemoryMetadataMigration(params: {
     if (!canCommit() || indexRoots.length === 0) return;
     if (params.scope === 'team') {
       await rebuildTeamAutoMemoryIndex(params.projectRoot);
+    } else if (params.scope === 'project') {
+      await Promise.all(
+        indexRoots.map((root) => recoverProjectMemoryIndex(root, owner)),
+      );
     } else {
       await Promise.all(
         indexRoots.map((root) =>
@@ -712,6 +766,7 @@ export async function runMemoryMetadataMigration(params: {
         candidate,
         metadata,
         canCommit,
+        owner,
       );
       if (status === 'committed') {
         result.committed += 1;
@@ -769,7 +824,12 @@ export async function runMemoryMetadataMigration(params: {
   result.remainingLegacyFiles = (
     await Promise.all(
       roots.map((root) =>
-        scanMemoryMetadataMigrationCandidates(root, params.scope),
+        scanMemoryMetadataMigrationCandidates(
+          root,
+          params.scope,
+          undefined,
+          owner,
+        ),
       ),
     )
   ).reduce((count, candidates) => count + candidates.length, 0);

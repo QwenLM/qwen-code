@@ -1,8 +1,10 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedTaskEventStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.EventPage;
 import com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.TaskEvent;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -42,10 +44,10 @@ class ManagedTaskEventJournalTest {
     private static final String WORKSPACE = "workspace-task-events";
 
     @Autowired
-    private ManagedTaskEventStore events;
+    private JdbcManagedTaskEventStore events;
 
     @Autowired
-    private ManagedSessionStore sessionStore;
+    private JdbcManagedSessionStore sessionStore;
 
     @Autowired
     @Qualifier("managedJdbcTemplate")
@@ -65,10 +67,14 @@ class ManagedTaskEventJournalTest {
                     chain.get(index).required("occurredAt").longValue());
             if (taskId == null) {
                 taskId = jdbc.queryForObject(
-                        "SELECT CONCAT('task_', record_key) FROM"
+                        "SELECT domain, record_id FROM"
                                 + " ma_session_record"
                                 + " WHERE tenant_id = ? AND session_id = ?",
-                        String.class, TENANT, sessionId);
+                        (row, rowNum) -> ManagedExtensionProjection.taskId(
+                                ManagedExtensionProjection.recordKey(sessionId,
+                                        row.getString("domain"),
+                                        row.getString("record_id"))),
+                        TENANT, sessionId);
             }
         }
         EventPage page = events.read(TENANT, sessionId, taskId, 0, 100);
@@ -81,11 +87,11 @@ class ManagedTaskEventJournalTest {
         }
         // A cursor is pure durable state: a rebuild derives the same string.
         TaskEvent first = page.events().getFirst();
-        assertThat(com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.encodeCursor(TENANT, sessionId, taskId,
+        assertThat(ManagedTaskEventStore.encodeCursor(TENANT, sessionId, taskId,
                 first.sequence())).isEqualTo(
-                com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.encodeCursor(TENANT, sessionId, taskId, 1));
-        assertThat(com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.decodeCursor(TENANT, sessionId, taskId,
-                com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore.encodeCursor(TENANT, sessionId, taskId,
+                ManagedTaskEventStore.encodeCursor(TENANT, sessionId, taskId, 1));
+        assertThat(ManagedTaskEventStore.decodeCursor(TENANT, sessionId, taskId,
+                ManagedTaskEventStore.encodeCursor(TENANT, sessionId, taskId,
                         first.sequence()))).isEqualTo(first.sequence());
         // The first revision's view opens the task; a settled chain end
         // shows the terminal state of the last committed revision.
@@ -174,7 +180,7 @@ class ManagedTaskEventJournalTest {
                     assertThat(error.getStatus())
                             .isEqualTo(HttpStatus.CONFLICT.value());
                     assertThat(error.getCode()).isEqualTo(
-                            ManagedTaskEventStore.CODE_FLOOR_PINNED);
+                            JdbcManagedTaskEventStore.CODE_FLOOR_PINNED);
                 });
         assertThat(events.positions(TENANT, sessionId,
                 taskId).expiredThrough()).isEqualTo(outputSequence - 1);
@@ -202,7 +208,7 @@ class ManagedTaskEventJournalTest {
         // accepted events the pass cannot expire...
         events.appendOutput(TENANT, sessionId, taskId, "x", false, null,
                 null, null, null, 0);
-        for (int round = 0; round < ManagedTaskEventStore.BACKLOG_BOUND - 1;
+        for (int round = 0; round < JdbcManagedTaskEventStore.BACKLOG_BOUND - 1;
                 round++) {
             events.appendStateChange(TENANT, sessionId, taskId, "running",
                     "ready", round);
@@ -214,7 +220,7 @@ class ManagedTaskEventJournalTest {
                 taskId, "running", "ready", 0))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
-                                ManagedTaskEventStore.CODE_BACKLOG_FULL));
+                                JdbcManagedTaskEventStore.CODE_BACKLOG_FULL));
         // Archival plus an explicit expiry reopens admission.
         events.markOutputArchived(TENANT, sessionId, taskId, 1);
         events.expireThrough(TENANT, sessionId, taskId, 1);
@@ -228,7 +234,7 @@ class ManagedTaskEventJournalTest {
         }
         var positions = events.positions(TENANT, sessionId, taskId);
         assertThat(positions.lastSequence() - positions.expiredThrough())
-                .isLessThanOrEqualTo(ManagedTaskEventStore.RETAIN_TARGET);
+                .isLessThanOrEqualTo(JdbcManagedTaskEventStore.RETAIN_TARGET);
     }
 
     @Test
@@ -253,8 +259,8 @@ class ManagedTaskEventJournalTest {
         events.appendArtifact(TENANT, sessionId, taskId, "artifact-a", 1);
         // The clobber the old write shape could carry: a writer holding the
         // outdated empty list. The compare-and-set latch must refuse it.
-        int rewritten = jdbc.update("UPDATE ma_event_stream SET artifact_refs_resource_key=NULL WHERE tenant_id=? AND session_id=?"
-                        + " AND stream_kind='TASK' AND stream_id=? AND artifact_refs_resource_key IS NULL",
+        int rewritten = jdbc.update("UPDATE ma_event_stream SET artifact_refs_resource_ref=NULL WHERE tenant_id=? AND session_id=?"
+                        + " AND stream_kind='TASK' AND stream_id=? AND artifact_refs_resource_ref IS NULL",
                 TENANT, sessionId, taskId);
         assertThat(rewritten).isZero();
         assertThat(events.positions(TENANT, sessionId,
@@ -266,7 +272,7 @@ class ManagedTaskEventJournalTest {
         String sessionId = session(true);
         String taskId = "task_" + "bb".repeat(32);
         for (int index = 0; index
-                < ManagedTaskEventStore.ARTIFACT_REF_BOUND; index++) {
+                < JdbcManagedTaskEventStore.ARTIFACT_REF_BOUND; index++) {
             events.appendArtifact(TENANT, sessionId, taskId,
                     "artifact-" + index, index);
         }
@@ -278,12 +284,12 @@ class ManagedTaskEventJournalTest {
                 taskId, "artifact-100", 100))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
-                                ManagedTaskEventStore.CODE_ADMISSION_REFUSED));
+                                JdbcManagedTaskEventStore.CODE_ADMISSION_REFUSED));
         assertThatThrownBy(() -> events.appendArtifact(TENANT, sessionId,
                 taskId, "artifact-0", 101))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
-                                ManagedTaskEventStore.CODE_ADMISSION_REFUSED));
+                                JdbcManagedTaskEventStore.CODE_ADMISSION_REFUSED));
         // No reference aged out to admit another.
         assertThat(events.positions(TENANT, sessionId,
                 taskId).artifactRefs()).hasSize(100)
@@ -298,13 +304,13 @@ class ManagedTaskEventJournalTest {
                 "x", false, null, null, null, null, 0))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
-                                ManagedTaskEventStore.CODE_ADMISSION_REFUSED));
+                                JdbcManagedTaskEventStore.CODE_ADMISSION_REFUSED));
         // Includes a task whose output would go only to Artifacts.
         assertThatThrownBy(() -> events.appendArtifact(TENANT, plain,
                 taskId, "artifact-1", 0))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
-                                ManagedTaskEventStore.CODE_ADMISSION_REFUSED));
+                                JdbcManagedTaskEventStore.CODE_ADMISSION_REFUSED));
         String deleting = session(true);
         jdbc.update("UPDATE ma_session SET status = 'DELETING'"
                 + " WHERE tenant_id = ? AND session_id = ?", TENANT,
@@ -313,7 +319,7 @@ class ManagedTaskEventJournalTest {
                 taskId, "x", false, null, null, null, null, 0))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
-                                ManagedTaskEventStore.CODE_ADMISSION_REFUSED));
+                                JdbcManagedTaskEventStore.CODE_ADMISSION_REFUSED));
     }
 
     @Test
@@ -334,12 +340,12 @@ class ManagedTaskEventJournalTest {
                 taskId, "x", false, "capture-1", null, 0L, 1L, 0))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
-                                ManagedTaskEventStore.CODE_SEGMENT_CONFLICT));
+                                JdbcManagedTaskEventStore.CODE_SEGMENT_CONFLICT));
         assertThatThrownBy(() -> events.appendOutput(TENANT, sessionId,
                 taskId, "x", false, "capture-1", "stdout", 1L, 1L, 0))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
-                                ManagedTaskEventStore.CODE_SEGMENT_CONFLICT));
+                                JdbcManagedTaskEventStore.CODE_SEGMENT_CONFLICT));
     }
 
     @Test
@@ -358,18 +364,18 @@ class ManagedTaskEventJournalTest {
                 taskId, "zz", true, "capture-1", "stdout", 2L, 5L, 3))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
-                                ManagedTaskEventStore.CODE_SEGMENT_CONFLICT));
+                                JdbcManagedTaskEventStore.CODE_SEGMENT_CONFLICT));
         assertThatThrownBy(() -> events.appendOutput(TENANT, sessionId,
                 taskId, "abcd", true, "capture-1", "stdout", 0L, 4L, 4))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
-                                ManagedTaskEventStore.CODE_SEGMENT_CONFLICT));
+                                JdbcManagedTaskEventStore.CODE_SEGMENT_CONFLICT));
         // A gap against the continuous space refuses as well.
         assertThatThrownBy(() -> events.appendOutput(TENANT, sessionId,
                 taskId, "zz", true, "capture-1", "stdout", 10L, 12L, 5))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
-                                ManagedTaskEventStore.CODE_SEGMENT_CONFLICT));
+                                JdbcManagedTaskEventStore.CODE_SEGMENT_CONFLICT));
         // What committed joins: each stream's ranges are continuous and
         // pairwise disjoint.
         EventPage page = events.read(TENANT, sessionId, taskId, 0, 100);

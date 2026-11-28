@@ -1,0 +1,75 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`CodeMode tool header and source > collapses a completed search to one line (empty) 1`] = `
+" ▪ CodeMode · 在 atlas-docs 中搜索文档校验工具 · 未找到匹配工具
+"
+`;
+
+exports[`CodeMode tool header and source > collapses a completed search to one line (found) 1`] = `
+" ▪ CodeMode · 在 atlas-docs 中搜索文档校验工具 · 找到 15 个候选工具
+"
+`;
+
+exports[`CodeMode tool header and source > renders a returned exec with a running script as a neutral receipt 1`] = `
+" ▫ CodeMode · Execute script · Script still running · 1 tool call
+   └  ▫ Grep
+
+     Output
+     partial output
+"
+`;
+
+exports[`CodeMode tool header and source > renders a returned wait with a running script as a neutral receipt 1`] = `
+" ▫ CodeMode · Wait for script · Script still running · 1 tool call
+   └  ▫ Grep
+
+     Output
+     partial output
+"
+`;
+
+exports[`CodeMode tool header and source > shows live child progress before exec returns 1`] = `
+" ▫ CodeMode · Execute script · Running · 1 tool call
+   └  ▫ Grep('TODO' within ./)
+     Ctrl+O to expand script
+"
+`;
+
+exports[`CodeMode tool header and source > shows source and child payload only when expanded (fold=1) 1`] = `
+" ▪ CodeMode · Execute script · Completed · 1 tool call
+   └  ▪ Grep('TODO' within ./)
+        └ Found 1 match (Ctrl+O to expand)
+
+     Output
+     script output
+     Ctrl+O to expand script
+"
+`;
+
+exports[`CodeMode tool header and source > shows source and child payload only when expanded (fold=2) 1`] = `
+" ▪ CodeMode · Execute script · Completed · 1 tool call
+   └  ▪ Grep('TODO' within ./)
+        └ Found 1 match
+
+          src/file.ts:1:TODO
+
+
+     Output
+     script output
+
+     JavaScript
+     const result = await tools.Grep({pattern: "TODO"});
+     text(result.content);
+"
+`;
+
+exports[`CodeMode tool header and source > shows the actual MCP server, tool and output in the collapsed card 1`] = `
+" ▪ CodeMode · 查询 Release Checklist 当前修订版 · 已完成 · 1 次工具调用
+   └  ▪ lookup_revision (atlas-docs MCP Server)({"title":"Release Checklist"})
+        └ revision-42
+
+     输出
+     revision-42
+     按 Ctrl+O 展开脚本
+"
+`;

@@ -1,6 +1,8 @@
+import { randomUUID } from '../../utils/random-uuid.js';
+import { useWorkspaceFileChanges } from './useWorkspaceFileChanges';
 import { useDaemonAvailabilityController } from '../../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../../daemon/availability.js';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonSessionProvider,
   useConnection,
@@ -12,6 +14,7 @@ import { WEB_SHELL_MAX_TRANSCRIPT_BLOCKS } from '../../constants/sessions';
 import { useAnimationFrameTranscriptSnapshot } from '../../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../../hooks/useMessages';
 import { useSessionArtifacts } from '../../hooks/useSessionArtifacts';
+import { ReportedArtifactRegistration } from '../ReportedArtifactRegistration';
 import { useI18n } from '../../i18n';
 import {
   SubagentDetailsProvider,
@@ -25,6 +28,7 @@ import {
   getArtifactsByTurn,
   getFileChangesByTurn,
 } from './turnOutputSelectors';
+import { fileChangeOwnerSessionId } from './workspace-file-changes';
 import styles from './SubagentDetail.module.css';
 
 interface SubagentResolution {
@@ -80,11 +84,7 @@ function getSubagentMetrics(
 }
 
 function createDetailClientId(): string {
-  const suffix =
-    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID()
-      : Math.random().toString(36).slice(2);
-  return `subagent-detail:${suffix}`;
+  return `subagent-detail:${randomUUID()}`;
 }
 
 export function findSubagentRootTool(
@@ -143,20 +143,22 @@ function SubagentDetailContent({
   const connection = useConnection();
   const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
-  const { artifacts } = useSessionArtifacts();
+  const { artifacts, hydrated, refresh } = useSessionArtifacts();
   const artifactsByTurn = useMemo(
     () =>
       getArtifactsByTurn(messages, artifacts, connection.workspaceCwd || ''),
     [artifacts, connection.workspaceCwd, messages],
   );
-  const fileChangesByTurn = useMemo(
-    () =>
-      getFileChangesByTurn(
-        messages,
-        artifactsByTurn,
-        connection.workspaceCwd || '',
-      ),
-    [artifactsByTurn, connection.workspaceCwd, messages],
+  const fileChangesByTurn = useWorkspaceFileChanges(
+    messages,
+    artifactsByTurn,
+    connection.workspaceCwd ||
+      connection.standaloneSession?.projectlessOutputDirectory ||
+      '',
+    connection.sessionId
+      ? fileChangeOwnerSessionId(connection.sessionId)
+      : undefined,
+    connection.workspaceCwd ? undefined : null,
   );
   const description = getAgentDescription(rootTool);
   const metrics = useMemo(
@@ -177,14 +179,34 @@ function SubagentDetailContent({
     };
   }, [artifacts, connection.sessionId, onArtifactsChange]);
 
+  const reviewSourceRef = useRef({ messages, artifactsByTurn });
+  reviewSourceRef.current = { messages, artifactsByTurn };
   const handleRightPanelOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
+      const source = reviewSourceRef.current;
       onRightPanelOpen?.({
         ...request,
+        ...(request.kind === 'review'
+          ? {
+              unfilteredChanges:
+                getFileChangesByTurn(
+                  source.messages,
+                  source.artifactsByTurn,
+                  connection.workspaceCwd ||
+                    connection.standaloneSession?.projectlessOutputDirectory ||
+                    '',
+                ).get(request.turnId) ?? request.changes,
+            }
+          : {}),
         sourceSessionId: connection.sessionId,
       });
     },
-    [connection.sessionId, onRightPanelOpen],
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      connection.standaloneSession?.projectlessOutputDirectory,
+      onRightPanelOpen,
+    ],
   );
 
   useEffect(() => {
@@ -230,6 +252,14 @@ function SubagentDetailContent({
 
   return (
     <div className={styles.detail}>
+      {/* The detail view runs under its own DaemonSessionProvider for the
+          subagent session; App's registration mount only covers the main
+          session, so register this session's reported artifacts here. */}
+      <ReportedArtifactRegistration
+        registered={artifacts}
+        hydrated={hydrated}
+        refresh={refresh}
+      />
       <div className={styles.overview}>
         <div className={styles.descriptionRow}>
           {description && (

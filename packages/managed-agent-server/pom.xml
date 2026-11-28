@@ -32,9 +32,6 @@
     </developers>
     <properties>
         <java.version>21</java.version>
-        <managed.operator-tools.attach>true</managed.operator-tools.attach>
-        <managed.operator-tools.jar.phase>package</managed.operator-tools.jar.phase>
-        <managed.operator-tools.skip>false</managed.operator-tools.skip>
         <druid.version>1.2.25</druid.version>
         <qwencode-sdk.version>0.1.0-alpha</qwencode-sdk.version>
         <fastjson2.version>2.0.65</fastjson2.version>
@@ -43,7 +40,7 @@
         <jacoco-maven-plugin.version>0.8.14</jacoco-maven-plugin.version>
         <checkstyle-maven-plugin.version>3.6.0</checkstyle-maven-plugin.version>
         <maven-failsafe-plugin.version>3.5.6</maven-failsafe-plugin.version>
-        <json-schema-validator.version>1.5.9</json-schema-validator.version>
+        <json-schema-validator.version>2.0.0</json-schema-validator.version>
         <spotbugs-maven-plugin.version>4.10.4.1</spotbugs-maven-plugin.version>
         <rocketmq-client-java.version>5.1.0</rocketmq-client-java.version>
         <managed.module.root>${project.basedir}</managed.module.root>
@@ -59,7 +56,6 @@
         <module>runtime-host</module>
         <module>runtime-local</module>
         <module>runtime-external</module>
-        <module>runtime-kubernetes</module>
         <module>runtime-ssh</module>
         <module>runtime-static</module>
         <module>adapters</module>
@@ -86,11 +82,6 @@
             <dependency>
                 <groupId>com.alibaba</groupId>
                 <artifactId>qwen-managed-agent-runtime-external</artifactId>
-                <version>${project.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.alibaba</groupId>
-                <artifactId>qwen-managed-agent-runtime-kubernetes</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
@@ -222,25 +213,7 @@
     </build>
     <profiles>
         <profile>
-            <id>no-operator-tools</id>
-            <activation>
-                <property>
-                    <name>managed.operator-tools.attach</name>
-                    <value>false</value>
-                </property>
-            </activation>
-            <properties>
-                <managed.operator-tools.jar.phase>none</managed.operator-tools.jar.phase>
-                <managed.operator-tools.skip>true</managed.operator-tools.skip>
-            </properties>
-        </profile>
-        <profile>
             <id>central-release</id>
-            <properties>
-                <managed.operator-tools.attach>false</managed.operator-tools.attach>
-                <managed.operator-tools.jar.phase>none</managed.operator-tools.jar.phase>
-                <managed.operator-tools.skip>true</managed.operator-tools.skip>
-            </properties>
             <build>
                 <plugins>
                     <plugin>

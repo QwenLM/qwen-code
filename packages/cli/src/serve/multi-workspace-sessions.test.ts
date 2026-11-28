@@ -16,7 +16,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import {
-  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionService,
   SessionTranscriptChangedError,
   Storage,
@@ -26,7 +25,13 @@ import {
   setDebugLogSession,
   writeSessionPrs,
 } from '@qwen-code/qwen-code-core';
+import { ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES } from './server/session-export.js';
 import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
+import {
+  SessionTranscriptReader,
+  setSessionTranscriptIndexBuildCompleteHookForTest,
+  setSessionTranscriptIndexCacheMaxBytesForTest,
+} from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import {
   InvalidRewindTargetError,
   SessionBusyError,
@@ -138,6 +143,11 @@ interface FakeBridge extends AcpSessionBridge {
     req: { modelId?: unknown; sessionId?: unknown };
     context?: BridgeClientRequestContext;
   }>;
+  readonly feedbackCalls: Array<{
+    sessionId: string;
+    req: { promptId: string; rating: 'up' | 'down' };
+    context?: BridgeClientRequestContext;
+  }>;
   readonly setApprovalModeCalls: Array<{
     sessionId: string;
     mode: string;
@@ -183,6 +193,7 @@ interface FakeBridge extends AcpSessionBridge {
     taskKind: 'agent' | 'shell' | 'monitor' | 'workflow';
   }>;
   readonly goalClearCalls: string[];
+  readonly goalControlCalls: Array<{ sessionId: string; request: unknown }>;
   readonly continueCalls: Array<{
     sessionId: string;
     context?: BridgeClientRequestContext;
@@ -506,6 +517,7 @@ function makeBridge(
   const listCalls: string[] = [];
   const summaryCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const feedbackCalls: FakeBridge['feedbackCalls'] = [];
   const setApprovalModeCalls: FakeBridge['setApprovalModeCalls'] = [];
   const metadataCalls: FakeBridge['metadataCalls'] = [];
   const recapCalls: FakeBridge['recapCalls'] = [];
@@ -516,6 +528,7 @@ function makeBridge(
   const sendMidTurnNowCalls: FakeBridge['sendMidTurnNowCalls'] = [];
   const taskCancelCalls: FakeBridge['taskCancelCalls'] = [];
   const goalClearCalls: string[] = [];
+  const goalControlCalls: FakeBridge['goalControlCalls'] = [];
   const continueCalls: FakeBridge['continueCalls'] = [];
   const languageCalls: FakeBridge['languageCalls'] = [];
   const addArtifactCalls: FakeBridge['addArtifactCalls'] = [];
@@ -547,6 +560,7 @@ function makeBridge(
     listCalls,
     summaryCalls,
     setModelCalls,
+    feedbackCalls,
     setApprovalModeCalls,
     metadataCalls,
     recapCalls,
@@ -557,6 +571,7 @@ function makeBridge(
     sendMidTurnNowCalls,
     taskCancelCalls,
     goalClearCalls,
+    goalControlCalls,
     continueCalls,
     languageCalls,
     addArtifactCalls,
@@ -713,6 +728,14 @@ function makeBridge(
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return { sessionId, modelId: req.modelId, _meta: { applied: true } };
     },
+    async rateSessionTurn(
+      sessionId: string,
+      req: { promptId: string; rating: 'up' | 'down' },
+      context?: BridgeClientRequestContext,
+    ) {
+      feedbackCalls.push({ sessionId, req, ...(context ? { context } : {}) });
+      return { recorded: true };
+    },
     async setSessionApprovalMode(
       sessionId: string,
       mode: string,
@@ -853,6 +876,12 @@ function makeBridge(
       return {
         cleared: workspaceCwd === SECONDARY_CWD,
         condition: workspaceCwd,
+      };
+    },
+    async controlSessionGoal(sessionId: string, request: unknown) {
+      goalControlCalls.push({ sessionId, request });
+      return {
+        snapshot: { v: 2 as const, activity: 'idle' as const, goal: null },
       };
     },
     async continueSession(
@@ -1120,6 +1149,7 @@ function makeDaemonLog(): DaemonLogger {
     warn: vi.fn(),
     error: vi.fn(),
     raw: vi.fn(),
+    setPort: vi.fn(),
     getLogPath: () => '',
     getDaemonId: () => 'test-daemon',
     getStatus: () => ({
@@ -2184,6 +2214,100 @@ describe('multi-workspace session dispatch', () => {
       },
     ]);
     expect(secondaryBridge.cwdChangeCalls).toEqual([]);
+  });
+
+  it('fires the PR-watch resume hook only after a restore succeeded', async () => {
+    // The serve root installs this local and the route's onSessionRestored
+    // reads it at call time, so setting it here exercises the real route seam
+    // rather than a stub of it. The drain itself is switched off in production;
+    // what this pins is that a user's resume reaches the seam at all.
+    const { app } = makeHarness();
+    const drainNow = vi.fn();
+    (
+      app.locals as { prWatchDrainNow?: (workspaceCwd: string) => void }
+    ).prWatchDrainNow = drainNow;
+
+    const ok = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+    expect(ok.status).toBe(200);
+    expect(drainNow).toHaveBeenCalledTimes(1);
+    // The session id rides along so the drain can clear a stale Gone mark for
+    // the session that was just restored.
+    expect(drainNow).toHaveBeenCalledWith(
+      SECONDARY_CWD,
+      '22222222-2222-4222-a222-222222222222',
+    );
+
+    // A restore that is attempted and then fails must not schedule a drain.
+    // The failure has to come from the restore itself: an earlier refusal (an
+    // untrusted workspace, say) is rejected long before the hook, so it would
+    // stay green even with the hook moved above restoreSessionCore.
+    const failing = makeHarness();
+    const failingDrain = vi.fn();
+    (
+      failing.app.locals as {
+        prWatchDrainNow?: (workspaceCwd: string, sessionId?: string) => void;
+      }
+    ).prWatchDrainNow = failingDrain;
+    vi.spyOn(failing.secondaryBridge, 'resumeSession').mockRejectedValue(
+      new Error('bridge restore failed'),
+    );
+    const failed = await request(failing.app)
+      .post('/session/22222222-2222-4222-a222-222222222222/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+    expect(failed.status).not.toBe(200);
+    // Proves the core reached the bridge, so the absence below is about the
+    // hook's placement rather than an earlier exit. Asserted on the spy: the
+    // rejection replaces the implementation, so the bridge's own restoreCalls
+    // log is no longer written.
+    expect(failing.secondaryBridge.resumeSession).toHaveBeenCalled();
+    expect(failingDrain).not.toHaveBeenCalled();
+  });
+
+  it('answers a resume without waiting for the drain it scheduled', async () => {
+    // §2 forbids awaiting the hook: the watch's per-PR lock is not re-entrant,
+    // so a restore the drain dispatched would deadlock against its own drain.
+    // A local that never settles is the witness — an awaited hook would hang
+    // this request instead of answering it.
+    const { app } = makeHarness();
+    let scheduled = false;
+    (
+      app.locals as {
+        prWatchDrainNow?: (workspaceCwd: string, sessionId?: string) => void;
+      }
+    ).prWatchDrainNow = () => {
+      scheduled = true;
+      return new Promise<void>(() => {});
+    };
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+    expect(res.status).toBe(200);
+    expect(scheduled).toBe(true);
+  });
+
+  it('still answers the resume when the scheduled drain throws', async () => {
+    // The hook fires after the response was written, so an escaping throw
+    // would reach sendBridgeError with headers already sent. The inner
+    // try/catch is what keeps a broken drain from corrupting the answer.
+    const { app } = makeHarness();
+    (
+      app.locals as {
+        prWatchDrainNow?: (workspaceCwd: string, sessionId?: string) => void;
+      }
+    ).prWatchDrainNow = () => {
+      throw new Error('drain local blew up');
+    };
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+    expect(res.status).toBe(200);
+    expect(res.body.sessionId).toBe('22222222-2222-4222-a222-222222222222');
   });
 
   it('restores cold Live load and resume sessions into their server-derived conversation directories', async () => {
@@ -3701,6 +3825,60 @@ describe('multi-workspace session dispatch', () => {
     expect(primaryBridge.setModelCalls).toEqual([]);
   });
 
+  it('routes POST /session/:id/feedback to the owning non-primary workspace bridge', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/feedback')
+      .set('Host', host())
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ promptId: 'prompt-1', rating: 'up' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ recorded: true });
+    expect(secondaryBridge.feedbackCalls).toEqual([
+      {
+        sessionId: '22222222-2222-4222-a222-222222222222',
+        req: { promptId: 'prompt-1', rating: 'up' },
+        context: { clientId: 'client-1' },
+      },
+    ]);
+    expect(primaryBridge.feedbackCalls).toEqual([]);
+  });
+
+  it('rejects invalid feedback bodies before reaching the bridge', async () => {
+    const { app, secondaryBridge } = makeHarness();
+    const invalid = [
+      { rating: 'up' },
+      { promptId: '', rating: 'up' },
+      { promptId: 42, rating: 'up' },
+      { promptId: 'prompt-1', rating: 'fine' },
+      { promptId: 'prompt-1', rating: null },
+      { promptId: 'prompt-1' },
+    ];
+    for (const body of invalid) {
+      const res = await request(app)
+        .post('/session/22222222-2222-4222-a222-222222222222/feedback')
+        .set('Host', host())
+        .send(body);
+      expect(res.status).toBe(400);
+    }
+    expect(secondaryBridge.feedbackCalls).toEqual([]);
+  });
+
+  it('rejects feedback on an untrusted non-primary session', async () => {
+    const { app, secondaryBridge } = makeHarness({ secondaryTrusted: false });
+
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/feedback')
+      .set('Host', host())
+      .send({ promptId: 'prompt-1', rating: 'down' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(secondaryBridge.feedbackCalls).toEqual([]);
+  });
+
   it('routes POST /session/:id/approval-mode to the owning non-primary workspace bridge', async () => {
     const { app, primaryBridge, secondaryBridge } = makeHarness();
 
@@ -3991,6 +4169,39 @@ describe('multi-workspace session dispatch', () => {
     }
   });
 
+  it('routes goal lifecycle controls to the owning non-primary workspace bridge', async () => {
+    // The Goals page pauses/resumes/edits secondary-workspace goals through
+    // the same per-session control route as clear; narrowing the owner
+    // resolution to the primary would break every secondary goal control.
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/goal')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .send({
+        action: 'pause',
+        expectedGoalId: 'goal-1',
+        expectedRevision: 1,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.snapshot).toEqual({ v: 2, activity: 'idle', goal: null });
+    expect(secondaryBridge.goalControlCalls).toEqual([
+      {
+        sessionId: '22222222-2222-4222-a222-222222222222',
+        request: {
+          action: 'pause',
+          expectedGoalId: 'goal-1',
+          expectedRevision: 1,
+        },
+      },
+    ]);
+    expect(primaryBridge.goalControlCalls).toEqual([]);
+  });
+
   it('persists a cross-workspace pr sidecar in the OWNING workspace chats dir', async () => {
     // A primary-route metadata PATCH against a secondary-owned session must
     // write the sidecar under the SECONDARY runtime — landing it under the
@@ -4020,7 +4231,7 @@ describe('multi-workspace session dispatch', () => {
         .set('X-Qwen-Client-Id', 'secondary-client')
         .send({ pr });
       expect(res.status).toBe(200);
-      expect(res.body.prs).toEqual([pr]);
+      expect(res.body.prs).toEqual([{ ...pr, source: 'create' }]);
       expect(secondaryBridge.metadataCalls[0]?.metadata).toEqual({ pr });
 
       const persisted = await readSessionPrs(secondaryPath);
@@ -5198,6 +5409,110 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
+  it('propagates HTTP disconnect AbortSignal to readPage, readTurnIndexPage, readTurnHooksPage, and tool-calls routes (R1-7, R1-8, R2-1)', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440198';
+      const primarySessionId = '550e8400-e29b-41d4-a716-446655440199';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'abort propagation target',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: primarySessionId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'primary abort propagation target',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const cases = [
+        {
+          url: `/session/${primarySessionId}/transcript?limit=5`,
+          method: 'readPage' as const,
+        },
+        {
+          url: `/session/${primarySessionId}/turn-index`,
+          method: 'readTurnIndexPage' as const,
+        },
+        {
+          url: `/session/${primarySessionId}/turns/u1/hooks`,
+          method: 'readTurnHooksPage' as const,
+        },
+        {
+          url: `/workspaces/secondary-id/session/${sessionId}/transcript?limit=5`,
+          method: 'readPage' as const,
+        },
+        {
+          url: `/workspaces/secondary-id/session/${sessionId}/turn-index`,
+          method: 'readTurnIndexPage' as const,
+        },
+        {
+          url: `/workspaces/secondary-id/session/${sessionId}/turns/u1/hooks`,
+          method: 'readTurnHooksPage' as const,
+        },
+        {
+          url: `/workspaces/secondary-id/session/${sessionId}/tool-calls?turnId=u1`,
+          method: 'readTurnIndexPage' as const,
+        },
+      ];
+      for (const testCase of cases) {
+        let markStarted: (() => void) | undefined;
+        const started = new Promise<void>((resolve) => {
+          markStarted = resolve;
+        });
+        let markAborted: (() => void) | undefined;
+        const aborted = new Promise<void>((resolve) => {
+          markAborted = resolve;
+        });
+        let capturedSignal: AbortSignal | undefined;
+        const spy = vi
+          .spyOn(SessionTranscriptReader.prototype, testCase.method)
+          .mockImplementation((async (...args: unknown[]): Promise<unknown> => {
+            const opts = args.at(-1) as { signal?: AbortSignal } | undefined;
+            capturedSignal = opts?.signal;
+            markStarted?.();
+            await new Promise<void>((resolve, reject) => {
+              if (!opts?.signal) {
+                resolve();
+                return;
+              }
+              if (opts.signal.aborted) {
+                markAborted?.();
+                reject(opts.signal.reason);
+                return;
+              }
+              opts.signal.addEventListener(
+                'abort',
+                () => {
+                  markAborted?.();
+                  reject(opts.signal!.reason);
+                },
+                { once: true },
+              );
+            });
+            return undefined;
+          }) as never);
+        try {
+          const { app } = makeHarness();
+          const pending = request(app).get(testCase.url).set('Host', host());
+          const done = pending.then(
+            () => undefined,
+            () => undefined,
+          );
+          await started;
+          pending.abort();
+          await Promise.all([done, aborted]);
+          expect(capturedSignal).toBeDefined();
+          expect(capturedSignal?.aborted).toBe(true);
+        } finally {
+          spy.mockRestore();
+        }
+      }
+    });
+  });
+
   it('lists archived non-primary workspace sessions for trusted workspaces', async () => {
     await withRuntimeDir(async () => {
       const archivedId = '550e8400-e29b-41d4-a716-446655440130';
@@ -5799,6 +6114,53 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
+  it('reuses the cached transcript index across workspace requests', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440273';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'first page',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const transcriptPath = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+        `${sessionId}.jsonl`,
+      );
+      const { app } = makeHarness({ secondaryTrusted: false });
+      let builds = 0;
+      setSessionTranscriptIndexBuildCompleteHookForTest((builtPath) => {
+        if (builtPath === transcriptPath) builds++;
+      });
+      // A 1-byte shared budget lands the index in the oversized class, so
+      // the reuse pinned here is the oversized-class retention of #17889.
+      setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      try {
+        await request(app)
+          .get(
+            `/workspaces/secondary-id/session/${sessionId}/transcript?limit=1`,
+          )
+          .set('Host', host())
+          .expect(200);
+        expect(builds).toBe(1);
+        const repeat = await request(app)
+          .get(
+            `/workspaces/secondary-id/session/${sessionId}/transcript?limit=1`,
+          )
+          .set('Host', host())
+          .expect(200);
+        // The second request hits the daemon-local index cache: no rebuild.
+        expect(builds).toBe(1);
+        expect(repeat.body.events).toHaveLength(1);
+      } finally {
+        setSessionTranscriptIndexBuildCompleteHookForTest(() => {});
+        setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
+      }
+    });
+  });
+
   it('rejects an oversized untrusted transcript record without starting the bridge', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440276';
@@ -5826,6 +6188,119 @@ describe('multi-workspace session dispatch', () => {
       expect(response.body.pageBytes).toBeGreaterThan(
         response.body.maxBytes as number,
       );
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
+    });
+  });
+
+  it.each([false, true])('reads scoped hook pages (SSH=%s)', async (ssh) => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440283';
+      const promptId = `${sessionId}########1`;
+      for (const cwd of [PRIMARY_CWD, SECONDARY_CWD]) {
+        await writeStoredSession({
+          sessionId,
+          cwd,
+          timestamp: '2026-07-08T00:00:00.000Z',
+          prompt: 'hook turn',
+          mtime: new Date('2026-07-08'),
+        });
+        const file = path.join(
+          new Storage(cwd).getProjectDir(),
+          'chats',
+          `${sessionId}.jsonl`,
+        );
+        await fsp.appendFile(
+          file,
+          JSON.stringify({
+            uuid: `${sessionId}-hook`,
+            parentUuid: `${sessionId}-user-1`,
+            sessionId,
+            cwd,
+            timestamp: '2026-07-08T00:00:01.000Z',
+            type: 'system',
+            subtype: 'ui_telemetry',
+            systemPayload: {
+              uiEvent: {
+                'event.name': 'hook_lifecycle',
+                v: 1,
+                kind: 'hook',
+                executionId: 'exec',
+                runtimeId: cwd,
+                sessionId,
+                promptId,
+                agentId: null,
+                eventName: 'Stop',
+                hookType: 'command',
+                name: cwd === PRIMARY_CWD ? 'primary hook' : 'secondary hook',
+                source: 'project',
+                startedAt: 100,
+                phase: 'ended',
+                endedAt: 110,
+                durationMs: 10,
+                outcome: 'success',
+              },
+            },
+          }) + '\n',
+        );
+      }
+      const { app, registry, primaryBridge, secondaryBridge } = makeHarness({
+        secondaryTrusted: false,
+      });
+      if (ssh) {
+        Object.defineProperty(
+          registry.getEntryByWorkspaceId('secondary-id')!.current!.runtime
+            .routeFileSystemFactory,
+          'sshWorkspace',
+          { value: { host: 'fixture-host', directory: '/remote/project' } },
+        );
+      }
+      const suffix = `/session/${sessionId}/turns/${encodeURIComponent(promptId)}/hooks`;
+      const secondary = await request(app)
+        .get('/workspaces/secondary-id' + suffix)
+        .set('Host', host())
+        .expect(200);
+      expect(secondary.body).toMatchObject({
+        totalExecutions: 1,
+        coverage: 'recorded',
+        executions: [{ event: { name: 'secondary hook' } }],
+      });
+      expect(JSON.stringify(secondary.body)).not.toContain('primary hook');
+      const primary = await request(app)
+        .get('/workspaces/primary-id' + suffix)
+        .set('Host', host())
+        .expect(200);
+      expect(primary.body.executions[0].event.name).toBe('primary hook');
+      await request(app)
+        .get(
+          '/workspaces/primary-id' +
+            suffix +
+            '?snapshot=' +
+            encodeURIComponent(secondary.body.snapshot),
+        )
+        .set('Host', host())
+        .expect(400);
+      await request(app)
+        .get('/workspaces/secondary-id' + suffix + '?start=1')
+        .set('Host', host())
+        .expect(400);
+      await request(app)
+        .get(
+          `/workspaces/secondary-id/session/${sessionId}/turns/missing/hooks`,
+        )
+        .set('Host', host())
+        .expect(404);
+      if (ssh) {
+        await request(app)
+          .post('/workspaces/secondary-id' + suffix)
+          .set('Host', host())
+          .expect(501);
+        await request(app)
+          .get(`/workspaces/secondary-id/session/${sessionId}/turns/turn/other`)
+          .set('Host', host())
+          .expect(501);
+      }
+      expect(primaryBridge.spawnCalls).toEqual([]);
       expect(secondaryBridge.spawnCalls).toEqual([]);
       expect(secondaryBridge.restoreCalls).toEqual([]);
     });
@@ -6546,6 +7021,14 @@ describe('multi-workspace session dispatch', () => {
         .expect(400);
       expect(filtered.body.code).toBe('invalid_session_live_only_filter');
 
+      const questionSorted = await request(trusted.app)
+        .get(
+          '/workspaces/secondary-id/sessions?liveOnly=1&sortBy=lastUserPromptAt',
+        )
+        .set('Host', host())
+        .expect(400);
+      expect(questionSorted.body.code).toBe('invalid_session_live_only_filter');
+
       const invalid = await request(trusted.app)
         .get('/workspaces/secondary-id/sessions?liveOnly=0')
         .set('Host', host())
@@ -6994,7 +7477,10 @@ describe('multi-workspace session dispatch', () => {
         'archive',
         `${sessionId}.jsonl`,
       );
-      await fsp.truncate(archivedPath, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
+      await fsp.truncate(
+        archivedPath,
+        ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES + 1,
+      );
       const { app } = makeHarness({ secondarySummaries: [] });
 
       const response = await request(app)
@@ -7005,8 +7491,8 @@ describe('multi-workspace session dispatch', () => {
       expect(response.body).toMatchObject({
         code: 'transcript_too_large',
         sessionId,
-        snapshotSize: SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1,
-        maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        snapshotSize: ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES + 1,
+        maxBytes: ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES,
       });
     });
   });

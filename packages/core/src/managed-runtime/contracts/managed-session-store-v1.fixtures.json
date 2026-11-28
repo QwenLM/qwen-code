@@ -26,6 +26,7 @@
     "tool.intent",
     "action.changed",
     "tool.receipt",
+    "tool.measured",
     "checkpoint.committed",
     "context.compacted",
     "cancel.requested",

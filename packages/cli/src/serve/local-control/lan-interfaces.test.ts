@@ -6,7 +6,14 @@
 
 import type { NetworkInterfaceInfo } from 'node:os';
 import { describe, expect, it } from 'vitest';
-import { listLanCandidates } from './lan-interfaces.js';
+import {
+  AmbiguousLanInterfaceError,
+  listLanCandidates,
+  NoLanInterfaceError,
+  ReservedLanAddressError,
+  selectLanAddress,
+  UnknownLanInterfaceError,
+} from './lan-interfaces.js';
 
 function ipv4(address: string): NetworkInterfaceInfo {
   return {
@@ -104,5 +111,159 @@ describe('listLanCandidates', () => {
       { interfaceName: 'Network Bridge', address: '192.168.4.50' },
       { interfaceName: 'br0', address: '192.168.2.50' },
     ]);
+  });
+});
+
+describe('selectLanAddress', () => {
+  it('accepts an explicitly named address outside RFC 1918 space (#14136)', () => {
+    // Enterprise intranets are sometimes numbered from public ranges the
+    // organization controls; the automatic filter refuses them, but an
+    // operator naming the address supplies the intent the filter cannot.
+    expect(
+      selectLanAddress('203.0.113.10', { en0: [ipv4('203.0.113.10')] }),
+    ).toEqual({ interfaceName: 'en0', address: '203.0.113.10' });
+  });
+
+  it('accepts an explicitly named address on a VPN/tunnel interface', () => {
+    // Phone and laptop on the same corporate VPN: the tunnel interface
+    // holds the only usable address. The software-network exclusion stops
+    // AUTOMATIC advertising from pointing a QR at an unreachable tunnel
+    // address; an explicit name overrides it.
+    expect(() =>
+      selectLanAddress(undefined, { utun4: [ipv4('10.8.0.2')] }),
+    ).toThrow(NoLanInterfaceError);
+    expect(
+      selectLanAddress('10.8.0.2', {
+        en0: [ipv4('192.168.1.10')],
+        utun4: [ipv4('10.8.0.2')],
+      }),
+    ).toEqual({ interfaceName: 'utun4', address: '10.8.0.2' });
+  });
+
+  it('resolves the explicit pick before reporting no LAN interface', () => {
+    // A host whose only address is outside RFC 1918/3927 has zero automatic
+    // candidates; the explicit opt-in must still be consulted rather than
+    // pre-empted by the no-candidate failure.
+    const interfaces = { en0: [ipv4('203.0.113.10')] };
+    expect(() => selectLanAddress(undefined, interfaces)).toThrow(
+      NoLanInterfaceError,
+    );
+    expect(selectLanAddress('203.0.113.10', interfaces)).toEqual({
+      interfaceName: 'en0',
+      address: '203.0.113.10',
+    });
+  });
+
+  it('refuses an explicitly named address the host does not have', () => {
+    expect(() =>
+      selectLanAddress('203.0.113.99', { en0: [ipv4('192.168.1.10')] }),
+    ).toThrow(UnknownLanInterfaceError);
+  });
+
+  it('refuses loopback even when named explicitly', () => {
+    const interfaces = {
+      lo0: [{ ...ipv4('127.0.0.1'), internal: true }],
+      en0: [ipv4('203.0.113.10')],
+    };
+    expect(() => selectLanAddress('127.0.0.1', interfaces)).toThrow(
+      ReservedLanAddressError,
+    );
+  });
+
+  it('still surfaces ambiguity among automatic candidates', () => {
+    expect(() =>
+      selectLanAddress(undefined, {
+        en0: [ipv4('192.168.1.10')],
+        en1: [ipv4('192.168.2.10')],
+      }),
+    ).toThrow(AmbiguousLanInterfaceError);
+  });
+
+  it('commits to a named address when several automatic candidates exist', () => {
+    // The Web Shell's disambiguation recovery posts the picked address back;
+    // the ambiguity throw must not pre-empt that commit, and the named
+    // candidate must win.
+    const interfaces = {
+      en0: [ipv4('192.168.1.10')],
+      en1: [ipv4('192.168.2.10')],
+    };
+    expect(selectLanAddress('192.168.2.10', interfaces)).toEqual({
+      interfaceName: 'en1',
+      address: '192.168.2.10',
+    });
+    expect(() => selectLanAddress('192.168.9.9', interfaces)).toThrow(
+      UnknownLanInterfaceError,
+    );
+  });
+
+  it('reports the physical interface for a dual-assigned routable address', () => {
+    // A corporate-VPN host can carry the same intranet address on the tunnel
+    // and the physical NIC; the tunnel is listed first so a first-match walk
+    // in enumeration order would report it. The QR row, the status payload,
+    // and the exposure warning all show this interfaceName, so the choice
+    // must be deterministic and prefer the physical interface.
+    const interfaces = {
+      utun4: [ipv4('203.0.113.10')],
+      en0: [ipv4('203.0.113.10')],
+    };
+    expect(selectLanAddress('203.0.113.10', interfaces)).toEqual({
+      interfaceName: 'en0',
+      address: '203.0.113.10',
+    });
+  });
+
+  it('prefers the physical interface when a software one sorts first', () => {
+    // `bridge0` sorts before `en0`: with the sort in place, only the
+    // non-software preference keeps the physical label on the address.
+    const interfaces = {
+      en0: [ipv4('203.0.113.10')],
+      bridge0: [ipv4('203.0.113.10')],
+    };
+    expect(selectLanAddress('203.0.113.10', interfaces)).toEqual({
+      interfaceName: 'en0',
+      address: '203.0.113.10',
+    });
+  });
+
+  it('reports dual-assigned addresses in sorted interface order', () => {
+    // Two physical interfaces holding the same address: the sorted walk is
+    // what keeps the reported interfaceName stable across OS enumeration
+    // orders (en1 is listed first on purpose).
+    expect(
+      selectLanAddress('203.0.113.10', {
+        en1: [ipv4('203.0.113.10')],
+        en0: [ipv4('203.0.113.10')],
+      }),
+    ).toEqual({ interfaceName: 'en0', address: '203.0.113.10' });
+  });
+
+  it('keeps a dual-assigned private address on its physical interface', () => {
+    // The case the candidate pre-check used to decide: an automatic-filter
+    // address held by both a tunnel and the physical NIC must keep the
+    // physical interfaceName even with the tunnel enumerated first.
+    const interfaces = {
+      utun4: [ipv4('192.168.1.10')],
+      en0: [ipv4('192.168.1.10')],
+    };
+    expect(selectLanAddress('192.168.1.10', interfaces)).toEqual({
+      interfaceName: 'en0',
+      address: '192.168.1.10',
+    });
+  });
+
+  it('refuses reserved-range addresses even when a non-loopback interface holds them', () => {
+    // `internal` comes from the interface's loopback flag, so a reserved
+    // address on a non-loopback interface would otherwise be accepted:
+    // 0.0.0.0 would bind EVERY interface, and multicast/reserved ranges can
+    // never pair a phone. The refusal names the shape rule rather than
+    // claiming the host lacks the address.
+    for (const refused of ['0.0.0.0', '224.0.0.5', '127.0.0.53']) {
+      expect(() =>
+        selectLanAddress(refused, { dummy0: [ipv4(refused)] }),
+      ).toThrow(ReservedLanAddressError);
+      expect(() =>
+        selectLanAddress(refused, { dummy0: [ipv4(refused)] }),
+      ).toThrow('never accepts');
+    }
   });
 });

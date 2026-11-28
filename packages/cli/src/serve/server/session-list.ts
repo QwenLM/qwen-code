@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
+import * as fs from 'node:fs/promises';
+import { GitWorktreeService } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
+import { selectWorktreeSnapshot } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import {
   addDaemonRequestAttribute,
   SESSION_PR_LIST_LIMIT,
@@ -14,6 +18,8 @@ import {
   readWorktreeSessionMarker,
   canonicalSessionPrUrl,
   readSessionPrsDetailed,
+  readSessionArtifactSummarySidecarAsync,
+  readSessionGoalSidecar,
   toSessionPrInfo,
   type SessionArchiveState,
   type SessionGroupPresetColor,
@@ -23,20 +29,33 @@ import {
   GROUP_COLOR_OPTIONS,
   type SessionGroupCatalog,
 } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  isPromptLedgerTerminalRecord,
+  readPromptLedgerRecords,
+} from '@qwen-code/acp-bridge/promptLedger';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
 } from '../acp-session-bridge.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import { preclassifyWorktreeCleanup } from './worktree-orphan-cleanup.js';
+import { assertRestoreCoordinates } from './worktree-snapshot-binding.js';
+import { canConvergeInterruptedSnapshotMove } from './worktree-snapshot-pairs.js';
 import {
   PersistedSessionListCache,
+  waitForSessionListLoad,
   type PersistedSessionListSnapshot,
+  type SessionListLoad,
 } from './persisted-session-list-cache.js';
 import { laterActivityTimestamp } from './activity-timestamp.js';
 import { classifyTopLevelConversationSource } from '../../runtime/live-session-source.js';
-import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
+import {
+  normalizeSessionIdForLookup,
+  parseCallerSuppliedSessionId,
+} from '../../config/session-id.js';
 import {
   HIDDEN_CATALOG_SOURCE_TYPES,
   isHiddenCatalogSource,
@@ -53,8 +72,22 @@ const persistedSessionListCache = new PersistedSessionListCache(
   PERSISTED_SESSION_LIST_CACHE_TTL_MS,
   MAX_ORGANIZED_SESSIONS,
 );
+// Each row is owned by one persisted snapshot. Its sidecars expire with it.
+interface PersistedSidecarLoad extends SessionListLoad<BridgeSessionSummary> {
+  worktreeLoad?: SessionListLoad<BridgeSessionSummary>;
+}
+
+interface CachedCatalogSnapshot extends PersistedSessionListSnapshot {
+  revalidateWorktree: boolean;
+}
+
+const persistedSidecarLoads = new WeakMap<
+  Readonly<BridgeSessionSummary>,
+  PersistedSidecarLoad
+>();
 
 export interface ListWorkspaceSessionsOptions {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   cursor?: string;
   size?: number;
   archiveState?: SessionArchiveState;
@@ -108,6 +141,8 @@ export interface WorkspaceSessionInfoResult {
 export interface ListWorkspaceSessionsReadOptions {
   /** Merge live bridge state into persisted summaries. */
   mergeLive?: boolean;
+  /** Explicitly control whether prompt-time reads may persist sidecars. */
+  allowSidecarWrite?: boolean;
   /** Paginate the combined persisted/live catalog, including unfiltered reads. */
   paginateMerged?: boolean;
   includeGroups?: boolean;
@@ -115,10 +150,13 @@ export interface ListWorkspaceSessionsReadOptions {
   runtimeBaseDir?: string;
   /** Aborts this caller's wait without cancelling other shared waiters. */
   signal?: AbortSignal;
+  /** Optional retirement-fence probe for search results that lack a bridge parameter. */
+  isSessionRetirementFenced?: (sessionId: string) => boolean;
 }
 
 interface ResolvedListWorkspaceSessionsReadOptions {
   mergeLive?: boolean;
+  allowSidecarWrite?: boolean;
   paginateMerged?: boolean;
   includeGroups?: boolean;
   runtimeBaseDir: string;
@@ -197,6 +235,7 @@ function parseSessionCursor(cursor: string): number | string | undefined {
 }
 
 interface OrganizedCursor {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   catalogKind?: 'organized';
   paginateMerged?: boolean;
   group: string;
@@ -240,6 +279,7 @@ function parseOrganizedCursor(
     group: string;
     archiveState: SessionArchiveState;
     paginateMerged: boolean;
+    sortBy?: 'updatedAt' | 'lastUserPromptAt';
     sourceType?: string;
     sourceId?: string;
     conversationKind?: 'standalone-top-level';
@@ -267,6 +307,8 @@ function parseOrganizedCursor(
       ((parsed as OrganizedCursor).paginateMerged !== undefined &&
         (parsed as OrganizedCursor).paginateMerged !==
           expected.paginateMerged) ||
+      ((parsed as OrganizedCursor).sortBy ?? 'updatedAt') !==
+        (expected.sortBy ?? 'updatedAt') ||
       (parsed as OrganizedCursor).group !== expected.group ||
       (parsed as OrganizedCursor).archiveState !== expected.archiveState ||
       (parsed as OrganizedCursor).sourceType !== expected.sourceType ||
@@ -294,10 +336,12 @@ function encodeOrganizedCursor(
   sourceId?: string,
   conversationKind?: 'standalone-top-level',
   emitted: readonly string[] = [],
+  sortBy?: 'updatedAt' | 'lastUserPromptAt',
 ): string {
   return Buffer.from(
     JSON.stringify({
       catalogKind: 'organized',
+      sortBy,
       paginateMerged,
       group,
       archiveState,
@@ -342,6 +386,7 @@ function encodeLiveSessionCursor(last: LiveSessionCursorKey): string {
 
 /** Binds an opaque cursor to the metadata filter that produced it. */
 interface SessionMetadataFilter {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   parentSessionId?: string;
   sourceType?: string;
   sourceId?: string;
@@ -403,6 +448,8 @@ function parseMetadataSessionCursor(
       ((parsed as { paginateMerged?: unknown }).paginateMerged !== undefined &&
         (parsed as { paginateMerged?: unknown }).paginateMerged !==
           expected.paginateMerged) ||
+      ((parsed as { sortBy?: unknown }).sortBy ?? 'updatedAt') !==
+        (expected.sortBy ?? 'updatedAt') ||
       (parsed as { parentSessionId?: unknown }).parentSessionId !==
         expected.parentSessionId ||
       (parsed as { sourceType?: unknown }).sourceType !== expected.sourceType ||
@@ -457,41 +504,208 @@ function encodeMetadataSessionCursor(
  * files so the ⑂ badge survives daemon restarts. Shared by all three
  * listing paths (default, organized, metadata-filtered).
  */
-async function enrichWorktreeSidecars(
+export function isBridgeSessionRetirementFenced(
+  bridge: Partial<Pick<AcpSessionBridge, 'getSessionRetirement'>>,
+  sessionId: string,
+): boolean {
+  if (!bridge.getSessionRetirement) return false;
+  const normalized = normalizeSessionIdForLookup(sessionId);
+  const ids = normalized === sessionId ? [sessionId] : [sessionId, normalized];
+  try {
+    return ids.some((id) => Boolean(bridge.getSessionRetirement!(id)));
+  } catch {
+    // Unreadable or corrupt retirement ledger entries fail closed.
+    return true;
+  }
+}
+
+export async function enrichWorktreeSidecars(
   bySessionId: Map<string, BridgeSessionSummary>,
   sessionService: SessionService,
   archiveState: SessionArchiveState = 'active',
   signal?: AbortSignal,
+  isSessionRetirementFenced?: (sessionId: string) => boolean,
 ): Promise<void> {
+  let runtimeRoots: readonly string[] | undefined;
+  const getRuntimeRoots = async () => {
+    if (runtimeRoots !== undefined) return runtimeRoots;
+    const roots = new Set([sessionService.getProjectRoot()]);
+    try {
+      const repoTop = await new GitWorktreeService(
+        sessionService.getProjectRoot(),
+      ).getRepoTopLevel();
+      if (repoTop) roots.add(repoTop);
+    } catch {
+      // The runtime root still bounds a plain workspace. Ownership
+      // calibration and the actual restore use a fresh Git read.
+    }
+    runtimeRoots = [...roots];
+    return runtimeRoots;
+  };
   for (const [sessionId, summary] of bySessionId) {
     signal?.throwIfAborted();
-    if (summary.worktree) continue;
+    const sidecarPath = sessionService.getWorktreeSessionPathForArchiveState(
+      sessionId,
+      archiveState,
+    );
     let sidecar: Awaited<ReturnType<typeof readWorktreeSession>>;
+    let readFailed = false;
     try {
-      const sidecarPath = sessionService.getWorktreeSessionPathForArchiveState(
-        sessionId,
-        archiveState,
-      );
-      sidecar = signal
-        ? await readWorktreeSession(sidecarPath, { signal })
-        : await readWorktreeSession(sidecarPath);
+      sidecar = await readWorktreeSession(sidecarPath, {
+        signal,
+        onInvalid: () => {
+          readFailed = true;
+        },
+      });
     } catch {
       signal?.throwIfAborted();
       sidecar = null;
+      readFailed = true;
     }
+    if (!sidecar) {
+      if (readFailed) {
+        if (summary.worktree?.worktreeRemoved) {
+          bySessionId.set(sessionId, {
+            ...summary,
+            worktree: { ...summary.worktree, canRestore: false },
+          });
+        }
+        continue;
+      }
+      if (summary.worktree) {
+        const updated = { ...summary };
+        delete updated.worktree;
+        bySessionId.set(sessionId, updated);
+      }
+      continue;
+    }
+    let removed = sidecar.worktreeRemoved;
     if (
-      sidecar &&
-      (await readWorktreeSessionMarker(sidecar.worktreePath)) === sessionId
+      !removed &&
+      (await readWorktreeSessionMarker(sidecar.worktreePath)) !== sessionId
     ) {
-      bySessionId.set(sessionId, {
-        ...summary,
-        worktree: {
-          slug: sidecar.slug,
-          path: sidecar.worktreePath,
-          branch: sidecar.worktreeBranch,
-        },
-      });
+      // A historical removal can lose the checkout and its marker before the
+      // sidecar binding is written. Only a genuinely absent checkout with an
+      // exact session/slug pair may be exposed as a retained snapshot.
+      try {
+        await fs.lstat(sidecar.worktreePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          const candidate = await preclassifyWorktreeCleanup(
+            sessionService,
+            sessionId,
+            sessionService.getProjectRoot(),
+            { quiet: true, runtimeRoots: await getRuntimeRoots() },
+          );
+          if (
+            candidate &&
+            path.dirname(candidate.sidecarPath) === path.dirname(sidecarPath)
+          ) {
+            try {
+              await assertRestoreCoordinates(candidate);
+              const selected = await selectWorktreeSnapshot({
+                directory: path.dirname(candidate.sidecarPath),
+                sessionId,
+                slug: candidate.sidecar.slug,
+              });
+              if (selected) {
+                removed = { archiveKey: path.basename(selected.snapshotPath) };
+              }
+            } catch {
+              // Invalid coordinates or an unreadable pair are not a restore
+              // capability; leave the ordinary missing-owner handling intact.
+            }
+          }
+        }
+      }
+      if (!removed) {
+        if (summary.worktree) {
+          const stripped = { ...summary };
+          delete stripped.worktree;
+          bySessionId.set(sessionId, stripped);
+        }
+        continue;
+      }
     }
+    let canRestore = false;
+    if (
+      removed &&
+      archiveState === 'active' &&
+      !isSessionRetirementFenced?.(sessionId)
+    ) {
+      try {
+        // The restore route refuses every non-active location, so a row that
+        // still has an archived twin must not advertise a capability the
+        // click can never satisfy.
+        if (
+          (await sessionService.getMaintainableSessionLocation(sessionId)) ===
+          'active'
+        ) {
+          const candidate = await preclassifyWorktreeCleanup(
+            sessionService,
+            sessionId,
+            sessionService.getProjectRoot(),
+            { quiet: true, runtimeRoots: await getRuntimeRoots() },
+          );
+          if (
+            candidate &&
+            path.dirname(candidate.sidecarPath) === path.dirname(sidecarPath)
+          ) {
+            await assertRestoreCoordinates(candidate);
+            try {
+              canRestore =
+                (await selectWorktreeSnapshot({
+                  directory: path.dirname(sidecarPath),
+                  sessionId,
+                  slug: sidecar.slug,
+                  archiveKey: removed.archiveKey,
+                })) !== undefined;
+            } catch {
+              canRestore = false;
+            }
+            if (!canRestore && candidate.otherStateSidecarDir !== undefined) {
+              canRestore = await canConvergeInterruptedSnapshotMove(
+                candidate.otherStateSidecarDir,
+                path.dirname(sidecarPath),
+                sessionId,
+                sidecar.slug,
+                removed.archiveKey,
+              );
+            }
+          }
+        }
+      } catch {
+        // An unavailable pair is shown as such, never as a restore capability.
+      }
+    }
+    // Normal metadata remains with its scan snapshot so a concurrent sidecar
+    // write never tears a cold response; refresh coordinates only when a
+    // previously removed entry has just been restored or no worktree was
+    // cached yet.
+    const worktree =
+      !removed &&
+      summary.worktree &&
+      summary.worktree.worktreeRemoved === undefined
+        ? { ...summary.worktree }
+        : {
+            ...(summary.worktree ?? {}),
+            slug: sidecar.slug,
+            path: sidecar.worktreePath,
+            branch: sidecar.worktreeBranch,
+            baseCommit:
+              sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
+            baseBranch: sidecar.originalBranch || undefined,
+          };
+    delete worktree.worktreeRemoved;
+    delete worktree.canRestore;
+    if (removed) {
+      worktree.worktreeRemoved = removed;
+      worktree.canRestore = canRestore;
+    }
+    bySessionId.set(sessionId, {
+      ...summary,
+      worktree,
+    });
   }
 }
 
@@ -538,6 +752,150 @@ async function enrichPrSidecars(
   }
 }
 
+/**
+ * Enrich persisted session summaries with the restorable artifact count from
+ * the summary sidecar so the header entry can show it at click time. Same
+ * best-effort pattern as {@link enrichPrSidecars}: a missing or unreadable
+ * sidecar is an UNKNOWN count, not zero artifacts, and leaves the field
+ * unset. Runs before the live merge; a live entry's own count supersedes it.
+ */
+async function enrichArtifactSummaries(
+  bySessionId: Map<string, BridgeSessionSummary>,
+  sessionService: SessionService,
+  archiveState: SessionArchiveState,
+  signal?: AbortSignal,
+): Promise<void> {
+  for (const [sessionId, summary] of bySessionId) {
+    signal?.throwIfAborted();
+    let count: number | undefined;
+    try {
+      const sidecarPath = sessionService.getArtifactSummaryPathForArchiveState(
+        sessionId,
+        archiveState,
+      );
+      // Yield between reads so a cancelled page stops doing work promptly.
+      const sidecar = signal
+        ? await readSessionArtifactSummarySidecarAsync(sidecarPath, { signal })
+        : await readSessionArtifactSummarySidecarAsync(sidecarPath);
+      count = sidecar?.artifactCount;
+    } catch {
+      signal?.throwIfAborted();
+      count = undefined;
+    }
+    if (count !== undefined && count > 0) {
+      bySessionId.set(sessionId, { ...summary, artifactCount: count });
+    }
+  }
+}
+
+/**
+ * Enrich persisted session summaries with the goal list projection from
+ * sidecar files, so the sidebar marker survives daemon restarts and shows
+ * for unloaded/archived sessions the live-only Goals listing cannot see.
+ * Same pattern as {@link enrichPrSidecars}; disk-only, no IPC probes. An
+ * absent or unreadable sidecar leaves `goal` unset (no marker).
+ */
+async function enrichGoalSidecars(
+  bySessionId: Map<string, BridgeSessionSummary>,
+  sessionService: SessionService,
+  archiveState: SessionArchiveState,
+  signal?: AbortSignal,
+): Promise<void> {
+  for (const [sessionId, summary] of bySessionId) {
+    signal?.throwIfAborted();
+    let sidecar: Awaited<ReturnType<typeof readSessionGoalSidecar>>;
+    try {
+      const sidecarPath = sessionService.getGoalSessionPathForArchiveState(
+        sessionId,
+        archiveState,
+      );
+      sidecar = signal
+        ? await readSessionGoalSidecar(sidecarPath, { signal })
+        : await readSessionGoalSidecar(sidecarPath);
+    } catch {
+      signal?.throwIfAborted();
+      sidecar = null;
+    }
+    if (sidecar) {
+      bySessionId.set(sessionId, {
+        ...summary,
+        goal: {
+          status: sidecar.status,
+          objective: sidecar.objective,
+          updatedAt: new Date(sidecar.updatedAt).toISOString(),
+        },
+      });
+    }
+  }
+}
+
+/**
+ * Teardown flush codes: `flushPromptTerminals` publishes an `error` terminal
+ * with one of these codes for every still-pending prompt when the daemon
+ * shuts down, the agent channel exits, or the session is closed/killed. The
+ * turn was cut off by teardown, not by a model failure, so the session can
+ * offer "Continue execution" on its next load.
+ */
+const CONTINUATION_TEARDOWN_CODES = new Set([
+  'daemon_shutdown',
+  'channel_closed',
+  'session_closed',
+  'session_killed',
+]);
+
+/**
+ * Only the ledger's last record decides, so a small tail window suffices;
+ * the reader drops a torn final line and falls back to the previous record.
+ */
+const CONTINUATION_LEDGER_TAIL_BYTES = 4 * 1024;
+
+/**
+ * Enrich persisted summaries with prompt-ledger continuation evidence so the
+ * sidebar can mark sessions whose latest prompt was cut off mid-flight. Same
+ * pattern as {@link enrichPrSidecars}; active sessions only — the ledger path
+ * is the active one, and archived conversations are closed. Fail-closed: an
+ * unreadable ledger leaves the field absent.
+ */
+async function enrichPromptContinuation(
+  bySessionId: Map<string, BridgeSessionSummary>,
+  sessionService: SessionService,
+  archiveState: SessionArchiveState,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (archiveState !== 'active') return;
+  let scanned = 0;
+  for (const [sessionId, summary] of bySessionId) {
+    signal?.throwIfAborted();
+    // The ledger reads are synchronous; yield periodically so a large
+    // result does not stall the daemon's event loop.
+    if (++scanned % 64 === 0) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      signal?.throwIfAborted();
+    }
+    let records: ReturnType<typeof readPromptLedgerRecords>;
+    try {
+      records = readPromptLedgerRecords(
+        sessionService.getPromptLedgerPath(sessionId),
+        { tailBytes: CONTINUATION_LEDGER_TAIL_BYTES },
+      );
+    } catch {
+      signal?.throwIfAborted();
+      continue;
+    }
+    const last = records[records.length - 1];
+    if (!last) continue;
+    const cutOff = !isPromptLedgerTerminalRecord(last)
+      ? true // dangling admission: no terminal ever landed
+      : last.terminal === 'interrupted' ||
+        (last.terminal === 'error' &&
+          last.code !== undefined &&
+          CONTINUATION_TEARDOWN_CODES.has(last.code));
+    if (cutOff) {
+      bySessionId.set(sessionId, { ...summary, needsContinuation: true });
+    }
+  }
+}
+
 function toSummary(item: {
   sessionId: string;
   cwd: string;
@@ -567,6 +925,15 @@ function toSummary(item: {
     hasActivePrompt: false,
     isArchived: item.isArchived === true,
   };
+}
+
+function hasActiveSessionWork(session: BridgeSessionSummary): boolean {
+  return (
+    session.hasActivePrompt ||
+    session.activeWorkState === 'active' ||
+    session.hasRunningBackgroundTasks === true ||
+    Boolean(session.backgroundTurn)
+  );
 }
 
 /**
@@ -600,6 +967,31 @@ function mergeLiveSessionSummary(
     hasRunningBackgroundTasks: live.hasRunningBackgroundTasks,
     isArchived: false,
   };
+  if (live.worktree) {
+    // Snapshot lifecycle changes are owned by the sidecar, not a live
+    // summary that may predate its removal or restoration.
+    const worktree = { ...live.worktree };
+    delete worktree.worktreeRemoved;
+    delete worktree.canRestore;
+    const removed = existing.worktree?.worktreeRemoved;
+    if (removed) {
+      merged.worktree = {
+        ...worktree,
+        worktreeRemoved: removed,
+        ...(existing.worktree?.canRestore !== undefined
+          ? { canRestore: existing.worktree.canRestore }
+          : {}),
+      };
+    } else {
+      merged.worktree = worktree;
+    }
+  }
+  // Work in flight supersedes the persisted cut-off evidence: the running
+  // turn owns the transcript tail now, so a fresh catalog read of a running
+  // session must not carry the continuation hint.
+  if (hasActiveSessionWork(merged)) {
+    delete merged.needsContinuation;
+  }
   // The live entry only knows PR bindings from this daemon lifetime while the
   // sidecar-enriched persisted summary holds the full history. The sidecar is
   // the append-only binding-time record (last = latest — the order the badge
@@ -611,6 +1003,15 @@ function mergeLiveSessionSummary(
   // it there, while the live entry is frozen at bind-time.
   if (existing.prs || live.prs) {
     merged.prs = mergeSummaryPrs(existing.prs, live.prs);
+  }
+  // The live entry is authoritative for its artifact count (the spread above
+  // already overlays a non-zero one). When it omits the field — count zero —
+  // a stale sidecar-derived count from the persisted summary must not survive.
+  // The exception is a pending restore: the entry is live but its store is
+  // not hydrated yet, so the omission is unknown, not zero, and the
+  // sidecar-enriched count stays until the restore settles.
+  if (live.artifactCount === undefined && live.artifactCountPending !== true) {
+    delete merged.artifactCount;
   }
   return merged;
 }
@@ -746,6 +1147,172 @@ function clonePersistedSummary(
   };
 }
 
+function readPersistedSidecars(
+  session: Readonly<BridgeSessionSummary>,
+  service: SessionService,
+  archiveState: SessionArchiveState,
+  signal: AbortSignal | undefined,
+  revalidateWorktree: boolean,
+  isSessionRetirementFenced?: (sessionId: string) => boolean,
+): Promise<BridgeSessionSummary> {
+  signal?.throwIfAborted();
+  const cachedLoad = persistedSidecarLoads.get(session);
+  let load = cachedLoad;
+  // A load created or still pending for this call already read the sidecar
+  // in this request; revalidating it again would double every page read.
+  const revalidateCachedWorktree =
+    revalidateWorktree &&
+    cachedLoad !== undefined &&
+    !cachedLoad.controller.signal.aborted &&
+    cachedLoad.settled;
+  if (!load || load.controller.signal.aborted) {
+    const controller = new AbortController();
+    const read = async () => {
+      const readSignal = controller.signal;
+      readSignal.throwIfAborted();
+      const rows = new Map([[session.sessionId, { ...session }]]);
+      await enrichPromptContinuation(rows, service, archiveState, readSignal);
+      await enrichWorktreeSidecars(
+        rows,
+        service,
+        archiveState,
+        readSignal,
+        isSessionRetirementFenced,
+      );
+      await enrichPrSidecars(rows, service, archiveState, readSignal);
+      await enrichArtifactSummaries(rows, service, archiveState, readSignal);
+      await enrichGoalSidecars(rows, service, archiveState, readSignal);
+      readSignal.throwIfAborted();
+      return rows.get(session.sessionId)!;
+    };
+    const started: PersistedSidecarLoad = {
+      controller,
+      waiterCount: 0,
+      settled: false,
+      promise: Promise.resolve()
+        .then(read)
+        .catch((error: unknown) => {
+          if (persistedSidecarLoads.get(session) === started) {
+            persistedSidecarLoads.delete(session);
+          }
+          throw error;
+        })
+        .finally(() => {
+          started.settled = true;
+        }),
+    };
+    persistedSidecarLoads.set(session, started);
+    load = started;
+  }
+  const metadataLoad = load;
+  return waitForSessionListLoad(metadataLoad, signal).then(async (cached) => {
+    // A fresh scan and its joiners already share this validated projection.
+    if (!revalidateCachedWorktree) return clonePersistedSummary(cached);
+    let worktreeLoad = metadataLoad.worktreeLoad;
+    if (
+      !worktreeLoad ||
+      worktreeLoad.settled ||
+      worktreeLoad.controller.signal.aborted
+    ) {
+      // Removal and restoration can change while metadata is cached. Share
+      // only the pending read; a later view validates the sidecar again.
+      const controller = new AbortController();
+      const started: SessionListLoad<BridgeSessionSummary> = {
+        controller,
+        waiterCount: 0,
+        settled: false,
+        promise: Promise.resolve()
+          .then(async () => {
+            controller.signal.throwIfAborted();
+            const rows = new Map([
+              [session.sessionId, clonePersistedSummary(cached)],
+            ]);
+            await enrichWorktreeSidecars(
+              rows,
+              service,
+              archiveState,
+              controller.signal,
+              isSessionRetirementFenced,
+            );
+            controller.signal.throwIfAborted();
+            return rows.get(session.sessionId)!;
+          })
+          .catch((error: unknown) => {
+            if (metadataLoad.worktreeLoad === started) {
+              delete metadataLoad.worktreeLoad;
+            }
+            throw error;
+          })
+          .finally(() => {
+            started.settled = true;
+          }),
+      };
+      worktreeLoad = started;
+      metadataLoad.worktreeLoad = started;
+    }
+    return waitForSessionListLoad(worktreeLoad, signal).then(
+      clonePersistedSummary,
+    );
+  });
+}
+
+async function enrichCatalogPage(
+  page: BridgeSessionSummary[],
+  persistedById: ReadonlyMap<string, Readonly<BridgeSessionSummary>>,
+  liveRows: readonly BridgeSessionSummary[],
+  service: SessionService,
+  archiveState: SessionArchiveState,
+  signal: AbortSignal | undefined,
+  revalidateWorktree: boolean,
+  isSessionRetirementFenced?: (sessionId: string) => boolean,
+): Promise<void> {
+  const selectedIds = new Set(page.map((session) => session.sessionId));
+  const detailsById = new Map<string, BridgeSessionSummary>();
+  for (const { sessionId } of page) {
+    const stored = persistedById.get(sessionId);
+    if (stored) {
+      detailsById.set(
+        sessionId,
+        clonePersistedSummary(
+          await readPersistedSidecars(
+            stored,
+            service,
+            archiveState,
+            signal,
+            revalidateWorktree,
+            isSessionRetirementFenced,
+          ),
+        ),
+      );
+    }
+  }
+  // Replay live merges on the enriched rows. The selected summaries keep
+  // their organization, sort keys, and cursor identity.
+  for (const live of liveRows) {
+    signal?.throwIfAborted();
+    if (!selectedIds.has(live.sessionId)) continue;
+    const stored = detailsById.get(live.sessionId);
+    detailsById.set(
+      live.sessionId,
+      stored
+        ? mergeLiveSessionSummary(stored, live)
+        : await liveOnlySummary(live, service, signal),
+    );
+  }
+  signal?.throwIfAborted();
+  for (const session of page) {
+    const details = detailsById.get(session.sessionId);
+    if (!details) continue;
+    if (details.worktree !== undefined) session.worktree = details.worktree;
+    if (details.prs !== undefined) session.prs = details.prs;
+    if (details.artifactCount !== undefined)
+      session.artifactCount = details.artifactCount;
+    if (details.goal !== undefined) session.goal = details.goal;
+    if (details.needsContinuation !== undefined)
+      session.needsContinuation = details.needsContinuation;
+  }
+}
+
 async function loadAllPersistedSummaries(
   sessionService: SessionService,
   archiveState: SessionArchiveState,
@@ -758,6 +1325,7 @@ async function loadAllPersistedSummaries(
   const sessions: BridgeSessionSummary[] = [];
   let truncated = false;
   let scanPages = 0;
+  let catalogReadFallbacks = 0;
   let cursor: number | string | undefined;
   do {
     scanPages += 1;
@@ -766,9 +1334,11 @@ async function loadAllPersistedSummaries(
       size: 10_000,
       archiveState,
       signal,
+      forCatalog: true,
       excludeSourceTypes: [...HIDDEN_CATALOG_SOURCE_TYPES],
     });
     signal.throwIfAborted();
+    catalogReadFallbacks += page.catalogReadFallbacks ?? 0;
     const remaining = MAX_ORGANIZED_SESSIONS - sessions.length;
     sessions.push(...page.items.slice(0, remaining).map(toSummary));
     cursor = page.nextCursor;
@@ -789,18 +1359,12 @@ async function loadAllPersistedSummaries(
   const bySessionId = new Map(
     sessions.map((session) => [session.sessionId, session]),
   );
-  await enrichWorktreeSidecars(
-    bySessionId,
-    sessionService,
-    archiveState,
-    signal,
-  );
-  await enrichPrSidecars(bySessionId, sessionService, archiveState, signal);
   signal.throwIfAborted();
   return {
     sessions: [...bySessionId.values()],
     truncated,
     scanPages,
+    catalogReadFallbacks,
     scanDurationMs: Math.max(0, performance.now() - scanStartedAt),
   };
 }
@@ -812,7 +1376,7 @@ async function listAllPersistedSummaries(
   runtimeBaseDir: string,
   queryKind: 'organized' | 'metadata',
   signal?: AbortSignal,
-): Promise<PersistedSessionListSnapshot> {
+): Promise<CachedCatalogSnapshot> {
   const lookup = persistedSessionListCache.lookup(
     { runtimeBaseDir, workspaceCwd, archiveState },
     (loadSignal) =>
@@ -857,20 +1421,35 @@ async function listAllPersistedSummaries(
       'qwen-code.daemon.session_list.scan_duration_ms',
       snapshot.scanDurationMs,
     );
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_list.catalog_read_fallbacks',
+      snapshot.catalogReadFallbacks ?? 0,
+    );
   }
-  return snapshot;
+  return {
+    ...snapshot,
+    revalidateWorktree: lookup.status === 'cache_hit',
+  };
 }
 
-function getSummaryActivityTime(session: BridgeSessionSummary): number {
+function getSummaryActivityTime(
+  session: BridgeSessionSummary,
+  sortBy?: 'updatedAt' | 'lastUserPromptAt',
+): number {
+  if (sortBy === 'lastUserPromptAt') {
+    const time = Date.parse(session.lastUserPromptAt ?? '');
+    return Number.isFinite(time) ? time : Number.MIN_SAFE_INTEGER;
+  }
   const time = Date.parse(session.updatedAt ?? session.createdAt);
   return Number.isFinite(time) ? time : 0;
 }
 
 function getLiveSessionCursorKey(
   session: BridgeSessionSummary,
+  sortBy?: 'updatedAt' | 'lastUserPromptAt',
 ): LiveSessionCursorKey {
   return {
-    activityTime: getSummaryActivityTime(session),
+    activityTime: getSummaryActivityTime(session, sortBy),
     sessionId: session.sessionId,
   };
 }
@@ -1033,6 +1612,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
       ? parseOrganizedCursor(options.cursor, {
           paginateMerged: readOptions.paginateMerged === true,
           group,
+          sortBy: options.sortBy,
           archiveState,
           sourceType: options.sourceType,
           sourceId: options.sourceId,
@@ -1054,11 +1634,13 @@ async function listOrganizedWorkspaceSessionsForResponse(
     readOptions.signal,
   );
   readOptions.signal?.throwIfAborted();
+  const persistedById = new Map<string, Readonly<BridgeSessionSummary>>();
   for (const session of persisted.sessions) {
+    persistedById.set(session.sessionId, session);
     bySessionId.set(
       session.sessionId,
       applyOrganization(
-        clonePersistedSummary(session),
+        { ...session },
         snapshot.sessions.get(session.sessionId),
       ),
     );
@@ -1071,6 +1653,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
     ]),
   );
   const liveSessionIds = new Set<string>();
+  const liveRows: BridgeSessionSummary[] = [];
 
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
@@ -1093,8 +1676,12 @@ async function listOrganizedWorkspaceSessionsForResponse(
           );
         } else if (
           // Preserve legacy first-page-only insertion unless the caller
-          // requests pagination across the complete merged catalog.
-          (isFirstPage || readOptions.paginateMerged) &&
+          // requests pagination across the complete merged catalog. Question
+          // sorting also needs later pages: a live-only row has no question
+          // time yet, so it sorts last and would otherwise be unreachable.
+          (isFirstPage ||
+            readOptions.paginateMerged ||
+            options.sortBy === 'lastUserPromptAt') &&
           // `listAllPersistedSummaries` already scanned every persisted
           // session when the scan wasn't truncated, so a `sessionId` missing
           // from `bySessionId` is definitively new — no disk re-check
@@ -1112,12 +1699,12 @@ async function listOrganizedWorkspaceSessionsForResponse(
         ) {
           bySessionId.set(
             live.sessionId,
-            applyOrganization(
-              await liveOnlySummary(live, sessionService, readOptions.signal),
-              organization,
-            ),
+            applyOrganization({ ...live, isArchived: false }, organization),
           );
+        } else {
+          continue;
         }
+        liveRows.push(live);
       }
     } catch (error) {
       readOptions.signal?.throwIfAborted();
@@ -1144,10 +1731,24 @@ async function listOrganizedWorkspaceSessionsForResponse(
     return session.color == null && session.groupId === group;
   });
   readOptions.signal?.throwIfAborted();
+  if (options.sortBy === 'lastUserPromptAt') {
+    await enrichPromptTimes(
+      filtered,
+      sessionService,
+      archiveState,
+      readOptions,
+      true,
+    );
+    for (const session of filtered)
+      persistedTimeById.set(
+        session.sessionId,
+        getSummaryActivityTime(session, options.sortBy),
+      );
+  }
   const activityTimeById = new Map(
     filtered.map((session) => [
       session.sessionId,
-      getSummaryActivityTime(session),
+      getSummaryActivityTime(session, options.sortBy),
     ]),
   );
   filtered.sort((a, b) => compareOrganizedSessions(activityTimeById, a, b));
@@ -1204,8 +1805,19 @@ async function listOrganizedWorkspaceSessionsForResponse(
       options.sourceId,
       options.conversationKind,
       emitted,
+      options.sortBy,
     );
   }
+  await enrichCatalogPage(
+    page,
+    persistedById,
+    liveRows,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+    persisted.revalidateWorktree,
+    (id) => isBridgeSessionRetirementFenced(bridge, id),
+  );
   return {
     sessions: page,
     ...(readOptions.includeGroups
@@ -1249,6 +1861,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
   const canonicalizeStandaloneIds =
     filter.conversationKind === 'standalone-top-level';
   const conflictedStandaloneIds = new Set<string>();
+  const persistedById = new Map<string, Readonly<BridgeSessionSummary>>();
   const persistedTimeById = new Map<string, number>();
   for (const session of persisted.sessions) {
     let sessionId = session.sessionId;
@@ -1259,19 +1872,22 @@ async function listWorkspaceSessionsByMetadataForResponse(
       if (conflictedStandaloneIds.has(sessionId)) continue;
       if (bySessionId.has(sessionId)) {
         bySessionId.delete(sessionId);
+        persistedById.delete(sessionId);
         persistedTimeById.delete(sessionId);
         conflictedStandaloneIds.add(sessionId);
         continue;
       }
     }
+    persistedById.set(sessionId, session);
     bySessionId.set(sessionId, {
-      ...clonePersistedSummary(session),
+      ...session,
       sessionId,
     });
     persistedTimeById.set(sessionId, getSummaryActivityTime(session));
   }
   // Activity floors: the key a row falls back to once its live entry is gone.
   const liveSessionIds = new Set<string>();
+  const liveRows: BridgeSessionSummary[] = [];
 
   let liveMergeFailed = false;
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
@@ -1309,15 +1925,11 @@ async function listWorkspaceSessionsByMetadataForResponse(
               })
             : sessionService.sessionExists(sessionId)))
         ) {
-          bySessionId.set(
-            sessionId,
-            await liveOnlySummary(
-              canonicalLive,
-              sessionService,
-              readOptions.signal,
-            ),
-          );
+          bySessionId.set(sessionId, { ...canonicalLive, isArchived: false });
+        } else {
+          continue;
         }
+        liveRows.push(canonicalLive);
       }
     } catch (error) {
       readOptions.signal?.throwIfAborted();
@@ -1330,21 +1942,15 @@ async function listWorkspaceSessionsByMetadataForResponse(
     }
   }
 
-  const matches = [...bySessionId.values()]
-    .filter(
-      (session) =>
-        !isHiddenCatalogSource(session.sourceType) &&
-        (filter.parentSessionId === undefined ||
-          session.parentSessionId === filter.parentSessionId) &&
-        matchesSessionMetadataSource(session, filter),
-    )
-    .sort((a, b) =>
-      compareLiveSessionCursorKeys(
-        getLiveSessionCursorKey(a),
-        getLiveSessionCursorKey(b),
-      ),
-    );
+  const matches = [...bySessionId.values()].filter(
+    (session) =>
+      !isHiddenCatalogSource(session.sourceType) &&
+      (filter.parentSessionId === undefined ||
+        session.parentSessionId === filter.parentSessionId) &&
+      matchesSessionMetadataSource(session, filter),
+  );
   readOptions.signal?.throwIfAborted();
+  // Reject a cross-sort cursor before paying for any transcript read.
   const cursor =
     options.cursor !== undefined && options.cursor !== ''
       ? parseMetadataSessionCursor(options.cursor, {
@@ -1353,6 +1959,26 @@ async function listWorkspaceSessionsByMetadataForResponse(
           archiveState,
         })
       : undefined;
+  if (options.sortBy === 'lastUserPromptAt') {
+    await enrichPromptTimes(
+      matches,
+      sessionService,
+      archiveState,
+      readOptions,
+      true,
+    );
+    for (const session of matches)
+      persistedTimeById.set(
+        session.sessionId,
+        getSummaryActivityTime(session, options.sortBy),
+      );
+  }
+  matches.sort((a, b) =>
+    compareLiveSessionCursorKeys(
+      getLiveSessionCursorKey(a, options.sortBy),
+      getLiveSessionCursorKey(b, options.sortBy),
+    ),
+  );
   const cursorKey = cursor?.last;
   const emittedBeforePage = new Set(cursor?.emitted ?? []);
   const afterCursor =
@@ -1365,13 +1991,16 @@ async function listWorkspaceSessionsByMetadataForResponse(
             !emittedBeforePage.has(session.sessionId) &&
             compareLiveSessionCursorKeys(
               cursorKey,
-              getLiveSessionCursorKey(session),
+              getLiveSessionCursorKey(session, options.sortBy),
             ) < 0,
         );
   const page = afterCursor.slice(0, pageSize);
   let nextCursor: string | undefined;
   if (page.length < afterCursor.length) {
-    const boundary = getLiveSessionCursorKey(page[page.length - 1]!);
+    const boundary = getLiveSessionCursorKey(
+      page[page.length - 1]!,
+      options.sortBy,
+    );
     const emitted = nextEmittedSessionIds({
       carried: emittedBeforePage,
       page,
@@ -1394,12 +2023,47 @@ async function listWorkspaceSessionsByMetadataForResponse(
       emitted,
     );
   }
+  await enrichCatalogPage(
+    page,
+    persistedById,
+    liveRows,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+    persisted.revalidateWorktree,
+    (id) => isBridgeSessionRetirementFenced(bridge, id),
+  );
   return {
     sessions: page,
     ...(nextCursor !== undefined ? { nextCursor } : {}),
     ...(liveMergeFailed ? { liveMergeFailed: true } : {}),
     ...(persisted.truncated ? { truncated: true } : {}),
   };
+}
+
+function waitForQuestionTime(
+  promise: Promise<string | undefined>,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  if (!signal) return promise;
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener('abort', abort);
+      reject(signal.reason);
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+    void promise.then(
+      (value) => {
+        signal.removeEventListener('abort', abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', abort);
+        reject(error);
+      },
+    );
+  });
 }
 
 export async function listWorkspaceSessionsForResponse(
@@ -1409,6 +2073,7 @@ export async function listWorkspaceSessionsForResponse(
   readOptions: ListWorkspaceSessionsReadOptions = {},
 ): Promise<ListWorkspaceSessionsResult> {
   readOptions.signal?.throwIfAborted();
+  const archiveState = options?.archiveState ?? 'active';
   const runtimeBaseDir = new Storage(
     workspaceCwd,
     readOptions.runtimeBaseDir,
@@ -1419,6 +2084,9 @@ export async function listWorkspaceSessionsForResponse(
       listWorkspaceSessionsForResponseInRuntime(bridge, workspaceCwd, options, {
         ...(readOptions.mergeLive !== undefined
           ? { mergeLive: readOptions.mergeLive }
+          : {}),
+        ...(readOptions.allowSidecarWrite !== undefined
+          ? { allowSidecarWrite: readOptions.allowSidecarWrite }
           : {}),
         ...(readOptions.paginateMerged !== undefined
           ? { paginateMerged: readOptions.paginateMerged }
@@ -1433,7 +2101,81 @@ export async function listWorkspaceSessionsForResponse(
       }),
   );
   readOptions.signal?.throwIfAborted();
+  if (options?.sortBy !== 'lastUserPromptAt') {
+    await enrichPromptTimes(
+      result.sessions,
+      new SessionService(workspaceCwd, { runtimeBaseDir }),
+      archiveState,
+      readOptions,
+    );
+  }
+  if (
+    archiveState === 'active' &&
+    readOptions.mergeLive !== false &&
+    !result.liveMergeFailed
+  ) {
+    // A prompt can start and write its admission while the page is enriched.
+    for (const session of result.sessions) {
+      if (!session.needsContinuation) continue;
+      try {
+        const live = bridge.getSessionSummary(session.sessionId);
+        if (live.workspaceCwd === workspaceCwd && hasActiveSessionWork(live)) {
+          delete session.needsContinuation;
+        }
+      } catch (error) {
+        if (!(error instanceof SessionNotFoundError)) throw error;
+      }
+    }
+  }
   return result;
+}
+
+async function enrichPromptTimes(
+  sessions: BridgeSessionSummary[],
+  service: SessionService,
+  archiveState: SessionArchiveState,
+  readOptions: Pick<
+    ListWorkspaceSessionsReadOptions,
+    'signal' | 'mergeLive' | 'allowSidecarWrite'
+  >,
+  preferCache = false,
+): Promise<void> {
+  let nextIndex = 0;
+  const allowSidecarWrite =
+    readOptions.allowSidecarWrite ?? readOptions.mergeLive !== false;
+  const promptReadOptions =
+    preferCache || readOptions.signal || !allowSidecarWrite
+      ? {
+          ...(preferCache ? { preferCache: true } : {}),
+          ...(readOptions.signal ? { signal: readOptions.signal } : {}),
+          ...(!allowSidecarWrite ? { allowSidecarWrite: false } : {}),
+        }
+      : undefined;
+  await Promise.all(
+    Array.from({ length: Math.min(2, sessions.length) }, async () => {
+      while (nextIndex < sessions.length) {
+        readOptions.signal?.throwIfAborted();
+        const session = sessions[nextIndex++]!;
+        try {
+          session.lastUserPromptAt = await waitForQuestionTime(
+            promptReadOptions
+              ? service.getLastUserPromptAt(
+                  session.sessionId,
+                  archiveState,
+                  promptReadOptions,
+                )
+              : service.getLastUserPromptAt(session.sessionId, archiveState),
+            readOptions.signal,
+          );
+        } catch {
+          // One unreadable transcript must not fail the page; abort still wins.
+          readOptions.signal?.throwIfAborted();
+          session.lastUserPromptAt = undefined;
+        }
+      }
+    }),
+  );
+  readOptions.signal?.throwIfAborted();
 }
 
 async function listWorkspaceSessionsForResponseInRuntime(
@@ -1462,6 +2204,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
 
   if (
     readOptions.paginateMerged ||
+    options?.sortBy === 'lastUserPromptAt' ||
     options?.parentSessionId !== undefined ||
     options?.sourceType !== undefined ||
     options?.conversationKind !== undefined
@@ -1472,6 +2215,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
       options ?? {},
       pageSize,
       {
+        ...(options?.sortBy !== undefined ? { sortBy: options.sortBy } : {}),
         ...(options?.parentSessionId !== undefined
           ? { parentSessionId: options.parentSessionId }
           : {}),
@@ -1516,8 +2260,27 @@ async function listWorkspaceSessionsForResponseInRuntime(
     sessionService,
     archiveState,
     readOptions.signal,
+    (id) => isBridgeSessionRetirementFenced(bridge, id),
   );
   await enrichPrSidecars(
+    bySessionId,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+  );
+  await enrichArtifactSummaries(
+    bySessionId,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+  );
+  await enrichGoalSidecars(
+    bySessionId,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+  );
+  await enrichPromptContinuation(
     bySessionId,
     sessionService,
     archiveState,
@@ -1696,8 +2459,27 @@ export async function searchWorkspaceSessionsForResponse(
       sessionService,
       'active',
       readOptions.signal,
+      readOptions.isSessionRetirementFenced,
     );
     await enrichPrSidecars(
+      bySessionId,
+      sessionService,
+      'active',
+      readOptions.signal,
+    );
+    await enrichArtifactSummaries(
+      bySessionId,
+      sessionService,
+      'active',
+      readOptions.signal,
+    );
+    await enrichGoalSidecars(
+      bySessionId,
+      sessionService,
+      'active',
+      readOptions.signal,
+    );
+    await enrichPromptContinuation(
       bySessionId,
       sessionService,
       'active',

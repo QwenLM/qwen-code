@@ -5,6 +5,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { readdirSync } from 'node:fs';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,11 +29,24 @@ describe('qwen-triage-finalize workflow', () => {
       'Qwen Code CI',
       'Qwen Autofix',
       'Managed Agent gate',
+      'Managed Agent loop verification',
       'SDK Python',
       'Serve A/B',
       'Web-shell Visuals',
     ]);
     expect(workflow.on.workflow_run.workflows).not.toContain('E2E Tests');
+    // Literal against literal above, so tie each name to a `name:` some
+    // workflow really carries: `workflow_run.workflows` matches on that name,
+    // so a typo keeps this suite green while the finalizer never fires.
+    const names = readdirSync('.github/workflows')
+      .filter((f) => f.endsWith('.yml'))
+      .map(
+        (f) => parse(readFileSync(join('.github/workflows', f), 'utf8')).name,
+      );
+    expect(
+      workflow.on.workflow_run.workflows.filter((n) => !names.includes(n)),
+      'names in workflow_run.workflows that no workflow carries:',
+    ).toEqual([]);
     expect(workflow.on.workflow_run.types).toEqual(['completed']);
     expect(workflow.jobs.finalize.if).toContain(
       "github.event.workflow_run.event == 'pull_request'",
@@ -93,13 +107,33 @@ describe('qwen-triage-finalize workflow', () => {
     expect(script).toContain(
       'select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))',
     );
-    // CI-region, approve-marker, and new-head-marker lookups embed the marker
-    // inside the body (not at the start), so contains is the correct match —
-    // still author-filtered.
+    // CI-region and new-head-marker lookups embed the marker inside the body
+    // (not at the start), so contains is the correct match — still
+    // author-filtered.
     const authorFiltered = script.match(
       /select\(\.user\.login == \$bot\) \| select\(\.body \| contains\(\$m\)\)/g,
     );
-    expect(authorFiltered?.length).toBeGreaterThanOrEqual(3);
+    expect(authorFiltered?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('honors the approve marker only in a bot-authored Stage 3 comment', () => {
+    // Bot authorship alone is forgeable-by-proxy: other bot lanes (serve-ab,
+    // visuals) publish bodies a fork PR's own scripts generated, so an
+    // approve-on-green marker planted there must stay inert. The Stage 3
+    // first-line marker is publisher-enforced (triage-publish.mjs guarantees
+    // the exact first-line marker — prepending/normalizing it and rejecting
+    // mismatched leading triage markers), which makes startswith the structural
+    // filter — the skill emits approve-on-green only in that comment.
+    expect(script).toContain("STAGE3_MARKER='<!-- qwen-triage stage=3 -->'");
+    expect(script).toContain(
+      'select(.user.login == $bot) | select(.body | startswith($s3)) | select(.body | contains($m))',
+    );
+    // The bare author+contains shape must not survive on the approval path.
+    const approveLookup = script.slice(
+      script.indexOf('HAS_MARKER='),
+      script.indexOf('[ "$HAS_MARKER" -gt 0 ]'),
+    );
+    expect(approveLookup).toContain('startswith($s3)');
   });
 
   it('pins the deferred approval to the reviewed SHA and fails closed', () => {

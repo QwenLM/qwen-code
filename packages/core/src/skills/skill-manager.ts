@@ -28,11 +28,14 @@ import {
   parseUserInvocableField,
   qualifySkillName,
   validateSkillName,
-  AUTO_MEMORY_SKILL_NAME,
 } from './types.js';
 import type { Config } from '../config/config.js';
 import { parsePriorityField, validateConfig } from './skill-load.js';
 import { validateSymlinkTarget } from './symlinkScope.js';
+import {
+  getTurnSkillActivation,
+  getTurnSkillSnapshot,
+} from './turn-skill-snapshot.js';
 import {
   SkillActivationRegistry,
   splitConditionalSkills,
@@ -56,19 +59,6 @@ import {
 
 const debugLogger = createDebugLogger('SKILL_MANAGER');
 const SKILLS_CONFIG_DIR = 'skills';
-/**
- * Bundled skills that `Config.isSkillEnabled` hides when the feature they
- * serve is off: `generated-ui` without the generated-UI runtime, and
- * `auto-memory` without legacy managed auto-memory. Both the listing and a
- * by-name load consult it, so the two cannot disagree. `generated-ui` is
- * spelled out because its module sits above this one in the import graph.
- * A Config stand-in that builds a SkillManager must answer `isSkillEnabled`
- * for these (see the daemon's skills catalog).
- */
-const CONDITIONAL_BUNDLED_SKILLS: ReadonlySet<string> = new Set([
-  'generated-ui',
-  AUTO_MEMORY_SKILL_NAME,
-]);
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 
 // Skills have a fixed layout (<skill-name>/SKILL.md), so depth 2 is enough to
@@ -344,7 +334,7 @@ export class SkillManager {
       for (const skill of levelSkills) {
         if (
           level === 'bundled' &&
-          CONDITIONAL_BUNDLED_SKILLS.has(skill.name) &&
+          skill.name === 'generated-ui' &&
           !this.config.isSkillEnabled(skill)
         )
           continue;
@@ -445,6 +435,14 @@ export class SkillManager {
     debugLogger.debug(
       `Loading skill for runtime: ${name}${level ? ` at level: ${level}` : ''}`,
     );
+    const snapshot = getTurnSkillSnapshot();
+    if (snapshot) {
+      const pinned = snapshot.skills.find((skill) => skill.name === name);
+      if (pinned) return !level || pinned.level === level ? pinned : null;
+      return !level || level === 'bundled'
+        ? this.loadSkill(name, 'bundled')
+        : null;
+    }
     const skill = await this.loadSkill(name, level);
     if (!skill) {
       debugLogger.debug(`Skill not found for runtime: ${name}`);
@@ -598,9 +596,13 @@ export class SkillManager {
    * become eligible only after a tool invocation touches a file matching
    * their `paths:` globs.
    */
-  isSkillActive(skill: SkillConfig): boolean {
+  isSkillActive(skill: SkillConfig, liveOnly?: boolean): boolean {
     if (!skill.paths || skill.paths.length === 0) return true;
-    return this.activationRegistry?.isActivated(skill.name) ?? false;
+    const registry =
+      (!liveOnly &&
+        getTurnSkillActivation(this.config.getProjectRoot(), this)) ||
+      this.activationRegistry;
+    return registry?.isActivated(skill.name) ?? false;
   }
 
   /**
@@ -632,7 +634,11 @@ export class SkillManager {
   async matchAndActivateByPaths(
     filePaths: readonly string[],
   ): Promise<string[]> {
-    const registry = this.activationRegistry;
+    const turnRegistry = getTurnSkillActivation(
+      this.config.getProjectRoot(),
+      this,
+    );
+    const registry = turnRegistry ?? this.activationRegistry;
     if (!registry || filePaths.length === 0) return [];
     const newlyAcrossPaths = new Set<string>();
     for (const filePath of filePaths) {
@@ -640,7 +646,7 @@ export class SkillManager {
         newlyAcrossPaths.add(name);
       }
     }
-    if (newlyAcrossPaths.size > 0) {
+    if (!turnRegistry && newlyAcrossPaths.size > 0) {
       await this.notifyChangeListeners();
     }
     return Array.from(newlyAcrossPaths);
@@ -1296,7 +1302,7 @@ export class SkillManager {
         (skill) =>
           skill.name === name &&
           (level !== 'bundled' ||
-            !CONDITIONAL_BUNDLED_SKILLS.has(name) ||
+            name !== 'generated-ui' ||
             this.config.isSkillEnabled(skill)),
       ) || null
     );

@@ -20,9 +20,10 @@ import type { Application, Request, Response } from 'express';
 import { isWithinRoot } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_REGISTERED_WORKSPACES } from '../workspace-inputs.js';
-import type {
-  WorkspaceRegistry,
-  WorkspaceRuntime,
+import {
+  WorkspaceMemoryPathCollisionError,
+  type WorkspaceRegistry,
+  type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { getWorkspaceRuntimeCoordinatorIfSupported } from '../workspace-runtime-coordinator.js';
 import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
@@ -33,8 +34,10 @@ import {
 } from '../workspace-route-runtime.js';
 import {
   normalizeWorkspaceDisplayName,
+  normalizeWorkspaceOrder,
   workspaceRegistrationId,
   WorkspaceDisplayNameValidationError,
+  WorkspaceOrderValidationError,
   WorkspaceRegistrationStoreCommittedError,
   WorkspaceRegistrationStoreLimitError,
   WorkspaceRegistrationStoreTooLargeError,
@@ -816,7 +819,15 @@ export function registerWorkspaceManagementRoutes(
           err instanceof Error ? err.message : String(err)
         }${canonical ? `; retained directory: ${canonical}` : ''}`,
       );
-      if (!res.headersSent) {
+      if (
+        !res.headersSent &&
+        err instanceof WorkspaceMemoryPathCollisionError
+      ) {
+        res.status(409).json({
+          error: err.message,
+          code: 'workspace_memory_path_collision',
+        });
+      } else if (!res.headersSent) {
         res.status(500).json({
           error: 'Failed to register scratch workspace',
           code: 'runtime_creation_failed',
@@ -1810,7 +1821,12 @@ export function registerWorkspaceManagementRoutes(
             err instanceof Error ? err.message : String(err)
           }`,
         );
-        if (persistenceFailed) {
+        if (err instanceof WorkspaceMemoryPathCollisionError) {
+          res.status(409).json({
+            error: err.message,
+            code: 'workspace_memory_path_collision',
+          });
+        } else if (persistenceFailed) {
           if (sendStoreCapacityError(res, err)) return;
           res.status(500).json({
             error: 'Failed to persist workspace registration',
@@ -2264,6 +2280,102 @@ export function registerWorkspaceManagementRoutes(
       }
     },
   );
+
+  const managedWorkspaceCwdSet = (): Set<string> =>
+    new Set(
+      workspaceRegistry
+        .listManaged()
+        .filter((runtime) => !isInternalWorkspaceRuntime(runtime))
+        .map((runtime) => runtime.workspaceCwd),
+    );
+
+  app.get('/workspace-order', async (_req, res) => {
+    if (!workspaceRegistrationStore) {
+      res.status(501).json({
+        error: 'Persistent workspace storage is not available',
+        code: 'persistence_not_available',
+      });
+      return;
+    }
+    try {
+      const snapshot = await workspaceRegistrationStore.read();
+      const known = managedWorkspaceCwdSet();
+      res.json({
+        cwds: (snapshot.workspaceOrder ?? []).filter((cwd) => known.has(cwd)),
+      });
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: failed to read workspace order: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      res.status(500).json({
+        error: 'Failed to read workspace order',
+        code: 'workspace_registration_store_error',
+      });
+    }
+  });
+
+  app.post('/workspace-order', mutate({ strict: true }), async (req, res) => {
+    if (sealed) {
+      sendSealed(res);
+      return;
+    }
+    if (!workspaceRegistrationStore) {
+      res.status(501).json({
+        error: 'Persistent workspace storage is not available',
+        code: 'persistence_not_available',
+      });
+      return;
+    }
+    let cwds: string[];
+    try {
+      cwds = normalizeWorkspaceOrder(safeBody(req)['cwds']);
+    } catch (err) {
+      if (!(err instanceof WorkspaceOrderValidationError)) throw err;
+      res
+        .status(400)
+        .json({ error: err.message, code: 'invalid_workspace_order' });
+      return;
+    }
+    const known = managedWorkspaceCwdSet();
+    if (cwds.some((cwd) => !known.has(cwd))) {
+      res.status(400).json({
+        error: 'Workspace order contains an unregistered workspace',
+        code: 'workspace_mismatch',
+      });
+      return;
+    }
+    operationStarted();
+    try {
+      try {
+        await workspaceRegistrationStore.setWorkspaceOrder(cwds);
+      } catch (err) {
+        if (!(err instanceof WorkspaceRegistrationStoreCommittedError))
+          throw err;
+        try {
+          writeStderrLine(`qwen serve: ${err.message}`);
+        } catch {
+          // The order is committed; diagnostics are best-effort.
+        }
+      }
+      res.json({ cwds });
+    } catch (err) {
+      if (!sendStoreCapacityError(res, err)) {
+        writeStderrLine(
+          `qwen serve: failed to persist workspace order: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to persist workspace order',
+          code: 'workspace_registration_store_error',
+        });
+      }
+    } finally {
+      operationFinished();
+    }
+  });
 
   const registrationIsActive = (registrationId: string): boolean =>
     workspaceRegistry.listManaged().some((runtime) => {

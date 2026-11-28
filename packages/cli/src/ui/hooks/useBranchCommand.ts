@@ -20,6 +20,7 @@ import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
   computeResumedPromptCountSeed,
+  computeResumedUserTurnCount,
 } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -30,6 +31,7 @@ import {
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
+import { flushRunUsageOnSessionSwap } from '../../utils/usage-persistence.js';
 
 const BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE =
   "Stop the current session's running background tasks before branching the conversation.";
@@ -73,7 +75,7 @@ export interface UseBranchCommandOptions {
     'clearItems' | 'loadHistory' | 'addItem'
   >;
   startNewSession: (sessionId: string) => void;
-  seedPromptCount: (count: number) => void;
+  seedPromptCount: (count: number, userPromptCountSeed?: number) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -291,13 +293,15 @@ export function useBranchCommand(
             resumed.conversation.messages,
             newSessionId,
           ),
+          computeResumedUserTurnCount(resumed.conversation.messages),
         );
         uiSwapped = true;
+        flushRunUsageOnSessionSwap(config, oldSessionId);
         config.getLlmClient()?.commitTelemetrySwap?.();
         await getInteractiveModSession(config)?.syncSession('resume');
         clearPendingState?.();
         historyManager.clearItems();
-        historyManager.loadHistory(uiHistoryItems);
+        historyManager.loadHistory(uiHistoryItems, newSessionId);
         resetBackgroundStateForSessionSwitch(config);
 
         // 9. Apply the already-persisted title to the prompt bar.

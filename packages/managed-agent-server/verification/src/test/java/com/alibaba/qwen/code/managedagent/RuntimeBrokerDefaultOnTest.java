@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import jakarta.websocket.server.ServerContainer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
@@ -14,11 +15,13 @@ import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.MapPropertySource;
 import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.web.context.ConfigurableWebApplicationContext;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
 /**
@@ -28,9 +31,7 @@ import static org.mockito.Mockito.verify;
  * pins neither flag: reverting either YAML placeholder default turns it red
  * through the binding assertions (and the coupling guard for durable); a
  * silent scan-configuration regression (coordinator never reaching the
- * candidate query) turns it red through the batch-read verification; and the
- * `ManagedAgentProperties` field defaults are pinned by
- * `EmbeddedRuntimeBrokerTest#usesFetchCompatibleDefaultBrokerPort`.
+ * candidate query) turns it red through the batch-read verification.
  */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:runtime-broker-default-on;MODE=MySQL;"
@@ -43,8 +44,6 @@ import static org.mockito.Mockito.verify;
                 + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "qwen.managed-agent.runtime-broker.enabled=true",
-        "qwen.managed-agent.runtime-broker.host=127.0.0.1",
-        "qwen.managed-agent.runtime-broker.port=0",
         "qwen.managed-agent.runtime-broker.token=broker-token",
         "qwen.managed-agent.runtime-broker.credential-key-id=test-key",
         "qwen.managed-agent.runtime-broker.credential-key="
@@ -64,6 +63,9 @@ class RuntimeBrokerDefaultOnTest {
     private ManagedAgentProperties properties;
     @MockitoSpyBean
     private RuntimeBindingRepository bindingRepository;
+    @Autowired
+    private org.springframework.beans.factory.ObjectProvider<
+            com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeResolver> terminalResolvers;
 
     @Test
     void defaultCombinationBootsWithTheYmlDefaultsBound() {
@@ -75,6 +77,17 @@ class RuntimeBrokerDefaultOnTest {
         ((EmbeddedRuntimeBroker) runtimeWarmer).recoverSavedRuntimes();
         verify(bindingRepository, atLeastOnce()).findRecoveryCandidates(
                 eq("local-process"), isNull(), eq(8));
+    }
+
+    @Test
+    void terminalPlacementResolverIsExposedAsTheBeanTheCapabilityHintReads() {
+        // R2-2: the resolver the Broker builds must be registered as a bean, or
+        // ManagedAgentService's ObjectProvider yields null and capabilities.terminal
+        // is pinned to false in every real deployment.
+        var brokerResolver =
+                ((EmbeddedRuntimeBroker) runtimeWarmer).workspaceRuntimeResolver();
+        assertThat(brokerResolver).isNotNull();
+        assertThat(terminalResolvers.getIfAvailable()).isSameAs(brokerResolver);
     }
 
     /** Removes the ambient copies of the two documented opt-out variables. */
@@ -90,6 +103,23 @@ class RuntimeBrokerDefaultOnTest {
             });
             context.getEnvironment().getPropertySources().replace(
                     "systemEnvironment", new MapPropertySource("systemEnvironment", filtered));
+            publishWebSocketContainer(context);
+        }
+    }
+
+    /**
+     * The mock servlet context never runs the container's WebSocket
+     * initializer, so the terminal {@code ServletServerContainerFactoryBean}
+     * finds no {@code ServerContainer} to bind its buffer ceiling to. Publish
+     * a stub before the context refreshes; the production defaults under test
+     * are untouched.
+     */
+    static void publishWebSocketContainer(ConfigurableApplicationContext context) {
+        if (context instanceof ConfigurableWebApplicationContext webContext
+                && webContext.getServletContext() != null) {
+            webContext.getServletContext().setAttribute(
+                    "jakarta.websocket.server.ServerContainer",
+                    mock(ServerContainer.class));
         }
     }
 }

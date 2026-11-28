@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -23,13 +24,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
-import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -111,7 +110,7 @@ class HostedProcessCrashIT {
         private final Path root;
         private final Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath().normalize();
         private final String node = required("node.executable");
-        private final String tenant = "hosted-coordinator-" + UUID.randomUUID();
+        private final String tenant = UUID.randomUUID().toString();
         private final int port;
         private final Set<ProcessHandle> processes = new LinkedHashSet<>();
         private final HttpClient http = HttpClient.newBuilder()
@@ -364,7 +363,7 @@ class HostedProcessCrashIT {
         private final Path root;
         private final Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath().normalize();
         private final String node = required("node.executable");
-        private final String tenant = "hosted-crash-" + UUID.randomUUID();
+        private final String tenant = UUID.randomUUID().toString();
         private final Set<ProcessHandle> processes = new LinkedHashSet<>();
         private final AtomicReference<Throwable> controlFailure = new AtomicReference<>();
         private Process spring;
@@ -490,10 +489,8 @@ class HostedProcessCrashIT {
             var command = new ArrayList<>(List.of(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                     "-cp", classpath, HostedProcessCrashFixtureMain.class.getName(), root.toString(), node,
                     cli.toString(), tenant, fault));
-            if (fault.equals("recovery-settlement")) {
-                command.addAll(List.of(Integer.toString(springPort), Integer.toString(harnessProxyPort),
-                        Integer.toString(brokerPort)));
-            }
+            command.addAll(List.of(Integer.toString(springPort), Integer.toString(harnessProxyPort),
+                    Integer.toString(brokerPort)));
             ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(log.toFile());
             builder.environment().put("FG6C_MYSQL_URL", required("mysql.url"));
             builder.environment().put("FG6C_MYSQL_USER", required("mysql.user"));
@@ -525,7 +522,7 @@ class HostedProcessCrashIT {
             await(() -> Files.exists(readiness) || !brokerSidecar.isAlive(), 90, "resident Broker readiness");
             assertThat(brokerSidecar.isAlive()).as("Broker failed: %s", Files.readString(log)).isTrue();
             assertThat(JSON.readTree(Files.readString(readiness)).path("brokerUrl").asText())
-                    .isEqualTo("http://127.0.0.1:" + brokerPort + "/");
+                    .isEqualTo("http://127.0.0.1:" + brokerPort);
         }
 
         private void assertResidentExecution() {
@@ -629,8 +626,7 @@ class HostedProcessCrashIT {
         }
 
         private Map<String, Object> owner() throws Exception {
-            return jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
-                    com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage"),
+            return jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_id = o.physical_id WHERE s.tenant_id = ? AND s.storage_id = ?",
                     tenant, "storage");
         }
 
@@ -645,8 +641,8 @@ class HostedProcessCrashIT {
             var owner = owner();
             assertThat(originalOwner).as("owner captured before crash").isNotNull();
             assertThat(owner).isEqualTo(originalOwner);
-            if (owner.get("holder_key") == null) {
-                assertThat(owner.get("holder_key")).isNull();
+            if (owner.get("holder_id") == null) {
+                assertThat(owner.get("holder_id")).isNull();
                 assertThat(owner.get("binding_id")).isNull();
                 assertThat(owner.get("runtime_generation")).isNull();
                 assertThat(owner.get("runtime_session_id")).isNull();
@@ -656,15 +652,15 @@ class HostedProcessCrashIT {
                 assertThat(((Number) owner.get("mount_revision")).longValue()).isPositive();
                 assertThat(owner.get("mount_root")).isEqualTo(root.resolve("workspace").toString());
                 var members = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RUNTIME_SESSION.columns()
-                        + " FROM ma_runtime_session WHERE execution_storage_key=?", owner.get("storage_key"));
+                        + " FROM ma_runtime_session WHERE execution_storage_id=?", owner.get("physical_id"));
                 assertThat(members).as("the original shared Workspace execution member").hasSize(1);
                 var member = members.getFirst();
                 if (originalMember == null) {
                     originalMember = new LinkedHashMap<>(member);
                 }
-                for (String key : List.of("scope_key", "tenant_id", "workspace_id", "workspace_generation",
+                for (String key : List.of("scope_id", "tenant_id", "workspace_id", "workspace_generation",
                         "canonical_cwd", "capability_digest", "isolation_class", "harness_session_id",
-                        "runtime_session_id", "binding_id", "runtime_generation", "execution_storage_key")) {
+                        "runtime_session_id", "binding_id", "runtime_generation", "execution_storage_id")) {
                     assertThat(member.get(key)).as("original Workspace member %s", key).isEqualTo(originalMember.get(key));
                 }
                 assertThat(member).containsEntry("tenant_id", tenant)
@@ -681,14 +677,14 @@ class HostedProcessCrashIT {
                         + " JOIN ma_runtime_session rs ON rs.binding_id=b.binding_id AND rs.runtime_generation=b.runtime_generation"
                         + " JOIN ma_session s ON s.tenant_id=rs.tenant_id AND s.session_id=rs.harness_session_id"
                         + " JOIN ma_storage st ON st.tenant_id=s.tenant_id AND st.storage_id=s.workspace_storage_id"
-                        + " WHERE rs.scope_key=? AND rs.runtime_session_id=? AND b.scope_key=rs.scope_key"
+                        + " WHERE rs.scope_id=? AND rs.runtime_session_id=? AND b.scope_id=rs.scope_id"
                         + " AND b.tenant_id=rs.tenant_id AND b.workspace_id=rs.workspace_id AND b.workspace_generation=rs.workspace_generation"
                         + " AND b.canonical_cwd=rs.canonical_cwd AND b.capability_digest=rs.capability_digest AND b.isolation_class=rs.isolation_class"
                         + " AND b.provisioner_kind='local-process' AND b.binding_state='READY' AND b.is_drain_requested=FALSE"
                         + " AND s.workspace_id=b.workspace_id AND s.workspace_generation=b.workspace_generation AND s.workspace_storage_id=b.storage_id"
-                        + " AND st.physical_key=rs.execution_storage_key AND st.registration_state='REGISTERED' AND st.storage_kind='LOCAL'"
+                        + " AND st.physical_id=rs.execution_storage_id AND st.registration_state='REGISTERED' AND st.storage_kind='LOCAL'"
                         + " AND st.registration_revision>0 AND s.workspace_config_ref=? AND s.workspace_policy_ref=? AND s.context_config_ref=?",
-                        Integer.class, member.get("scope_key"), member.get("runtime_session_id"),
+                        Integer.class, member.get("scope_id"), member.get("runtime_session_id"),
                         WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF,
                         WorkspaceExecutionProfile.CONTEXT_CONFIG_REF)).isEqualTo(1);
                 return;
@@ -696,9 +692,11 @@ class HostedProcessCrashIT {
             assertThat(owner.get("binding_id")).isEqualTo(execution.get("binding_id"));
             assertThat(owner.get("runtime_generation")).isEqualTo(execution.get("runtime_generation"));
             assertThat(owner.get("runtime_session_id")).isEqualTo(execution.get("runtime_session_id"));
-            assertThat(owner.get("holder_key")).isEqualTo(sha256((execution.get("binding_id") + "\u0000"
-                    + execution.get("runtime_generation") + "\u0000" + execution.get("runtime_session_id"))
-                    .getBytes(StandardCharsets.UTF_8)));
+            assertThat(owner.get("holder_id")).isEqualTo(ManagedIdentityRefs.ref(
+                    ManagedIdentityRefs.HOLDER_REF_BYTES, "external-workspace-holder/1",
+                    execution.get("binding_id").toString(),
+                    execution.get("runtime_generation").toString(),
+                    execution.get("runtime_session_id").toString()));
         }
 
         private void assertLedger(JsonNode report) throws Exception {
@@ -769,8 +767,8 @@ class HostedProcessCrashIT {
             // Led by the indexed session scope key, as in HostedGateTestSupport:
             // the raw tenant+session form scans the lane's accumulated ma_resource rows.
             byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
-                    + " WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
-                    byte[].class, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), checkpointId, tenant, session);
+                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
+                    byte[].class, tenant, session, checkpointId, tenant, session);
             JsonNode saved = JSON.readTree(checkpoint);
             assertThat(saved.path("continuation").path("phase").asText()).isEqualTo(prepared ? "before_model" : "await_runtime");
             assertThat(events.stream().filter(event -> event.path("kind").asText().equals("input.accepted")
@@ -779,9 +777,9 @@ class HostedProcessCrashIT {
             assertThat(events.stream().filter(event -> event.path("kind").asText().equals("turn.settled"))).isEmpty();
             assertThat(events.stream().filter(event -> event.path("kind").asText().equals("message.committed")
                     && event.path("payload").path("role").asText().equals("tool_result"))).isEmpty();
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE session_scope_key = ?"
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ? AND session_id = ?"
                     + " AND kind = 'managed-tool-outcome' AND tenant_id = ? AND session_id = ?",
-                    Integer.class, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session))
+                    Integer.class, tenant, session, tenant, session))
                     .isZero();
             JsonNode target = report.path("target");
             if (fault.equals("harness-result")) {
@@ -849,10 +847,6 @@ class HostedProcessCrashIT {
             assertThat(System.nanoTime()).as(description).isLessThan(deadline);
             Thread.sleep(20);
         }
-    }
-
-    private static String sha256(byte[] bytes) throws Exception {
-        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
     }
 
     private static String required(String key) {

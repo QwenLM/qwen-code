@@ -767,6 +767,42 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `session-overview-details-${theme}`);
     });
 
+    test('sidebar continuation badge', async ({ page }, testInfo) => {
+      const workspaceCwd = '/workspace/continuation-badge';
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd,
+        sessions: [
+          {
+            sessionId: 'cut-off',
+            displayName: 'Refactor the config loader',
+            needsContinuation: true,
+          },
+          {
+            sessionId: 'running',
+            displayName: 'Run the browser tests',
+            hasActivePrompt: true,
+          },
+          { sessionId: 'clean', displayName: 'Update session documentation' },
+        ].map((session) => ({
+          ...session,
+          workspaceCwd,
+          updatedAt: '2026-07-01T12:00:00.000Z',
+        })),
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      const badge = page
+        .locator(`[data-sidebar-workspace="${workspaceCwd}"]`)
+        .locator('[data-web-shell-session-continuation]');
+      await expect(badge).toBeVisible();
+      await expect(badge).toHaveText('Continue');
+      await captureScreenshot(page, `sidebar-continuation-badge-${theme}`);
+    });
+
     test('session overview bulk delete batches at the route limit', async ({
       page,
     }, testInfo) => {
@@ -970,6 +1006,104 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `session-transcript-${theme}`);
     });
 
+    test(`bidirectional Markdown`, async ({ page }, testInfo) => {
+      const response = [
+        'שלום, פתחו את `/workspace/docs/readme.md` ואת https://example.com/docs.',
+        '',
+        '```ts',
+        '// שלום path = "/workspace/logs/app.log";',
+        'const status = "ready";',
+        '```',
+      ].join('\n');
+      const scenario = createWebShellDaemonScenario();
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await fillComposer(page, 'Render mixed-direction Markdown.');
+      await page.locator('[data-web-shell-composer-submit]').click();
+      await expect.poll(() => daemon.promptRequests().length).toBe(1);
+      await daemon.sse.split(assistantTextEvent(response, { id: 10 }));
+
+      const markdown = page.locator(
+        '[data-web-shell-message-list] [data-markdown-source="assistant"]',
+      );
+      const inlineCode = markdown.locator('p code').first();
+      const streamingCode = markdown.locator('pre').first();
+      await expect(markdown).toHaveAttribute('dir', 'auto');
+      await expect(inlineCode).toHaveAttribute('dir', 'auto');
+      await expect(streamingCode).toHaveAttribute('dir', 'auto');
+      await expect(markdown.locator('pre.shiki')).toHaveCount(0);
+      await expect
+        .poll(async () => ({
+          message: await markdown.evaluate(
+            (element) => window.getComputedStyle(element).unicodeBidi,
+          ),
+          messageDirection: await markdown.evaluate(
+            (element) => window.getComputedStyle(element).direction,
+          ),
+          inline: await inlineCode.evaluate(
+            (element) => window.getComputedStyle(element).unicodeBidi,
+          ),
+          inlineDirection: await inlineCode.evaluate(
+            (element) => window.getComputedStyle(element).direction,
+          ),
+          code: await streamingCode.evaluate(
+            (element) => window.getComputedStyle(element).unicodeBidi,
+          ),
+        }))
+        .toEqual({
+          message: 'plaintext',
+          messageDirection: 'rtl',
+          inline: 'isolate',
+          inlineDirection: 'ltr',
+          code: 'plaintext',
+        });
+      await captureScreenshot(
+        page,
+        `markdown-bidirectional-streaming-${theme}`,
+      );
+
+      await daemon.sendEvent(turnCompleteEvent('prompt-e2e', { id: 11 }));
+      const highlightedCode = markdown.locator('pre.shiki').first();
+      await expect(highlightedCode).toBeVisible();
+      const highlightedWrapper = highlightedCode.locator('..');
+      await expect(highlightedWrapper).toHaveAttribute('dir', 'auto');
+      await expect
+        .poll(async () => ({
+          wrapper: await highlightedWrapper.evaluate(
+            (element) => window.getComputedStyle(element).unicodeBidi,
+          ),
+          code: await highlightedCode.evaluate(
+            (element) => window.getComputedStyle(element).unicodeBidi,
+          ),
+        }))
+        .toEqual({ wrapper: 'plaintext', code: 'plaintext' });
+      const lineInsets = await highlightedCode
+        .locator('code .line')
+        .evaluateAll((lines) => {
+          const container = lines[0]?.closest('pre');
+          if (!container) return [];
+          const containerRect = container.getBoundingClientRect();
+          return lines.slice(0, 2).map((line) => {
+            const range = document.createRange();
+            range.selectNodeContents(line);
+            const lineRect = range.getBoundingClientRect();
+            return {
+              left: lineRect.left - containerRect.left,
+              right: containerRect.right - lineRect.right,
+            };
+          });
+        });
+      expect(lineInsets).toHaveLength(2);
+      expect(lineInsets[0]!.right).toBeLessThanOrEqual(1);
+      expect(lineInsets[1]!.left).toBeLessThanOrEqual(1);
+      await captureScreenshot(page, `markdown-bidirectional-settled-${theme}`);
+    });
+
     test(`usage-limited goal status`, async ({ page }, testInfo) => {
       // Seed the compatibility card together with its canonical V2 state, as
       // emitted by both live goal updates and transcript replay.
@@ -994,6 +1128,10 @@ for (const theme of THEMES) {
 
       const messageList = page.locator('[data-web-shell-message-list]');
       await expect(messageList).toContainText('Goal usage limited');
+      await expect(messageList).not.toContainText('Token budget reached');
+      await messageList
+        .getByRole('button', { name: 'Expand details', exact: true })
+        .click();
       await expect(messageList).toContainText('Token budget reached');
       await captureScreenshot(page, `goal-usage-limited-${theme}`);
     });
@@ -1020,6 +1158,10 @@ for (const theme of THEMES) {
 
       const messageList = page.locator('[data-web-shell-message-list]');
       await expect(messageList).toContainText('Goal blocked');
+      await expect(messageList).not.toContainText('User authority is required');
+      await messageList
+        .getByRole('button', { name: 'Expand details', exact: true })
+        .click();
       await expect(messageList).toContainText('User authority is required');
       await expect(messageList).not.toContainText('Goal aborted');
       await captureScreenshot(page, `goal-blocked-${theme}`);

@@ -4,7 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -30,7 +30,7 @@ public final class ExtensionRecordJournal {
     private static final String WRITER = "writer-extension";
     static final String TOKEN = "extension-writer-token-0123456789";
     public static final String OPERATION = "commitMonitorRun";
-    private final ManagedSessionStore store;
+    private final JdbcManagedSessionStore store;
     private final String tenantId;
     private final String workspaceId;
     private final String sessionId;
@@ -40,7 +40,7 @@ public final class ExtensionRecordJournal {
     private String lastCommitDigest;
     private int domainEvents;
 
-    public ExtensionRecordJournal(ManagedSessionStore store, String tenantId,
+    public ExtensionRecordJournal(JdbcManagedSessionStore store, String tenantId,
             String workspaceId, String sessionId) {
         this.store = store;
         this.tenantId = tenantId;
@@ -136,8 +136,15 @@ public final class ExtensionRecordJournal {
     public CommitTransactionRequest requestDomainWithInput(String commandId,
             String domain, JsonNode body, List<CommitResource> resources,
             String inputId, CommitResource input) {
+        return requestDomainWithInput(commandId, domain, body, resources,
+                inputId, input, "session_message");
+    }
+
+    public CommitTransactionRequest requestDomainWithInput(String commandId,
+            String domain, JsonNode body, List<CommitResource> resources,
+            String inputId, CommitResource input, String source) {
         return requestDomainWithInputs(commandId, domain, body, resources,
-                List.of(inputId), input);
+                List.of(inputId), input, source);
     }
 
     /**
@@ -148,6 +155,13 @@ public final class ExtensionRecordJournal {
     public CommitTransactionRequest requestDomainWithInputs(String commandId,
             String domain, JsonNode body, List<CommitResource> resources,
             List<String> inputIds, CommitResource input) {
+        return requestDomainWithInputs(commandId, domain, body, resources,
+                inputIds, input, "session_message");
+    }
+
+    public CommitTransactionRequest requestDomainWithInputs(String commandId,
+            String domain, JsonNode body, List<CommitResource> resources,
+            List<String> inputIds, CommitResource input, String source) {
         ObjectNode ref = JSON.createObjectNode()
                 .put("resourceId", input.resourceId())
                 .put("kind", input.kind())
@@ -163,7 +177,7 @@ public final class ExtensionRecordJournal {
             ObjectNode inputEvent = event(accepted, turn + ":accepted",
                     "input.accepted");
             inputEvent.putObject("payload").put("inputId", inputId)
-                    .put("turnId", turn).put("source", "session_message")
+                    .put("turnId", turn).put("source", source)
                     .<ObjectNode>set("contentRef", ref.deepCopy())
                     .putNull("deadline")
                     .set("admissionRef", ref.deepCopy());

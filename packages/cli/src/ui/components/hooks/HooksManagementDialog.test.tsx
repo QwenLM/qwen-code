@@ -336,6 +336,39 @@ describe('HooksManagementDialog', () => {
     });
   });
 
+  it('marks an exec-form command hook as skipped alongside a runnable hook', async () => {
+    mockSettingsHooks({
+      PreToolUse: [
+        {
+          matcher: 'Bash',
+          hooks: [
+            { type: 'command', command: 'node', args: ['check.js'] },
+            { type: 'command', command: 'echo valid', args: [] },
+          ],
+        },
+      ],
+    });
+
+    const { lastFrame } = renderWithProviders(
+      <HooksManagementDialog onClose={mockOnClose} />,
+    );
+
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('2 hooks configured');
+    });
+    pressKey('return');
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('[User] Bash');
+    });
+    pressKey('return');
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain(
+        '[command] skipped (unsupported args) · node',
+      );
+      expect(lastFrame()).toContain('[command] echo valid');
+    });
+  });
+
   it('should navigate from matcher detail to config detail', async () => {
     mockSettingsHooks({
       PreToolUse: [

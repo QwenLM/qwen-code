@@ -4,15 +4,21 @@ import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtecto
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.datasource.DelegatingDataSource;
 
 import javax.sql.DataSource;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.SQLException;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
@@ -24,8 +30,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Tool execution admission and dispatch on an ordinary session-class binding
- * decide the CSI pin under the Session root alone and take no tenant guard
- * there (designs 2026-11-05-managed-dispatch-tenant-guards and
+ * lock the Session root alone and take no tenant guard there (designs
+ * 2026-11-05-managed-dispatch-tenant-guards and
  * 2026-11-05-managed-admission-placement).
  */
 class ExecutionControlTenantGuardsTest {
@@ -48,6 +54,23 @@ class ExecutionControlTenantGuardsTest {
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
         sessions = new JdbcRuntimeSessionRepository(source);
         executions = new JdbcToolExecutionRepository(source);
+    }
+
+    @Test
+    void hostSentinelScopeFitsGuardColumn() throws SQLException {
+        String sentinel = "local-storage-host/" + "f".repeat(64);
+        try (Connection connection = source.getConnection()) {
+            JdbcRuntimeBindingRepository.lockPlacementDomain(connection, sentinel);
+            try (var statement = connection.prepareStatement(
+                    "SELECT tenant_id FROM ma_tenant_guard"
+                            + " WHERE guard_domain = 'runtime_placement' AND tenant_id = ?")) {
+                statement.setString(1, sentinel);
+                try (var rows = statement.executeQuery()) {
+                    assertTrue(rows.next());
+                    assertEquals(sentinel, rows.getString(1));
+                }
+            }
+        }
     }
 
     @Test
@@ -118,7 +141,7 @@ class ExecutionControlTenantGuardsTest {
     @Test
     void sessionIsolatedLeaseChangesCompleteWhileBothTenantGuardsAreHeld() throws Exception {
         // Claim, renew and release move no binding out of its state, so like
-        // dispatch they decide the CSI pin under the Session root alone
+        // dispatch they lock the Session root alone
         // (design 2026-11-06-managed-binding-control-tenant-guards).
         var fixture = sessionFixture(true);
         bindings.releaseOperation(fixture.binding.getBindingId(), "recovery", fixture.binding.getOperationGeneration());
@@ -127,9 +150,52 @@ class ExecutionControlTenantGuardsTest {
     }
 
     @Test
+    void sessionIsolatedRenewalLocksTheRootOnceWithoutACatalogProbe() throws Exception {
+        // A heartbeat on an ordinary binding needs one locking read of its
+        // Session root; the validated catalog always has the table.
+        var fixture = sessionFixture(true);
+        bindings.releaseOperation(fixture.binding.getBindingId(), "recovery", fixture.binding.getOperationGeneration());
+        var claimed = bindings.claimOperation(fixture.binding.getBindingId(), "control", Duration.ofMinutes(1));
+        var calls = new ArrayList<String>();
+        var traced = new JdbcRuntimeBindingRepository(recording(source, calls),
+                new AesGcmSecretProtector("test", new byte[32]));
+        assertEquals(claimed.getOperationGeneration(), traced.renewOperation(claimed.getBindingId(), "control",
+                claimed.getOperationGeneration(), Duration.ofMinutes(1)).getOperationGeneration());
+        assertEquals(List.of(), calls.stream().filter(call -> call.startsWith("getTables")).toList());
+        assertEquals(1, calls.stream().filter(call -> call.contains(" FROM ma_session WHERE")
+                && call.endsWith(" FOR UPDATE")).count(), calls.toString());
+    }
+
+    /** Records prepared SQL and catalog table probes without changing either. */
+    private static DataSource recording(DataSource source, List<String> calls) {
+        return new DelegatingDataSource(source) {
+            @Override
+            public Connection getConnection() throws SQLException {
+                return record(Connection.class, super.getConnection(), calls);
+            }
+        };
+    }
+
+    private static <T> T record(Class<T> type, T target, List<String> calls) {
+        return type.cast(Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[] {type}, (proxy, method, args) -> {
+            if (method.getName().equals("prepareStatement") || method.getName().equals("getTables")) {
+                calls.add(method.getName().equals("getTables") ? "getTables " + args[2] : (String) args[0]);
+            }
+            Object result;
+            try {
+                result = method.invoke(target, args);
+            } catch (InvocationTargetException failure) {
+                throw failure.getCause();
+            }
+            return method.getName().equals("getMetaData")
+                    ? record(DatabaseMetaData.class, (DatabaseMetaData) result, calls) : result;
+        }));
+    }
+
+    @Test
     void withoutASessionRootLeaseChangesTakeNoPublicationGuard() throws Exception {
         // The guarded path still takes placement but no longer the publication
-        // guard, which only a CSI profile original needs.
+        // guard.
         var fixture = sessionFixture(false);
         bindings.releaseOperation(fixture.binding.getBindingId(), "recovery", fixture.binding.getOperationGeneration());
         var released = whileGuardsHeld(fixture.id, false, () -> leaseRound(fixture));
@@ -162,20 +228,17 @@ class ExecutionControlTenantGuardsTest {
 
     /** A session-class fixture; {@code root} adds the managed Session root of its harness Session. */
     protected RuntimeRecoveryContract.Fixture sessionFixture(boolean root) throws Exception {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         if (root) {
             String session = tenant + "-harness";
             try (Connection connection = source.getConnection(); var insert = connection.prepareStatement(
-                    "INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key,"
-                            + " session_scope_key, gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, ?)")) {
+                    "INSERT INTO ma_session (tenant_id, session_id, session_kind,"
+                            + " gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', ?, ?)")) {
                 long now = System.currentTimeMillis();
-                insert.setBytes(1, ManagedSchemaKeys.identity(tenant));
-                insert.setBytes(2, ManagedSchemaKeys.identity(session));
-                insert.setString(3, ManagedSchemaKeys.key(tenant));
-                insert.setString(4, ManagedSchemaKeys.key(session));
-                insert.setString(5, ManagedSchemaKeys.key(tenant, session));
-                insert.setLong(6, now);
-                insert.setLong(7, now);
+                insert.setString(1, tenant);
+                insert.setString(2, session);
+                insert.setLong(3, now);
+                insert.setLong(4, now);
                 insert.executeUpdate();
             }
         }
@@ -192,8 +255,8 @@ class ExecutionControlTenantGuardsTest {
                     connection.setAutoCommit(false);
                     try (var lock = connection.prepareStatement(
                             "SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
-                        lock.setBytes(1, ManagedSchemaKeys.identity(tenant));
-                        lock.setBytes(2, ManagedSchemaKeys.identity(session));
+                        lock.setString(1, tenant);
+                        lock.setString(2, session);
                         lock.executeQuery().close();
                     }
                     held.countDown();
@@ -223,17 +286,15 @@ class ExecutionControlTenantGuardsTest {
                     if (placement) {
                         JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant);
                     }
-                    String key = ManagedSchemaKeys.key(tenant);
-                    try (var insert = connection.prepareStatement("INSERT INTO ma_tenant_guard (tenant_key, tenant_id,"
-                            + " guard_domain) VALUES (?, ?, 'output_publication') ON DUPLICATE KEY UPDATE"
-                            + " tenant_key = tenant_key")) {
-                        insert.setString(1, key);
-                        insert.setBytes(2, ManagedSchemaKeys.identity(tenant));
+                    try (var insert = connection.prepareStatement("INSERT INTO ma_tenant_guard (tenant_id,"
+                            + " guard_domain) VALUES (?, 'output_publication') ON DUPLICATE KEY UPDATE"
+                            + " tenant_id = tenant_id")) {
+                        insert.setString(1, tenant);
                         insert.executeUpdate();
                     }
                     try (var lock = connection.prepareStatement("SELECT tenant_id FROM ma_tenant_guard WHERE"
-                            + " guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE")) {
-                        lock.setString(1, key);
+                            + " guard_domain = 'output_publication' AND tenant_id = ? FOR UPDATE")) {
+                        lock.setString(1, tenant);
                         lock.executeQuery().close();
                     }
                     held.countDown();

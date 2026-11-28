@@ -408,7 +408,7 @@ describe('AgentInteractive', () => {
         text: '',
         terminateMode: AgentTerminateMode.LOOP_DETECTED,
         turnsUsed: 3,
-        loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+        loopType: LoopType.TURN_TOOL_CALL_CAP,
       },
     });
     // Built inline: an extra async hop before the waitFor shifts its timing.
@@ -431,9 +431,86 @@ describe('AgentInteractive', () => {
       .filter((m) => m.role === 'info')
       .map((m) => String(m.content));
     expect(stopMessages).toContain(
-      'Agent stopped: duplicate tool-call loop detected (consecutive_identical_tool_calls).',
+      'Agent stopped: loop detected (turn_tool_call_cap).',
     );
 
+    await agent.shutdown();
+  });
+
+  it.each([
+    [
+      AgentTerminateMode.MAX_TURNS,
+      'Agent stopped: maximum turns reached.',
+      'warning',
+    ],
+    [
+      AgentTerminateMode.TIMEOUT,
+      'Agent stopped: time limit reached.',
+      'warning',
+    ],
+    [AgentTerminateMode.ERROR, 'Agent stopped due to an error.', 'error'],
+    [
+      AgentTerminateMode.LOOP_DETECTED,
+      'Agent stopped: loop detected.',
+      'error',
+    ],
+  ] as const)(
+    'reports %s at its own severity',
+    async (terminateMode, text, level) => {
+      // The wording lives in terminate-reason.ts and the severity in this
+      // file's table; nothing else asserts a level, so a wrong one would
+      // ship green even though the user sees it.
+      const { core } = createMockCore({
+        loopResult: { text: '', terminateMode, turnsUsed: 1 },
+      });
+      const agent = new AgentInteractive(
+        createConfig({ initialTask: 'go' }),
+        core,
+      );
+      await agent.start(context);
+      await vi.waitFor(() => {
+        expect(['idle', 'failed']).toContain(agent.getStatus());
+      });
+      await vi.waitFor(() => {
+        expect(agent.getMessages().some((m) => m.role === 'info')).toBe(true);
+      });
+
+      const stop = agent
+        .getMessages()
+        .find((m) => m.role === 'info' && String(m.content) === text);
+      expect(stop).toBeDefined();
+      expect(stop?.metadata).toMatchObject({ level });
+
+      await agent.shutdown();
+    },
+  );
+
+  it('shows the hook stop reason in the warning and the Arena error', async () => {
+    const { core } = createMockCore({
+      loopResult: {
+        text: 'A hook stopped the agent: \x1b[31mbudget\nspent\x1b[0m',
+        terminateMode: AgentTerminateMode.HOOK_STOPPED,
+        turnsUsed: 1,
+      },
+    });
+    const agent = new AgentInteractive(
+      createConfig({ initialTask: 'go' }),
+      core,
+    );
+    await agent.start(context);
+    await waitForStatus(agent, AgentStatus.FAILED);
+
+    const reason = 'A hook stopped the agent: budget spent';
+    expect(agent.getLastRoundError()).toBe(
+      `Terminated: HOOK_STOPPED (${reason})`,
+    );
+    expect(agent.getMessages()).toContainEqual(
+      expect.objectContaining({
+        role: 'info',
+        content: reason,
+        metadata: { level: 'warning' },
+      }),
+    );
     await agent.shutdown();
   });
 

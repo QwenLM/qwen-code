@@ -658,6 +658,7 @@ export function createSpawnChannelFactory(
 
     return {
       stream,
+      pid: child.pid,
       ...(transportFailed ? { transportFailed } : {}),
       ...(failTransport && options.pipeLimits
         ? {

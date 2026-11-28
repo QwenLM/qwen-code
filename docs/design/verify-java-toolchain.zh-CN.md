@@ -69,9 +69,10 @@ GitHub 和 Actions 凭据。
 ### 工具链
 
 `Install Java toolchain` 以 root 运行，位于 `Install verify runner tools`
-之后、`Checkout PR merge ref` 之前。它下载钉死版本的 Temurin 21 x64 压缩包
-（sha256），以及 `repo.maven.apache.org` 上的 Maven 3.9.11（sha512，与
-`sdk-java.yml` 的 `MAVEN_VERSION`、`MAVEN_SHA512` 相同）。两份归档解压到
+之后、`Checkout PR merge ref` 之前。它按 runner 架构下载钉死版本的 Temurin 21
+压缩包（x64 或 aarch64，每种架构分别固定 sha256），以及
+`repo.maven.apache.org` 上的 Maven 3.9.11（sha512，与 `sdk-java.yml` 的
+`MAVEN_VERSION`、`MAVEN_SHA512` 相同）。两份归档解压到
 `/opt/verify-java/{jdk,maven}`，权限 `a+rX`，属主为 root。只有两份校验和
 `java -version` / `mvn -version` 都成功之后才写 `/opt/verify-java/ready`。
 `mvn -version` 之前会导出 `JAVA_HOME` 和 `PATH`：Maven 启动脚本不会自己去找刚解压的
@@ -138,7 +139,7 @@ SNAPSHOT），以及把依赖数据库的集成测试写进 _Not covered_。Java
 
 预算注释为工具链、恢复和两次封顶的 `mvn install` 增加最多约 20 分钟，且只在
 Java diff 上发生。最坏情况从约 180 分钟变为约 200 分钟。`timeout-minutes`
-改为 210，仍留 10 分钟余量。
+改为 210，仍留 10 分钟余量。后来加深历史的步骤又加了一行 3 分钟，现为 213。
 
 ## 设计决定
 
@@ -182,9 +183,9 @@ Java diff 上发生。最坏情况从约 180 分钟变为约 200 分钟。`timeo
 - `scripts/tests/qwen-triage-workflow.test.js` 钉住路径开关、步骤顺序、校验和、
   与 `sdk-java.yml` 及生产者共享的 Maven 钉子、只恢复的缓存（相同的 path、
   key、runner 和容器）、被剥离的 artifact 集合、`runuser` 加 `timeout`、
-  有条件的代理环境，以及 210 分钟的任务上限。
+  有条件的代理环境，以及任务上限（现为 213 分钟）。
 - `.github/scripts/qwen-triage-workflow.test.mjs` 要求
-  `timeout-minutes >= 210`。
+  `timeout-minutes >= 213`。
 - 本地 `node:22-bookworm` 演练跑下载、以 `node` 安装同级模块，以及只用代理
   环境变量跑 `mvn test`。
 - 合并之后：对同一个 Java PR 连续两次 `/verify`。第二次的步骤摘要显示

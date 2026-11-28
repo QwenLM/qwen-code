@@ -4,17 +4,25 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.CwdChangeOutcome;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessCapabilityFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessGenerationFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessMutationUnknownFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessProtocolFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessSettleAnsweredFailure;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.managedagent.workspace.ChildLifecycleAdmissions;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -22,9 +30,11 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -35,8 +45,10 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Delivers admitted close, delete and cwd-change operations. An
@@ -96,19 +108,31 @@ public class SessionLifecycleCoordinator {
     // barrier forever (review round 9, R9-4).
     private static final int SETTLED_COMPLETION_BUDGET_FACTOR = 4;
     // The daemon refuses a lifecycle phase while it is still busy with the
-    // previous prompt: hosted_lifecycle_recovery_required names its cleanup
-    // debt, and hosted_turn_active names a turn, MCP call or hook that is
-    // still draining. Both clear through the daemon's own work, not by
-    // anything the caller changes, so neither is a permanent hook refusal
-    // or spends the close's retry budget.
+    // previous prompt, closing its resident Session, or out of cold-open
+    // admission slots. These clear through the daemon's own work, not by
+    // anything the caller changes, so none is a permanent hook refusal or
+    // spends the close's retry budget; past the budget the wait is
+    // published as recovery_blocked with its own code.
     private static final Set<String> SELF_CLEARING_DAEMON_REFUSALS =
-            Set.of("hosted_lifecycle_recovery_required", "hosted_turn_active");
+            Set.of("hosted_lifecycle_recovery_required", "hosted_turn_active",
+                    "hosted_session_closing", "hosted_session_open_busy");
     private final AgentStateStore store;
-    private com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore lifecycle;
+    private WorkspaceLifecycleStore lifecycle;
+    private SessionResourceGcWakeup resourceGcWakeup;
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
-    public void setWorkspaceLifecycleStore(com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore lifecycle) {
+    @Autowired(required = false)
+    public void setSessionResourceGcWakeup(SessionResourceGcWakeup wakeup) {
+        this.resourceGcWakeup = wakeup;
+    }
+
+    @Autowired(required = false)
+    public void setWorkspaceLifecycleStore(WorkspaceLifecycleStore lifecycle) {
         this.lifecycle = lifecycle;
+    }
+
+    @Autowired(required = false)
+    public void setClientFilesRelay(ObjectProvider<ClientFilesRelayService> clientFilesRelay) {
+        this.clientFilesRelay = clientFilesRelay;
     }
 
     public boolean supportsWorkspaceLifecycle() {
@@ -116,12 +140,14 @@ public class SessionLifecycleCoordinator {
     }
 
     public boolean supportsWorkspaceLifecycle(String profile) {
-        return runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle(profile);
+        return (WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+                ? runtimeWarmer.supportsWorkspaceClose(profile) : runtimeWarmer.supportsWorkspaceClose()) && harness.supportsLifecycle(profile);
     }
 
     public boolean supportsWorkspaceLifecycle(SessionRecord session) {
         return session.workspace() != null && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
-                && harness.supportsLifecycle(session.toolProfile());
+                && (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()));
     }
 
     private final ManagedSessionStore sessionStore;
@@ -131,28 +157,48 @@ public class SessionLifecycleCoordinator {
     private final ObjectMapper objectMapper;
     private final ChildLifecycleAdmissions childCloses;
     private final ManagedAgentService sessions;
-    private final com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore childWorkspaces;
+    private final ChildWorkspaceStore childWorkspaces;
     private final ObjectProvider<RuntimeBrokerOperations> brokerProviders;
+    // Lazy provider: the relay service depends on ManagedAgentService, so a
+    // constructor parameter here could form a cycle. Used to close the
+    // client-files binding when the harness detaches or the Session closes.
+    // Setter-injected (like setWorkspaceLifecycleStore) so tests can install a
+    // fake; unset means the teardown is a no-op rather than a swallowed NPE.
+    private ObjectProvider<ClientFilesRelayService> clientFilesRelay;
     private final ExecutorService executor;
     private final Clock clock;
     private final Duration leaseDuration;
     private final Duration retryInitialDelay;
     private final Duration retryMaxDelay;
     private final int maxOperationRetries;
-    private final String owner = UUID.randomUUID().toString();
-    private final java.util.concurrent.ScheduledExecutorService renewals =
-            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(task -> {
-                Thread thread = new Thread(task, "session-lifecycle-renewal");
-                thread.setDaemon(true);
-                return thread;
-            });
+    private final LeaseRenewalRunner runner =
+            new LeaseRenewalRunner("session-lifecycle-renewal");
+    private final String owner = runner.owner();
 
-    @jakarta.annotation.PreDestroy
+    @PreDestroy
     void stopRenewals() {
-        renewals.shutdownNow();
+        runner.close();
     }
 
-    private final Set<String> active = ConcurrentHashMap.newKeySet();
+    // The harness-local client-files catalog is gone once the harness detaches
+    // or the Session closes; close the control-plane binding so the panel stops
+    // reporting a registration the model can no longer use. Best-effort: a
+    // relay failure must not wedge the lifecycle.
+    private void closeClientFilesBinding(OperationRecord operation) {
+        if (clientFilesRelay == null) {
+            return;
+        }
+        try {
+            clientFilesRelay.ifAvailable(relay ->
+                    relay.closeForSession(operation.tenantId(), operation.sessionId()));
+        } catch (RuntimeException failure) {
+            // Best-effort: a relay failure must not wedge the lifecycle, but it
+            // must be diagnosable — the binding then lingers until binding-ttl.
+            LOG.warn("Client files binding teardown failed tenant={} session={}",
+                    operation.tenantId(), operation.sessionId(), failure);
+        }
+    }
+
     static final Set<String> SETTLED_SESSION_STATES =
             Set.of("CLOSED", "ARCHIVED", "DELETED");
 
@@ -170,7 +216,7 @@ public class SessionLifecycleCoordinator {
                 executor, clock, properties, null);
     }
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public SessionLifecycleCoordinator(AgentStateStore store,
             ManagedSessionStore sessionStore, HarnessConnector harness,
             RuntimeWarmer runtimeWarmer, ChildResultRelayStore childScopes,
@@ -180,7 +226,7 @@ public class SessionLifecycleCoordinator {
             ObjectProvider<RuntimeBrokerOperations> brokerProviders,
             @Qualifier("managedAgentExecutor") ExecutorService executor,
             @Qualifier("managedAgentClock") Clock clock, ManagedAgentSettings properties,
-            com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore childWorkspaces) {
+            ChildWorkspaceStore childWorkspaces) {
         this.childWorkspaces = childWorkspaces;
         this.store = store;
         this.sessionStore = sessionStore;
@@ -203,17 +249,10 @@ public class SessionLifecycleCoordinator {
 
     public void dispatch(String tenantId, String sessionId,
             String operationId) {
-        String key = tenantId + "\n" + sessionId + "\n" + operationId;
-        if (!active.add(key)) {
-            return;
-        }
-        executor.execute(() -> {
-            try {
-                deliver(tenantId, sessionId, operationId);
-            } finally {
-                active.remove(key);
-            }
-        });
+        runner.dispatchOnce(
+                executor,
+                LeaseRenewalRunner.scopedKey(tenantId, sessionId, operationId),
+                () -> deliver(tenantId, sessionId, operationId));
     }
 
     @Scheduled(scheduler = "managedAgentScheduler", fixedDelayString =
@@ -233,21 +272,16 @@ public class SessionLifecycleCoordinator {
         if (claimed == null) {
             return;
         }
-        var valid = new java.util.concurrent.atomic.AtomicBoolean(true);
-        long period = Math.max(1, leaseDuration.toMillis() / 3);
-        java.util.concurrent.ScheduledFuture<?> renewal;
+        long period = LeaseRenewalRunner.renewalPeriodMillis(leaseDuration);
+        LeaseRenewalRunner.RenewalHandle renewal;
         try {
-            renewal = renewals.scheduleWithFixedDelay(() -> {
-                try {
-                    if (!store.renewLifecycleOperation(tenantId, sessionId, operationId, owner,
-                            claimed.claimGeneration(), leaseDuration)) {
-                        valid.set(false);
-                    }
-                } catch (RuntimeException error) {
-                    valid.set(false);
-                }
-            }, period, period, java.util.concurrent.TimeUnit.MILLISECONDS);
-        } catch (java.util.concurrent.RejectedExecutionException stopped) {
+            renewal = runner.startFixedDelay(
+                    period,
+                    () -> store.renewLifecycleOperation(tenantId, sessionId,
+                            operationId, owner, claimed.claimGeneration(),
+                            leaseDuration),
+                    ignored -> {});
+        } catch (RejectedExecutionException stopped) {
             // The coordinator is shutting down; the claim's lease lets the
             // recovery scan re-drive this operation after restart, once a
             // scan tick has room under its page limit.
@@ -264,14 +298,14 @@ public class SessionLifecycleCoordinator {
         // a settle that asked the Harness to stop but threw later must not
         // be recorded as one that never happened (review round 7, R7-2).
         var harnessSettled =
-                new java.util.concurrent.atomic.AtomicBoolean(false);
+                new AtomicBoolean(false);
         try {
             if (claimed.kind() == OperationKind.CWD_CHANGE) {
                 settleCwdChange(claimed);
                 return;
             }
             harnessConfirmed = settle(claimed, harnessSettled);
-            if (!valid.get()) {
+            if (!renewal.isLive()) {
                 return;
             }
             if (!store.completeOperation(tenantId, sessionId, operationId,
@@ -279,6 +313,13 @@ public class SessionLifecycleCoordinator {
                 LOG.warn("Managed Session operation was claimed by another"
                                 + " worker tenant={} session={} operation={}",
                         tenantId, sessionId, operationId);
+            } else if (claimed.kind() == OperationKind.DELETE && resourceGcWakeup != null) {
+                try {
+                    resourceGcWakeup.retired(tenantId, sessionId);
+                } catch (RuntimeException failure) {
+                    LOG.warn("Session resource collection wakeup failed tenant={} session={}",
+                            tenantId, sessionId, failure);
+                }
             }
         } catch (RuntimeException error) {
             // A capability digest mismatch lands here too: nothing may be
@@ -289,7 +330,7 @@ public class SessionLifecycleCoordinator {
             long delay = HarnessCoordinator.retryDelay(retryInitialDelay,
                     retryMaxDelay, claimed.attemptCount());
             Throwable cause = error;
-            while (cause.getCause() != null && cause instanceof java.util.concurrent.CompletionException) {
+            while (cause.getCause() != null && cause instanceof CompletionException) {
                 cause = cause.getCause();
             }
             // A blocked close waits on a fact only an operator or the
@@ -302,7 +343,7 @@ public class SessionLifecycleCoordinator {
                 failureCode = mismatch.getCode();
             } else if (cause instanceof HarnessProtocolFailure) {
                 failureCode = "hosted_harness_protocol_error";
-            } else if (cause instanceof com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException brokerError) {
+            } else if (cause instanceof RuntimeBrokerException brokerError) {
                 failureCode = brokerError.getCode();
                 if (brokerError.getCode().startsWith("workspace_lifecycle")
                         || "runtime_admission_closed".equals(brokerError.getCode())
@@ -313,29 +354,34 @@ public class SessionLifecycleCoordinator {
                     blocked = "workspace_close_identity_unverified";
                 }
             }
-            if (cause instanceof com.alibaba.qwen.code.managedagent.exception.ManagedAgentException apiError
+            if (cause instanceof ManagedAgentException apiError
                     && (apiError.getCode().startsWith("workspace_lifecycle") || apiError.getCode().startsWith("workspace_close"))) {
                 blocked = apiError.getCode();
             }
             if ((cause instanceof HarnessHttpFailure
-                    || cause instanceof com.alibaba.qwen.code.managedagent.harness.contracts.HarnessMutationUnknownFailure)
+                    || cause instanceof HarnessMutationUnknownFailure)
                     && operationIsLifecycle(claimed)) {
                 String refusal = daemonRefusalCode(cause);
                 if (refusal != null
                         && SELF_CLEARING_DAEMON_REFUSALS.contains(refusal)) {
                     daemonWaitCode = refusal;
                 } else {
+                    // A wedged teardown keeps its own code too: the close
+                    // reconciles under this operation's authority or an
+                    // operator takes over, and the generic hooks code
+                    // would name a debt the Session does not have.
                     blocked = cause instanceof HarnessHttpFailure httpError
                             && httpError.getErrorCode() != null
                             && (httpError.getErrorCode().startsWith("workspace_lifecycle") || httpError.getErrorCode().startsWith("workspace_close")
-                                    || "runtime_admission_closed".equals(httpError.getErrorCode()))
+                                    || "runtime_admission_closed".equals(httpError.getErrorCode())
+                                    || "hosted_session_teardown_blocked".equals(httpError.getErrorCode()))
                             ? httpError.getErrorCode() : "workspace_lifecycle_hooks_unsettled";
                 }
             }
             if (claimed.kind() != OperationKind.CWD_CHANGE && cause instanceof RuntimeException wait
                     && HarnessCoordinator.isPoolWait(wait)) {
                 blocked = null;
-                daemonWaitCode = wait instanceof com.alibaba.qwen.code.managedagent.exception.ManagedAgentException apiError
+                daemonWaitCode = wait instanceof ManagedAgentException apiError
                         ? apiError.getCode() : ((HarnessHttpFailure) wait).getErrorCode();
             }
             if (blocked != null) {
@@ -395,7 +441,7 @@ public class SessionLifecycleCoordinator {
                     ? adjustedAttempts >= (long) maxOperationRetries
                             * SETTLED_COMPLETION_BUDGET_FACTOR
                     : adjustedAttempts >= maxOperationRetries;
-            if (!cwdChange && budgetSpent && valid.get() && !exemptWait
+            if (!cwdChange && budgetSpent && renewal.isLive() && !exemptWait
                     && !staleBoot && daemonWaitCode == null) {
                 String terminalCode = settleReachedHarness
                         ? "session_close_completion_unsettled" : failureCode;
@@ -487,7 +533,7 @@ public class SessionLifecycleCoordinator {
                                     + " session={} operation={} failure={}",
                             tenantId, sessionId, operationId,
                             writeError.getMessage());
-                    if (valid.get()) {
+                    if (renewal.isLive()) {
                         if (blocked != null) {
                             store.blockLifecycleOperation(tenantId, sessionId,
                                     operationId, owner,
@@ -503,11 +549,11 @@ public class SessionLifecycleCoordinator {
                 }
                 return;
             }
-            if (valid.get() && blocked != null) {
+            if (renewal.isLive() && blocked != null) {
                 store.blockLifecycleOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(), blocked, Math.addExact(clock.millis(), delay),
                         exemptWait || staleBoot);
-            } else if (valid.get() && exemptWait && !staleBoot
+            } else if (renewal.isLive() && exemptWait && !staleBoot
                     && claimed.attemptCount() >= maxOperationRetries) {
                 // Past the budget the writer wait is published: the row reads
                 // recovery_blocked with its code rather than a healthy
@@ -522,7 +568,7 @@ public class SessionLifecycleCoordinator {
                         operationId, owner, claimed.claimGeneration(),
                         "session_close_writer_live",
                         Math.addExact(clock.millis(), delay), true);
-            } else if (valid.get() && !cwdChange && staleBoot
+            } else if (renewal.isLive() && !cwdChange && staleBoot
                     && claimed.attemptCount() >= maxOperationRetries) {
                 // The stale-view wait outlasts the budget only while the
                 // Harness keeps restarting between attempts — each
@@ -535,7 +581,7 @@ public class SessionLifecycleCoordinator {
                         operationId, owner, claimed.claimGeneration(),
                         "hosted_harness_generation_mismatch",
                         Math.addExact(clock.millis(), delay), true);
-            } else if (valid.get() && daemonWaitCode != null
+            } else if (renewal.isLive() && daemonWaitCode != null
                     && claimed.attemptCount() >= maxOperationRetries) {
                 // The daemon's wait is published the same way: the row
                 // reads recovery_blocked with the refusal's own code and
@@ -545,11 +591,11 @@ public class SessionLifecycleCoordinator {
                         operationId, owner, claimed.claimGeneration(),
                         daemonWaitCode,
                         Math.addExact(clock.millis(), delay), true);
-            } else if (valid.get() && (exemptWait || staleBoot || daemonWaitCode != null)) {
+            } else if (renewal.isLive() && (exemptWait || staleBoot || daemonWaitCode != null)) {
                 store.retryOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(),
                         Math.addExact(clock.millis(), delay), true);
-            } else if (valid.get()) {
+            } else if (renewal.isLive()) {
                 store.retryOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(), Math.addExact(clock.millis(), delay));
             }
@@ -561,7 +607,7 @@ public class SessionLifecycleCoordinator {
                     error.getClass().getSimpleName(), error.getMessage(),
                     error);
         } finally {
-            renewal.cancel(false);
+            renewal.close();
         }
     }
 
@@ -577,7 +623,7 @@ public class SessionLifecycleCoordinator {
     // exactly the predicate hasLiveWriter reads, and writerLive stays gated
     // on a fresh writerStillLive(claimed) check regardless.
     private static boolean retryable(Throwable cause) {
-        if (cause instanceof com.alibaba.qwen.code.managedagent.exception.ManagedAgentException apiError
+        if (cause instanceof ManagedAgentException apiError
                 && (apiError.getStatus() >= 400 && apiError.getStatus() < 500)) {
             return "workspace_lifecycle_writer_active".equals(apiError.getCode())
                     || "managed_session_writer_active".equals(apiError.getCode());
@@ -622,7 +668,7 @@ public class SessionLifecycleCoordinator {
     }
 
     private static boolean operationIsLifecycle(OperationRecord operation) {
-        return com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.lifecycleProtocol(operation.lifecycleProtocolVersion());
+        return WorkspaceToolProfiles.lifecycleProtocol(operation.lifecycleProtocolVersion());
     }
 
     // The SDK wraps a daemon refusal in MutationOutcomeUnknownException once
@@ -648,7 +694,7 @@ public class SessionLifecycleCoordinator {
         var session = store.requireSession(tenantId, sessionId);
         try {
             if (session.workspace() == null) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             runtimeWarmer.verifyWorkspaceCwdTarget(session.workspace(),
                     operation.targetCwdRelative());
@@ -711,9 +757,9 @@ public class SessionLifecycleCoordinator {
     // it. A Harness that never held it, or that replaced the one that did,
     // answers too, but its answer confirms nothing about the Session.
     private boolean settle(OperationRecord operation,
-            java.util.concurrent.atomic.AtomicBoolean harnessSettled) {
+            AtomicBoolean harnessSettled) {
         if (operation.lifecycleProtocolVersion() < 0 || operation.lifecycleProtocolVersion() > 2) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
         }
         boolean harnessConfirmed = false;
         var session = store.requireSession(operation.tenantId(), operation.sessionId());
@@ -727,17 +773,18 @@ public class SessionLifecycleCoordinator {
         }
         if (bound && operationIsLifecycle(operation)) {
             if (lifecycle == null || !RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
+                throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
             }
             lifecycle.requireSettledExecutions(operation);
             JsonNode effects = lifecycle.recoverEffects(operation);
             if (effects == null) {
-                if (!harness.supportsLifecycle(session.toolProfile())) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
+                if (!(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()))) {
+                    throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
                 }
                 try {
                     effects = harness.settleLifecycle(operation);
-                } catch (com.alibaba.qwen.code.managedagent.harness.contracts.HarnessSettleAnsweredFailure answered) {
+                } catch (HarnessSettleAnsweredFailure answered) {
                     // The Harness answered the settle but Java could not
                     // process the receipt — the latch still sets: a later
                     // failure of this attempt is not "the settle never
@@ -770,8 +817,8 @@ public class SessionLifecycleCoordinator {
                 String profile = session.toolProfile();
                 try {
                     harness.prepareLifecycleResources(operation);
-                    if (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.SHELL.equals(profile)) {
-                        var authority = com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation);
+                    if (WorkspaceToolProfiles.isPublicShell(profile)) {
+                        var authority = WorkspaceLifecycleStore.authority(operation);
                         if (store.hasMcpServers(session)) {
                             runtimeWarmer.prepareWorkspaceResources(operation.tenantId(), operation.sessionId(), authority)
                                     .toCompletableFuture().join();
@@ -782,28 +829,28 @@ public class SessionLifecycleCoordinator {
                     }
                     harness.settleLifecycleResources(operation);
                     runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(),
-                            com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation))
+                            WorkspaceLifecycleStore.authority(operation))
                             .toCompletableFuture().join();
                 } catch (RuntimeException unsettled) {
-                    if (!(unsettled instanceof com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure)
-                            || unsettled instanceof com.alibaba.qwen.code.managedagent.harness.contracts.HarnessGenerationFailure) {
+                    if (!(unsettled instanceof HarnessFailure)
+                            || unsettled instanceof HarnessGenerationFailure) {
                         throw unsettled;
                     }
-                    if (unsettled instanceof com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure http
+                    if (unsettled instanceof HarnessHttpFailure http
                             && (http.getErrorCode() != null && (http.getErrorCode().startsWith("workspace_lifecycle_claim")
                                     || http.getErrorCode().startsWith("workspace_lifecycle_authorization")
                                     || http.getErrorCode().startsWith("workspace_close")
-                                            && !(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.MCP.equals(profile)
+                                            && !(WorkspaceToolProfiles.MCP.equals(profile)
                                                     && "workspace_close_identity_unverified".equals(http.getErrorCode()))
                                     || "runtime_admission_closed".equals(http.getErrorCode())))) {
                         throw unsettled;
                     }
-                    if (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.MCP.equals(profile)) {
+                    if (WorkspaceToolProfiles.MCP.equals(profile)) {
                         runtimeWarmer.recoverStoppedWorkspaceResources(operation.tenantId(), operation.sessionId(),
-                                com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation))
+                                WorkspaceLifecycleStore.authority(operation))
                                 .toCompletableFuture().join();
                     } else {
-                        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
+                        throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
                     }
                 }
             }
@@ -813,14 +860,18 @@ public class SessionLifecycleCoordinator {
             }
             harness.detachLifecycle(operation);
             if (sessionStore.hasLiveWriter(operation.tenantId(), operation.sessionId())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
             }
+            // Only tear the binding down once the detach is actually proceeding:
+            // a live writer means the Session was not detached, and closing the
+            // registration here would destroy a live client-files binding.
+            closeClientFilesBinding(operation);
             runtimeWarmer.closeWorkspace(operation.tenantId(), operation.sessionId()).toCompletableFuture().join();
             return true;
         }
         if (bound) {
             if (!RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())) {
-                throw new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(409,
+                throw new RuntimeBrokerException(409,
                         "workspace_close_identity_unverified", "This instance cannot verify the original worker stop", false);
             }
             runtimeWarmer.requestWorkspaceClose(operation.tenantId(), operation.sessionId());
@@ -848,6 +899,11 @@ public class SessionLifecycleCoordinator {
                 throw new IllegalStateException(
                         "A Harness still holds the Session's journal writer");
             }
+            // A harness that merely answered the close (possibly another
+            // server's) does not prove the Session closed; only tear the binding
+            // down once the live-writer gate confirms the close is proceeding,
+            // so a refused close cannot destroy a live client-files registration.
+            closeClientFilesBinding(operation);
         }
         if (bound) {
             runtimeWarmer.closeWorkspace(operation.tenantId(), operation.sessionId()).toCompletableFuture().join();
@@ -883,11 +939,11 @@ public class SessionLifecycleCoordinator {
                 return true;
             }
             childWorkspaces.requestFinish(tenantId, sessionId, childRunId,
-                    com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore.DISCARD,
+                    ChildWorkspaceStore.DISCARD,
                     clock.millis());
             return true;
-        } catch (com.alibaba.qwen.code.managedagent.exception.ManagedAgentException refused) {
-            if (java.util.Set.of("child_workspace_conflict",
+        } catch (ManagedAgentException refused) {
+            if (Set.of("child_workspace_conflict",
                     "child_workspace_finishing", "child_workspace_not_found")
                     .contains(refused.getCode())) {
                 return true;
@@ -1095,14 +1151,16 @@ public class SessionLifecycleCoordinator {
                                     harness.runMessageOperation(tenantId,
                                             childSessionId, stop);
                                 } catch (HarnessHttpFailure error) {
-                                    // A child waiting on its recovery or
-                                    // closing takes no stop yet: the retry
-                                    // asks again, as on the relay's arm.
+                                    // A child waiting on its recovery,
+                                    // closing, or out of cold-open slots
+                                    // takes no stop yet: the retry asks
+                                    // again, as on the relay's arm.
                                     if (!"hosted_turn_recovery_required"
                                             .equals(error.getErrorCode())
                                             && !"hosted_session_closing"
-                                                    .equals(error
-                                                            .getErrorCode())) {
+                                                    .equals(error.getErrorCode())
+                                            && !"hosted_session_open_busy"
+                                                    .equals(error.getErrorCode())) {
                                         stopFailure = error;
                                     }
                                 } catch (RuntimeException error) {

@@ -16,6 +16,7 @@ import type { ClaudeMarketplaceConfig } from '@qwen-code/qwen-code-core/extensio
 import { redactUrlCredentials } from '@qwen-code/qwen-code-core/extension/redaction.js';
 import { requestConsentOrFail } from '../../commands/extensions/consent.js';
 import { t } from '../../i18n/index.js';
+import { keyMatchers, Command } from '../keyMatchers.js';
 import { getErrorMessage } from '../../utils/errors.js';
 import {
   sanitizeTerminalLine,
@@ -286,7 +287,7 @@ function PermissionText({
   );
 }
 
-function ExtensionSettingInput({
+export function ExtensionSettingInput({
   permission,
   width,
   height,
@@ -322,6 +323,11 @@ function ExtensionSettingInput({
         settled.current = true;
         permission.resolve(state.current.text);
       }
+    } else if (
+      !permission.setting.sensitive &&
+      keyMatchers[Command.CLEAR_INPUT](key)
+    ) {
+      update(endOfLine(''));
     } else if (key.ctrl && key.name === 'u') update(endOfLine(''));
     else {
       const next = applyLineKey(state.current, key);
@@ -361,7 +367,14 @@ function ExtensionSettingInput({
           )
         }
       />
-      <box flexDirection="row">
+      <box
+        id={
+          permission.setting.sensitive
+            ? 'screen-reader-protected-input'
+            : 'screen-reader-input-line'
+        }
+        flexDirection="row"
+      >
         <text fg={C.accent}>{'> '}</text>
         {before ? <text fg={C.text}>{before}</text> : null}
         <text bg={C.accent}>{sanitizeTerminalText(spans.at) || ' '}</text>
@@ -372,7 +385,7 @@ function ExtensionSettingInput({
   );
 }
 
-function ExtensionPluginChoice({
+export function ExtensionPluginChoice({
   permission,
   width,
   height,

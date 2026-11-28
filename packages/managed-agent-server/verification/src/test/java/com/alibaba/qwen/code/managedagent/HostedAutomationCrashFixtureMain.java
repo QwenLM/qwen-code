@@ -8,7 +8,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.automation.AutomationScanner;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcAutomationLedgerStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -62,7 +62,6 @@ public final class HostedAutomationCrashFixtureMain {
         String cli = args[2];
         String tenant = args[3];
         int internalPort = Integer.parseInt(args[4]);
-        int brokerPort = Integer.parseInt(args[5]);
         int publicPort = Integer.parseInt(args[6]);
         int storeBasePort = Integer.parseInt(args[7]);
         ObjectMapper mapper = new ObjectMapper();
@@ -86,7 +85,6 @@ public final class HostedAutomationCrashFixtureMain {
                         + "a".repeat(64),
                 "--qwen.managed-agent.harness.workspace-files-enabled=true",
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                 "--qwen.managed-agent.runtime-broker.token=fg11-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
@@ -186,7 +184,7 @@ public final class HostedAutomationCrashFixtureMain {
     // and the covered marker has not moved yet. Locking the schedule row
     // cannot express it (the settle's HELD proof reads the same row), so
     // the fixture parks the store's own advanceWatermark call instead.
-    static class HoldStore extends AutomationLedgerStore {
+    static class HoldStore extends JdbcAutomationLedgerStore {
         HoldStore(JdbcTemplate jdbc) {
             super(jdbc);
         }
@@ -211,7 +209,7 @@ public final class HostedAutomationCrashFixtureMain {
     static class FireHold {
         @Bean
         @Primary
-        AutomationLedgerStore holdStore(JdbcTemplate jdbc) {
+        JdbcAutomationLedgerStore holdStore(JdbcTemplate jdbc) {
             return new HoldStore(jdbc);
         }
 

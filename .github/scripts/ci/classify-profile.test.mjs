@@ -63,6 +63,9 @@ test('lists every lightweight Markdown a test names in TEST_READ_MARKDOWN', () =
     tracked.filter(
       (file) =>
         /\.md$/i.test(file) &&
+        // Explicit GITHUB_CI_ONLY_FILES Markdown is covered by the dep-free
+        // helper lane that runs on github_ci_only, not treated as test-free.
+        !GITHUB_CI_ONLY_FILES.has(file) &&
         classifyChangedFiles([file]) === 'github_ci_only',
     ),
   );
@@ -165,9 +168,68 @@ test('uses github_ci_only for the allowed GitHub CI helper files', () => {
 });
 
 test('uses github_ci_only for each allowed GitHub CI helper file', () => {
+  assert.deepEqual(
+    [...GITHUB_CI_ONLY_FILES].sort(),
+    [
+      '.github/CODEOWNERS',
+      '.github/actionlint.yaml',
+      '.github/scripts/pr-safety-precheck.mjs',
+      '.github/scripts/pr-safety-precheck.test.mjs',
+      '.github/scripts/pr-safety-precheck.workflow.test.mjs',
+      '.github/scripts/update-ecs-runner-qwen-workflow.test.mjs',
+      '.github/workflows/qwen-pr-safety-precheck.yml',
+      '.github/workflows/update-ecs-runner-qwen.yml',
+      'docs/users/features/headless.md',
+    ].sort(),
+  );
   for (const file of GITHUB_CI_ONLY_FILES) {
-    assert.equal(classifyChangedFiles([file]), 'github_ci_only');
+    assert.equal(classifyChangedFiles([file]), 'github_ci_only', file);
   }
+});
+
+test('routes test-read docs pages to full or github_ci_only instead of docs_only', () => {
+  // settings.md is read by both pr-safety-precheck.test.mjs and the full-only
+  // packages/cli/src/config/settings-docs-sync.test.ts suite.
+  assert.equal(
+    classifyChangedFiles(['docs/users/configuration/settings.md']),
+    'full',
+  );
+  assert.equal(
+    classifyChangedFiles([
+      'docs/users/configuration/settings.md',
+      'docs/usage.md',
+    ]),
+    'full',
+  );
+  assert.equal(
+    classifyChangedFiles([
+      {
+        filename: 'docs/users/configuration/settings-next.md',
+        previous_filename: 'docs/users/configuration/settings.md',
+        status: 'renamed',
+      },
+    ]),
+    'full',
+  );
+  // headless.md is read only by the dep-free precheck helper suite.
+  assert.equal(
+    classifyChangedFiles(['docs/users/features/headless.md']),
+    'github_ci_only',
+  );
+  assert.equal(
+    classifyChangedFiles(['docs/users/features/headless.md', 'docs/usage.md']),
+    'github_ci_only',
+  );
+  assert.equal(
+    classifyChangedFiles([
+      {
+        filename: 'docs/users/features/headless-next.md',
+        previous_filename: 'docs/users/features/headless.md',
+        status: 'renamed',
+      },
+    ]),
+    'full',
+  );
 });
 
 test('uses github_ci_only, not docs_only, for CODEOWNERS changes', () => {
@@ -225,6 +287,39 @@ test('keeps yaml-dependent helper suites on the full profile', () => {
       '.github/scripts/web-shell-visuals-publish.test.mjs',
     ]),
     'full',
+  );
+});
+
+test('runs ESLint on github_ci_only, which whitelists lintable scripts', () => {
+  // The whitelist's own contract: add a path only when a lane covers it.
+  // Three members are `.mjs` under .github/scripts, which ESLint's scope
+  // covers (`eslint .` plus lint-scope.js selecting every .[cm]?[jt]sx?).
+  // `Run ESLint` used to be full-gated, so a PR editing only one of them
+  // passed the required Lint & Static and reddened the next main push lint —
+  // the class #16899/#16920 closed for Prettier (#16958 item 3).
+  //
+  // Read the gate from ci.yml rather than restating it: this suite runs in
+  // the dependency-free lane, so it must not import `yaml`. Anchored to the
+  // step's own block so a commented-out copy cannot satisfy it.
+  const lintable = [...GITHUB_CI_ONLY_FILES].filter((file) =>
+    /\.[cm]?[jt]sx?$/.test(file),
+  );
+  assert.ok(
+    lintable.length > 0,
+    'the whitelist no longer contains a lintable script; this pin is moot',
+  );
+  const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
+  const step = /^ {6}- name: 'Run ESLint'\n((?: {8}.*\n|\n)*)/m.exec(ci);
+  assert.ok(step, 'Run ESLint step not found in ci.yml');
+  const gate = /^ {8}if: "(.*)"$/m.exec(step[1]);
+  assert.ok(gate, 'Run ESLint has no gate');
+  assert.ok(
+    gate[1].includes("steps.ci_profile.outputs.ci_profile == 'github_ci_only'"),
+    `Run ESLint must run on github_ci_only, which whitelists ${lintable.join(', ')}`,
+  );
+  assert.ok(
+    gate[1].includes("steps.ci_profile.outputs.ci_profile == 'full'"),
+    'widening the gate must not drop the full profile',
   );
 });
 
@@ -289,6 +384,16 @@ test('keeps docs mixed with helper files or Markdown off application tests', () 
     classifyChangedFiles([
       'README.md',
       '.github/scripts/pr-safety-precheck.mjs',
+    ]),
+    'github_ci_only',
+  );
+  assert.equal(
+    classifyChangedFiles(['.github/scripts/pr-safety-precheck.test.mjs']),
+    'github_ci_only',
+  );
+  assert.equal(
+    classifyChangedFiles([
+      '.github/scripts/pr-safety-precheck.workflow.test.mjs',
     ]),
     'github_ci_only',
   );

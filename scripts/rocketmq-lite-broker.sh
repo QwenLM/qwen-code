@@ -52,6 +52,9 @@ RMQ_EXTRA_GROUPS="${RMQ_EXTRA_GROUPS:-}"
 # gates can prove a misconfigured topic fails startup.
 RMQ_NORMAL_TOPIC="${RMQ_NORMAL_TOPIC:-}"
 RMQ_NORMAL_GROUPS="${RMQ_NORMAL_GROUPS:-}"
+# Optional DELAY topic and ordinary consumer group for Session resource GC.
+RMQ_DELAY_TOPIC="${RMQ_DELAY_TOPIC:-}"
+RMQ_DELAY_GROUP="${RMQ_DELAY_GROUP:-}"
 # The broker runs on the JDK 17 the 5.5.1 staging verification used; prefer
 # the runner's 17 when it provides one.
 RMQ_JAVA_HOME="${RMQ_JAVA_HOME:-${JAVA_HOME_17_X64:-${JAVA_HOME:-}}}"
@@ -308,6 +311,10 @@ roll_back_start() {
 }
 
 start() {
+  if [ -n "${RMQ_DELAY_TOPIC}${RMQ_DELAY_GROUP}" ] &&
+    { [ -z "${RMQ_DELAY_TOPIC}" ] || [ -z "${RMQ_DELAY_GROUP}" ]; }; then
+    die "set RMQ_DELAY_TOPIC and RMQ_DELAY_GROUP together"
+  fi
   java_env
   trap roll_back_start EXIT
   if [ "$(uname -s)" = "Darwin" ] && [ ! -d /Volumes/RAMDisk ]; then
@@ -361,6 +368,12 @@ start() {
         updateSubGroup -c "${CLUSTER}" -g "${group}" -o true \
         --attributes "+lite.bind.topic=${RMQ_NORMAL_TOPIC}"
     done
+  fi
+  if [ -n "${RMQ_DELAY_TOPIC}" ]; then
+    provision "DELAY topic ${RMQ_DELAY_TOPIC}" "+message.type=DELAY" \
+      updateTopic -c "${CLUSTER}" -t "${RMQ_DELAY_TOPIC}" -a +message.type=DELAY
+    provision "ordinary group ${RMQ_DELAY_GROUP}" "groupName=${RMQ_DELAY_GROUP}" \
+      updateSubGroup -c "${CLUSTER}" -g "${RMQ_DELAY_GROUP}" -o false
   fi
   cat > "${RMQ_WORK_DIR}/broker.env" << EOF
 RMQ_ENDPOINTS=127.0.0.1:${RMQ_PROXY_GRPC_PORT}

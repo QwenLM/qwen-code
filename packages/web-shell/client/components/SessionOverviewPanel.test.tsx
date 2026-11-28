@@ -11,6 +11,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonCapabilities,
+  DaemonSessionClient,
   DaemonSessionSummary,
   DaemonStandaloneSessionSummary,
   DaemonStatusReportSession,
@@ -39,6 +40,7 @@ if (!Element.prototype.hasPointerCapture) {
 // --- Mutable mock state, reset in beforeEach ---
 let connectionState: {
   sessionId?: string;
+  clientId?: string;
   capabilities?: DaemonCapabilities;
   workspaceCwd?: string;
   sessionContext?: DaemonProductSessionContext;
@@ -86,13 +88,17 @@ let workspaceClient: {
   exportStandaloneSession: ReturnType<typeof vi.fn>;
   archiveStandaloneSessions: ReturnType<typeof vi.fn>;
   deleteStandaloneSessions: ReturnType<typeof vi.fn>;
+  detachSession: ReturnType<typeof vi.fn>;
+  updateSessionMetadata: ReturnType<typeof vi.fn>;
 };
 // Primary-workspace actions surfaced by useWorkspace / useActions.
 let workspaceActions: {
   deleteSession: ReturnType<typeof vi.fn>;
   archiveSession: ReturnType<typeof vi.fn>;
   renameSession: ReturnType<typeof vi.fn>;
+  bindSessionPr: ReturnType<typeof vi.fn>;
   exportSession: ReturnType<typeof vi.fn>;
+  restoreWorktreeSession: ReturnType<typeof vi.fn>;
 };
 
 const sessionsReload = vi.fn(async () => sessionsState.sessions);
@@ -248,12 +254,14 @@ beforeEach(() => {
     deleteSession: vi.fn(async () => true),
     archiveSession: vi.fn(async () => true),
     renameSession: vi.fn(async () => ({ displayName: 'Renamed' })),
+    bindSessionPr: vi.fn(async () => ({ prs: [] })),
     exportSession: vi.fn(async () => ({
       content: '<html></html>',
       filename: 'session.html',
       mimeType: 'text/html',
       format: 'html',
     })),
+    restoreWorktreeSession: vi.fn(),
   };
   workspaceClient = {
     listWorkspaceSessionsPage: vi.fn(async (cwd: string) => ({
@@ -275,6 +283,12 @@ beforeEach(() => {
         errors: [],
       })),
       updateSessionMetadata: vi.fn(async () => ({ displayName: 'Renamed' })),
+      workspaceGitHubPullRequests: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: cwd,
+        available: true,
+        pullRequests: [],
+      })),
       exportSession: vi.fn(async () => ({
         content: '<html></html>',
         filename: 'session.html',
@@ -312,6 +326,8 @@ beforeEach(() => {
       errors: [],
       fileCleanupPending: [],
     })),
+    detachSession: vi.fn(async () => {}),
+    updateSessionMetadata: vi.fn(async () => ({ prs: [] })),
   };
   sessionsReload.mockClear();
   statusReload.mockClear();
@@ -343,6 +359,7 @@ function render(
     }) => Promise<boolean | void> | boolean | void;
     manageLiveState?: boolean;
     workspaceCwd?: string;
+    onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
   } = {},
 ): void {
   container = document.createElement('div');
@@ -368,6 +385,7 @@ function rerender(
     }) => Promise<boolean | void> | boolean | void;
     manageLiveState?: boolean;
     workspaceCwd?: string;
+    onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
   } = {},
 ): void {
   act(() =>
@@ -640,6 +658,30 @@ describe('SessionOverviewPanel', () => {
     expect(footerButton('Delete')!.disabled).toBe(true);
     expect(workspaceClient.deleteSessionsData).not.toHaveBeenCalled();
     expect(workspaceClient.archiveSessionsData).not.toHaveBeenCalled();
+  });
+
+  it('disables cleanup for a session whose only activity is background work', () => {
+    // The card grades this session idle, so the grade alone would offer both
+    // destructive actions while the sidebar refuses them.
+    sessionsState.sessions = [
+      session('background-only', {
+        displayName: 'Background task',
+        clientCount: 1,
+        hasActivePrompt: false,
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      }),
+    ];
+    render();
+    expect(rowTitles()).toEqual(['Background task']);
+    for (const action of ['Archive', 'Delete']) {
+      expect(rowActionButton(rows()[0]!, action).disabled).toBe(true);
+    }
+    act(() => click(selectAllCheckbox()));
+    expect(footerButton('Archive')!.disabled).toBe(true);
+    expect(footerButton('Delete')!.disabled).toBe(true);
+    expect(workspaceClient.archiveSessionsData).not.toHaveBeenCalled();
+    expect(workspaceClient.deleteSessionsData).not.toHaveBeenCalled();
   });
 
   it.each(['FEATURE/TOPIC', '1234', '#1234', 'SESSION-SEARCH'])(
@@ -1445,6 +1487,22 @@ describe('SessionOverviewPanel', () => {
     expect(rows()[1]?.querySelector('[data-web-shell-session-git]')).toBeNull();
   });
 
+  it('falls back to the worktree slug when the branch is empty', () => {
+    // A detached managed worktree reports branch:''; the slug must display
+    // explicitly (an absent branch would not distinguish || from ??).
+    sessionsState.sessions = [
+      session('s1', {
+        displayName: 'One',
+        worktree: { slug: 'detached-slug', path: '/wt/one', branch: '' },
+      }),
+    ];
+    render();
+    const titleCell = titleTrigger(rows()[0]!).closest('td');
+    expect(
+      titleCell?.querySelector('[data-web-shell-session-git]')?.textContent,
+    ).toBe('detached-slug');
+  });
+
   it('does not open the session when a PR badge is clicked', async () => {
     sessionsState.sessions = [
       session('s1', {
@@ -2182,7 +2240,7 @@ describe('SessionOverviewPanel', () => {
       '[data-slot="table"]',
     ) as HTMLTableElement;
     expect(renderedTable.dataset.layout).toBe('scroll');
-    expect(renderedTable.style.minWidth).toBe('696px');
+    expect(renderedTable.style.minWidth).toBe('720px');
     expect(renderedTable.style.tableLayout).toBe('fixed');
     expect(renderedTable.querySelectorAll('col')).toHaveLength(headers.length);
     expect(
@@ -2191,8 +2249,8 @@ describe('SessionOverviewPanel', () => {
     ).toBe('260px');
     expect(headers.at(-1)?.textContent).toContain('Actions');
     expect(headers.at(-1)?.className).toContain('text-center');
-    expect((headers.at(-1) as HTMLElement).style.width).toBe('156px');
-    expect((cells.at(-1) as HTMLElement).style.width).toBe('156px');
+    expect((headers.at(-1) as HTMLElement).style.width).toBe('180px');
+    expect((cells.at(-1) as HTMLElement).style.width).toBe('180px');
     expect(cells.at(-1)?.firstElementChild?.className).toContain(
       'justify-center',
     );
@@ -2287,7 +2345,7 @@ describe('SessionOverviewPanel', () => {
         parseFloat((headers[1] as HTMLElement).style.width),
       ).toBeGreaterThan(260);
       expect((headers[1] as HTMLElement).style.minWidth).toBe('260px');
-      expect((headers.at(-1) as HTMLElement).style.width).toBe('156px');
+      expect((headers.at(-1) as HTMLElement).style.width).toBe('180px');
       const columnWidth = Array.from(table.querySelectorAll('col')).reduce(
         (total, column) => total + parseFloat(column.style.width),
         0,
@@ -3675,6 +3733,339 @@ describe('SessionOverviewPanel', () => {
     );
   });
 
+  it('binds a PR to the current session through its own actions', async () => {
+    connectionState.sessionId = 's1';
+    connectionState.capabilities = { features: [], workspaceCwd: '/w' };
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    expect(input).not.toBeNull();
+    const url = 'https://github.com/QwenLM/qwen-code/pull/16865';
+    act(() => setInputValue(input, url));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    expect(workspaceActions.bindSessionPr).toHaveBeenCalledWith({
+      number: 16865,
+      url,
+    });
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
+    expect(document.querySelector('input[aria-label="Bind PR"]')).toBeNull();
+  });
+
+  it('binds a PR number resolved through the workspace PR list', async () => {
+    connectionState.sessionId = 's1';
+    connectionState.capabilities = { features: [], workspaceCwd: '/w' };
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    const prUrl = 'https://github.com/QwenLM/qwen-code/pull/16865';
+    workspaceClient.workspaceByCwd.mockImplementation((cwd: string) => ({
+      listWorkspaceSessionsPage: vi.fn(async () => ({
+        sessions: otherWorkspaceSessions[cwd] ?? [],
+      })),
+      updateSessionMetadata: vi.fn(async () => ({})),
+      workspaceGitHubPullRequests: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: cwd,
+        available: true,
+        pullRequests: [{ number: 16865, url: prUrl, title: 'feat' }],
+      })),
+    }));
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    act(() => setInputValue(input, '16865'));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    // Pin the workspaceCwd the panel handed the bind dialog: the bare-number
+    // resolution fetches the PR list through that cwd, so routing the dialog
+    // at the wrong workspace would be caught here.
+    expect(workspaceClient.workspaceByCwd).toHaveBeenCalledWith('/w');
+    expect(workspaceActions.bindSessionPr).toHaveBeenCalledWith({
+      number: 16865,
+      url: prUrl,
+      state: 'open',
+    });
+  });
+
+  it('binds a PR to an other-workspace session through the qualified client', async () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_metadata', 'workspace_qualified_rest_core'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    sessionsState.sessions = [session('a', { displayName: 'Alpha' })];
+    otherWorkspaceSessions['/wsB'] = [
+      session('b1', { workspaceCwd: '/wsB', displayName: 'Beta' }),
+    ];
+    render();
+    await flushAsync();
+    const beta = rows().find((tr) => tr.textContent?.includes('Beta'))!;
+    act(() => click(rowActionButton(beta, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    const url = 'https://github.com/QwenLM/qwen-code/pull/42';
+    act(() => setInputValue(input, url));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    // Pin the cwd the qualified client was opened for, not just "the last
+    // object": routing through the primary workspace must be caught.
+    expect(workspaceClient.workspaceByCwd).toHaveBeenCalledWith('/wsB');
+    const qualified = workspaceClient.workspaceByCwd.mock.results.at(-1)!.value;
+    expect(qualified.updateSessionMetadata).toHaveBeenCalledWith('b1', {
+      pr: { number: 42, url },
+    });
+    expect(workspaceActions.bindSessionPr).not.toHaveBeenCalled();
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/wsB',
+    );
+  });
+
+  it('binds a legacy primary session without a workspace cwd through the top-level client', async () => {
+    connectionState.sessionId = 'current';
+    connectionState.workspaceCwd = '';
+    connectionState.capabilities = {
+      features: ['workspace_session_metadata'],
+      workspaceCwd: '',
+    };
+    sessionsState.sessions = [
+      session('legacy', { workspaceCwd: '', displayName: 'Legacy' }),
+    ];
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    const url = 'https://github.com/QwenLM/qwen-code/pull/7';
+    act(() => setInputValue(input, url));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    expect(workspaceClient.updateSessionMetadata).toHaveBeenCalledWith(
+      'legacy',
+      { pr: { number: 7, url } },
+    );
+    expect(workspaceActions.bindSessionPr).not.toHaveBeenCalled();
+  });
+
+  it('keeps the bind dialog open with an error when the bind fails', async () => {
+    connectionState.sessionId = 's1';
+    connectionState.capabilities = { features: [], workspaceCwd: '/w' };
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    workspaceActions.bindSessionPr.mockRejectedValue(new Error('locked'));
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    act(() =>
+      setInputValue(input, 'https://github.com/QwenLM/qwen-code/pull/1'),
+    );
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    expect(
+      document.querySelector('input[aria-label="Bind PR"]'),
+    ).not.toBeNull();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'Bind PR failed',
+    );
+  });
+
+  it('reports a late bind failure on the panel notice after the dialog is dismissed', async () => {
+    connectionState.sessionId = 's1';
+    connectionState.capabilities = { features: [], workspaceCwd: '/w' };
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    let rejectBind!: (err: Error) => void;
+    workspaceActions.bindSessionPr.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectBind = reject;
+        }),
+    );
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    act(() =>
+      setInputValue(input, 'https://github.com/QwenLM/qwen-code/pull/1'),
+    );
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    // Dismiss the dialog while the write is in flight.
+    const cancel = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'cancel');
+    act(() => click(cancel!));
+    await flushAsync();
+    expect(document.querySelector('input[aria-label="Bind PR"]')).toBeNull();
+    // The write now fails; with the dialog gone the panel notice is the only
+    // report path (the settle-time else arm), so it must carry the error.
+    await act(async () => {
+      rejectBind(new Error('locked'));
+    });
+    await flushAsync();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'Bind PR failed',
+    );
+  });
+
+  it('hides Bind PR on a non-current card when metadata mutation is unavailable', async () => {
+    connectionState.sessionId = 'someone-else';
+    connectionState.capabilities = { features: [], workspaceCwd: '/w' };
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('One'))!;
+    expect(rowActionButton(row, 'Bind PR')).toBeNull();
+  });
+
+  it('refuses number resolution for a cwd-less legacy card', async () => {
+    connectionState.sessionId = 'current';
+    connectionState.workspaceCwd = '';
+    connectionState.capabilities = {
+      features: ['workspace_session_metadata'],
+      workspaceCwd: '',
+    };
+    sessionsState.sessions = [
+      session('legacy', { workspaceCwd: '', displayName: 'Legacy' }),
+    ];
+    const prList = vi.fn(async () => ({
+      v: 1,
+      workspaceCwd: '',
+      available: true,
+      pullRequests: [],
+    }));
+    workspaceClient.workspaceByCwd.mockImplementation((cwd: string) => ({
+      listWorkspaceSessionsPage: vi.fn(async () => ({
+        sessions: otherWorkspaceSessions[cwd] ?? [],
+      })),
+      updateSessionMetadata: vi.fn(async () => ({})),
+      workspaceGitHubPullRequests: prList,
+    }));
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    act(() => setInputValue(input, '42'));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    // The card's own (empty) cwd is passed to the dialog, so it refuses the
+    // lookup and asks for the URL instead of resolving against a workspace.
+    expect(prList).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'full PR URL',
+    );
+  });
+
+  it('does not close another card dialog when a bind completes late', async () => {
+    connectionState.sessionId = 's1';
+    connectionState.capabilities = {
+      features: ['workspace_session_metadata'],
+      workspaceCwd: '/w',
+    };
+    sessionsState.sessions = [
+      session('s1', { displayName: 'One' }),
+      session('s2', { displayName: 'Two' }),
+    ];
+    let resolveBind!: (value: { prs: never[] }) => void;
+    workspaceActions.bindSessionPr.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveBind = resolve;
+        }),
+    );
+    render();
+    await flushAsync();
+    const one = rows().find((tr) => tr.textContent?.includes('One'))!;
+    act(() => click(rowActionButton(one, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    act(() =>
+      setInputValue(input, 'https://github.com/QwenLM/qwen-code/pull/1'),
+    );
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    // Dismiss One's dialog while its bind is still in flight, then open Two's.
+    const cancel = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'cancel');
+    act(() => click(cancel!));
+    await flushAsync();
+    const two = rows().find((tr) => tr.textContent?.includes('Two'))!;
+    act(() => click(rowActionButton(two, 'Bind PR')));
+    await flushAsync();
+    expect(
+      document.querySelector('input[aria-label="Bind PR"]'),
+    ).not.toBeNull();
+    // One's bind now completes; it must not close Two's dialog.
+    await act(async () => {
+      resolveBind({ prs: [] });
+    });
+    await flushAsync();
+    expect(
+      document.querySelector('input[aria-label="Bind PR"]'),
+    ).not.toBeNull();
+  });
+
   it('exports a session as an html download', async () => {
     connectionState.capabilities = {
       features: ['session_export'],
@@ -3944,6 +4335,101 @@ describe('SessionOverviewPanel polling', () => {
     };
     render({ workspaceCwd: '/wsB' });
     expect(workspaceLiveStateOptions.workspaceCwds).toEqual(['/wsB']);
+  });
+
+  it('reports its displayed live-state workspace set and clears it on unmount (#16355)', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    const onLiveStateWorkspaceCwdsChange = vi.fn();
+    render({ onLiveStateWorkspaceCwdsChange });
+
+    // All entries are pollable here, so the reported subset coincides with
+    // what the panel would poll when it owns the channel.
+    expect(workspaceLiveStateOptions.workspaceCwds).toEqual(['/w', '/wsB']);
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith([
+      '/w',
+      '/wsB',
+    ]);
+
+    act(() => root?.unmount());
+    root = null;
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith([]);
+  });
+
+  it('reports live-state workspace set changes to the host poller', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [{ id: 'w0', cwd: '/w', primary: true, trusted: true }],
+    };
+    const onLiveStateWorkspaceCwdsChange = vi.fn();
+    render({ onLiveStateWorkspaceCwdsChange });
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith(['/w']);
+
+    connectionState.capabilities = {
+      ...connectionState.capabilities,
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    rerender({ onLiveStateWorkspaceCwdsChange });
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith([
+      '/w',
+      '/wsB',
+    ]);
+  });
+
+  it('reports the pollable subset when a live workspace shares the catalog (#16355)', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        {
+          id: 'live',
+          cwd: '/conversations/live',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    const onLiveStateWorkspaceCwdsChange = vi.fn();
+    render({ onLiveStateWorkspaceCwdsChange });
+
+    // The panel's own adoption stays all-or-nothing: a live entry in the
+    // visible set keeps it on the catalog fallback.
+    expect(workspaceLiveStateOptions.enabled).toBe(false);
+    // ...but the app-level poller still receives the pollable subset.
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith([
+      '/w',
+      '/wsB',
+    ]);
+  });
+
+  it('reports the displayed set without untrusted or non-absolute entries', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: false },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+        { id: 'w2', cwd: 'relative/path', primary: false, trusted: true },
+      ],
+    };
+    const onLiveStateWorkspaceCwdsChange = vi.fn();
+    render({ onLiveStateWorkspaceCwdsChange });
+
+    expect(workspaceLiveStateOptions.enabled).toBe(false);
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith(['/wsB']);
   });
 
   it('falls back to the catalog poll without live-state', () => {
@@ -4372,6 +4858,28 @@ describe('SessionOverviewPanel standalone sessions', () => {
     expect(anchorClick).toHaveBeenCalled();
   });
 
+  it('does not offer Bind PR on a standalone card', async () => {
+    useConversationsRuntimeCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    // Rename is available on the standalone card, but Bind PR is not: the
+    // standalone metadata route only accepts displayName.
+    expect(rowActionButton(row, 'Rename')).not.toBeNull();
+    expect(rowActionButton(row, 'Bind PR')).toBeNull();
+  });
+
   it('routes standalone archive through the standalone client route', async () => {
     useConversationsRuntimeCapabilities();
     standalonePages = [
@@ -4402,6 +4910,109 @@ describe('SessionOverviewPanel standalone sessions', () => {
     for (const call of workspaceClient.workspaceByCwd.mock.results) {
       expect(call.value.archiveSessionsData).not.toHaveBeenCalled();
     }
+  });
+
+  it('detaches the selected standalone session before archive succeeds', async () => {
+    useConversationsRuntimeCapabilities();
+    connectionState.sessionId = 'st1';
+    connectionState.sessionContext = { kind: 'standalone' };
+    connectionState.clientId = 'client-st1';
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+          }),
+        ],
+      },
+      { sessions: [] },
+    ];
+    let detached = false;
+    workspaceClient.detachSession.mockImplementation(
+      async (id: string, clientId: string) => {
+        expect(id).toBe('st1');
+        expect(clientId).toBe('client-st1');
+        detached = true;
+      },
+    );
+    workspaceClient.archiveStandaloneSessions.mockImplementation(
+      async (ids: string[]) => ({
+        archived: detached ? ids : [],
+        alreadyArchived: [],
+        notFound: [],
+        errors: detached
+          ? []
+          : [
+              {
+                sessionId: 'st1',
+                code: 'session_busy',
+                message: 'The standalone session is busy.',
+              },
+            ],
+      }),
+    );
+    render({ onCurrentSessionRemoved });
+    await flushAsync();
+
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(rowActionButton(row, 'Archive')));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    expect(confirm).not.toBeNull();
+    act(() => click(confirm));
+
+    await vi.waitFor(() => {
+      expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
+    });
+    expect(workspaceClient.detachSession).toHaveBeenCalledExactlyOnceWith(
+      'st1',
+      'client-st1',
+    );
+    expect(
+      workspaceClient.detachSession.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      workspaceClient.archiveStandaloneSessions.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('does not detach a different session during standalone archive', async () => {
+    useConversationsRuntimeCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st2', {
+            workspaceCwd: '/conv',
+            displayName: 'Other idle session',
+          }),
+        ],
+      },
+      { sessions: [] },
+    ];
+    render({ onCurrentSessionRemoved });
+    await flushAsync();
+
+    const row = rows().find((tr) =>
+      tr.textContent?.includes('Other idle session'),
+    )!;
+    act(() => click(rowActionButton(row, 'Archive')));
+    act(() =>
+      click(
+        document.querySelector(
+          '[data-slot="alert-dialog-action"]',
+        ) as HTMLElement,
+      ),
+    );
+
+    await vi.waitFor(() => {
+      expect(workspaceClient.archiveStandaloneSessions).toHaveBeenCalledOnce();
+    });
+    expect(workspaceClient.archiveStandaloneSessions).toHaveBeenCalledWith([
+      'st2',
+    ]);
+    expect(workspaceClient.detachSession).not.toHaveBeenCalled();
+    expect(onCurrentSessionRemoved).not.toHaveBeenCalled();
   });
 
   it('routes standalone delete through the standalone client route', async () => {
@@ -4666,5 +5277,318 @@ describe('SessionOverviewPanel standalone sessions', () => {
       'st1',
     ]);
     expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
+  });
+});
+
+describe('worktree snapshot restore in the session overview', () => {
+  const cwd = '/work/secondary';
+
+  function present(cardCanRestore = true): void {
+    connectionState.capabilities = {
+      ...connectionState.capabilities,
+      features: [
+        ...(connectionState.capabilities?.features ?? []),
+        'session_worktree_restore_v1',
+      ],
+    };
+    sessionsState = {
+      sessions: [
+        session('removed-session', {
+          workspaceCwd: cwd,
+          worktree: {
+            slug: 'reclaimed',
+            path: `${cwd}/.qwen/worktrees/reclaimed`,
+            branch: '',
+            worktreeRemoved: {
+              archiveKey: 'removed-session.1.1.worktree-snapshot.tar.gz',
+            },
+            canRestore: cardCanRestore,
+          },
+        }),
+      ],
+      loading: false,
+    };
+    render();
+  }
+
+  function restoreButton(): HTMLButtonElement {
+    const button = container!.querySelector<HTMLButtonElement>(
+      '[data-web-shell-session-restore-worktree]',
+    );
+    expect(button).not.toBeNull();
+    return button!;
+  }
+
+  function restoredClient() {
+    return {
+      sessionId: 'removed-session',
+      workspaceCwd: cwd,
+      clientId: 'restore-client',
+      state: { mode: 'replay-ready' },
+      lastEventId: 27,
+      eventEpoch: 'epoch-restore',
+      replaySnapshot: {
+        compactedReplay: [{ id: 1, v: 1, type: 'session_update', data: {} }],
+        liveJournal: [{ id: 27, v: 1, type: 'session_update', data: {} }],
+      },
+      replaySnapshotComplete: true,
+      historyHasMore: true,
+      historyAnchorRecordId: 'anchor-restore-1',
+      replayProjectionWatermark: 17,
+      replayDegraded: true,
+      restoredArtifacts: [],
+      detach: vi.fn(async () => undefined),
+    } as unknown as DaemonSessionClient & {
+      detach: ReturnType<typeof vi.fn>;
+    };
+  }
+
+  it.each(['row', 'title'] as const)(
+    'hands a hydrated restore to an ordinary %s open after catalog reload',
+    async (surface) => {
+      let finishReload = () => {};
+      sessionsReload.mockReturnValueOnce(
+        new Promise((resolve) => {
+          finishReload = () => resolve(sessionsState.sessions);
+        }),
+      );
+      const restored = restoredClient();
+      const restore =
+        workspaceActions.restoreWorktreeSession.mockResolvedValueOnce(restored);
+      present();
+      const target =
+        surface === 'title'
+          ? titleTrigger(rows()[0]!)
+          : rows()[0]!.querySelectorAll('td')[2]!;
+      await act(async () => {
+        click(target);
+      });
+      expect(restore).toHaveBeenCalledExactlyOnceWith('removed-session', {
+        workspaceCwd: cwd,
+      });
+      expect(sessionsReload).toHaveBeenCalledOnce();
+      expect(onOpenSession).not.toHaveBeenCalled();
+      await act(async () => {
+        finishReload();
+      });
+      await vi.waitFor(() =>
+        expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+          'removed-session',
+          cwd,
+          undefined,
+          restored,
+        ),
+      );
+      expect(restored.detach).not.toHaveBeenCalled();
+    },
+  );
+
+  it('detaches its restored client when the catalog reload fails', async () => {
+    sessionsReload.mockRejectedValueOnce(new Error('catalog unavailable'));
+    const restored = restoredClient();
+    workspaceActions.restoreWorktreeSession.mockResolvedValueOnce(restored);
+    present();
+
+    await act(async () => {
+      click(rows()[0]!.querySelectorAll('td')[2]!);
+    });
+
+    await vi.waitFor(() =>
+      expect(container!.textContent).toContain(
+        'Snapshot restore failed: catalog unavailable',
+      ),
+    );
+    expect(restored.detach).toHaveBeenCalledOnce();
+    expect(onOpenSession).not.toHaveBeenCalled();
+  });
+
+  it('detaches a restored client instead of opening after the panel unmounts', async () => {
+    let finishReload = () => {};
+    sessionsReload.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishReload = () => resolve(sessionsState.sessions);
+      }),
+    );
+    const restored = restoredClient();
+    workspaceActions.restoreWorktreeSession.mockResolvedValueOnce(restored);
+    present();
+
+    await act(async () => {
+      click(rows()[0]!.querySelectorAll('td')[2]!);
+    });
+    expect(sessionsReload).toHaveBeenCalledOnce();
+    act(() => root?.unmount());
+    root = null;
+    await act(async () => finishReload());
+
+    await vi.waitFor(() => expect(restored.detach).toHaveBeenCalledOnce());
+    expect(onOpenSession).not.toHaveBeenCalled();
+  });
+
+  it('does not ordinary-open a removed session whose snapshot is unavailable', () => {
+    workspaceClient.workspaceByCwd.mockClear();
+    present(false);
+    act(() => click(rows()[0]!.querySelectorAll('td')[2]!));
+    expect(container!.querySelector('[role="alert"]')?.textContent).toBe(
+      'Snapshot is unavailable for this workspace',
+    );
+    expect(workspaceClient.workspaceByCwd).not.toHaveBeenCalled();
+    expect(onOpenSession).not.toHaveBeenCalled();
+  });
+
+  it('disables duplicate clicks while pending and opens the owning session after reload', async () => {
+    const restored = restoredClient();
+    let finish: () => void = () => {};
+    const pending = new Promise<DaemonSessionClient>((resolve) => {
+      finish = () => resolve(restored);
+    });
+    const restore =
+      workspaceActions.restoreWorktreeSession.mockReturnValueOnce(pending);
+    present();
+    const button = restoreButton();
+    expect(button.disabled).toBe(false);
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(
+      container!.querySelectorAll('[data-web-shell-session-restore-worktree]'),
+    ).toHaveLength(1);
+    expect(restore).toHaveBeenCalledOnce();
+    expect(restoreButton().disabled).toBe(true);
+    expect(restoreButton().getAttribute('aria-busy')).toBe('true');
+    expect(container!.textContent).toContain('Restoring…');
+    await act(async () => {
+      restoreButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(restore).toHaveBeenCalledOnce();
+    expect(restore).toHaveBeenCalledWith('removed-session', {
+      workspaceCwd: cwd,
+    });
+    expect(onOpenSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finish();
+      await pending;
+    });
+    await vi.waitFor(() =>
+      expect(onOpenSession).toHaveBeenCalledWith(
+        'removed-session',
+        cwd,
+        undefined,
+        restored,
+      ),
+    );
+    expect(restored.detach).not.toHaveBeenCalled();
+    expect(sessionsReload).toHaveBeenCalled();
+    expect(restoreButton().disabled).toBe(false);
+  });
+
+  it('does not present an unrelated export as worktree restoration', async () => {
+    connectionState.sessionId = 'removed-session';
+    connectionState.capabilities = {
+      ...connectionState.capabilities,
+      features: [
+        ...(connectionState.capabilities?.features ?? []),
+        'session_export',
+      ],
+    };
+    connectionState.capabilities.workspaces = [
+      { id: 'primary', cwd: '/w', primary: true, trusted: true },
+      { id: 'secondary', cwd, primary: false, trusted: true },
+    ];
+    connectionState.capabilities.features?.push('workspace_session_export');
+    workspaceClient.workspaceByCwd.mockReturnValue({
+      exportSession: workspaceActions.exportSession,
+      listWorkspaceSessionsPage: vi.fn(async () => ({ sessions: [] })),
+    });
+    const exportResult = {
+      content: '<html></html>',
+      filename: 'session.html',
+      mimeType: 'text/html',
+      format: 'html' as const,
+    };
+    let finish: () => void = () => {};
+    const pending = new Promise<typeof exportResult>((resolve) => {
+      finish = () => resolve(exportResult);
+    });
+    workspaceActions.exportSession.mockReturnValueOnce(pending);
+    present();
+
+    await act(async () => {
+      rowActionButton(rows()[0]!, 'Export conversation record').dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+
+    expect(workspaceActions.exportSession).toHaveBeenCalledOnce();
+    expect(restoreButton().disabled).toBe(true);
+    expect(restoreButton().getAttribute('aria-busy')).toBeNull();
+    expect(restoreButton().textContent).not.toContain('Restoring…');
+    await act(async () => {
+      finish();
+      await pending;
+    });
+    await vi.waitFor(() => expect(restoreButton().disabled).toBe(false));
+  });
+
+  it('shows failure without claiming the session opened, and releases busy state', async () => {
+    workspaceActions.restoreWorktreeSession.mockRejectedValueOnce(
+      new Error('damaged snapshot'),
+    );
+    present();
+    const button = restoreButton();
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await vi.waitFor(() =>
+      expect(container!.textContent).toContain(
+        'Snapshot restore failed: damaged snapshot',
+      ),
+    );
+    expect(onOpenSession).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(button.disabled).toBe(false));
+  });
+
+  it('keeps an unavailable archive disabled instead of issuing a request', async () => {
+    workspaceClient.workspaceByCwd.mockClear();
+    present(false);
+    const button = restoreButton();
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute('aria-label')).toBe(
+      'Snapshot is unavailable for this workspace',
+    );
+    act(() => button.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(workspaceClient.workspaceByCwd).not.toHaveBeenCalled();
+  });
+
+  it('does not enable restore without the daemon capability or without a removed state', async () => {
+    present();
+    connectionState.capabilities = {
+      ...connectionState.capabilities,
+      features: (connectionState.capabilities?.features ?? []).filter(
+        (feature) => feature !== 'session_worktree_restore_v1',
+      ),
+    };
+    rerender({ manageLiveState: true });
+    const button = restoreButton();
+    expect(button.disabled).toBe(true);
+
+    sessionsState = {
+      sessions: [
+        session('healthy-session', {
+          workspaceCwd: cwd,
+          worktree: {
+            slug: 'healthy',
+            path: `${cwd}/.qwen/worktrees/healthy`,
+            branch: '',
+          },
+        }),
+      ],
+      loading: false,
+    };
+    rerender();
+    expect(
+      container!.querySelector('[data-web-shell-session-restore-worktree]'),
+    ).toBeNull();
   });
 });

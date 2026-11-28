@@ -2,8 +2,8 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-这个实验性 Helm chart 安装签名认证的 Managed Agent API、同 Pod 的私有 Hosted
-Harness，以及使用持久卷的 MySQL 8.4。提供镜像和模型配置后，一条 Helm 命令即可安装
+这个实验性 Helm chart 在同一应用 Pod 内安装签名认证的 Managed Agent API 和两个私有
+Hosted Harness 池成员，并为 MySQL 8.4 配置持久卷。提供镜像和模型配置后，一条 Helm 命令即可安装
 整套服务。默认支持文本 Session；可选配置增加可信单节点 Workspace 文件、前台
 Shell 和 Managed WebShell 网关。K2 CSI provisioning 仍是独立部署。
 
@@ -17,7 +17,7 @@ Shell 和 Managed WebShell 网关。K2 CSI provisioning 仍是独立部署。
   revision，并匹配节点 CPU 架构。不假设已有公开发布的 Managed Agent 镜像。
 - OpenAI 兼容模型 endpoint、模型 ID 和 API key。
 
-默认应用 Pod 总计申请 500m CPU 和 1 GiB 内存；MySQL 额外申请 250m CPU 和 512 MiB
+默认应用 Pod 总计申请 750m CPU 和 1.5 GiB 内存。MySQL 额外申请 250m CPU 和 512 MiB
 内存。资源 requests 和 limits 可在 [values.yaml](chart/values.yaml) 配置。
 应用无需 Kubernetes API 权限，不挂载 service-account token。
 
@@ -93,18 +93,18 @@ Helm 会将受管 Secret 内容保存到 release 元数据。若要独立管理�
 `credentials.existingSecret` 并省略 `model.apiKey`。该 Secret 必须已存在于 release
 namespace，包含以下全部键：
 
-| 键                          | 值                                                                                       |
-| --------------------------- | ---------------------------------------------------------------------------------------- |
-| `auth-signing-key`          | 至少 32 个 UTF-8 字节                                                                    |
-| `session-store-binding-key` | 独立密钥，至少 32 个 UTF-8 字节                                                          |
-| `harness-token`             | Java 与 Harness 共享的私有 bearer token                                                  |
-| `capability-digest`         | `sha256:` 后跟 64 位小写十六进制字符                                                     |
-| `mysql-password`            | 应用数据库密码                                                                           |
-| `mysql-root-password`       | MySQL 初始化 root 密码                                                                   |
-| `model-api-key`             | Provider API key                                                                         |
-| `runtime-broker-token`      | `runtime.enabled` 时必需；私有 Broker bearer token                                       |
-| `runtime-credential-key`    | `runtime.enabled` 时必需；32 个随机字节的 base64 编码                                    |
-| `web-token`                 | `web.enabled` 时必需；至少 32 字节的独立浏览器 bearer token，不能等于 `auth-signing-key` |
+| 键                          | 值                                                                               |
+| --------------------------- | -------------------------------------------------------------------------------- |
+| `auth-signing-key`          | 至少 32 个 UTF-8 字节                                                            |
+| `session-store-binding-key` | 独立密钥，至少 32 个 UTF-8 字节                                                  |
+| `harness-token`             | Java 与 Harness 共享的私有 bearer token                                          |
+| `capability-digest`         | `sha256:` 后跟 64 位小写十六进制字符                                             |
+| `mysql-password`            | 应用数据库密码                                                                   |
+| `mysql-root-password`       | MySQL 初始化 root 密码                                                           |
+| `model-api-key`             | Provider API key                                                                 |
+| `runtime-broker-token`      | `runtime.enabled` 时必需；私有 Broker bearer token                               |
+| `runtime-credential-key`    | `runtime.enabled` 时必需；32 个随机字节的 base64 编码                            |
+| `web-token`                 | `web.enabled` 时必需；非空的独立浏览器 bearer token，不能等于 `auth-signing-key` |
 
 Runtime credential key ID 固定为 `kubernetes-v1`；存在保留的 binding 时必须保留此
 密钥。连接集群时，Helm 会检查已有自管 Secret 的必需键；离线 `helm template` 无法
@@ -117,8 +117,11 @@ Runtime credential key ID 固定为 `kubernetes-v1`；存在保留的 binding �
 MySQL 初始化时授予应用用户数据库权限，以及 Flyway 启动探针所需的
 `performance_schema.user_variables_by_thread` SELECT 权限。
 
-ClusterIP Service 仅在 8080 暴露签名认证的公开 API。Harness 4170 和 Session Store
-8081 都绑定 loopback。不启用无认证公开监听、LoadBalancer 或 Ingress。远程客户端
+ClusterIP Service 仅在 8080 暴露签名认证的公开 API。Harness 池成员 `harness`
+和 `harness-b` 分别使用回环端口 4170 和 4172，私有 Session Store 使用回环端口
+8081。`runtime.enabled` 为 true 时，Runtime Broker 共用同一个内部 origin：每个 Harness 都获得 `QWEN_MANAGED_RUNTIME_BROKER_URL=http://127.0.0.1:8081`，不再暴露独立的 Broker 监听器。`runtime.enabled` 为 false 时，Harness 不获得 Broker URL 或 token，继续支持纯文本 Session。控制面按记录的 owner 路由会话，SQL wake dispatch 使会话在干净挂起后释放
+placement。Pod 的就绪状态覆盖全部容器，Harness 重启时可能暂时从 Service 摘除 API
+端点。不启用无认证公开监听、LoadBalancer 或 Ingress。远程客户端
 使用独立配置的 TLS ingress 或可信网关，并保留 API 签名；tenant 和 actor header
 本身不能认证调用者。
 
@@ -225,7 +228,8 @@ smoke 需要 Node.js 22 或更新版本。它验证无签名请求被拒绝、�
 输出 Session 和 Turn ID。它会使用已配置账号真实调用 provider。失败时报告 Session
 ID，保留 Session 供检查，不重放结果不确定的输入。可使用
 `kubectl -n qwen-managed-agent logs deployment/managed-agent -c server` 或
-`-c harness` 查看日志。默认超时 120 秒，可用 `--timeout-ms` 调整。
+`-c harness`、`-c harness-b` 查看相应的池成员日志。默认超时 120 秒，可用
+`--timeout-ms` 调整。
 
 验证空闲持久化时，第一次为 smoke 增加 `--keep-session`。记录输出的 Session ID，
 重启应用，再使用该 ID 继续 smoke：
@@ -248,6 +252,11 @@ node deploy/kubernetes/smoke.mjs --key-file "$QWEN_K8S_KEY_FILE" --session-id <s
 release 名、MySQL 和可选 Runtime/Workspace PVC，以及凭据不变。使用匹配的新镜像
 重复安装命令，恢复流量前执行
 Session smoke。应用固定单副本并使用 Recreate，升级存在停机时间，请勿扩为多副本。
+
+从 Harness 仍使用独立 Broker URL `http://127.0.0.1:4182` 的版本升级时，必须同时升级 chart 以及匹配的服务端和 Harness 镜像。新模板会把该值替换为共享的 Session Store origin `http://127.0.0.1:8081`。回滚到使用独立监听器的版本时，也必须同时恢复旧 chart 与配套镜像，包括旧的 4182 URL；不要把共享监听器的 Harness 配置与旧的独立监听器服务端混用。
+
+会话进入池后，其 writer 凭据绑定成员与 epoch。若回退到使用非池连接器的版本，
+在接受写入前一并恢复配套的升级前数据库和应用备份。
 
 不要使用 `--atomic`，也不要自动回滚改变 schema 的升级。Flyway 在 readiness 前执行
 migration，旧 binary 不保证接受新 schema。请向前修复，或在接受写入前恢复匹配的
@@ -272,9 +281,13 @@ Kubernetes API peer 验证凭据复用，通过受控 HTTP peer 验证签名 smo
 
 每个目标集群应独立记录镜像构建、安装、真实 MySQL、provider 调用和重启结果。
 ACK、节点故障、CSI、物理退役与生产验收仍是独立门槛。可选可信 LOCAL 模式与
-[K2 常驻部署](../k2-resident/README.zh-CN.md) 独立；后者需要经过资格验证的 CSI
+原 [K2 常驻部署](../../packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident/README.zh-CN.md)
+（已从 `managed-agent-server` 移除并归档）独立；后者需要经过资格验证的 CSI
 身份，且不支持 Shell。chart 不开启 K2。
 设计：[English](../../docs/design/2026-10-24-managed-agent-kubernetes.md) |
 [简体中文](../../docs/design/2026-10-24-managed-agent-kubernetes.zh-CN.md)；工具与 WebShell：
 [English](../../docs/design/2026-10-25-managed-agent-kubernetes-tools.md) |
 [简体中文](../../docs/design/2026-10-25-managed-agent-kubernetes-tools.zh-CN.md)。
+Harness 池设计见
+[English](../../docs/design/2026-11-26-managed-agent-helm-harness-pool.md) |
+[简体中文](../../docs/design/2026-11-26-managed-agent-helm-harness-pool.zh-CN.md)。

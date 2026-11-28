@@ -357,6 +357,21 @@ export function createBoundSessionsAccessor(
   // I/O failure behind it, so without this line the cause would be logged
   // nowhere; throttled because the route is polled every channel cycle.
   let workerDowngradeStreak = 0;
+  // Consecutive authorship lookups that failed with a non-200 or a thrown
+  // request. Each fail-open empty set makes the bound session receive its own
+  // comments (the self-delivery loop the watch exists to prevent), so the
+  // cause must not be silent; throttled like the sibling downgrade line
+  // because the lookup runs on every comment-watch pass. A 200 empty set is
+  // NOT a failure (it is indistinguishable from a quiet PR by design).
+  let attributionFailureStreak = 0;
+  const noteAttributionFailure = (cause: string): void => {
+    attributionFailureStreak += 1;
+    if (attributionFailureStreak === 1 || attributionFailureStreak % 60 === 0) {
+      process.stderr.write(
+        `[channel-worker] posted-comment authorship lookup failed (${cause}); delivering without authorship exclusion (${attributionFailureStreak} consecutive failures); check that the worker and the daemon run the same version\n`,
+      );
+    }
+  };
   // requestRest's timer covers the connection through response headers
   // only; the signal also bounds body consumption so a half-open connection
   // cannot hang the poll loop indefinitely.
@@ -442,7 +457,10 @@ export function createBoundSessionsAccessor(
       const entries: PrBindingSummary['prs'] = [];
       for (const pr of prs) {
         if (pr === null || typeof pr !== 'object') continue;
-        const { number, url, state, role } = pr as Record<string, unknown>;
+        const { number, url, state, role, watching } = pr as Record<
+          string,
+          unknown
+        >;
         if (
           typeof number !== 'number' ||
           !Number.isSafeInteger(number) ||
@@ -468,6 +486,10 @@ export function createBoundSessionsAccessor(
           // The vocabulary check above proved the value; includes() does
           // not narrow unknown, so assert the validated type here.
           ...(role !== undefined ? { role: role as PrBindingRole } : {}),
+          // Only a strict boolean is knowledge; any other value is unknown
+          // and drops the FIELD, not the entry — a malformed watching must
+          // not fabricate the binding's absence. Unknown stays eligible.
+          ...(typeof watching === 'boolean' ? { watching } : {}),
         });
       }
       if (entries.length < prs.length) {
@@ -685,6 +707,54 @@ export function createBoundSessionsAccessor(
         if (releaseWake) {
           await releaseWake().catch(() => {});
         }
+      }
+    },
+    postedCommentIds: async (sessionId) => {
+      // Fail-open: a non-200 or a malformed body resolves to an empty set so
+      // the comment watch never suppresses delivery on missing authorship
+      // evidence. The cwd hint cache is capped (FIFO): a listed session beyond
+      // the cap is evicted, so on a cold miss re-read the fresh snapshot like
+      // the delivery path does — otherwise an evicted author is credited with
+      // nothing and receives its own comments. Absence from the snapshot stays
+      // fail-open (unknown, not evidence of having posted nothing).
+      let cwd = cwdBySession.get(sessionId);
+      if (cwd === undefined) {
+        try {
+          const snapshot = await listPrBindings();
+          cwd = snapshot.bindings.find(
+            (binding) => binding.sessionId === sessionId,
+          )?.workspaceCwd;
+        } catch {
+          return new Set<string>();
+        }
+        if (cwd === undefined) return new Set<string>();
+      }
+      let res: Response | undefined;
+      try {
+        res = await client.requestRest(
+          `/sessions/${encodeURIComponent(sessionId)}/posted-comments?workspaceCwd=${encodeURIComponent(cwd)}`,
+          { signal: requestSignal() },
+        );
+        if (!res.ok) {
+          noteAttributionFailure(`HTTP ${res.status}`);
+          return new Set<string>();
+        }
+        const body = (await res.json()) as { ids?: unknown };
+        const ids = new Set<string>();
+        if (Array.isArray(body.ids)) {
+          for (const id of body.ids) {
+            if (typeof id === 'string') ids.add(id);
+          }
+        }
+        attributionFailureStreak = 0;
+        return ids;
+      } catch (err) {
+        noteAttributionFailure(
+          (err instanceof Error ? err.message : String(err)).slice(0, 200),
+        );
+        return new Set<string>();
+      } finally {
+        if (res) await discardBody(res);
       }
     },
   };

@@ -62,6 +62,7 @@ describe('hooksCommand', () => {
       getTopTierMcpServers: vi.fn(),
       getHookSystem: vi.fn().mockReturnValue({
         reload: vi.fn().mockResolvedValue(undefined),
+        getConfigWarnings: vi.fn().mockReturnValue([]),
         getRegistry: vi.fn().mockReturnValue({
           getAllHooks: vi.fn().mockReturnValue([]),
         }),
@@ -182,6 +183,7 @@ describe('hooksCommand', () => {
     ) {
       const hookSystem = {
         reload: vi.fn().mockResolvedValue(undefined),
+        getConfigWarnings: vi.fn().mockReturnValue([]),
         getRegistry: vi.fn().mockReturnValue({
           getAllHooks: vi.fn().mockReturnValue([]),
         }),

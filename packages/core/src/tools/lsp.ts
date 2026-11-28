@@ -11,6 +11,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
 import { unescapePath } from '../utils/paths.js';
+import { raceWithAbort } from '../utils/race-with-abort.js';
 import type { Config } from '../config/config.js';
 import type {
   LspCallHierarchyIncomingCall,
@@ -145,7 +146,12 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     return `LSP ${operationLabel}`;
   }
 
-  async execute(_signal: AbortSignal): Promise<ToolResult> {
+  execute(signal: AbortSignal): Promise<ToolResult> {
+    // LSP tool operations are read-only, so the turn can discard late replies.
+    return raceWithAbort(signal, () => this.executeOperation());
+  }
+
+  private async executeOperation(): Promise<ToolResult> {
     const client = this.config.getLspClient();
     if (!client || !this.config.isLspEnabled()) {
       const message = `LSP ${this.getOperationLabel()} is unavailable (LSP disabled or not initialized).`;

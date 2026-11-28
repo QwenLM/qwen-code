@@ -52,6 +52,8 @@ export function managedLocalJavaEnvironment(
     SPRING_APPLICATION_JSON: JSON.stringify({
       'qwen.managed-agent.runtime-broker.session-worktrees-enabled':
         process.platform !== 'win32',
+      'qwen.managed-agent.runtime-broker.tool-measurements': true,
+      'qwen.managed-agent.runtime-broker.web-terminal': true,
       'qwen.managed-agent.model-catalog': models,
       'qwen.managed-agent.definition-models': models.map(
         (model) => model.modelId,
@@ -88,8 +90,6 @@ export function managedLocalJavaEnvironment(
     QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED: 'true',
     QWEN_MANAGED_AGENT_APPROVAL_MODE: 'default',
     QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED: 'true',
-    QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST: '127.0.0.1',
-    QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT: String(state.brokerPort),
     QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN: state.brokerToken,
     QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER: 'local-process',
     QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
@@ -250,11 +250,7 @@ export async function runManagedLocalServe(
 
   try {
     const { models, defaultModelId } = loadManagedLocalModels();
-    if (
-      [state.javaPort, state.harnessPort, state.brokerPort].includes(
-        options.port,
-      )
-    ) {
+    if ([state.javaPort, state.harnessPort].includes(options.port)) {
       throw new Error(
         'Public --port conflicts with a persisted private service port. Choose another public port.',
       );
@@ -286,7 +282,7 @@ export async function runManagedLocalServe(
         ...process.env,
         QWEN_SERVER_TOKEN: state.harnessToken,
         QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST: state.capabilityDigest,
-        QWEN_MANAGED_RUNTIME_BROKER_URL: `http://127.0.0.1:${state.brokerPort}`,
+        QWEN_MANAGED_RUNTIME_BROKER_URL: javaUrl,
         QWEN_MANAGED_RUNTIME_BROKER_TOKEN: state.brokerToken,
         QWEN_RUNTIME_DIR: path.join(directory, 'harness'),
       },

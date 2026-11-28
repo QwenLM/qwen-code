@@ -34,3 +34,4 @@ export {
   shutdownTelemetry,
   startEventLoopLagMonitor,
 } from '@qwen-code/qwen-code-core';
+export { getMemoryBaseDir } from '@qwen-code/qwen-code-core/memory/paths.js';

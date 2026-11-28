@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { FolderOpenIcon } from 'lucide-react';
 import type {
@@ -14,161 +21,98 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
+  useActions,
   useConnection,
   useWorkspace,
   useWorkspaceActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../i18n';
-import type { LocalFilesBlocker } from '../local-files/capabilities';
 import type { AcpWorkspaceSelector } from '../local-files/bridge-client';
 import {
   useLocalFilesBridge,
   type LocalFilesPhase,
-  type LocalFilesStatus,
 } from '../local-files/useLocalFilesBridge';
 import { resolveVoiceWorkspaceTarget } from '../voice/voice-workspace-target';
-import { Button } from './ui/button';
+import { writeClipboardText } from '../utils/clipboard';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
-import { Spinner } from './ui/spinner';
+import { requestToast } from './ToastHost';
+import { useWebShellPortalRoot } from '../portalRoot';
+import {
+  LOCAL_FILES_DAEMON_COMMAND,
+  LocalFilesPanel,
+  deriveLocalFilesDaemonCommand,
+  getLocalFilesDotClass,
+  getLocalFilesTooltip,
+  type LocalFilesPanelProps,
+} from './LocalFilesPanel';
 import { cn } from '@/lib/utils';
 
-const STATUS_KEY: Record<LocalFilesPhase, string> = {
-  unavailable: 'localFiles.status.unavailable',
-  'needs-session': 'localFiles.status.needsSession',
-  idle: 'localFiles.status.idle',
-  'needs-gesture': 'localFiles.status.needsGesture',
-  'held-elsewhere': 'localFiles.status.heldElsewhere',
-  connecting: 'localFiles.status.connecting',
-  registering: 'localFiles.status.registering',
-  connected: 'localFiles.status.connected',
-  reconnecting: 'localFiles.status.reconnecting',
-  failed: 'localFiles.status.failed',
+export {
+  LOCAL_FILES_DAEMON_COMMAND,
+  LocalFilesPanel,
+  deriveLocalFilesDaemonCommand,
+  getLocalFilesDotClass,
+  getLocalFilesTooltip,
+  type LocalFilesPanelProps,
 };
 
-const BLOCKER_KEY: Record<NonNullable<LocalFilesBlocker>, string> = {
-  'insecure-context': 'localFiles.blocker.insecureContext',
-  'cross-origin-frame': 'localFiles.blocker.crossOriginFrame',
-  'unsupported-browser': 'localFiles.blocker.unsupportedBrowser',
-  'workspace-ineligible': 'localFiles.blocker.workspaceIneligible',
-  'workspace-resolving': 'localFiles.blocker.workspaceResolving',
-  'unsupported-daemon': 'localFiles.blocker.unsupportedDaemon',
-};
-
-const BUSY: readonly LocalFilesPhase[] = [
-  'connecting',
-  'registering',
-  'reconnecting',
-];
-
-export interface LocalFilesPanelProps {
-  status: LocalFilesStatus;
-  onConnect: () => void;
-  onDisconnect: () => void;
-  onOpenInNewTab: () => void;
+interface LocalFilesTunnelTarget {
+  host: string;
+  remotePort: number;
+  localPort: number;
 }
 
 /**
- * The popover body, kept prop-driven and free of hooks/portals so the phase →
- * affordance mapping is testable without a Radix portal or a daemon provider.
+ * Parse the daemon URL into an SSH tunnel target. The local bind port is
+ * always DIFFERENT from the daemon's port: in the same-machine LAN case (the
+ * browser runs on the daemon host and the page was opened via the LAN IP)
+ * the daemon already holds that port, so an identity forward cannot bind.
+ * The offset also keeps the bind unprivileged (a non-root user cannot bind
+ * 80/443); it wraps down for ports near the top of the range. The remote
+ * port stays the daemon's. IPv6 hostnames are unbracketed because ssh takes
+ * a bare host.
+ *
+ * The host is allowlisted because the command is pasted into a shell: the
+ * WHATWG URL parser preserves shell metacharacters in the host (`http://a;b/`
+ * parses with hostname `a;b`), and a leading `-` would reach ssh's own option
+ * parser. `:` stays allowed for bare IPv6 addresses. Returns undefined for a
+ * relative/base-less URL or a host outside the allowlist (no safe tunnel).
  */
-export function LocalFilesPanel({
-  status,
-  onConnect,
-  onDisconnect,
-  onOpenInNewTab,
-}: LocalFilesPanelProps) {
-  const { t } = useI18n();
-  const busy = BUSY.includes(status.phase);
-  const active =
-    status.phase === 'connected' || status.phase === 'held-elsewhere';
-  // A grant worth releasing: a directory is bound, or a bridge is running.
-  const granted = status.rootName !== undefined || busy || active;
-  const canConnect = status.phase !== 'unavailable' && !busy && !active;
-  // The one transient blocker: pairing it with the permanent "Unavailable
-  // here" header would assert impossibility next to a promise of progress.
-  const resolving = status.blocker === 'workspace-resolving';
+function parseLocalFilesTunnelTarget(
+  baseUrl: string,
+): LocalFilesTunnelTarget | undefined {
+  try {
+    const url = new URL(baseUrl);
+    if (!url.hostname) return undefined;
+    const host = url.hostname.replace(/^\[|\]$/g, '');
+    if (!/^[A-Za-z0-9._:-]+$/.test(host) || host.startsWith('-')) {
+      return undefined;
+    }
+    const remotePort = Number(
+      url.port || (url.protocol === 'https:' ? '443' : '80'),
+    );
+    const localPort =
+      remotePort + 8000 <= 65535 ? remotePort + 8000 : remotePort - 8000;
+    return { host, remotePort, localPort };
+  } catch {
+    return undefined;
+  }
+}
 
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center gap-2">
-        {busy || resolving ? <Spinner /> : null}
-        <h2 className="text-sm font-medium">{t('localFiles.title')}</h2>
-        <span className="ml-auto text-xs text-muted-foreground">
-          {resolving
-            ? t('localFiles.status.resolving')
-            : t(STATUS_KEY[status.phase])}
-        </span>
-      </div>
+/** Derive the SSH tunnel command for the insecure-context blocker. */
+export function deriveLocalFilesTunnelCommand(
+  baseUrl: string,
+): string | undefined {
+  const target = parseLocalFilesTunnelTarget(baseUrl);
+  if (target === undefined) return undefined;
+  return `ssh -L ${target.localPort}:localhost:${target.remotePort} ${target.host}`;
+}
 
-      <p className="text-xs text-muted-foreground">{t('localFiles.hint')}</p>
-
-      {status.rootName ? (
-        <dl className="flex flex-col gap-1 text-xs">
-          <div className="flex gap-2">
-            <dt className="text-muted-foreground">
-              {t('localFiles.directory')}
-            </dt>
-            <dd className="ml-auto break-all font-mono">{status.rootName}</dd>
-          </div>
-          {status.toolCount === undefined ? null : (
-            <p className="text-right text-muted-foreground">
-              {t('localFiles.tools', { count: status.toolCount })}
-            </p>
-          )}
-        </dl>
-      ) : null}
-
-      {status.phase === 'unavailable' && status.blocker ? (
-        <div className="flex flex-col gap-2">
-          <p className="text-xs text-muted-foreground">
-            {t(BLOCKER_KEY[status.blocker])}
-          </p>
-          {status.blocker === 'cross-origin-frame' ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={onOpenInNewTab}
-            >
-              {t('localFiles.openInNewTab')}
-            </Button>
-          ) : null}
-        </div>
-      ) : null}
-
-      {status.phase === 'needs-session' ? (
-        <p className="text-xs text-muted-foreground">
-          {t('localFiles.needsSessionHint')}
-        </p>
-      ) : null}
-
-      {status.phase === 'failed' && status.message ? (
-        <p className="text-xs text-destructive" role="alert">
-          {status.message}
-        </p>
-      ) : null}
-
-      <div className="flex gap-2">
-        {canConnect ? (
-          <Button type="button" variant="outline" size="sm" onClick={onConnect}>
-            {status.phase === 'needs-gesture'
-              ? t('localFiles.reconnect')
-              : t('localFiles.connect')}
-          </Button>
-        ) : null}
-        {granted ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={onDisconnect}
-          >
-            {t('localFiles.disconnect')}
-          </Button>
-        ) : null}
-      </div>
-    </div>
-  );
+/** The local port the copied tunnel binds — the address the user must open. */
+export function deriveLocalFilesTunnelLocalPort(
+  baseUrl: string,
+): number | undefined {
+  return parseLocalFilesTunnelTarget(baseUrl)?.localPort;
 }
 
 interface LocalFilesControlProps {
@@ -321,8 +265,12 @@ export function LocalFilesControl({
   const { t } = useI18n();
   const { baseUrl, token, capabilities, client } = useWorkspace();
   const actions = useWorkspaceActions();
-  const { sessionId, workspaceCwd } = useConnection();
+  const sessionActions = useActions();
+  const { sessionId, workspaceCwd, displayName } = useConnection();
   const [open, setOpen] = useState(false);
+  // Own the toast dispatch scope: ownership must not be inferred from focus,
+  // which can sit in a co-mounted shell or nowhere at all.
+  const toastScope = useWebShellPortalRoot();
   useEffect(() => {
     if (portalContainer === null) setOpen(false);
   }, [portalContainer]);
@@ -374,9 +322,60 @@ export function LocalFilesControl({
     withheldBlocker,
   });
 
-  const active =
-    status.phase === 'connected' || status.phase === 'held-elsewhere';
-  const busy = BUSY.includes(status.phase);
+  // A grant that fell back to `prompt` (e.g. after a reload) parks the bridge
+  // in needs-gesture. Nothing outside the popover would report it, so notify
+  // once per transition; the amber trigger dot keeps it discoverable after
+  // the toast dismisses.
+  const prevPhaseRef = useRef<LocalFilesPhase | undefined>(undefined);
+  useEffect(() => {
+    const prev = prevPhaseRef.current;
+    prevPhaseRef.current = status.phase;
+    if (status.phase === 'needs-gesture' && prev !== 'needs-gesture') {
+      requestToast(
+        'warning',
+        t('localFiles.gestureToast', { name: status.rootName ?? '' }),
+        toastScope,
+      );
+    }
+  }, [status.phase, status.rootName, t, toastScope]);
+
+  const handleCopyCommand = useCallback(
+    (command: string) => {
+      void writeClipboardText(command).then(
+        () => requestToast('success', t('localFiles.copied'), toastScope),
+        () => requestToast('error', t('localFiles.copyFailed'), toastScope),
+      );
+    },
+    [t, toastScope],
+  );
+
+  // Concrete SSH tunnel for the insecure-context blocker, when the daemon URL
+  // is absolute. A relative base (same-origin) yields no command.
+  const tunnelCommand = useMemo(
+    () => deriveLocalFilesTunnelCommand(baseUrl),
+    [baseUrl],
+  );
+  const tunnelLocalPort = useMemo(
+    () => deriveLocalFilesTunnelLocalPort(baseUrl),
+    [baseUrl],
+  );
+  // PowerShell cannot parse the POSIX env-prefix form; copy the syntax the
+  // user's shell actually accepts.
+  const daemonCommand = useMemo(() => {
+    const nav = navigator as Navigator & {
+      userAgentData?: { platform?: string };
+    };
+    return deriveLocalFilesDaemonCommand(
+      nav.userAgentData?.platform ?? nav.platform,
+    );
+  }, []);
+
+  const dotClass = getLocalFilesDotClass(status);
+  // The state is colour + a native tooltip, both invisible to assistive tech.
+  // Expose it as a description (the accessible name stays the stable trigger
+  // label so name-based queries and screen-reader naming are unchanged).
+  const stateDescription = getLocalFilesTooltip(status, t);
+  const stateDescriptionId = useId();
 
   const control = (
     <Popover open={open} onOpenChange={setOpen}>
@@ -385,17 +384,19 @@ export function LocalFilesControl({
           type="button"
           className={cn('relative', triggerClassName)}
           aria-label={t('localFiles.trigger')}
-          title={t('localFiles.trigger')}
+          aria-describedby={stateDescriptionId}
+          title={stateDescription}
         >
           <FolderOpenIcon size={16} strokeWidth={1.2} aria-hidden="true" />
-          {active || busy ? (
+          <span id={stateDescriptionId} className="sr-only">
+            {stateDescription}
+          </span>
+          {dotClass ? (
             <span
               aria-hidden="true"
               className={cn(
                 'absolute right-1 bottom-1 h-1.5 w-1.5 rounded-full',
-                status.phase === 'connected'
-                  ? 'bg-primary'
-                  : 'bg-muted-foreground',
+                dotClass,
               )}
             />
           ) : null}
@@ -415,6 +416,36 @@ export function LocalFilesControl({
             // top-level document this one is framed inside.
             window.open(window.location.href, '_blank', 'noopener');
           }}
+          onChangeDirectory={() => {
+            void connect({ forcePicker: true }).then((result) => {
+              // A failed re-pick keeps the running bridge connected, but the
+              // click must not be silent (R1-5).
+              if (result?.kind === 'repick-failed') {
+                requestToast(
+                  'error',
+                  t('localFiles.changeDirectoryFailed'),
+                  toastScope,
+                );
+              } else if (result?.kind === 'change-deferred') {
+                // The grant is saved but the live bridge keeps serving the old
+                // directory until the workspace verdict settles; say so.
+                requestToast(
+                  'info',
+                  t('localFiles.changeDirectoryDeferred'),
+                  toastScope,
+                );
+              }
+            });
+          }}
+          sessionName={displayName}
+          onNewSession={() => {
+            // newSession reports its own failures through the notice system.
+            void sessionActions.newSession().catch(() => {});
+          }}
+          onCopyCommand={handleCopyCommand}
+          tunnelCommand={tunnelCommand}
+          tunnelLocalPort={tunnelLocalPort}
+          daemonCommand={daemonCommand}
         />
       </PopoverContent>
     </Popover>

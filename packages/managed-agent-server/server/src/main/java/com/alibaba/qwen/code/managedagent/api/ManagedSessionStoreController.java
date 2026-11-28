@@ -5,6 +5,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.BlockRecoveryRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.IngestEventsRequest;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.IngestReceipt;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.PublishToolResultRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.RecoveryStateReceipt;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.RenewWriterRequest;
@@ -17,20 +19,31 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.WriterGrant;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedUserMessageStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionResourceObjects;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedNativeJournalSnapshots;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionModelConfigs;
+import com.alibaba.qwen.code.managedagent.session.HarnessEventIngest;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonUnwrapped;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.NullNode;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -40,23 +53,39 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-@org.springframework.beans.factory.annotation.Qualifier("managedAgentTransactionManager")
+import java.util.Base64;
+import java.util.Map;
+
+@Qualifier("managedAgentTransactionManager")
 @RestController
 @ConditionalOnProperty(prefix = "qwen.managed-agent.session-store",
         name = "enabled", havingValue = "true")
 @RequestMapping("/internal/managed-session-store/v1/sessions/{sessionId}")
 public class ManagedSessionStoreController {
-    private final ManagedSessionStore store;
-    private final ManagedUserMessageStore userMessages;
+    private final JdbcManagedSessionStore store;
+    private final JdbcManagedUserMessageStore userMessages;
     private final ManagedNativeJournalSnapshots snapshots;
-    @org.springframework.beans.factory.annotation.Autowired
-    private com.alibaba.qwen.code.managedagent.persistence.ManagedSessionModelConfigs modelConfigs;
+    private final JdbcSessionResourceObjects resourceObjects;
+    @Autowired
+    private ManagedSessionModelConfigs modelConfigs;
+    @Autowired
+    private HarnessEventIngest eventIngest;
+    @Value("${qwen.managed-agent.wake-dispatch.enabled:false}")
+    private boolean wakeDispatch;
+    @Value("${qwen.managed-agent.action-parking.enabled:false}")
+    private boolean actionParking;
 
-    public ManagedSessionStoreController(ManagedSessionStore store, ManagedUserMessageStore userMessages,
-            ManagedNativeJournalSnapshots snapshots) {
+    @Value(
+            "${qwen.managed-agent.runtime-observation.enabled:false}")
+    private boolean runtimeObservation;
+
+    public ManagedSessionStoreController(JdbcManagedSessionStore store, JdbcManagedUserMessageStore userMessages,
+            ManagedNativeJournalSnapshots snapshots,
+            JdbcSessionResourceObjects resourceObjects) {
         this.store = store;
         this.userMessages = userMessages;
         this.snapshots = snapshots;
+        this.resourceObjects = resourceObjects;
     }
 
     public record QueueClaim(String workspaceId, String writerId, long writerGeneration, String promptId, boolean initialOnly) { }
@@ -68,7 +97,7 @@ public class ManagedSessionStoreController {
             String expectedDigest, String kind) { }
 
     @PostMapping("/model-config:query")
-    @org.springframework.transaction.annotation.Transactional
+    @Transactional
     public ResponseEntity<Object> modelConfig(TenantContext tenant, @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
             @Valid @RequestBody ModelConfigQuery request, @RequestHeader HttpHeaders headers) {
@@ -84,12 +113,12 @@ public class ManagedSessionStoreController {
             store.authorizeLifecycle(tenant.tenantId(), sessionId, writerToken, owner, authority);
         }
         var config = modelConfigs.read(tenant.tenantId(), sessionId, request.expectedDigest());
-        return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
-                .body(java.util.Map.of("digest", config.digest(), "config", config.wireValue()));
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+                .body(Map.of("digest", config.digest(), "config", config.wireValue()));
     }
 
     @PostMapping("/user-messages:claim")
-    @org.springframework.transaction.annotation.Transactional
+    @Transactional
     public Object claimUserMessages(TenantContext tenant, @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
             @RequestBody QueueClaim request) {
@@ -103,37 +132,37 @@ public class ManagedSessionStoreController {
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
             @Valid @RequestBody ManagedSessionStoreModels.AuthorizeLifecycleRequest request) {
         var selected = store.approvalSelection(tenant.tenantId(), sessionId, writerToken, request);
-        return selected == null ? com.fasterxml.jackson.databind.node.NullNode.getInstance() : selected;
+        return selected == null ? NullNode.getInstance() : selected;
     }
 
-    static com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycleAuthority(HttpHeaders headers) {
-        String operation = headers.getFirst(com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.OPERATION_HEADER);
-        String generation = headers.getFirst(com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.GENERATION_HEADER);
+    static RuntimeLifecycleAuthority lifecycleAuthority(HttpHeaders headers) {
+        String operation = headers.getFirst(RuntimeLifecycleAuthority.OPERATION_HEADER);
+        String generation = headers.getFirst(RuntimeLifecycleAuthority.GENERATION_HEADER);
         if (operation == null && generation == null) {
             return null;
         }
         try {
-            return new com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority(operation, Long.parseLong(generation));
+            return new RuntimeLifecycleAuthority(operation, Long.parseLong(generation));
         } catch (RuntimeException error) {
             throw new ManagedAgentException(400, "invalid_lifecycle_authority", "Invalid lifecycle authority.");
         }
     }
 
     @PostMapping("/execution:authorize")
-    public java.util.Map<String, Object> authorizeOrdinary(TenantContext tenant, @PathVariable String sessionId,
+    public Map<String, Object> authorizeOrdinary(TenantContext tenant, @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
             @Valid @RequestBody ManagedSessionStoreModels.AuthorizeLifecycleRequest request) {
         store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken, request);
-        return java.util.Map.of("authorized", true);
+        return Map.of("authorized", true);
     }
 
     @PostMapping("/lifecycle:authorize")
-    public java.util.Map<String, Object> authorizeLifecycle(TenantContext tenant, @PathVariable String sessionId,
+    public Map<String, Object> authorizeLifecycle(TenantContext tenant, @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
             @Valid @RequestBody ManagedSessionStoreModels.AuthorizeLifecycleRequest request,
             @RequestHeader HttpHeaders headers) {
         store.authorizeLifecycle(tenant.tenantId(), sessionId, writerToken, request, lifecycleAuthority(headers));
-        return java.util.Map.of("authorized", true);
+        return Map.of("authorized", true);
     }
 
     @PostMapping("/writers:acquire")
@@ -143,8 +172,8 @@ public class ManagedSessionStoreController {
                     String writerToken,
             @Valid @RequestBody AcquireWriterRequest request,
             @RequestHeader HttpHeaders headers) {
-        return store.acquireWriter(tenant.tenantId(), sessionId,
-                writerToken, request, lifecycleAuthority(headers));
+        return advertise(store.acquireWriter(tenant.tenantId(), sessionId,
+                writerToken, request, lifecycleAuthority(headers)));
     }
 
     @PostMapping("/writers:renew")
@@ -154,8 +183,19 @@ public class ManagedSessionStoreController {
                     String writerToken,
             @Valid @RequestBody RenewWriterRequest request,
             @RequestHeader HttpHeaders headers) {
-        return store.renewWriter(tenant.tenantId(), sessionId,
-                writerToken, request, lifecycleAuthority(headers));
+        return advertise(store.renewWriter(tenant.tenantId(), sessionId,
+                writerToken, request, lifecycleAuthority(headers)));
+    }
+
+    private WriterGrant advertise(WriterGrant grant) {
+        if (grant == null) {
+            return null;
+        }
+        WriterGrant advertised = wakeDispatch
+                ? grant.withWakeDispatch().withSuspensionPlacementRelease()
+                : grant;
+        advertised = runtimeObservation ? advertised.withRuntimeObservation() : advertised;
+        return actionParking ? advertised.withActionParking() : advertised;
     }
 
     @PostMapping("/writers:seal")
@@ -170,7 +210,7 @@ public class ManagedSessionStoreController {
     }
 
     @PostMapping("/writers:release-ownership")
-    public com.fasterxml.jackson.databind.JsonNode releaseOwnership(TenantContext tenant,
+    public JsonNode releaseOwnership(TenantContext tenant,
             @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
             @Valid @RequestBody ManagedSessionStoreModels.ReleaseOwnershipRequest request) {
@@ -178,12 +218,12 @@ public class ManagedSessionStoreController {
     }
 
     @PostMapping("/writers:quiesce-ownership")
-    public java.util.Map<String, String> quiesceOwnership(TenantContext tenant,
+    public Map<String, String> quiesceOwnership(TenantContext tenant,
             @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
             @Valid @RequestBody ManagedSessionStoreModels.QuiesceOwnershipRequest request) {
         store.quiesceOwnership(tenant.tenantId(), sessionId, writerToken, request);
-        return java.util.Map.of("state", "QUIESCING");
+        return Map.of("state", "QUIESCING");
     }
 
     @PostMapping("/recovery:block")
@@ -194,6 +234,18 @@ public class ManagedSessionStoreController {
             @Valid @RequestBody BlockRecoveryRequest request) {
         return store.blockRecovery(tenant.tenantId(), sessionId,
                 writerToken, request);
+    }
+
+    // Not transactional: authentication commits before the events are
+    // recorded, each in the stream consumer's own transactions.
+    @PostMapping("/events:ingest")
+    public IngestReceipt ingestEvents(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER)
+                    String writerToken,
+            @Valid @RequestBody IngestEventsRequest request) {
+        return eventIngest.ingest(tenant.tenantId(), sessionId, writerToken,
+                request);
     }
 
     @PostMapping({"/transactions:commit", "/transactions:commit-v2"})
@@ -309,5 +361,74 @@ public class ManagedSessionStoreController {
                         Integer.toString(resource.schemaVersion()))
                 .header("X-Qwen-Resource-Digest", resource.digest())
                 .body(resource.bytes());
+    }
+
+    @PostMapping("/resources:allocate")
+    @Transactional
+    public ResponseEntity<Object> allocateResource(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody JdbcSessionResourceObjects.AllocateRequest request) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest(request.workspaceId(),
+                        request.writerId(), request.writerGeneration()));
+        return ResponseEntity.ok(resourceObjects.allocate(tenant.tenantId(), sessionId, request));
+    }
+
+    @PostMapping(value = "/resources/{resourceId}:upload",
+            consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+    @Transactional
+    public ResponseEntity<Object> uploadResource(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String resourceId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestParam String workspaceId, @RequestParam String writerId,
+            @RequestParam long writerGeneration, @RequestBody byte[] bytes) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest(workspaceId, writerId,
+                        writerGeneration));
+        resourceObjects.upload(tenant.tenantId(), sessionId, resourceId, bytes);
+        return ResponseEntity.ok(Map.of("resourceId", resourceId));
+    }
+
+    @PostMapping(value = "/resources/{resourceId}:upload",
+            consumes = MediaType.APPLICATION_JSON_VALUE)
+    @Transactional
+    public ResponseEntity<Object> uploadResourceJson(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String resourceId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestParam String workspaceId, @RequestParam String writerId,
+            @RequestParam long writerGeneration,
+            @RequestBody Map<String, String> body) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest(workspaceId, writerId,
+                        writerGeneration));
+        String encoded = body == null ? null : body.get("bytesBase64");
+        if (encoded == null || encoded.isBlank()) {
+            throw new ManagedAgentException(400,
+                    "invalid_request", "bytesBase64 is required.");
+        }
+        byte[] bytes;
+        try {
+            bytes = Base64.getDecoder().decode(encoded);
+        } catch (IllegalArgumentException error) {
+            throw new ManagedAgentException(400,
+                    "invalid_request", "bytesBase64 is not valid base64.");
+        }
+        resourceObjects.upload(tenant.tenantId(), sessionId, resourceId, bytes);
+        return ResponseEntity.ok(Map.of("resourceId", resourceId));
+    }
+
+    @PostMapping("/resources/{resourceId}:finalize")
+    @Transactional
+    public ResponseEntity<Object> finalizeResource(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String resourceId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestParam String workspaceId, @RequestParam String writerId,
+            @RequestParam long writerGeneration) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest(workspaceId, writerId,
+                        writerGeneration));
+        resourceObjects.finalize(tenant.tenantId(), sessionId, resourceId);
+        return ResponseEntity.ok(Map.of("resourceId", resourceId, "state", "PUBLISHED"));
     }
 }

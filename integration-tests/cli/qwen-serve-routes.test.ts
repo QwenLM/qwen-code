@@ -20,10 +20,14 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   appendFileSync,
+  existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   truncateSync,
   writeFileSync,
 } from 'node:fs';
@@ -73,6 +77,7 @@ const ACP_INITIALIZE_TIMEOUT_MS = 60_000;
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
 let daemon: ChildProcess;
+let daemonStderr = '';
 let homeDir = '';
 let port = 0;
 let base = '';
@@ -188,6 +193,9 @@ beforeAll(async () => {
       // / IDE-launcher environments.
       '--workspace',
       REPO_ROOT,
+      // This fixture creates fresh children to exercise unrelated route
+      // contracts, whose setup must remain deterministic on loaded CI hosts.
+      '--no-load-admission',
       '--initialize-timeout-ms',
       String(ACP_INITIALIZE_TIMEOUT_MS),
     ],
@@ -223,6 +231,10 @@ beforeAll(async () => {
       },
     },
   );
+  daemonStderr = '';
+  daemon.stderr!.on('data', (chunk: Buffer) => {
+    daemonStderr += chunk.toString();
+  });
   // Read stdout until we see the listening line + parse the port.
   port = await new Promise<number>((resolve, reject) => {
     let buf = '';
@@ -344,7 +356,7 @@ describe('qwen serve — capabilities envelope', () => {
     expect(caps.v).toBe(1);
     expect(caps.mode).toBe('http-bridge');
     // Order must match `SERVE_CAPABILITY_REGISTRY` in
-    // `packages/cli/src/serve/capabilities.ts` and the unit-level
+    // `packages/sdk-typescript/src/daemon/capabilities.ts` and the unit-level
     // baseline features in `packages/cli/src/serve/server.test.ts`.
     //
     // Conditional tags absent under this suite's spawn flags (no
@@ -352,7 +364,7 @@ describe('qwen serve — capabilities envelope', () => {
     // rate-limit opt-in, no `--channel`, no configured batch ASR model):
     // `require_auth`, `allow_origin`, `cdp_tunnel_over_ws`,
     // `prompt_absolute_deadline`, `writer_idle_timeout`,
-    // `workspace_voice_transcription`, `rate_limit`, `channel_reload`.
+    // `workspace_voice_transcription`, `rate_limit`.
     // `native_directory_picker` is host-conditional (the daemon host's GUI
     // environment, not a spawn flag) and is spliced at its registry
     // position below, using the boot-time probe captured when the daemon
@@ -370,11 +382,13 @@ describe('qwen serve — capabilities envelope', () => {
     // depends on the mounted runtime's bridge, which the bootstrap envelope
     // cannot see, so the tag appears only once the runtime app serves the
     // envelope.
+    // `channel_reload` also appears once the runtime channel manager mounts.
     expect(
       caps.features.filter(
         (feature) =>
           feature !== 'scheduled_task_session_reuse' &&
-          feature !== 'workspace_runtime_stop',
+          feature !== 'workspace_runtime_stop' &&
+          feature !== 'channel_reload',
       ),
     ).toEqual([
       'health',
@@ -389,12 +403,15 @@ describe('qwen serve — capabilities envelope', () => {
       'session_resume',
       'unstable_session_resume',
       'session_list',
+      'session_last_user_prompt_sort',
       'session_catalog_batch',
       'session_info',
       'session_source_metadata',
       'session_side_task',
+      'session_sub_session_send',
       'session_prompt',
       'session_turn_status',
+      'session_turn_feedback',
       'session_attachments',
       'session_attachment_chunk_upload',
       'session_attachment_list',
@@ -409,6 +426,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_artifact_library',
       'workspace_artifact_library_stream',
       'session_sources',
+      'generated_ui_state',
       'slow_client_warning',
       'typed_event_schema',
       'session_set_model',
@@ -441,6 +459,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_tasks',
       'session_agents',
       'session_agent_trace',
+      'scheduled_task_owner_selection',
       'scheduled_task_gate',
       'autofix_pr_watches',
       'session_monitor_tool_correlation',
@@ -493,9 +512,14 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_init',
       'workspace_github_setup',
       'workspace_github_prs',
+      'workspace_github_pr_files',
+      'workspace_git_log_exclude_refs',
       'workspace_git_worktrees',
+      'workspace_git_check_ignore',
+      'workspace_input_history',
       'workspace_mcp_restart',
       'session_recap',
+      'session_mod_rows',
       'session_generation',
       'workspace_generation',
       'session_btw',
@@ -523,6 +547,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_channel_observed_contacts',
       'dynamic_workspace_registration',
       'persistent_workspace_registration',
+      'workspace_order',
       'workspace_display_name',
       'scratch_workspace_registration',
       ...(gitAvailableAtBoot ? ['git_workspace_clone'] : []),
@@ -543,9 +568,13 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_archived_session_export',
       'workspace_session_live_state',
       'workspace_session_live_state_batch',
+      'restart_recovery',
       'workspace_session_metadata',
       'session_worktree_persistence_v1',
       'session_worktree_reset_v1',
+      'session_worktree_restore_v1',
+      'session_worktree_branch_v1',
+      'session_worktree_handoff_v1',
       'voice_transcribe',
       'web_terminal',
     ]);
@@ -1493,5 +1522,166 @@ describe('qwen serve — prompt clientId admission', () => {
     // asynchronously; cancel so nothing lingers past the test.
     await client.cancel(session.sessionId, reattached.clientId).catch(() => {});
     await client.closeSession(session.sessionId);
+  });
+});
+
+describe('qwen serve — archive coordinator over real HTTP', () => {
+  it('preserves original transcript records through real HTTP archive and unarchive', async () => {
+    const sessionIds = [randomUUID(), randomUUID()];
+    // Titles unique per attempt keep unarchive off its retitle-on-collision
+    // path, which legitimately appends a custom_title record to the restored
+    // transcript; a retried attempt would otherwise collide with the previous
+    // attempt's restored sessions.
+    const titles = sessionIds.map((sessionId) => `archive me ${sessionId}`);
+    const activePaths = sessionIds.map((sessionId, index) =>
+      writePersistedTranscript(sessionId, [
+        chatRecord(sessionId, 'u-1', null, titles[index]!),
+        chatRecord(sessionId, 'a-1', 'u-1', 'assistant reply to preserve'),
+        {
+          uuid: 'system-1',
+          parentUuid: 'a-1',
+          sessionId,
+          timestamp: '2026-07-08T00:00:02.000Z',
+          type: 'system',
+          subtype: 'custom_title',
+          cwd: REPO_ROOT,
+          version: '1.0.0',
+          systemPayload: {
+            customTitle: titles[index]!,
+            titleSource: 'auto',
+          },
+        },
+      ]),
+    );
+    const archivedPaths = activePaths.map((activePath) =>
+      path.join(path.dirname(activePath), 'archive', path.basename(activePath)),
+    );
+    const transcriptBytes = activePaths.map((activePath) =>
+      readFileSync(activePath),
+    );
+
+    const archived = await client.archiveSessionsData(sessionIds, {
+      requireIdle: false,
+    });
+    expect(archived.archived).toEqual(sessionIds);
+    expect(archived.errors).toEqual([]);
+    for (const [index, activePath] of activePaths.entries()) {
+      expect(existsSync(activePath)).toBe(false);
+      expect(existsSync(archivedPaths[index]!)).toBe(true);
+      expect(readFileSync(archivedPaths[index]!)).toEqual(
+        transcriptBytes[index],
+      );
+    }
+
+    const unarchived = await client.unarchiveSessionsData(sessionIds);
+    expect(unarchived.unarchived).toEqual(sessionIds);
+    expect(unarchived.errors).toEqual([]);
+    for (const [index, activePath] of activePaths.entries()) {
+      expect(existsSync(activePath)).toBe(true);
+      expect(existsSync(archivedPaths[index]!)).toBe(false);
+      expect(readFileSync(activePath)).toEqual(transcriptBytes[index]);
+    }
+    expect(
+      (await fetch(`${base}/health`)).status,
+      'daemon remains healthy after both batches',
+    ).toBe(200);
+  });
+
+  it('refuses a dangling sidecar symlink over real HTTP and leaves the transcript active', async () => {
+    const sessionId = randomUUID();
+    const activePath = writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u-1', null, 'do not archive'),
+    ]);
+    const sidecarPath = activePath.replace(/\.jsonl$/, '.worktree.json');
+    symlinkSync(path.join(homeDir, 'missing-sidecar-target'), sidecarPath);
+    const archivedPath = path.join(
+      path.dirname(activePath),
+      'archive',
+      path.basename(activePath),
+    );
+
+    const result = await client.archiveSessionsData([sessionId], {
+      requireIdle: false,
+    });
+
+    expect(result.archived).toEqual([]);
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        sessionId,
+        error: expect.stringContaining('unsafe sidecar file type'),
+      }),
+    ]);
+    expect(existsSync(activePath)).toBe(true);
+    expect(existsSync(archivedPath)).toBe(false);
+  });
+
+  it('warns and unlinks a dangling sidecar symlink on real HTTP delete', async () => {
+    // Wait for the boot-time retention sweep to finish before planting the
+    // dangling symlink so the preserve warning below can only come from
+    // POST /sessions/delete, not from the background startup sweep.
+    await expect
+      .poll(() => daemonStderr, { timeout: 10_000 })
+      .toMatch(
+        /retention candidates|worktree retention (?:preserved state|paused)/,
+      );
+
+    const sessionId = randomUUID();
+    const activePath = writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u-1', null, `delete dangling ${sessionId}`),
+    ]);
+    const sidecarPath = activePath.replace(/\.jsonl$/, '.worktree.json');
+    symlinkSync(
+      path.join(homeDir, 'missing-delete-sidecar-target'),
+      sidecarPath,
+    );
+
+    const stderrStart = daemonStderr.length;
+    const result = await client.deleteSessionsData([sessionId]);
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(result.errors).toEqual([]);
+    expect(existsSync(activePath)).toBe(false);
+    expect(lstatSync(sidecarPath, { throwIfNoEntry: false })).toBeUndefined();
+    await expect
+      .poll(() => daemonStderr.slice(stderrStart), { timeout: 5_000 })
+      .toContain(
+        `worktree cleanup preserved checkout action=delete session="${sessionId}" reason="unreadable sidecar (unsafe sidecar file type)"`,
+      );
+  });
+
+  it('logs worktree sidecar unlink failures to daemon stderr on real HTTP delete', async () => {
+    await expect
+      .poll(() => daemonStderr, { timeout: 10_000 })
+      .toMatch(
+        /retention candidates|worktree retention (?:preserved state|paused)/,
+      );
+
+    const sessionId = randomUUID();
+    const activePath = writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u-1', null, `delete eisdir ${sessionId}`),
+    ]);
+    const sidecarPath = activePath.replace(/\.jsonl$/, '.worktree.json');
+    // A directory at the sidecar path makes unlinkSync fail on every platform
+    // (EISDIR / EPERM), even under root or Windows.
+    mkdirSync(sidecarPath);
+
+    try {
+      const stderrStart = daemonStderr.length;
+      const result = await client.deleteSessionsData([sessionId]);
+
+      expect(result.removed).toEqual([sessionId]);
+      expect(result.errors).toEqual([]);
+      expect(existsSync(activePath)).toBe(false);
+      expect(lstatSync(sidecarPath, { throwIfNoEntry: false })).toBeDefined();
+      await expect
+        .poll(() => daemonStderr.slice(stderrStart), { timeout: 5_000 })
+        .toMatch(
+          new RegExp(
+            `qwen serve: worktree sidecar not removed: .*${sessionId}\\.worktree\\.json`,
+          ),
+        );
+    } finally {
+      rmSync(sidecarPath, { recursive: true, force: true });
+    }
   });
 });

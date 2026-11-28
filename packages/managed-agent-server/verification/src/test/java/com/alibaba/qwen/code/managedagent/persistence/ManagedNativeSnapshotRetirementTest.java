@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
@@ -31,15 +32,15 @@ class ManagedNativeSnapshotRetirementTest {
             }
         }
         jdbc.update("UPDATE ma_session SET retired_at = 1 WHERE tenant_id = ? AND session_id = ?", "tenant", "retiring");
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "retiring");
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", "retiring");
         for (int remaining = 4; remaining > 0; remaining--) {
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE session_scope_key = ?"
-                    + " AND owner_kind = 'NATIVE_SNAPSHOT'", Long.class, scope)).isEqualTo(remaining);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
+                    + " AND owner_kind = 'NATIVE_SNAPSHOT'", Long.class, "tenant", "retiring")).isEqualTo(remaining);
             Boolean deleted = tx.execute(status -> ManagedSessionRetirementStore.deleteOwnerBatch(jdbc, "tenant", "retiring", 1));
             assertThat(deleted).isTrue();
         }
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE session_scope_key = ?"
-                + " AND owner_kind = 'NATIVE_SNAPSHOT'", Long.class, scope)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
+                + " AND owner_kind = 'NATIVE_SNAPSHOT'", Long.class, "tenant", "retiring")).isZero();
         assertThat(snapshots.read("tenant", "workspace", "protected", "extension-writer-token-0123456789", "two")
                 .snapshot().coveredJournalRevision()).isEqualTo(1);
     }

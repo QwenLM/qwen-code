@@ -31,6 +31,7 @@ import { deleteCommand } from '../ui/commands/deleteCommand.js';
 import { compressCommand } from '../ui/commands/compressCommand.js';
 import { compressFastCommand } from '../ui/commands/compressFastCommand.js';
 import { contextCommand } from '../ui/commands/contextCommand.js';
+import { contextWindowCommand } from '../ui/commands/context-window-command.js';
 import { curatorCommand } from '../ui/commands/curator-command.js';
 import { copyCommand } from '../ui/commands/copyCommand.js';
 import { docsCommand } from '../ui/commands/docsCommand.js';
@@ -60,6 +61,7 @@ import { outputStyleCommand } from '../ui/commands/output-style-command.js';
 import { rememberCommand } from '../ui/commands/rememberCommand.js';
 import { planCommand } from '../ui/commands/planCommand.js';
 import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
+import { prCommand } from '../ui/commands/pr-command.js';
 import { trustCommand } from '../ui/commands/trustCommand.js';
 import { quitCommand } from '../ui/commands/quitCommand.js';
 import { recapCommand } from '../ui/commands/recapCommand.js';
@@ -151,6 +153,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       compressFastCommand,
       configCommand,
       contextCommand,
+      contextWindowCommand,
       curatorCommand,
       copyCommand,
       diffCommand,
@@ -181,6 +184,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       rememberCommand,
       planCommand,
       permissionsCommand,
+      prCommand,
       ...(this.config?.getFolderTrust() ? [trustCommand] : []),
       quitCommand,
       recapCommand,

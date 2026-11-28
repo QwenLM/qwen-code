@@ -87,7 +87,31 @@ jobs:
       artifact_id: '${{ steps.artifact.outputs.artifact-id }}'
 
     steps:
-      - uses: '$/.github/actions/prepare-release-runner'
+      - name: 'Prepare isolated release runner'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        working-directory: '${{ runner.temp }}'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          WORKFLOW_SHA: '${{ github.workflow_sha }}'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          bootstrap=$(mktemp -d "${RUNNER_TEMP:?}/release-bootstrap.XXXXXX")
+          trap 'rm -rf -- "$bootstrap"' EXIT
+          export GH_CONFIG_DIR="$bootstrap/gh"
+          mkdir -p "$GH_CONFIG_DIR"
+          for script in prepare-release-runner.sh check-disk-floor.sh; do
+            for attempt in 1 2 3; do
+              if gh api "repos/${GITHUB_REPOSITORY}/contents/.github/scripts/${script}?ref=${WORKFLOW_SHA}" --jq .content | base64 --decode > "$bootstrap/$script" && [ -s "$bootstrap/$script" ]; then
+                break
+              fi
+              [ "$attempt" -lt 3 ] || exit 1
+              sleep 2
+            done
+          done
+          bash "$bootstrap/prepare-release-runner.sh"
+          node -e 'if (Number(process.versions.node.split(".")[0]) !== 22) throw new Error("Release hosts require Node 22")'
+          bash "$bootstrap/check-disk-floor.sh" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -531,6 +555,7 @@ jobs:
           BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
           RELEASE_TAG: '${{ needs.build-sdk.outputs.release_tag || steps.version.outputs.RELEASE_TAG }}'
         run: |-
+          set -euo pipefail
           # Only persist version bumps after a successful publish.
           git add packages/sdk-typescript/package.json
           if git diff --staged --quiet; then
@@ -547,14 +572,35 @@ jobs:
             fi
             echo "HAS_PERSISTED_SOURCE=true" >> "${GITHUB_OUTPUT}"
             echo "Pushing release branch to remote..."
-            git push --set-upstream origin "${BRANCH_NAME}" --follow-tags
+            for attempt in 1 2 3; do
+              if git push --set-upstream origin "${BRANCH_NAME}" --follow-tags; then
+                break
+              fi
+              # The observed #16490 failure left nothing on the remote, so the bounded
+              # re-push is the remedy; the reconcile below is defence-in-depth against a
+              # partial --follow-tags push that landed despite the reported error. The
+              # || true keeps a transient ls-remote failure on the retry path
+              # (set -euo pipefail above).
+              remote_sha="$(git ls-remote --heads origin "refs/heads/${BRANCH_NAME}" | cut -f1 || true)"
+              if [[ -n "${remote_sha}" ]]; then
+                if [[ "${remote_sha}" == "$(git rev-parse HEAD)" ]]; then
+                  echo "::notice::Push of ${BRANCH_NAME} landed remotely despite the reported failure; continuing."
+                  break
+                fi
+                echo "::error::Remote branch ${BRANCH_NAME} diverged from local HEAD; refusing to force-push." >&2
+                exit 1
+              fi
+              [[ "${attempt}" -lt 3 ]] || { echo "::error::Failed to push release branch ${BRANCH_NAME} after 3 attempts." >&2; exit 1; }
+              echo "::warning::Push attempt ${attempt}/3 of ${BRANCH_NAME} failed; retrying in $((attempt * 30))s."
+              sleep $((attempt * 30))
+            done
           fi
 
       - name: 'Create GitHub Release and Tag'
         if: |-
           ${{ (needs.build-sdk.outputs.is_dry_run || steps.vars.outputs.is_dry_run) == 'false' && ((needs.build-sdk.outputs.is_nightly || steps.vars.outputs.is_nightly) == 'true' || (needs.build-sdk.outputs.is_preview || steps.vars.outputs.is_preview) == 'true' || steps.persist_source.outputs.HAS_PERSISTED_SOURCE == 'true') }}
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
           RELEASE_TAG: '${{ needs.build-sdk.outputs.release_tag || steps.version.outputs.RELEASE_TAG }}'
           PREVIOUS_RELEASE_TAG: '${{ needs.build-sdk.outputs.previous_release_tag || steps.version.outputs.PREVIOUS_RELEASE_TAG }}'

@@ -25,6 +25,12 @@
 - 保留无效百分比处理、无效 PR 回退和可选 endpoint 契约。
   未配置 canary URL 时保留既有的仅模型分流；配置 URL 但缺少 key，
   或 URL 无法解析时，回退至 default cohort。
+- 端点覆盖仅在 self-hosted 池生效（PR #18579）。canary 网关（CN MaaS endpoint）
+  从 GitHub 托管 runner 不可达——fork PR 评审正路由到该 lane——托管 runner 对其
+  TCP connect 超时。非 self-hosted runner 保留 default cohort，并输出记录所解析
+  `runner.environment` 的 `::warning::`。key/URL 有效性先行校验，配置错误因此在
+  任何 runner 上都报具体的「unusable」原因。仅模型 canary（无 URL）不受影响，
+  默认网关处处可达。
 - 将提前输出的 host 日志标记为 `initial_openai_host`。
   选择完成后记录请求模型名、桶号与桶数、最终 cohort 和 endpoint hostname。
   notice 不包含 key、URL 用户信息、路径或查询参数。
@@ -34,7 +40,9 @@
 缩短分桶周期可能让已有 PR 更换 cohort。只有百分比和配置不变时，cohort 才稳定。
 80/20 分流描述的是 PR 桶，不是模型请求量或并发容量；
 本修改不保证任何网关能够承受其流量份额。传输错误不会自动触发跨 endpoint 切换，
-其他 workflow 仍可能消耗默认 endpoint 的配额。
+其他 workflow 仍可能消耗默认 endpoint 的配额。端点覆盖仅在 self-hosted 池生效：
+GitHub 托管 runner 上每个桶都保留 default cohort，因此无论百分比多少，
+canary endpoint 在托管 runner 上的份额都为零。
 
 EAS 后端模型尚未确认。在确认显式支持 `deepseek-v4.1-flash-1017` 之前，
 保留当前可用的默认请求名；仅替换后端模型不能证明支持哪些请求名。
@@ -47,7 +55,8 @@ Workflow 元测试执行真实 shell 选择块，覆盖 80% 时连续两个十 P
 交付不需要运行本地构建或安装依赖。
 
 CI 通过并合并 PR 后，各检查一个 cohort 的 review。
-80% 时，0–7 桶应记录北京 hostname，8–9 桶应记录上海 EAS hostname。
+在 self-hosted 运行上，80% 时 0–7 桶应记录北京 hostname，8–9 桶应记录上海 EAS hostname；
+GitHub 托管运行上每个桶都记录默认 hostname。
 必须确认 `Run review` 实际执行，不能只依赖 review 被跳过时的绿色 workflow。
 服务端模型与容量验证留作独立后续工作；
 不能仅根据 notice 中的请求模型名修改线上模型变量。

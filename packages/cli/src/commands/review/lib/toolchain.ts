@@ -39,6 +39,13 @@ export interface ToolchainRunArgs {
    */
   previous?: BuildTestReport;
   /**
+   * Optional override for checking whether dependency installation is complete
+   * inside the execution environment. Used by the microVM bridge so install
+   * verification checks the guest-side workspace marker instead of the host
+   * worktree (which is never mounted read-write into the guest).
+   */
+  installComplete?: () => boolean;
+  /**
    * `kind` decides the containment policy when the reviewed repository's
    * commands run sandboxed (#9556): only an install is given the network.
    * Optional, and it defaults to the RESTRICTIVE side, so an adapter that

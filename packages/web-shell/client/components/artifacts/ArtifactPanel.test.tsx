@@ -20,9 +20,29 @@ import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
 import type { WebShellRightPanelItem } from '../../customization';
 import type { ArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
 import type { TurnOutputScheduledTask } from './TurnOutputs';
+import {
+  scheduledTaskRuntimeKey,
+  type SessionDurableScheduledTask,
+} from '../../hooks/useSessionScheduledTasks';
 
 const mockDocxRender = vi.hoisted(() => vi.fn());
 vi.mock('docx-preview', () => ({ renderAsync: mockDocxRender }));
+
+vi.mock('./WorkspacePdfRangePreview', () => ({
+  default: function MockWorkspacePdfRangePreview({
+    initialStat,
+    onOpenFull,
+  }: {
+    initialStat: { sizeBytes: number };
+    onOpenFull: () => void;
+  }) {
+    return (
+      <button data-pdf-size={initialStat.sizeBytes} onClick={onOpenFull}>
+        Open full PDF
+      </button>
+    );
+  },
+}));
 
 const originalCreateObjectURL = Object.getOwnPropertyDescriptor(
   URL,
@@ -184,6 +204,23 @@ vi.mock('./SideTaskPanel', () => ({
   SideTaskPanel: (props: Record<string, unknown>) => {
     sideTaskPanelProps.current = props;
     return <div data-testid="side-task-panel" />;
+  },
+}));
+
+const changeOverviewHook = vi.hoisted(() => ({
+  args: undefined as unknown[] | undefined,
+}));
+vi.mock('./useChangeOverview', () => ({
+  useChangeOverview: (...args: unknown[]) => {
+    changeOverviewHook.args = args;
+    return {
+      gitAvailable: true,
+      loadFailed: false,
+      loading: false,
+      units: [],
+      commitsTruncated: false,
+      refresh: vi.fn(),
+    };
   },
 }));
 
@@ -375,7 +412,7 @@ const secondaryScheduledTask: DaemonScheduledTask = {
   createdAt: 1_700_000_000_000,
   lastFiredAt: null,
   nextRunAt: null,
-  sessionId: null,
+  sessionId: 'active-session',
   runs: [],
 };
 
@@ -384,6 +421,24 @@ function scheduledTaskPanel(
     workspaceCwd?: string;
     workspaceId?: string;
     task?: Partial<TurnOutputScheduledTask>;
+    liveDurableScheduledTasks?: readonly SessionDurableScheduledTask[];
+    confirmedDeletedDurableTaskKeys?: ReadonlySet<string>;
+    hasLiveDurableScheduledSnapshot?: boolean;
+    liveSessionScheduledTasks?: Parameters<
+      typeof ArtifactPanel
+    >[0]['liveSessionScheduledTasks'];
+    liveSessionScheduledTasksOwnerSessionId?: string;
+    hasLiveSessionScheduledSnapshot?: boolean;
+    onCancelSessionScheduledTask?: Parameters<
+      typeof ArtifactPanel
+    >[0]['onCancelSessionScheduledTask'];
+    onSessionScheduledTaskStopped?: Parameters<
+      typeof ArtifactPanel
+    >[0]['onSessionScheduledTaskStopped'];
+    onDurableScheduledTaskDeleted?: Parameters<
+      typeof ArtifactPanel
+    >[0]['onDurableScheduledTaskDeleted'];
+    sourceSessionId?: string;
   } = {},
 ) {
   const workspaceCwd = options.workspaceCwd ?? '/secondary';
@@ -414,11 +469,29 @@ function scheduledTaskPanel(
             workspaceCwd,
             workspaceId,
             task,
+            sourceSessionId: options.sourceSessionId ?? 'active-session',
           },
         ]}
         activeTabId="scheduled-task:secondary:cron-call"
         reviewChanges={[]}
         selectedReviewPath={null}
+        liveDurableScheduledTasks={options.liveDurableScheduledTasks}
+        confirmedDeletedDurableTaskKeys={
+          options.confirmedDeletedDurableTaskKeys
+        }
+        liveSessionScheduledTasks={options.liveSessionScheduledTasks}
+        liveSessionScheduledTasksOwnerSessionId={
+          options.liveSessionScheduledTasksOwnerSessionId
+        }
+        hasLiveDurableScheduledSnapshot={
+          options.hasLiveDurableScheduledSnapshot
+        }
+        hasLiveSessionScheduledSnapshot={
+          options.hasLiveSessionScheduledSnapshot
+        }
+        onCancelSessionScheduledTask={options.onCancelSessionScheduledTask}
+        onSessionScheduledTaskStopped={options.onSessionScheduledTaskStopped}
+        onDurableScheduledTaskDeleted={options.onDurableScheduledTaskDeleted}
         onSelectTab={() => {}}
         onCloseTab={() => {}}
         onOpenFilePreview={() => {}}
@@ -558,6 +631,105 @@ describe('ArtifactPanel context usage tabs', () => {
     expect(
       container.querySelector('button[title="Context Usage"]'),
     ).not.toBeNull();
+  });
+});
+
+describe('ArtifactPanel artifacts list tab', () => {
+  function renderPanel(props: {
+    artifacts: readonly DaemonSessionArtifact[];
+    sessionArtifacts?: readonly DaemonSessionArtifact[];
+    onOpenArtifact?: (artifactId: string) => void;
+    loading?: boolean;
+  }) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={props.artifacts}
+            sessionArtifacts={props.sessionArtifacts}
+            onOpenArtifact={props.onOpenArtifact}
+            loading={props.loading}
+            tabs={[
+              {
+                id: 'artifacts:s1',
+                kind: 'artifacts',
+                title: 'Artifacts',
+                sessionId: 's1',
+              },
+            ]}
+            activeTabId="artifacts:s1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+    return container;
+  }
+
+  const artifact = {
+    id: 'a1',
+    kind: 'document',
+    title: 'Quarterly report',
+    workspacePath: 'reports/report.md',
+  } as unknown as DaemonSessionArtifact;
+
+  it('renders the session artifact list and opens a clicked artifact', () => {
+    const onOpenArtifact = vi.fn();
+    const container = renderPanel({ artifacts: [artifact], onOpenArtifact });
+
+    const list = container.querySelector('[data-testid="artifacts-list"]');
+    expect(list).not.toBeNull();
+    expect(container.textContent).toContain('report.md');
+    const row = list!.querySelector<HTMLButtonElement>('button');
+    act(() => row?.click());
+    expect(onOpenArtifact).toHaveBeenCalledWith('a1');
+  });
+
+  it('shows the empty state when the session has no artifacts', () => {
+    const container = renderPanel({ artifacts: [] });
+    expect(
+      container.querySelector('[data-testid="artifacts-list-empty"]'),
+    ).not.toBeNull();
+  });
+
+  it('shows a skeleton while artifacts load', () => {
+    const container = renderPanel({ artifacts: [artifact], loading: true });
+    expect(
+      container.querySelector('[data-testid="artifacts-list-skeleton"]'),
+    ).not.toBeNull();
+  });
+
+  it('shows the package icon on the artifacts tab in the tab bar', () => {
+    const container = renderPanel({ artifacts: [artifact] });
+    const tab = container.querySelector('[role="tab"][title="Artifacts"]');
+    expect(tab).not.toBeNull();
+    expect(tab!.querySelector('.lucide-package')).not.toBeNull();
+  });
+
+  it('lists only the session artifacts, matching the header count, not pane extras', () => {
+    const paneExtra = {
+      ...artifact,
+      id: 'pane-extra',
+      workspacePath: 'pane.html',
+    };
+    const container = renderPanel({
+      artifacts: [artifact, paneExtra],
+      sessionArtifacts: [artifact],
+    });
+    expect(
+      container.querySelectorAll('[data-testid="artifacts-list"] li'),
+    ).toHaveLength(1);
+    expect(container.textContent).toContain('report.md');
+    expect(container.textContent).not.toContain('pane.html');
   });
 });
 
@@ -2200,6 +2372,7 @@ describe('ArtifactPanel scheduled-task ownership', () => {
       'cron-secondary',
       { enabled: false },
       'secondary-id',
+      'active-session',
     );
 
     const openDelete = Array.from(container.querySelectorAll('button')).find(
@@ -2217,6 +2390,641 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledWith(
       'cron-secondary',
       'secondary-id',
+      'active-session',
+    );
+  });
+
+  it('rejects a foreign mutation response without replacing the owned task', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...secondaryScheduledTask,
+      sessionId: 'foreign-session',
+      enabled: false,
+      prompt: 'FOREIGN REBIND',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+    const disable = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Disable',
+    );
+    await act(async () => {
+      disable?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledOnce();
+    expect(container.textContent).not.toContain('FOREIGN REBIND');
+    expect(container.textContent).toContain(
+      'The selected workspace is unavailable or untrusted',
+    );
+    const edit = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Edit',
+    );
+    act(() => edit?.click());
+    expect(document.body.querySelector('textarea')?.value).toBe(
+      'secondary only',
+    );
+  });
+
+  it('completes a confirmed save after a live update during its request', async () => {
+    const pendingUpdate = Promise.withResolvers<DaemonScheduledTask>();
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    mockWorkspaceActions.updateScheduledTask.mockImplementation(
+      () => pendingUpdate.promise,
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+    const edit = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Edit',
+    );
+    act(() => edit?.click());
+    const textarea = document.body.querySelector('textarea');
+    expect(textarea?.value).toBe('secondary only');
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )!.set!.call(textarea, 'unsaved draft');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const save = Array.from(document.body.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    act(() => save?.click());
+    expect(save?.disabled).toBe(true);
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          task: { prompt: 'server C' },
+          liveDurableScheduledTasks: [
+            {
+              scope: 'durable',
+              id: secondaryScheduledTask.id,
+              title: secondaryScheduledTask.name ?? 'Session task',
+              prompt: 'server C',
+              cronExpr: secondaryScheduledTask.cron,
+              recurring: true,
+              enabled: true,
+              createdAt: secondaryScheduledTask.createdAt,
+              lastFiredAt: secondaryScheduledTask.lastFiredAt,
+              nextRunAt: secondaryScheduledTask.nextRunAt,
+              gate: null,
+              workspaceId: 'secondary-id',
+              task: { ...secondaryScheduledTask, prompt: 'server C' },
+            },
+          ],
+        }),
+      ),
+    );
+    await flush();
+    expect(textarea?.value).toBe('unsaved draft');
+
+    await act(async () => {
+      pendingUpdate.resolve({
+        ...secondaryScheduledTask,
+        cron: '0 9 * * *',
+        prompt: 'confirmed save',
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      expect.objectContaining({ prompt: 'unsaved draft' }),
+      'secondary-id',
+      'active-session',
+    );
+    expect(document.body.querySelector('textarea')).toBeNull();
+    expect(container.textContent).toContain('confirmed save');
+  });
+
+  it('does not hydrate a same-id task from a different session', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      { ...secondaryScheduledTask, sessionId: 'foreign-session' },
+    ]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          sourceSessionId: 'owner-session',
+          liveSessionScheduledTasksOwnerSessionId: 'owner-session',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain('live status is unavailable');
+    for (const label of ['Edit', 'Enable', 'Delete']) {
+      expect(
+        Array.from(container.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === label,
+        )?.disabled,
+      ).toBe(true);
+    }
+    expect(mockWorkspaceActions.updateScheduledTask).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.deleteScheduledTask).not.toHaveBeenCalled();
+  });
+
+  it('retains an acknowledged detail deletion across owner providers rebuilding', async () => {
+    const onDurableScheduledTaskDeleted = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+
+    act(() =>
+      root.render(scheduledTaskPanel({ onDurableScheduledTaskDeleted })),
+    );
+    await flush();
+    const openDelete = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Delete',
+    );
+    act(() => openDelete?.click());
+    const confirmDelete = Array.from(document.body.querySelectorAll('button'))
+      .filter((button) => button.textContent?.trim() === 'Delete')
+      .at(-1);
+    await act(async () => {
+      confirmDelete?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onDurableScheduledTaskDeleted).toHaveBeenCalledWith(
+      'cron-secondary',
+      'secondary-id',
+      'active-session',
+    );
+    expect(container.textContent).toContain('has been deleted');
+    mockWorkspace.capabilities = { ...mockWorkspace.capabilities };
+    act(() =>
+      root.render(scheduledTaskPanel({ onDurableScheduledTaskDeleted })),
+    );
+    await flush();
+    expect(container.textContent).toContain('has been deleted');
+    expect(container.textContent).toContain('secondary only');
+    expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledOnce();
+  });
+
+  it('retains a draft and a confirmed save through live refreshes', async () => {
+    const liveEntry = (prompt: string): SessionDurableScheduledTask => ({
+      scope: 'durable',
+      id: secondaryScheduledTask.id,
+      title: secondaryScheduledTask.name ?? prompt,
+      prompt,
+      cronExpr: secondaryScheduledTask.cron,
+      recurring: true,
+      enabled: true,
+      createdAt: secondaryScheduledTask.createdAt,
+      lastFiredAt: secondaryScheduledTask.lastFiredAt,
+      nextRunAt: secondaryScheduledTask.nextRunAt,
+      gate: null,
+      workspaceId: 'secondary-id',
+      task: { ...secondaryScheduledTask, prompt },
+    });
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...secondaryScheduledTask,
+      prompt: 'confirmed save',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const options = {
+      sourceSessionId: 'active-session',
+      liveSessionScheduledTasksOwnerSessionId: 'active-session',
+    };
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          ...options,
+          liveDurableScheduledTasks: [liveEntry('server A')],
+        }),
+      ),
+    );
+    await flush();
+    const edit = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Edit',
+    );
+    act(() => edit?.click());
+    const textarea = document.body.querySelector('textarea');
+    expect(textarea?.value).toBe('server A');
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )!.set!.call(textarea, 'unsaved draft');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(textarea?.value).toBe('unsaved draft');
+
+    await act(async () => {
+      root.render(
+        scheduledTaskPanel({
+          ...options,
+          task: { prompt: 'server C' },
+          liveDurableScheduledTasks: [liveEntry('server C')],
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(textarea?.value).toBe('unsaved draft');
+
+    const save = Array.from(document.body.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save!.click();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      expect.objectContaining({ prompt: 'unsaved draft' }),
+      'secondary-id',
+      'active-session',
+    );
+    expect(container.textContent).toContain('confirmed save');
+  });
+
+  it('retires stale live controls only after a supported snapshot loses that task', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const button = (label: string) =>
+      Array.from(container.querySelectorAll('button')).find(
+        (candidate) => candidate.textContent?.trim() === label,
+      );
+    const options = {
+      sourceSessionId: 'active-session',
+      liveSessionScheduledTasksOwnerSessionId: 'active-session',
+    };
+
+    act(() => root.render(scheduledTaskPanel(options)));
+    await flush();
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          ...options,
+          liveDurableScheduledTasks: [],
+          hasLiveDurableScheduledSnapshot: false,
+        }),
+      ),
+    );
+    await flush();
+    expect(button('Disable')).toBeDefined();
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          ...options,
+          liveDurableScheduledTasks: [],
+          hasLiveDurableScheduledSnapshot: true,
+        }),
+      ),
+    );
+    await flush();
+    expect(container.textContent).toContain('live status is unavailable');
+    expect(button('Edit')?.disabled).toBe(true);
+    expect(button('Enable')?.disabled).toBe(true);
+    expect(button('Delete')?.disabled).toBe(true);
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledOnce();
+  });
+
+  it('hydrates and edits a default unbound durable task created in the active session', async () => {
+    const unboundTask = {
+      ...secondaryScheduledTask,
+      id: 'cron-secondary',
+      workspaceId: 'secondary-id',
+      sessionId: null,
+      prompt: 'Default unbound durable prompt',
+    };
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([unboundTask]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...unboundTask,
+      prompt: 'Updated unbound prompt',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          sourceSessionId: 'active-session',
+          liveSessionScheduledTasksOwnerSessionId: 'active-session',
+          liveDurableScheduledTasks: [],
+          hasLiveDurableScheduledSnapshot: true,
+          task: {
+            id: unboundTask.id,
+            prompt: unboundTask.prompt,
+          },
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).not.toContain('live status is unavailable');
+    const editBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'Edit',
+    );
+    expect(editBtn).toBeDefined();
+    expect(editBtn?.disabled).toBe(false);
+
+    act(() => editBtn!.click());
+    await flush();
+    const promptInput =
+      document.body.querySelector<HTMLTextAreaElement>('textarea');
+    expect(promptInput).not.toBeNull();
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(promptInput, 'Updated unbound prompt');
+      promptInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const saveBtn = Array.from(document.body.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'Save',
+    );
+    expect(saveBtn).toBeDefined();
+    await act(async () => {
+      saveBtn!.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+      unboundTask.id,
+      expect.objectContaining({ prompt: 'Updated unbound prompt' }),
+      'secondary-id',
+      null,
+    );
+  });
+
+  it('does not let a late loadTask response resurrect a bound task absent from the authoritative session snapshot', async () => {
+    let resolveLoad!: (tasks: DaemonScheduledTask[]) => void;
+    const delayedLoad = new Promise<DaemonScheduledTask[]>((resolve) => {
+      resolveLoad = resolve;
+    });
+    mockWorkspaceActions.listScheduledTasks.mockReturnValueOnce(delayedLoad);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const options = {
+      sourceSessionId: 'active-session',
+      liveSessionScheduledTasksOwnerSessionId: 'active-session',
+    };
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          ...options,
+          liveDurableScheduledTasks: [],
+          hasLiveDurableScheduledSnapshot: false,
+        }),
+      ),
+    );
+    await flush();
+
+    // Authoritative empty session snapshot arrives before the stale list load settles.
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          ...options,
+          liveDurableScheduledTasks: [],
+          hasLiveDurableScheduledSnapshot: true,
+        }),
+      ),
+    );
+    await flush();
+
+    // Stale list response carrying the deleted bound task arrives later.
+    await act(async () => {
+      resolveLoad([secondaryScheduledTask]);
+      await delayedLoad;
+    });
+    await flush();
+
+    expect(container.textContent).toContain('live status is unavailable');
+    const editBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'Edit',
+    );
+    expect(editBtn?.disabled).toBe(true);
+  });
+
+  it.each(['adopted-before-open', 'adopted-before-save'] as const)(
+    'hydrates and saves a default unbound durable task even after keepalive adopts it into a dedicated session (%s)',
+    async (timing) => {
+      const dedicatedSessionId = 'dedicated-task-session-uuid';
+      const unboundBeforeAdopt = {
+        ...secondaryScheduledTask,
+        id: 'cron-secondary',
+        workspaceId: 'secondary-id',
+        sessionId: null,
+        prompt: 'Default unbound durable prompt',
+      };
+      const adoptedTask = {
+        ...unboundBeforeAdopt,
+        sessionId: dedicatedSessionId,
+      };
+      if (timing === 'adopted-before-open') {
+        mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+          adoptedTask,
+        ]);
+      } else {
+        mockWorkspaceActions.listScheduledTasks
+          .mockResolvedValueOnce([unboundBeforeAdopt])
+          .mockResolvedValue([adoptedTask]);
+      }
+      mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+        ...adoptedTask,
+        prompt: 'Saved after keepalive adoption',
+      });
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          scheduledTaskPanel({
+            sourceSessionId: 'creating-session',
+            liveSessionScheduledTasksOwnerSessionId: 'creating-session',
+            liveDurableScheduledTasks: [],
+            hasLiveDurableScheduledSnapshot: true,
+            task: {
+              id: adoptedTask.id,
+              prompt: adoptedTask.prompt,
+              unboundCreation: true,
+            },
+          }),
+        ),
+      );
+      await flush();
+
+      expect(container.textContent).not.toContain('live status is unavailable');
+      const editBtn = Array.from(container.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Edit',
+      );
+      expect(editBtn?.disabled).toBe(false);
+
+      act(() => editBtn!.click());
+      await flush();
+      const promptInput =
+        document.body.querySelector<HTMLTextAreaElement>('textarea');
+      expect(promptInput).not.toBeNull();
+      act(() => {
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )?.set;
+        setter?.call(promptInput, 'Saved after keepalive adoption');
+        promptInput!.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      const saveBtn = Array.from(document.body.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Save',
+      );
+      await act(async () => {
+        saveBtn!.click();
+        await Promise.resolve();
+      });
+      await flush();
+
+      expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+        adoptedTask.id,
+        expect.objectContaining({ prompt: 'Saved after keepalive adoption' }),
+        'secondary-id',
+        dedicatedSessionId,
+      );
+      expect(container.textContent).toContain('Saved after keepalive adoption');
+    },
+  );
+
+  it('does not treat another workspace empty live snapshot as deleting a secondary durable tab', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'scheduled-task:secondary:cross-ws',
+                kind: 'scheduled_task',
+                title: 'Scheduled Tasks',
+                workspaceCwd: '/secondary',
+                workspaceId: 'secondary-id',
+                sourceSessionId: 'active-session',
+                task: {
+                  id: secondaryScheduledTask.id,
+                  toolCallId: 'cron-cross-ws',
+                  title: 'Secondary task',
+                  cron: secondaryScheduledTask.cron,
+                  prompt: secondaryScheduledTask.prompt,
+                  recurring: true,
+                  durable: true,
+                  workspaceId: 'secondary-id',
+                },
+              },
+            ]}
+            activeTabId="scheduled-task:secondary:cross-ws"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            liveDurableScheduledTasks={[]}
+            liveDurableScheduledTasksWorkspaceId={null}
+            hasLiveDurableScheduledSnapshot={true}
+            liveSessionScheduledTasksOwnerSessionId="active-session"
+            open={true}
+            onClose={vi.fn()}
+            onSelectTab={vi.fn()}
+            onCloseTab={vi.fn()}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).not.toContain('live status is unavailable');
+    const editBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'Edit',
+    );
+    expect(editBtn?.disabled).toBe(false);
+  });
+
+  it('rejects an untrusted primary durable task without issuing a request', async () => {
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: mockWorkspace.capabilities.workspaces?.map((entry, index) =>
+        index === 0 ? { ...entry, trusted: false } : entry,
+      ),
+    };
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      { ...secondaryScheduledTask, workspaceId: undefined },
+    ]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          workspaceCwd: '/primary',
+          workspaceId: undefined,
+        }),
+      ),
+    );
+    await flush();
+
+    expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+    expect(container.textContent).toContain(
+      'This workspace may have been removed or the link is no longer valid.',
+    );
+    for (const label of ['Edit', 'Enable', 'Delete']) {
+      expect(
+        Array.from(container.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === label,
+        ),
+      ).toBeUndefined();
+    }
+    expect(container.textContent).not.toContain(
+      'Scheduled task workspace owner no longer matches',
     );
   });
 
@@ -2245,6 +3053,34 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     expect(mockWorkspaceActions.deleteScheduledTask).not.toHaveBeenCalled();
   });
 
+  it('does not call a fallback tool-call id a deleted durable task', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          task: {
+            id: 'cron-call',
+            toolCallId: 'cron-call',
+            prompt: 'history without structured id',
+          },
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain('history without structured id');
+    expect(container.textContent).not.toContain('has been deleted');
+    expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+    const edit = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Edit',
+    );
+    expect(edit?.disabled).toBe(true);
+  });
+
   it('shows a session-scoped task snapshot without a workspace owner', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -2271,6 +3107,75 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     expect(container.textContent).toContain('local session snapshot');
     expect(container.querySelector('[role="alert"]')).toBeNull();
     expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+  });
+
+  it('does not expose durable mutations when the workspace target has no actions', async () => {
+    const capability = {
+      workspaceCwd: '/primary',
+      workspaces: [
+        {
+          id: 'primary-id',
+          cwd: '/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'new-registration',
+          cwd: '/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    const liveTask = {
+      ...secondaryScheduledTask,
+      enabled: true,
+      sessionId: 'active-session',
+    };
+    mockWorkspace.capabilities = capability;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          sourceSessionId: 'active-session',
+          liveSessionScheduledTasksOwnerSessionId: 'active-session',
+          liveDurableScheduledTasks: [
+            {
+              scope: 'durable',
+              id: liveTask.id,
+              title: liveTask.name ?? liveTask.prompt,
+              prompt: liveTask.prompt,
+              cronExpr: liveTask.cron,
+              recurring: liveTask.recurring,
+              enabled: true,
+              createdAt: liveTask.createdAt,
+              lastFiredAt: liveTask.lastFiredAt,
+              nextRunAt: liveTask.nextRunAt,
+              gate: null,
+              workspaceId: 'secondary-id',
+              task: liveTask,
+            },
+          ],
+          hasLiveDurableScheduledSnapshot: true,
+        }),
+      ),
+    );
+    await flush();
+    const byLabel = (label: string) =>
+      Array.from(container.querySelectorAll('button')).find(
+        (candidate) => candidate.textContent === label,
+      );
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain(
+        'This workspace may have been removed or the link is no longer valid.',
+      ),
+    );
+    for (const label of ['Edit', 'Enable', 'Disable', 'Delete']) {
+      expect(byLabel(label)).toBeUndefined();
+    }
   });
 
   it('keeps legacy single-workspace scheduled-task routes unqualified', async () => {
@@ -2315,6 +3220,7 @@ describe('ArtifactPanel scheduled-task ownership', () => {
       'cron-secondary',
       { enabled: false },
       undefined,
+      'active-session',
     );
 
     const openDelete = Array.from(container.querySelectorAll('button')).find(
@@ -2331,6 +3237,7 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledWith(
       'cron-secondary',
       undefined,
+      'active-session',
     );
   });
 
@@ -2383,6 +3290,7 @@ describe('ArtifactPanel scheduled-task ownership', () => {
           'cron-secondary',
           expect.objectContaining({ prompt: expect.any(String) }),
           'secondary-id',
+          'active-session',
         );
       } else if (mutation === 'toggle') {
         const disable = Array.from(container.querySelectorAll('button')).find(
@@ -2414,7 +3322,9 @@ describe('ArtifactPanel scheduled-task ownership', () => {
         await Promise.resolve();
       });
 
-      expect(container.textContent).not.toContain('Loading…');
+      await vi.waitFor(() => {
+        expect(container.textContent).not.toContain('Loading…');
+      });
       if (mutation === 'delete') {
         expect(container.textContent).toContain('has been deleted');
       } else {
@@ -2493,7 +3403,263 @@ describe('ArtifactPanel scheduled-task ownership', () => {
       'cron-replacement',
       { enabled: false },
       'secondary-id',
+      'active-session',
     );
+  });
+
+  it('reflects an owned durable update without another server request', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    const liveTask = {
+      ...secondaryScheduledTask,
+      enabled: false,
+      prompt: 'Edited through the environment',
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+    expect(
+      Array.from(container.querySelectorAll('button')).some(
+        (button) => button.textContent?.trim() === 'Disable',
+      ),
+    ).toBe(true);
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          liveDurableScheduledTasks: [
+            {
+              scope: 'durable',
+              id: liveTask.id,
+              title: liveTask.name ?? liveTask.prompt,
+              prompt: liveTask.prompt,
+              cronExpr: liveTask.cron,
+              recurring: liveTask.recurring,
+              enabled: liveTask.enabled,
+              createdAt: liveTask.createdAt,
+              lastFiredAt: liveTask.lastFiredAt,
+              nextRunAt: liveTask.nextRunAt,
+              gate: null,
+              workspaceId: 'secondary-id',
+              task: liveTask,
+            },
+          ],
+          sourceSessionId: 'active-session',
+          liveSessionScheduledTasksOwnerSessionId: 'active-session',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(
+      Array.from(container.querySelectorAll('button')).some(
+        (button) => button.textContent?.trim() === 'Enable',
+      ),
+    ).toBe(true);
+    expect(container.textContent).toContain('Edited through the environment');
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledOnce();
+  });
+
+  it('uses a confirmed owner-scoped deletion to retire detail actions', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          confirmedDeletedDurableTaskKeys: new Set([
+            JSON.stringify(['secondary-id', 'cron-secondary']),
+          ]),
+          sourceSessionId: 'active-session',
+          liveSessionScheduledTasksOwnerSessionId: 'active-session',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain('has been deleted');
+    const edit = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Edit',
+    );
+    const toggle = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Enable',
+    );
+    const remove = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Delete',
+    );
+    expect(edit?.disabled).toBe(true);
+    expect(toggle?.disabled).toBe(true);
+    expect(remove?.disabled).toBe(true);
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledOnce();
+  });
+
+  it('restores focus to the detail after confirming a session stop', async () => {
+    const onCancelSessionScheduledTask = vi.fn().mockResolvedValue(true);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          task: { durable: false },
+          liveSessionScheduledTasks: new Map([
+            [
+              scheduledTaskRuntimeKey({
+                id: 'cron-secondary',
+                scope: 'session',
+                source: 'cron',
+              }),
+              {
+                id: 'cron-secondary',
+                source: 'cron',
+                cronExpr: '0 9 * * *',
+                prompt: 'secondary only',
+                recurring: true,
+                createdAt: 1_700_000_000_000,
+                expiresAt: null,
+                lastFiredAt: null,
+                nextRunAt: null,
+                enabled: true,
+              },
+            ],
+          ]),
+          liveSessionScheduledTasksOwnerSessionId: 'session-1',
+          hasLiveSessionScheduledSnapshot: true,
+          onCancelSessionScheduledTask,
+          sourceSessionId: 'session-1',
+        }),
+      ),
+    );
+    await flush();
+    const stop = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Stop task',
+    );
+    expect(stop).toBeDefined();
+    await act(async () => {
+      stop?.focus();
+      stop?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      'cron',
+    );
+    expect(container.textContent).not.toContain('Stop task');
+    const detail = container.querySelector(
+      '[role="group"][aria-label="Scheduled tasks"]',
+    );
+    expect(detail).not.toBeNull();
+    expect(document.activeElement).toBe(detail);
+  });
+
+  it('stops the wakeup task when cron and wakeup share an id', async () => {
+    const onCancelSessionScheduledTask = vi.fn().mockResolvedValue(true);
+    const onSessionScheduledTaskStopped = vi.fn();
+    const cronTask = {
+      id: 'shared-scheduled-task',
+      source: 'cron' as const,
+      cronExpr: '0 9 * * *',
+      prompt: 'Cron live prompt',
+      recurring: true,
+      createdAt: 1_000,
+      expiresAt: null,
+      lastFiredAt: null,
+      nextRunAt: null,
+      enabled: true,
+    };
+    const wakeupTask = {
+      ...cronTask,
+      source: 'wakeup' as const,
+      cronExpr: '@wakeup',
+      prompt: 'Wakeup live prompt',
+      recurring: false,
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          task: {
+            id: 'shared-scheduled-task',
+            toolCallId: 'shared-wakeup-call',
+            cron: '@wakeup',
+            prompt: 'Wakeup historical prompt',
+            recurring: false,
+            durable: false,
+          },
+          liveSessionScheduledTasks: new Map([
+            [
+              scheduledTaskRuntimeKey({ ...cronTask, scope: 'session' }),
+              cronTask,
+            ],
+            [
+              scheduledTaskRuntimeKey({ ...wakeupTask, scope: 'session' }),
+              wakeupTask,
+            ],
+          ]),
+          liveSessionScheduledTasksOwnerSessionId: 'owner-session',
+          hasLiveSessionScheduledSnapshot: true,
+          onCancelSessionScheduledTask,
+          onSessionScheduledTaskStopped,
+          sourceSessionId: 'owner-session',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain(
+      'Active in this session. Stopping cancels future runs immediately.',
+    );
+    expect(container.textContent).toContain('Wakeup live prompt');
+    expect(container.textContent).not.toContain('Cron live prompt');
+    const stop = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Stop task',
+    );
+    expect(stop).toBeDefined();
+    expect(stop?.disabled).toBe(false);
+
+    await act(async () => {
+      stop?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(
+      'shared-scheduled-task',
+      'wakeup',
+    );
+    expect(onSessionScheduledTaskStopped).toHaveBeenCalledWith(
+      'shared-scheduled-task',
+      'owner-session',
+      'wakeup',
+    );
+    expect(container.textContent).toContain(
+      'This session-scoped scheduled task is no longer active.',
+    );
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.trim() === 'Stop task',
+      ),
+    ).toBeUndefined();
   });
 });
 
@@ -3613,9 +4779,406 @@ describe('ArtifactPanel add menu', () => {
     expect(menuText).toContain('New side task');
     expect(menuText).not.toContain('Existing side task');
   });
+
+  it('opens the change overview from the add menu', () => {
+    const onOpenChangeOverview = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'artifact',
+                kind: 'artifact',
+                title: 'Report',
+                artifactId: 'report',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+            ]}
+            activeTabId="artifact"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            changeOverviewAvailable
+            onOpenChangeOverview={onOpenChangeOverview}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    openAddMenu(container);
+    const item = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((el) => el.textContent?.includes('Change overview'));
+    expect(item).toBeDefined();
+    act(() => item?.click());
+    expect(onOpenChangeOverview).toHaveBeenCalledOnce();
+  });
+
+  it('hides the change overview from the add menu when unavailable', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'artifact',
+                kind: 'artifact',
+                title: 'Report',
+                artifactId: 'report',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+            ]}
+            activeTabId="artifact"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            changeOverviewAvailable={false}
+            onOpenChangeOverview={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    openAddMenu(container);
+    const menuText = document.body.querySelector('[role="menu"]')?.textContent;
+    expect(menuText).not.toContain('Change overview');
+  });
+
+  it('offers the change overview as an empty-state action when no tab is open', () => {
+    const onOpenChangeOverview = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[]}
+            activeTabId={null}
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            changeOverviewAvailable
+            onOpenChangeOverview={onOpenChangeOverview}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const action = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="right-panel-empty-actions"] button',
+      ),
+    ).find((button) => button.textContent?.includes('Change overview'));
+    expect(action).toBeDefined();
+    act(() => action?.click());
+    expect(onOpenChangeOverview).toHaveBeenCalledOnce();
+  });
+
+  it('respects the items allowlist and hides the change overview entry', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'artifact',
+                kind: 'artifact',
+                title: 'Report',
+                artifactId: 'report',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+            ]}
+            activeTabId="artifact"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            items={['review']}
+            changeOverviewAvailable
+            onOpenChangeOverview={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    openAddMenu(container);
+    const menuText = document.body.querySelector('[role="menu"]')?.textContent;
+    expect(menuText).not.toContain('Change overview');
+  });
+
+  it('hides the change overview entry once its singleton tab is already open', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'artifact',
+                kind: 'artifact',
+                title: 'Report',
+                artifactId: 'report',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+              {
+                id: 'change_overview',
+                kind: 'change_overview',
+                title: 'Change overview',
+                workspaceCwd: '/primary',
+                sessionId: 's1',
+              },
+            ]}
+            activeTabId="artifact"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            changeOverviewAvailable
+            onOpenChangeOverview={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    openAddMenu(container);
+    const menuText = document.body.querySelector('[role="menu"]')?.textContent;
+    expect(menuText).not.toContain('Change overview');
+  });
+
+  it('renders the change overview panel for a change_overview tab and wires the hook', () => {
+    changeOverviewHook.args = undefined;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'change_overview',
+                kind: 'change_overview',
+                title: 'Change overview',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+                sessionId: 's1',
+              },
+            ]}
+            activeTabId="change_overview"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            changeOverviewAvailable
+            onOpenChangeOverview={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(changeOverviewHook.args).toEqual(['/primary', 's1']);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    // The panel body renders (the mocked hook yields an empty scope), not a
+    // blank slot — replacing the render branch with a <div/> fails this.
+    expect(container.textContent).toContain('No changes in this scope');
+  });
+
+  it('shows the workspace-not-found state when the change_overview workspace is gone', () => {
+    changeOverviewHook.args = undefined;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'change_overview',
+                kind: 'change_overview',
+                title: 'Change overview',
+                workspaceCwd: '/removed',
+                workspaceId: 'removed-id',
+                sessionId: 's1',
+              },
+            ]}
+            activeTabId="change_overview"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            changeOverviewAvailable
+            onOpenChangeOverview={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    // The accurate not-found guard fires instead of an endless retry, and the
+    // hook never runs for a workspace the daemon no longer advertises.
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(changeOverviewHook.args).toBeUndefined();
+  });
 });
 
 describe('ArtifactPanel review downloads', () => {
+  it.each([
+    { name: 'standalone', workspaceCwd: undefined, workspaceId: undefined },
+    {
+      name: 'unregistered conversation directory',
+      workspaceCwd: '/private-conversation',
+      workspaceId: undefined,
+    },
+    {
+      name: 'stale workspace identity',
+      workspaceCwd: '/primary',
+      workspaceId: 'removed-id',
+    },
+    {
+      name: 'untrusted workspace',
+      workspaceCwd: '/primary',
+      workspaceId: 'primary-id',
+    },
+  ])(
+    'shows recorded diffs without file access for $name',
+    async ({ name, workspaceCwd, workspaceId }) => {
+      if (name === 'untrusted workspace') {
+        mockWorkspace.capabilities.workspaces[0].trusted = false;
+      }
+      const changes = [
+        {
+          path: 'preview.html',
+          status: 'created' as const,
+          toolCallId: 'write-preview',
+          isArtifact: false,
+          diffs: [
+            {
+              oldText: '',
+              newText: '<h1>Standalone change</h1>',
+              fullContent: true,
+            },
+          ],
+        },
+      ];
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const onOpenFilePreview = vi.fn();
+      const renderPanel = () => (
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'review',
+                kind: 'review',
+                title: 'Review',
+                changes: name === 'standalone' ? undefined : changes,
+                workspaceCwd,
+                workspaceId,
+              },
+            ]}
+            activeTabId="review"
+            workspaceCwd="/primary"
+            reviewChanges={changes}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={onOpenFilePreview}
+            onClose={() => {}}
+          />
+        </I18nProvider>
+      );
+
+      act(() => root.render(renderPanel()));
+      const toggle = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="preview.html"]',
+      );
+      expect(toggle).not.toBeNull();
+      await act(async () => toggle!.click());
+
+      await vi.waitFor(() =>
+        expect(container.querySelector('.cm-content')?.textContent).toContain(
+          '<h1>Standalone change</h1>',
+        ),
+      );
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(
+        container.querySelector('button[title="Preview preview.html"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('button[title="Download preview.html"]'),
+      ).toBeNull();
+      expect(onOpenFilePreview).not.toHaveBeenCalled();
+      expect(mockWorkspace.client.workspaceByCwd).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.stat).not.toHaveBeenCalled();
+
+      changes[0].diffs = [];
+      act(() => root.render(renderPanel()));
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+        'This workspace may have been removed or the link is no longer valid.',
+      );
+    },
+  );
+
   it('renders a saved unified patch without full file bodies', () => {
     const fileDiff =
       '--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new';
@@ -5480,9 +7043,82 @@ describe('ArtifactPanel binary document previews', () => {
       patch.workspacePath ?? 'reports/Report.PDF',
       { offset: 0, maxBytes: 256 * 1024 },
     );
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(2);
     const blob = vi.mocked(URL.createObjectURL).mock.calls[0]![0] as Blob;
     expect(blob.type).toBe('application/pdf');
     expect(Buffer.from(await blob.arrayBuffer())).toEqual(bytes);
+  });
+
+  it('only loads a large PDF into the native viewer after it is requested', async () => {
+    const sizeBytes = 4 * 1024 * 1024;
+    const fixture = Buffer.alloc(sizeBytes);
+    bytes.copy(fixture);
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readFileBytes.mockImplementation(
+      async (
+        _path: string,
+        { offset, maxBytes }: { offset: number; maxBytes: number },
+      ) => {
+        const chunk = fixture.subarray(offset, offset + maxBytes);
+        return {
+          contentBase64: chunk.toString('base64'),
+          offset,
+          returnedBytes: chunk.length,
+          sizeBytes,
+        };
+      },
+    );
+    const { root, container } = mountPdf();
+    const artifact = pdfArtifact();
+    act(() => root.render(artifactPanel(artifact)));
+    await vi.waitFor(async () => {
+      await flushPreview();
+      expect(container.querySelector('[data-pdf-size]')?.textContent).toBe(
+        'Open full PDF',
+      );
+    });
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(1);
+    expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+    expect(container.querySelector('iframe')).toBeNull();
+
+    const updatedHeader = '%PDF-1.6';
+    fixture.write(updatedHeader);
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes,
+      modifiedMs: 2,
+    });
+    act(() =>
+      container.querySelector<HTMLButtonElement>('[data-pdf-size]')!.click(),
+    );
+    await flush();
+    expect(container.querySelector('[data-pdf-size]')).toBeNull();
+    expect(container.querySelector('iframe')?.getAttribute('src')).toBe(
+      'blob:pdf-preview',
+    );
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(3);
+    expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledTimes(16);
+    const blob = vi.mocked(URL.createObjectURL).mock.calls[0]![0] as Blob;
+    expect(blob.size).toBe(sizeBytes);
+    expect(await blob.slice(0, updatedHeader.length).text()).toBe(
+      updatedHeader,
+    );
+
+    act(() =>
+      root.render(
+        artifactPanel({ ...artifact, updatedAt: '2026-10-20T00:00:00Z' }),
+      ),
+    );
+    await flush();
+    expect(container.querySelector('[data-pdf-size]')).not.toBeNull();
+    expect(container.querySelector('iframe')).toBeNull();
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(4);
+    expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledTimes(16);
   });
 
   it.each(['missing', 'expired'])(
@@ -5743,5 +7379,509 @@ describe('ArtifactPanel binary document previews', () => {
     const download = container.querySelector<HTMLAnchorElement>('a[download]');
     expect(download?.getAttribute('href')).toBe('blob:pdf-preview');
     expect(download?.download).toBe('Report.PDF');
+  });
+
+  it('allows stopping a paused but live session-scoped scheduled task', async () => {
+    const onCancelSessionScheduledTask = vi.fn().mockResolvedValue(true);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const task = {
+      id: 'cron-paused-live',
+      toolCallId: 'create-paused-live',
+      title: 'Paused release monitor',
+      cron: '*/5 * * * *',
+      prompt: 'Paused release monitor',
+      recurring: true,
+      durable: false,
+    };
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'scheduled-task:paused:cron-paused-live',
+                kind: 'scheduled_task',
+                title: 'Paused release monitor',
+                task,
+                sourceSessionId: 'session-live',
+              },
+            ]}
+            activeTabId="scheduled-task:paused:cron-paused-live"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            liveSessionScheduledTasks={
+              new Map([
+                [
+                  scheduledTaskRuntimeKey({
+                    id: 'cron-paused-live',
+                    scope: 'session',
+                    source: 'cron',
+                  }),
+                  {
+                    id: 'cron-paused-live',
+                    source: 'cron' as const,
+                    cronExpr: '*/5 * * * *',
+                    prompt: 'Paused release monitor',
+                    recurring: true,
+                    enabled: false,
+                    createdAt: 1,
+                    expiresAt: null,
+                    lastFiredAt: null,
+                    nextRunAt: Date.now() + 60_000,
+                  },
+                ],
+              ])
+            }
+            liveSessionScheduledTasksOwnerSessionId="session-live"
+            hasLiveSessionScheduledSnapshot
+            onCancelSessionScheduledTask={onCancelSessionScheduledTask}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain(
+      'Paused in this session. Stopping removes the remaining schedule.',
+    );
+    const stopButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Stop task');
+    expect(stopButton).toBeDefined();
+    expect(stopButton?.disabled).toBe(false);
+
+    await act(async () => {
+      stopButton?.click();
+      await Promise.resolve();
+    });
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(
+      'cron-paused-live',
+      'cron',
+    );
+    expect(container.textContent).toContain(
+      'This session-scoped scheduled task is no longer active.',
+    );
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Stop task',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('allows stopping an active session-scoped scheduled task from ArtifactPanel', async () => {
+    const onCancelSessionScheduledTask = vi.fn().mockResolvedValue(true);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const liveTask = {
+      id: 'cron-live-1',
+      source: 'cron' as const,
+      cronExpr: '*/5 * * * *',
+      prompt: 'Poll build status',
+      recurring: true,
+      createdAt: 1_000,
+      expiresAt: 100_000,
+      lastFiredAt: null,
+      nextRunAt: 60_000,
+    };
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'scheduled-task:session:cron-live-1',
+                kind: 'scheduled_task',
+                title: 'Poll build status',
+                task: {
+                  id: 'cron-live-1',
+                  toolCallId: 'tool-cron-1',
+                  title: 'Poll build status',
+                  cron: '*/5 * * * *',
+                  prompt: 'Poll build status',
+                  recurring: true,
+                  durable: false,
+                },
+              },
+            ]}
+            activeTabId="scheduled-task:session:cron-live-1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            liveSessionScheduledTasks={
+              new Map([
+                [
+                  scheduledTaskRuntimeKey({ ...liveTask, scope: 'session' }),
+                  liveTask,
+                ],
+              ])
+            }
+            hasLiveSessionScheduledSnapshot
+            onCancelSessionScheduledTask={onCancelSessionScheduledTask}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain(
+      'Active in this session. Stopping cancels future runs immediately.',
+    );
+    const stopButton = Array.from(container.querySelectorAll('button')).find(
+      (btn) => btn.textContent === 'Stop task',
+    );
+    expect(stopButton).toBeDefined();
+    await act(async () => {
+      stopButton?.click();
+      await Promise.resolve();
+    });
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(
+      'cron-live-1',
+      'cron',
+    );
+    expect(container.textContent).toContain(
+      'This session-scoped scheduled task is no longer active.',
+    );
+  });
+
+  it('does not borrow another session live snapshot for a historical task', () => {
+    const onCancelSessionScheduledTask = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const task = {
+      id: 'cron-from-session-b',
+      toolCallId: 'tool-session-b',
+      title: 'Poll build status',
+      cron: '*/5 * * * *',
+      prompt: 'Poll build status',
+      recurring: true,
+      durable: false,
+    };
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'scheduled-task:session-b:cron-from-session-b',
+                kind: 'scheduled_task',
+                title: 'Poll build status',
+                task,
+                sourceSessionId: 'session-b',
+              },
+            ]}
+            activeTabId="scheduled-task:session-b:cron-from-session-b"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            liveSessionScheduledTasks={new Map()}
+            liveSessionScheduledTasksOwnerSessionId="session-a"
+            hasLiveSessionScheduledSnapshot
+            onCancelSessionScheduledTask={onCancelSessionScheduledTask}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain(
+      'Showing the snapshot from when it was created.',
+    );
+    expect(container.textContent).not.toContain('no longer active');
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Stop task',
+      ),
+    ).toBeUndefined();
+    expect(onCancelSessionScheduledTask).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a failed session-scoped cancellation instead of a silent snapshot', async () => {
+    const onCancelSessionScheduledTask = vi.fn().mockResolvedValue(false);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const liveTask = {
+      id: 'cron-refused-1',
+      source: 'cron' as const,
+      cronExpr: '*/5 * * * *',
+      prompt: 'Poll build status',
+      recurring: true,
+      createdAt: 1_000,
+      expiresAt: 100_000,
+      lastFiredAt: null,
+      nextRunAt: 60_000,
+      enabled: true,
+    };
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'scheduled-task:session:cron-refused-1',
+                kind: 'scheduled_task',
+                title: 'Poll build status',
+                task: {
+                  id: 'cron-refused-1',
+                  toolCallId: 'tool-cron-refused',
+                  title: 'Poll the build',
+                  cron: '*/5 * * * *',
+                  prompt: 'Poll build status',
+                  recurring: true,
+                  durable: false,
+                },
+              },
+            ]}
+            activeTabId="scheduled-task:session:cron-refused-1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            liveSessionScheduledTasks={
+              new Map([
+                [
+                  scheduledTaskRuntimeKey({ ...liveTask, scope: 'session' }),
+                  liveTask,
+                ],
+              ])
+            }
+            hasLiveSessionScheduledSnapshot
+            onCancelSessionScheduledTask={onCancelSessionScheduledTask}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const stopButton = Array.from(container.querySelectorAll('button')).find(
+      (btn) => btn.textContent === 'Stop task',
+    );
+    expect(stopButton).toBeDefined();
+    await act(async () => {
+      stopButton?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(
+      'cron-refused-1',
+      'cron',
+    );
+    expect(container.textContent).toContain(
+      'Failed to stop the scheduled task',
+    );
+    expect(container.textContent).not.toContain(
+      'Showing the snapshot from when it was created.',
+    );
+    expect(stopButton?.disabled).toBe(false);
+  });
+});
+
+describe('ArtifactPanel task explanation', () => {
+  const task: DaemonSessionShellTaskStatus = {
+    kind: 'shell',
+    id: 'shell-1',
+    label: 'npm run dev',
+    description: 'npm run dev',
+    status: 'running',
+    startTime: 1_000,
+    runtimeMs: 5_000,
+    command: 'npm run dev',
+    cwd: '/work/project',
+  };
+
+  type ExplainPanelProps = {
+    explainTask?: DaemonSessionShellTaskStatus | null;
+    onExplainTask?: (task: DaemonSessionShellTaskStatus) => void;
+    taskExplanation?: {
+      messageId: string;
+      taskId: string;
+      question: string;
+      answer: string;
+      isPending: boolean;
+    } | null;
+  };
+
+  function renderExplainPanel(props: ExplainPanelProps) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    mockActions.getTaskRuntime.mockImplementation(() => new Promise(() => {}));
+    const element = (p: ExplainPanelProps) => (
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={[
+            { id: 'shell:shell-1', kind: 'shell', title: task.command, task },
+          ]}
+          activeTabId="shell:shell-1"
+          reviewChanges={[]}
+          selectedReviewPath={null}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+          explainTask={p.explainTask === undefined ? task : p.explainTask}
+          onExplainTask={p.onExplainTask}
+          taskExplanation={p.taskExplanation}
+        />
+      </I18nProvider>
+    );
+    act(() => {
+      root.render(element(props));
+    });
+    return {
+      container,
+      root,
+      rerender: (p: ExplainPanelProps) =>
+        act(() => {
+          root.render(element(p));
+        }),
+    };
+  }
+
+  it('offers a header "?" that asks about the active task', () => {
+    const onExplainTask = vi.fn();
+    const { container } = renderExplainPanel({ onExplainTask });
+    const explain = container.querySelector<HTMLButtonElement>(
+      '[data-testid="artifact-panel-explain"]',
+    );
+    expect(explain).not.toBeNull();
+    expect(explain?.getAttribute('aria-label')).toBe(
+      'Explain task: npm run dev',
+    );
+    act(() => explain?.click());
+    expect(onExplainTask).toHaveBeenCalledExactlyOnceWith(task);
+  });
+
+  it('renders no "?" without an explainable task', () => {
+    const { container } = renderExplainPanel({
+      explainTask: null,
+      onExplainTask: vi.fn(),
+    });
+    expect(
+      container.querySelector('[data-testid="artifact-panel-explain"]'),
+    ).toBeNull();
+  });
+
+  it('mirrors the explanation in place when it matches the active task', () => {
+    const { container, rerender } = renderExplainPanel({
+      onExplainTask: vi.fn(),
+      taskExplanation: {
+        messageId: 'm1',
+        taskId: 'shell-1',
+        question: 'Explain what this task is doing: npm run dev',
+        answer: 'It runs the dev server.',
+        isPending: false,
+      },
+    });
+    const block = container.querySelector(
+      '[data-testid="artifact-panel-explanation"]',
+    );
+    expect(block).not.toBeNull();
+    expect(block?.textContent).toContain(
+      'Explain what this task is doing: npm run dev',
+    );
+    expect(block?.textContent).toContain('It runs the dev server.');
+    // A button-triggered explanation is not a typed /btw command.
+    expect(block?.textContent).not.toContain('/btw');
+    // The mirror has no focusable surface of its own, so the composer
+    // panel's key hints would advertise keys that act on whatever control
+    // holds focus (Enter on the header "?" re-asks the question).
+    expect(block?.textContent).not.toContain('Press Space');
+
+    rerender({
+      onExplainTask: vi.fn(),
+      taskExplanation: {
+        messageId: 'm2',
+        taskId: 'shell-1',
+        question: 'Explain what this task is doing: npm run dev',
+        answer: '',
+        isPending: true,
+      },
+    });
+    const pendingBlock = container.querySelector(
+      '[data-testid="artifact-panel-explanation"]',
+    );
+    expect(pendingBlock?.textContent).not.toContain('Ctrl+C');
+  });
+
+  it('does not mirror an explanation for another task', () => {
+    const { container } = renderExplainPanel({
+      onExplainTask: vi.fn(),
+      taskExplanation: {
+        messageId: 'm1',
+        taskId: 'other-task',
+        question: 'Explain what this task is doing: other',
+        answer: 'About another task.',
+        isPending: false,
+      },
+    });
+    expect(
+      container.querySelector('[data-testid="artifact-panel-explanation"]'),
+    ).toBeNull();
+  });
+
+  it('remounts the mirrored answer when a new ask replaces the old one', () => {
+    const explanation = (messageId: string) => ({
+      messageId,
+      taskId: 'shell-1',
+      question: 'Explain what this task is doing: npm run dev',
+      answer: 'It runs the dev server.',
+      isPending: false,
+    });
+    const { container, rerender } = renderExplainPanel({
+      onExplainTask: vi.fn(),
+      taskExplanation: explanation('m1'),
+    });
+    const contentSelector =
+      '[data-testid="artifact-panel-explanation"] [data-web-shell-btw-content]';
+    const first = container.querySelector(contentSelector);
+    expect(first).not.toBeNull();
+
+    rerender({ onExplainTask: vi.fn(), taskExplanation: explanation('m2') });
+
+    const second = container.querySelector(contentSelector);
+    expect(second).not.toBeNull();
+    expect(second).not.toBe(first);
+  });
+
+  it('excerpts a multi-KB label in the header aria label', () => {
+    const longTask = {
+      ...task,
+      label: 'echo ' + 'x'.repeat(4_000),
+      command: 'echo ' + 'x'.repeat(4_000),
+    };
+    const { container } = renderExplainPanel({
+      explainTask: longTask,
+      onExplainTask: vi.fn(),
+    });
+    const aria =
+      container
+        .querySelector('[data-testid="artifact-panel-explain"]')
+        ?.getAttribute('aria-label') ?? '';
+    expect(aria.length).toBeLessThanOrEqual(150);
+    expect(aria).toContain('…');
   });
 });

@@ -5,6 +5,7 @@
  */
 
 import type { ToolOutputSize } from './tool-output-size.js';
+import type { ApprovalMode } from '../config/approval-mode.js';
 import type { SubscriptionQuotaDisplay } from '../utils/subscription-quota.js';
 import type { ShellResultDisplay } from '../utils/shell-result.js';
 import type { FunctionDeclaration, Part, PartListUnion } from '@google/genai';
@@ -91,9 +92,15 @@ export interface ToolInvocation<
   canAutoApproveOnAllow?(): boolean;
 
   /**
-   * Constructs the confirmation dialog details for this invocation.
-   * Only called when the final permission decision is `'ask'` and the user
-   * needs to be prompted interactively.
+   * Whether an allow decision must still be reviewed by AUTO mode.
+   * This is independent of host interaction-payload forwarding.
+   */
+  requiresAutoReviewOnAllow?(): boolean;
+
+  /**
+   * Constructs confirmation details and optional automatic-approval hooks.
+   * A host may call this after a real automatic decision even when no human
+   * interaction is required.
    *
    * @param abortSignal Signal to cancel the operation.
    * @returns The confirmation details for the UI to display.
@@ -148,6 +155,10 @@ export abstract class BaseToolInvocation<
 
   canAutoApproveOnAllow(): boolean {
     return true;
+  }
+
+  requiresAutoReviewOnAllow(): boolean {
+    return false;
   }
 
   /**
@@ -637,6 +648,13 @@ export interface ToolResult {
   interruptedBeforeCompletion?: boolean;
 
   /**
+   * Set when the result names work that keeps running after the call, such
+   * as a shell moved to the background for a user message. A call cancelled
+   * after this result keeps it, so the model still learns the task.
+   */
+  keptWhenCancelled?: boolean;
+
+  /**
    * Markdown string for user display.
    * This provides a user-friendly summary or visualization of the result.
    * NOTE: This might also be considered UI-specific and could potentially be
@@ -666,6 +684,9 @@ export interface ToolResult {
    */
   artifacts?: ToolArtifact[];
 
+  /** The tool returned a failure result. Its body is in llmContent. */
+  isError?: boolean;
+
   /**
    * If this property is present, the tool call is considered a failure.
    */
@@ -686,6 +707,12 @@ export interface ToolResult {
    * honored when the tool batch carries a Goal context; ignored otherwise.
    */
   terminateTurn?: boolean;
+
+  /**
+   * A tool hook of a call this tool ran (a Code Mode `exec` call) returned
+   * `continue: false`: the turn ends after this batch, with this reason.
+   */
+  hookStopReason?: string;
 }
 
 /**
@@ -1202,6 +1229,8 @@ export interface ToolExecuteConfirmationDetails {
   hideAlwaysAllow?: boolean;
   command: string;
   rootCommand: string;
+  /** Plain-text approval details for clients that render tool call content. */
+  approvalText?: string;
   /** Permission rules extracted by extractCommandRules(), used for display and persistence. */
   permissionRules?: string[];
   /**
@@ -1255,7 +1284,9 @@ export interface AutoModeFallbackConfirmation {
     | 'consecutive_unavailable'
     | 'total_denial'
     | 'external_write'
-    | 'external_directory';
+    | 'external_directory'
+    // A human-only safety floor, currently the `git commit --amend` guard.
+    | 'safety_check';
   message: string;
 }
 
@@ -1269,6 +1300,11 @@ export type ToolCallConfirmationDetails = (
 ) & {
   /** Explains why an AUTO-mode call was routed to manual confirmation. */
   autoModeFallback?: AutoModeFallbackConfirmation;
+  /**
+   * Called instead of onConfirm for an automatic permission grant. This lets
+   * tools distinguish it from an explicit human approval at execution time.
+   */
+  onAutoConfirm?: (approvalMode: ApprovalMode) => Promise<void>;
 };
 
 export interface ToolPlanConfirmationDetails {

@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setLanguageAsync, t } from './index.js';
 import { SUPPORTED_LANGUAGES } from './languages.js';
 import { MUST_TRANSLATE_KEYS } from './mustTranslateKeys.js';
+import type { TranslationDict } from './translationDict.js';
 import { BuiltinCommandLoader } from '../services/BuiltinCommandLoader.js';
 import { advisorCommand } from '../ui/commands/advisor-command.js';
 import { approvalModeCommand } from '../ui/commands/approvalModeCommand.js';
@@ -35,15 +36,27 @@ const FORK_COMMAND_REQUIRED_KEYS = [
   'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.',
 ] as const;
 
+const PR_COMMAND_REQUIRED_KEYS = [
+  'Bind a GitHub pull request to this session',
+  'Usage: /pr <number | url>',
+  'No PRs bound to this session.',
+  'Bound PRs: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.',
+  'Bound PR #{{number}} to this session: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}',
+  'Failed to bind PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.',
+] as const;
+
 const NON_ENGLISH_LANGUAGES = SUPPORTED_LANGUAGES.filter(
   (language) => language.code !== 'en',
 );
 const STRICT_PARITY_NON_ENGLISH_LANGUAGES = NON_ENGLISH_LANGUAGES.filter(
   (language) => language.strictParity,
 );
-
-type TranslationValue = string | string[];
-type TranslationDict = Record<string, TranslationValue>;
 
 async function loadEnglishBaselineTranslations(): Promise<TranslationDict> {
   const localePath = path.join(
@@ -101,9 +114,40 @@ describe('must-translate locale coverage', () => {
     expect(missingKeys).toEqual([]);
   });
 
+  it('covers every English locale key in ru', async () => {
+    const enTranslations = await loadEnglishBaselineTranslations();
+    const localePath = path.join(
+      path.dirname(fileURLToPath(import.meta.url)),
+      'locales',
+      'ru.js',
+    );
+    const ruTranslations =
+      (
+        (await import(pathToFileURL(localePath).href)) as {
+          default?: TranslationDict;
+        }
+      ).default ?? {};
+    const missingKeys = Object.keys(enTranslations).filter(
+      (key) => !(key in ruTranslations),
+    );
+
+    expect(missingKeys).toEqual([]);
+    expect(ruTranslations['Copied to clipboard']).toBe(
+      'Скопировано в буфер обмена',
+    );
+    await setLanguageAsync('ru');
+    expect(t('{{count}} extensions', { count: '5' })).toBe('5 расширений');
+  });
+
   it('requires translation coverage for /fork user-facing strings', () => {
     expect(MUST_TRANSLATE_KEYS).toEqual(
       expect.arrayContaining([...FORK_COMMAND_REQUIRED_KEYS]),
+    );
+  });
+
+  it('requires translation coverage for /pr user-facing strings', () => {
+    expect(MUST_TRANSLATE_KEYS).toEqual(
+      expect.arrayContaining([...PR_COMMAND_REQUIRED_KEYS]),
     );
   });
 

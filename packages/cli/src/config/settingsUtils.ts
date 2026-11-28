@@ -276,12 +276,14 @@ export function validateSettingValue(
  * runtime import cycle.
  */
 export const WORKSPACE_RESTRICTED_SETTINGS = [
+  { section: 'general', key: 'displayLanguage' },
   { section: 'memory', key: 'mem0' },
   { section: 'memory', key: 'agentMaxTurns' },
   { section: 'memory', key: 'agentTimeoutMinutes' },
   { section: 'model', key: 'catalogRefresh' },
   { section: 'tools', key: 'executionSandbox' },
   { section: 'tools', key: 'workflowsEnabled' },
+  { section: 'tools', key: 'lspEnabled' },
   { section: 'security', key: 'allowPrivateNetworkHooks' },
   // A repository must not switch on the gate that authorizes its own hooks.
   { section: 'security', key: 'folderTrust' },
@@ -290,6 +292,9 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'outboundCorrelation', key: 'allowDynamicHeaderValues' },
   { section: 'serve', key: 'tokenQr' },
   { section: 'serve', key: 'maxSessions' },
+  // A repository must not spend daemon-wide gh budget or inject prompts into
+  // sessions across workspaces; the trust-gated channel alias is its path.
+  { section: 'serve', key: 'sessionPrWatch' },
   { section: 'ui', key: 'allowedApprovalModes' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
@@ -410,7 +415,10 @@ export function getDialogSettingKeys(options?: {
     .filter(
       (key) =>
         !options?.excludeWorkspaceRestricted ||
-        !WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key),
+        (!WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key) &&
+          !WORKSPACE_RESTRICTED_ROOT_SETTINGS.some(
+            (restrictedKey) => restrictedKey === key,
+          )),
     );
 
   // Sort by explicit order; settings not in the order array appear at the end
@@ -505,10 +513,10 @@ export function setNestedPropertyForce(
 
 export function setNestedPropertySafe(
   obj: Record<string, unknown>,
-  path: string,
+  path: string | readonly string[],
   value: unknown,
 ): void {
-  const keys = path.split('.');
+  const keys = typeof path === 'string' ? path.split('.') : [...path];
   // Refuse prototype-chain segments (see pathHasUnsafeSegment).
   if (pathHasUnsafeSegment(keys)) return;
   const lastKey = keys.pop();
@@ -532,9 +540,10 @@ export function setNestedPropertySafe(
 
 export function deleteNestedPropertySafe(
   obj: Record<string, unknown>,
-  path: string,
+  path: string | readonly string[],
 ): void {
-  const keys = path.split('.');
+  const keys = typeof path === 'string' ? path.split('.') : [...path];
+  if (pathHasUnsafeSegment(keys)) return;
   const lastKey = keys.pop();
   if (!lastKey) return;
 
@@ -686,9 +695,10 @@ export function getDisplayValue(
 export function nextBooleanSettingValue(
   currentValue: unknown,
   defaultValue?: unknown,
+  unsetToggleValue = false,
 ): boolean {
   if (currentValue !== undefined) return !currentValue;
-  return defaultValue === undefined ? false : !defaultValue;
+  return defaultValue === undefined ? unsetToggleValue : !defaultValue;
 }
 
 /**

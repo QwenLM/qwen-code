@@ -8,6 +8,51 @@
 // The key serves as both the translation key and the default English text
 
 export default {
+  user: 'user',
+  assistant: 'assistant',
+  thinking: 'thinking',
+  task: 'task',
+  compaction: 'compaction',
+  info: 'info',
+  warning: 'warning',
+  retry: 'retry',
+  'stop-hook': 'stop-hook',
+  'away-recap': 'away-recap',
+  'user-shell': 'user-shell',
+  advisor: 'advisor',
+  'arena-agent': 'arena-agent',
+  'arena-session': 'arena-session',
+  goal: 'goal',
+  'Protected input': 'Protected input',
+  'Focused input. Cursor: {{position}}': 'Focused input. Cursor: {{position}}',
+  'Unfocused input.': 'Unfocused input.',
+  'Focused Prompt: {{value}}': 'Focused Prompt: {{value}}',
+  'Prompt: {{value}}': 'Prompt: {{value}}',
+  'Focused Input: {{value}}': 'Focused Input: {{value}}',
+  'Input: {{value}}': 'Input: {{value}}',
+  'Placeholder: {{value}}': 'Placeholder: {{value}}',
+  'Cursor: {{position}}': 'Cursor: {{position}}',
+  'Selected {{value}}': 'Selected {{value}}',
+  'Disabled {{value}}': 'Disabled {{value}}',
+  'Focused Toggle on: {{value}}': 'Focused Toggle on: {{value}}',
+  'Focused Toggle off: {{value}}': 'Focused Toggle off: {{value}}',
+  'Toggle on: {{value}}': 'Toggle on: {{value}}',
+  'Toggle off: {{value}}': 'Toggle off: {{value}}',
+  'Conversation cleared.': 'Conversation cleared.',
+  '{{role}}: {{value}}': '{{role}}: {{value}}',
+  'Revision {{value}}': 'Revision {{value}}',
+  Dialog: 'Dialog',
+  'Dialog closed. Focus: prompt.': 'Dialog closed. Focus: prompt.',
+  'Dialog closed.': 'Dialog closed.',
+  'Waiting for confirmation': 'Waiting for confirmation',
+  'Working. Escape to cancel.': 'Working. Escape to cancel.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'History items {{start}}-{{end}} of {{total}}',
+  'Worktree: {{value}}': 'Worktree: {{value}}',
+  'Workflow mode: on': 'Workflow mode: on',
+  'Workflow mode: on (unavailable)': 'Workflow mode: on (unavailable)',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.',
   "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
     "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.",
   "You've used up your weekly credits.{{reset}} Please try again after the reset.":
@@ -24,6 +69,8 @@ export default {
   Retry: 'Retry',
   'Connecting…': 'Connecting…',
   'Loading models from provider…': 'Loading models from provider…',
+  'Could not list models. Enter model IDs manually.':
+    'Could not list models. Enter model IDs manually.',
   'Recommended models · provider list unavailable, showing built-ins':
     'Recommended models · provider list unavailable, showing built-ins',
   'Generated UI': 'Generated UI',
@@ -371,6 +418,7 @@ export default {
   Auth: 'Auth',
   Model: 'Model',
   'Fast Model': 'Fast Model',
+  'Agent Loop': 'Agent Loop',
   Sandbox: 'Sandbox',
   'Session ID': 'Session ID',
   'Base URL': 'Base URL',
@@ -389,6 +437,8 @@ export default {
     'Open the skills panel (browse, search, toggle, pick).',
   'Move this session to a new working directory':
     'Move this session to a new working directory',
+  'Wait for background agents to finish or stop them in /tasks before changing directories.':
+    'Wait for background agents to finish or stop them in /tasks before changing directories.',
   // SkillsManagerDialog (the panel `/skills` opens)
   'Manage Skills': 'Manage Skills',
   'Skills configuration saved.': 'Skills configuration saved.',
@@ -781,8 +831,8 @@ export default {
   // ============================================================================
   'Code Mode Only (Experimental)': 'Code Mode Only (Experimental)',
   'Mods (Experimental)': 'Mods (Experimental)',
-  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
-    'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.',
+  'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.':
+    'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.',
   'Vim Mode': 'Vim Mode',
   'Attribution: commit': 'Attribution: commit',
   'Terminal Bell Notification': 'Terminal Bell Notification',
@@ -793,6 +843,7 @@ export default {
   'Debug Keystroke Logging': 'Debug Keystroke Logging',
   'Language: UI': 'Language: UI',
   'Language: Model': 'Language: Model',
+  'Language: Display Translation': 'Language: Display Translation',
   'Output Format': 'Output Format',
   'Hide Window Title': 'Hide Window Title',
   'Show Status in Title': 'Show Status in Title',
@@ -812,7 +863,6 @@ export default {
   'Screen Reader Mode': 'Screen Reader Mode',
   'Max Session Turns': 'Max Session Turns',
   'Skip Next Speaker Check': 'Skip Next Speaker Check',
-  'Skip Loop Detection': 'Skip Loop Detection',
   'Skip Startup Context': 'Skip Startup Context',
   'Enable OpenAI Logging': 'Enable OpenAI Logging',
   'OpenAI Logging Directory': 'OpenAI Logging Directory',
@@ -1135,8 +1185,11 @@ export default {
   // ============================================================================
   'Manage Qwen Code hooks': 'Manage Qwen Code hooks',
   'List all configured hooks': 'List all configured hooks',
+  'No hooks were loaded.': 'No hooks were loaded.',
+  'skipped (unsupported args)': 'skipped (unsupported args)',
   // Hooks - Dialog
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}': 'A hook stopped the turn: {{reason}}',
   'Loading hooks...': 'Loading hooks...',
   'Error loading hooks:': 'Error loading hooks:',
   'Press Escape to close': 'Press Escape to close',
@@ -1430,6 +1483,26 @@ export default {
     'Usage: /forget <memory text to remove>',
   'No managed auto-memory entries matched: {{query}}':
     'No managed auto-memory entries matched: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Bind a GitHub pull request to this session',
+  'Usage: /pr <number | url>': 'Usage: /pr <number | url>',
+  'No PRs bound to this session.': 'No PRs bound to this session.',
+  'Bound PRs: {{list}}': 'Bound PRs: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Invalid PR reference. Usage: /pr <number | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'Bound PR #{{number}} to this session: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} is already bound to this session: {{url}}',
+  'Failed to bind PR #{{number}}.': 'Failed to bind PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'Failed to bind PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'Could not read the PR bindings for this session.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.',
   'Consolidate managed auto-memory topic files.':
     'Consolidate managed auto-memory topic files.',
   'Import MCP servers from Claude configs':
@@ -1717,6 +1790,8 @@ export default {
     'Could not compress chat history because the compression summary was truncated.',
   'Could not compress chat history due to an API error.':
     'Could not compress chat history due to an API error.',
+  'Could not compress chat history because it is too large for the context window.':
+    'Could not compress chat history because it is too large for the context window.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1850,10 +1925,10 @@ export default {
   'Signed in successfully · {{email}}': 'Signed in successfully · {{email}}',
   'Current plan: Qwen {{plan}}. Qwen Code is ready.':
     'Current plan: Qwen {{plan}}. Qwen Code is ready.',
-  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.':
-    'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.',
-  'Common commands: /usage   /upgrade   /model   /status   /logout':
-    'Common commands: /usage   /upgrade   /model   /status   /logout',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.':
+    'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.',
+  'Common commands: /usage   /upgrade   /model   /effort   /status   /logout':
+    'Common commands: /usage   /upgrade   /model   /effort   /status   /logout',
   'Signed in as {{email}} (Qwen {{plan}})':
     'Signed in as {{email}} (Qwen {{plan}})',
   'Qwen {{plan}} is active · usage is included with your plan':
@@ -1936,6 +2011,18 @@ export default {
     'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
+  'Set the vision bridge timeout in seconds (use with --vision)':
+    'Set the vision bridge timeout in seconds (use with --vision)',
+  '--timeout can only be used with --vision.':
+    '--timeout can only be used with --vision.',
+  'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
+    'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.',
+  'Vision bridge timeout: {{timeout}}': 'Vision bridge timeout: {{timeout}}',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.',
+  'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
+    'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.',
+  '{{timeout}} (default)': '{{timeout}} (default)',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
@@ -2142,6 +2229,7 @@ export default {
   Reqs: 'Reqs',
   'Input Tokens': 'Input Tokens',
   'Output Tokens': 'Output Tokens',
+  'Output (incl. Reasoning)': 'Output (incl. Reasoning)',
   'Savings Highlight:': 'Savings Highlight:',
   'of input tokens were served from the cache, reducing costs.':
     'of input tokens were served from the cache, reducing costs.',
@@ -2544,6 +2632,8 @@ export default {
     'Run /context detail for per-item breakdown.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     'Show context window usage breakdown. Use "/context detail" for per-item breakdown.',
+  'Save the context window for the current model.':
+    'Save the context window for the current model.',
   'body loaded': 'body loaded',
   memory: 'memory',
   '{{region}} configuration updated successfully.':
@@ -2715,6 +2805,8 @@ export default {
   'Advisor review failed: {{error}}': 'Advisor review failed: {{error}}',
   'No conversation context available for /advisor':
     'No conversation context available for /advisor',
+  'No conversation context available for /btw':
+    'No conversation context available for /btw',
   'Focus too long (max {{max}} chars)': 'Focus too long (max {{max}} chars)',
   'Another operation is in progress, wait for it to complete before running /advisor':
     'Another operation is in progress, wait for it to complete before running /advisor',
@@ -3072,4 +3164,17 @@ export default {
     'Signed out of Qwen. Use /auth to sign in with another account.',
   'Tip: Run /usage to see your plan usage.':
     'Tip: Run /usage to see your plan usage.',
+  'Copied to clipboard': 'Copied to clipboard',
+  'Copy failed': 'Copy failed',
+  '(API error: {{error}})': '(API error: {{error}})',
+  'API error': 'API error',
+  '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}':
+    '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}',
+  '←/→ browse earlier answers': '←/→ browse earlier answers',
+  'c copy': 'c copy',
+  'x clear history': 'x clear history',
+  'Tip: Use /btw to ask a quick side question without interrupting the current work':
+    'Tip: Use /btw to ask a quick side question without interrupting the current work',
+  '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
+    '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)',
 };

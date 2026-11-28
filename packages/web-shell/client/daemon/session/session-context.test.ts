@@ -13,6 +13,7 @@ import {
   getDaemonErrorCode,
   getStandaloneConnectionState,
   isDaemonErrorExplicitlyNonRetryable,
+  isStandaloneDaemonSession,
   resolveActionSessionContext,
   resolveLiveSessionWorkspaceCwd,
   resolveProviderSessionContext,
@@ -101,6 +102,33 @@ describe('session context', () => {
         workingDirectory: { state: 'ready' },
       } as unknown as DaemonSession),
     ).toBeUndefined();
+  });
+
+  it('identifies standalone sessions by sourceType and context alone', () => {
+    expect(isStandaloneDaemonSession(undefined)).toBe(false);
+    expect(
+      isStandaloneDaemonSession({
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+      } as unknown as DaemonSession),
+    ).toBe(true);
+    expect(
+      isStandaloneDaemonSession({
+        sourceType: 'standalone',
+      } as unknown as DaemonSession),
+    ).toBe(false);
+    expect(
+      isStandaloneDaemonSession({
+        sourceType: 'standalone',
+        context: { kind: 'workspace' },
+      } as unknown as DaemonSession),
+    ).toBe(false);
+    expect(
+      isStandaloneDaemonSession({
+        sourceType: 'default',
+        context: { kind: 'standalone' },
+      } as unknown as DaemonSession),
+    ).toBe(false);
   });
 
   it('resolves one uniquely trusted non-primary Live runtime', () => {
@@ -443,5 +471,31 @@ describe('session context', () => {
         body: { code: 'working_directory_missing', retryable: true },
       }),
     ).toBe(false);
+  });
+
+  it('resolves standalone and empty-workspace session contexts safely', async () => {
+    const { daemonClientSessionContext } = await import('./session-context.js');
+    expect(
+      daemonClientSessionContext({
+        session: {
+          sessionId: 'sa-1',
+          workspaceCwd: '',
+          attached: false,
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+        },
+        workspaceCwd: '',
+      } as unknown as Parameters<typeof daemonClientSessionContext>[0]),
+    ).toEqual({ kind: 'standalone' });
+    expect(
+      daemonClientSessionContext({
+        session: {
+          sessionId: 'ws-empty',
+          workspaceCwd: '',
+          attached: false,
+        },
+        workspaceCwd: '',
+      } as unknown as Parameters<typeof daemonClientSessionContext>[0]),
+    ).toBeUndefined();
   });
 });

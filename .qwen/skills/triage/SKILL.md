@@ -74,9 +74,28 @@ directory (the workflow provides it in CI):
 ```bash
 # Fresh per run: a reused directory would append to a previous run's
 # actions. CI provides a per-run directory via QWEN_TRIAGE_DRAFT_DIR.
-DRAFT_DIR="${QWEN_TRIAGE_DRAFT_DIR:-$(mktemp -d /tmp/triage-drafts-XXXXXX)}"
+# Fail closed in CI: silently falling back to mktemp leaves drafts where the
+# upload-artifact step never looks, and publish-triage then fails with "no
+# drafts" (see run 43994043448). Local runs may still use mktemp.
+if [ "${QWEN_TRIAGE_PUBLISH:-}" = "workflow" ]; then
+  if [ -z "${QWEN_TRIAGE_DRAFT_DIR:-}" ]; then
+    echo "::error::QWEN_TRIAGE_DRAFT_DIR is unset in CI; refusing to fall back to mktemp"
+    exit 1
+  fi
+  DRAFT_DIR="$QWEN_TRIAGE_DRAFT_DIR"
+else
+  DRAFT_DIR="${QWEN_TRIAGE_DRAFT_DIR:-$(mktemp -d /tmp/triage-drafts-XXXXXX)}"
+fi
 mkdir -p "$DRAFT_DIR/bodies"
 ```
+
+Run this setup verbatim with `run_shell_command`. Do **not** probe with
+`env` / `printenv` first to "check whether the variable is set" — the CI
+denylist rejects those commands, and a rejected probe is **not** evidence
+that `QWEN_TRIAGE_DRAFT_DIR` is empty. Parameter expansion inside this
+compound command reads the variable directly without any separate probe.
+Every draft body and `actions.jsonl` line must go under `$DRAFT_DIR`; never
+substitute a different directory (e.g. a fresh `mktemp`) on your own.
 
 Write each body as a file under `$DRAFT_DIR/bodies/`, then append one JSON
 action per line to `$DRAFT_DIR/actions.jsonl` (use `jq -cn` so names and
@@ -93,10 +112,14 @@ labels are escaped safely). Actions execute in file order:
 
 Rules the publisher enforces (fail-closed; do not rely on leniency):
 
-- Comment bodies must start with the exact marker line
-  `<!-- qwen-triage <marker> -->`; markers are limited to `stage=1`,
-  `stage=2`, `stage=3`, `stage=1-pre`, `stage=1b`.
-- Bodies are capped at 65,536 characters — rejected, not truncated.
+- Markers are limited to `stage=1`, `stage=2`, `stage=3`, `stage=1-pre`,
+  `stage=1b`. Write `<!-- qwen-triage <marker> -->` as the first line of
+  each comment body; the publisher enforces that exact first line (prepending
+  it when omitted, normalizing leading blank lines or whitespace on a
+  matching marker, and rejecting empty bodies or any mismatched/malformed
+  leading `<!-- qwen-triage ... -->` comment).
+- Bodies are capped at 65,536 characters (checked after any marker prefix is
+  added) — rejected, not truncated.
 - `APPROVE` requires the full reviewed `commit_id`; the publisher skips it
   as stale if the head moved, and suppresses duplicate approvals and
   duplicate `CHANGES_REQUESTED` reviews.

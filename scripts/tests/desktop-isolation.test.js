@@ -76,6 +76,30 @@ const stepNamed = (name) =>
   desktopJob.steps.find((step) => step.name === name) ??
   desktopJob.steps.find((step) => String(step.uses ?? '').includes(name));
 
+it('applies the linuxdeploy exclusions on both AppImage release legs', () => {
+  const { steps, strategy } = release.jobs.build;
+  const command = steps.find(
+    (step) => step.name === 'Build desktop installers',
+  ).run;
+  const appImageLegs = strategy.matrix.include.filter((leg) =>
+    leg.tauri_args.includes('--bundles appimage,deb'),
+  );
+
+  expect(appImageLegs.map((leg) => leg.rust_target)).toEqual([
+    'x86_64-unknown-linux-gnu',
+    'aarch64-unknown-linux-gnu',
+  ]);
+  expect(
+    strategy.matrix.include.filter(
+      (leg) => leg.os.startsWith('ubuntu') && leg.rpm === 'false',
+    ),
+  ).toEqual(appImageLegs);
+  expect(command).toContain(
+    `if [ "$RUNNER_OS" = 'Linux' ] && [ '\${{ matrix.rpm }}' = 'false' ]; then\n` +
+      '  bash scripts/run-appimage-build.sh npm run tauri -- build "${args[@]}"',
+  );
+});
+
 describe('desktop rpm build-root dependencies', () => {
   it('checks a versioned EPEL release before installing it', () => {
     const install = release.jobs.build.steps.find(

@@ -9,10 +9,30 @@
 // persisted by one and refused by another.
 
 export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
+export const HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE =
+  'hosted-workspace-external-files/1';
+// #15512 slice C: registered external storage plus foreground Shell. Its own
+// profile and capability, never a reinterpretation of the files placement:
+// the Shell capture must be drained before that storage can be released.
+export const HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE =
+  'hosted-workspace-external-shell/1';
 export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
 export const HOSTED_WORKSPACE_FILE_PROFILE_V2 = 'hosted-workspace-files/2';
 // #15076: `files/3` adds `todo_write` to its `/2` counterpart.
 export const HOSTED_WORKSPACE_FILE_PROFILE_V3 = 'hosted-workspace-files/3';
+// Self-paced /loop: `shell/3` adds `loop_wakeup` and the cron union to its
+// `/1` counterpart. `shell/2` was retired by the unified Shell lifecycle
+// (#15330) and is deliberately not reused, so the persisted vocabulary stays
+// unambiguous.
+export const HOSTED_WORKSPACE_SHELL_PROFILE_V3 = 'hosted-workspace-shell/3';
+// Fixed-interval /loop: the cron trio (cron_create plus the union
+// cron_list/cron_delete) ships on the next revisions. shell/4 inherits
+// loop_wakeup from shell/3; files/4 and team-lead/2 declare the cron trio
+// without loop_wakeup. shell/2 stays retired (#15330).
+export const HOSTED_WORKSPACE_FILE_PROFILE_V4 = 'hosted-workspace-files/4';
+export const HOSTED_WORKSPACE_SHELL_PROFILE_V4 = 'hosted-workspace-shell/4';
+export const HOSTED_WORKSPACE_TEAM_LEAD_PROFILE_V2 =
+  'hosted-workspace-team-lead/2';
 export const HOSTED_WORKSPACE_TEAM_LEAD_PROFILE =
   'hosted-workspace-team-lead/1';
 // #13753 I3: a snapshot child's profile, `read_file` and `glob` only. The
@@ -22,10 +42,16 @@ export const HOSTED_WORKSPACE_READ_PROFILE = 'hosted-workspace-read/1';
 
 export type HostedWorkspaceToolProfile =
   | typeof HOSTED_WORKSPACE_FILE_PROFILE
+  | typeof HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
+  | typeof HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE
   | typeof HOSTED_WORKSPACE_SHELL_PROFILE
   | typeof HOSTED_WORKSPACE_FILE_PROFILE_V2
   | typeof HOSTED_WORKSPACE_FILE_PROFILE_V3
+  | typeof HOSTED_WORKSPACE_SHELL_PROFILE_V3
+  | typeof HOSTED_WORKSPACE_FILE_PROFILE_V4
+  | typeof HOSTED_WORKSPACE_SHELL_PROFILE_V4
   | typeof HOSTED_WORKSPACE_TEAM_LEAD_PROFILE
+  | typeof HOSTED_WORKSPACE_TEAM_LEAD_PROFILE_V2
   | typeof HOSTED_WORKSPACE_READ_PROFILE;
 
 export function isHostedWorkspaceProfile(
@@ -33,10 +59,16 @@ export function isHostedWorkspaceProfile(
 ): profile is HostedWorkspaceToolProfile {
   return (
     profile === HOSTED_WORKSPACE_FILE_PROFILE ||
+    profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
+    profile === HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE ||
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
+    profile === HOSTED_WORKSPACE_FILE_PROFILE_V4 ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V4 ||
     profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE ||
+    profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_READ_PROFILE
   );
 }
@@ -44,7 +76,46 @@ export function isHostedWorkspaceProfile(
 export function isHostedWorkspaceShellProfile(profile: unknown): boolean {
   return (
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
-    profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V4 ||
+    profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE ||
+    profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE_V2
+  );
+}
+
+/**
+ * The external foreground-Shell placement. Deliberately absent from
+ * isHostedWorkspaceShellProfile: that predicate selects the local Shell lane
+ * with its background processes and monitors, neither of which this
+ * single-worker drain can prove.
+ */
+export function isHostedWorkspaceExternalShellProfile(
+  profile: unknown,
+): profile is string {
+  return profile === HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE;
+}
+
+/** Either external placement: registered storage, one worker per Session. */
+export function isHostedWorkspaceExternalProfile(profile: unknown): boolean {
+  return (
+    profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
+    isHostedWorkspaceExternalShellProfile(profile)
+  );
+}
+
+/**
+ * The public Shell revisions, mirroring the control plane's
+ * WorkspaceToolProfiles.isPublicShell: shell/1 and shell/3, but not the
+ * internal team-lead profile. Routes that admit a public Shell use this so a
+ * new revision is admitted in one place; the retired shell/2 stays refused.
+ */
+export function isHostedWorkspacePublicShellProfile(
+  profile: unknown,
+): profile is string {
+  return (
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V4
   );
 }
 
@@ -62,7 +133,10 @@ export function isHostedWorkspaceSearchProfile(profile: unknown): boolean {
     profile === HOSTED_WORKSPACE_FILE_PROFILE ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
-    profile === HOSTED_WORKSPACE_FILE_PROFILE_V3
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V4 ||
+    profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
+    profile === HOSTED_WORKSPACE_FILE_PROFILE_V4
   );
 }
 
@@ -73,10 +147,54 @@ export function isHostedWorkspaceSearchProfile(profile: unknown): boolean {
 export function isHostedWorkspaceGlobProfile(profile: unknown): boolean {
   return (
     isHostedWorkspaceSearchProfile(profile) ||
+    profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
+    isHostedWorkspaceExternalShellProfile(profile) ||
     profile === HOSTED_WORKSPACE_READ_PROFILE
   );
 }
 
 export function isHostedWorkspaceReadProfile(profile: unknown): boolean {
   return profile === HOSTED_WORKSPACE_READ_PROFILE;
+}
+
+/**
+ * The options neither external lane admits. `sessionSkillsRef` is not one of
+ * them: both external lanes serve the skill catalog as turn content, so the
+ * worker accepts the reference while still refusing extensions, hooks, MCP,
+ * agent definitions and every other lane the profiles never negotiate. All
+ * three gates read this list — worker create/load, the cold-open frozen
+ * definition gate and recovery genesis — so an option removed here widens
+ * recovery too; recovery parses the reference on its own (it must, or it would
+ * admit a definition the resident load rejects). The
+ * Shell lane differs on `captureBytes` alone: the files lane refuses it, while
+ * the Shell lane requires it, and that requirement is checked where the
+ * reservation is made.
+ */
+export function hasHostedExternalExcludedOptions(
+  value: Record<string, unknown> | null | undefined,
+  profile: unknown,
+): boolean {
+  const keys = [
+    'agentDefinition',
+    'hookCatalog',
+    'mcpServers',
+    'initialSelection',
+    'publicChildModelRoute',
+    'publicChildExtensionAgent',
+    'lineage',
+    'memoryStoreId',
+  ];
+  if (!isHostedWorkspaceExternalShellProfile(profile))
+    keys.push('captureBytes');
+  return (
+    keys.some((key) => value?.[key] !== undefined) ||
+    value?.['childWorkspaces'] === true ||
+    value?.['childSnapshots'] === true ||
+    (value?.['publicChildAgentsVersion'] ?? 0) !== 0 ||
+    value?.['planMode'] === true ||
+    (typeof value?.['approvalSelection'] === 'object' &&
+      value['approvalSelection'] !== null &&
+      (value['approvalSelection'] as Record<string, unknown>)['planMode'] ===
+        true)
+  );
 }

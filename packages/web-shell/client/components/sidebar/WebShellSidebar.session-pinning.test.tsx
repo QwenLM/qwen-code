@@ -14,6 +14,8 @@ import {
   sidebarSessionPage,
   useSidebarSessionCatalogQuery,
 } from '../../test/sidebarHarness';
+import { TOUCH_COMPOSER_QUERY } from '../../hooks/useIsTouchComposer';
+import { WebShellPortalRootContext } from '../../portalRoot';
 
 const mocks = createSidebarMocks({
   colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
@@ -122,6 +124,7 @@ const organizationCapabilities = {
 
 let root: Root;
 let container: HTMLDivElement;
+let portalHostForCleanup: HTMLElement | undefined;
 
 function renderSidebar(
   props: {
@@ -129,27 +132,32 @@ function renderSidebar(
     sessionActions?: React.ComponentProps<
       typeof WebShellSidebar
     >['sessionActions'];
+    portalRoot?: HTMLElement | null;
+    archivedSessionsTarget?: HTMLElement | null;
   } = {},
 ): void {
   const onError = props.onError ?? (() => {});
   act(() => {
     root.render(
-      <I18nProvider language="en">
-        <WebShellSidebar
-          collapsed={false}
-          onCollapsedChange={() => {}}
-          onOpenSettings={() => {}}
-          onOpenDaemonStatus={() => {}}
-          onOpenScheduledTasks={() => {}}
-          onOpenGoals={() => {}}
-          onOpenSessions={() => {}}
-          onOpenSplitView={() => {}}
-          onNewSession={() => false}
-          onLoadSession={loadSession}
-          onError={onError}
-          sessionActions={props.sessionActions}
-        />
-      </I18nProvider>,
+      <WebShellPortalRootContext.Provider value={props.portalRoot ?? null}>
+        <I18nProvider language="en">
+          <WebShellSidebar
+            collapsed={false}
+            onCollapsedChange={() => {}}
+            onOpenSettings={() => {}}
+            onOpenDaemonStatus={() => {}}
+            onOpenScheduledTasks={() => {}}
+            onOpenGoals={() => {}}
+            onOpenSessions={() => {}}
+            onOpenSplitView={() => {}}
+            onNewSession={() => false}
+            onLoadSession={loadSession}
+            onError={onError}
+            archivedSessionsTarget={props.archivedSessionsTarget}
+            sessionActions={props.sessionActions ?? { inlineItems: ['pin'] }}
+          />
+        </I18nProvider>
+      </WebShellPortalRootContext.Provider>,
     );
   });
 }
@@ -174,6 +182,30 @@ function sessionTitleCount(displayName: string): number {
   return Array.from(
     container.querySelectorAll('[data-web-shell-session-title]'),
   ).filter((node) => node.textContent === displayName).length;
+}
+
+async function selectWorkspaceFilter(label: string): Promise<void> {
+  const display = container.querySelector<HTMLElement>(
+    'button[aria-label="Display options"]',
+  );
+  expect(display).not.toBeNull();
+  await act(async () => click(display!, true));
+  const workspaceTrigger = Array.from(
+    document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+  ).find((item) => item.textContent?.startsWith('Workspace'));
+  expect(workspaceTrigger).toBeDefined();
+  await act(async () => {
+    workspaceTrigger!.focus();
+    workspaceTrigger!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+    );
+  });
+  const option = Array.from(
+    document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+  ).find((item) => item.textContent === label);
+  expect(option).toBeDefined();
+  await act(async () => click(option!, true));
+  await flushSidebar();
 }
 
 function findSessionPinButton(displayName: string): HTMLButtonElement {
@@ -219,11 +251,88 @@ beforeEach(() => {
 
 afterEach(() => {
   act(() => root.unmount());
+  portalHostForCleanup?.remove();
+  portalHostForCleanup = undefined;
   container.remove();
   window.localStorage.clear();
 });
 
 describe('WebShellSidebar session pinning (issue #9465)', () => {
+  it('carries the archived panel question sort into secondary archive queries independently of sidebar sort', async () => {
+    connection.capabilities = {
+      ...organizationCapabilities,
+      features: [
+        ...organizationCapabilities.features,
+        'session_archive',
+        'session_last_user_prompt_sort',
+        'workspace_qualified_rest_core',
+      ],
+    };
+    workspace.capabilities = {
+      ...connection.capabilities,
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'secondary', cwd: '/tmp/other', primary: false, trusted: true },
+      ],
+    };
+    const archivedTarget = document.createElement('div');
+    document.body.appendChild(archivedTarget);
+    try {
+      renderSidebar({ archivedSessionsTarget: archivedTarget });
+      await flushSidebar();
+      const archiveQuery = () =>
+        useSessionCatalogQueries.mock.calls
+          .flatMap((call) => call[1])
+          .filter(
+            (query) =>
+              query.workspaceCwd === '/tmp/other' &&
+              query.options.archiveState === 'archived',
+          )
+          .at(-1);
+      expect(archiveQuery()?.options.sortBy).toBe('updatedAt');
+      await act(async () =>
+        click(
+          container.querySelector<HTMLElement>(
+            'button[aria-label="Display options"]',
+          )!,
+          true,
+        ),
+      );
+      const sortBy = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).find((item) => item.textContent?.startsWith('Sort by'));
+      expect(sortBy).toBeDefined();
+      await act(async () => {
+        sortBy!.focus();
+        sortBy!.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+        );
+      });
+      const choice = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+      ).find((item) => item.textContent === 'Last question');
+      expect(choice).toBeDefined();
+      await act(async () => click(choice!, true));
+      await flushSidebar();
+      expect(archiveQuery()?.options.sortBy).toBe('updatedAt');
+
+      const archiveTrigger = archivedTarget.querySelector<HTMLElement>(
+        'button[aria-label="Filter and sort archived conversations"]',
+      )!;
+      expect(archiveTrigger).not.toBeNull();
+      await act(async () => click(archiveTrigger, true));
+      const archiveChoice = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+      ).find((item) => item.textContent === 'Last question');
+      expect(archiveChoice).toBeDefined();
+      await act(async () => click(archiveChoice!, true));
+      await flushSidebar();
+      expect(archiveQuery()?.options.sortBy).toBe('lastUserPromptAt');
+    } finally {
+      archivedTarget.remove();
+    }
+  });
+
   it('does not restore cleared activity unread when the legacy catalog catches up', async () => {
     const running = makeSession('background', {
       displayName: 'Background result',
@@ -391,6 +500,40 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     // hidden from the unpinned list while the RPC is in flight.
     expect(pinnedListTitles()).toEqual(['Plain session']);
     expect(sessionTitleCount('Plain session')).toBe(1);
+  });
+
+  it('filters an in-flight optimistic pin when the workspace changes', async () => {
+    const workspaceCapabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    connection.capabilities = workspaceCapabilities;
+    workspace.capabilities = workspaceCapabilities;
+    active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockReturnValue(
+      new Promise(() => {}),
+    );
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+    await selectWorkspaceFilter('other');
+    expect(pinnedListTitles()).toEqual([]);
   });
 
   it('appends an optimistic pin below existing pinned sessions', async () => {
@@ -861,6 +1004,157 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
   });
 });
 
+it('restores More focus after Escape with a shadow portal', async () => {
+  active.sessions = [
+    makeSession('group-shadow', { displayName: 'Shadow group' }),
+  ];
+  active.data = active.sessions;
+  workspaceActions.listSessionGroups.mockResolvedValue({
+    groups: [],
+    colorOptions: ['red'],
+  });
+  portalHostForCleanup = document.createElement('div');
+  const portalRoot = portalHostForCleanup.attachShadow({ mode: 'open' });
+  portalRoot.appendChild(document.createElement('div'));
+  document.body.appendChild(portalHostForCleanup);
+  renderSidebar({
+    portalRoot: portalRoot.firstElementChild as HTMLElement,
+  });
+  await flushSidebar();
+  const more = container.querySelector<HTMLButtonElement>(
+    '[aria-label="More actions"]',
+  );
+  expect(more).not.toBeNull();
+  await act(async () => click(more!, true));
+  const portalMenu = portalRoot.querySelector('[role="menu"]');
+  expect(portalMenu).not.toBeNull();
+  const group = Array.from(
+    portalMenu!.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+  ).find((item) => item.textContent === 'Group');
+  expect(group).not.toBeUndefined();
+  await act(async () => click(group!, true));
+  await flushSidebar();
+  expect(
+    container.querySelector('[data-web-shell-session-group-menu]'),
+  ).not.toBeNull();
+  const selected = container.querySelector<HTMLButtonElement>(
+    '[data-web-shell-session-group-menu] [role="menuitemradio"]',
+  );
+  expect(selected).not.toBeNull();
+  await act(async () => {
+    await vi.waitFor(() => {
+      expect(document.activeElement).toBe(selected);
+    });
+  });
+  await act(async () => {
+    selected!.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  });
+  await flushSidebar();
+  expect(
+    container.querySelector('[data-web-shell-session-group-menu]'),
+  ).toBeNull();
+  expect(document.activeElement).toBe(more);
+});
+
+async function openShadowGroup(displayName: string) {
+  connection.capabilities = {
+    ...organizationCapabilities,
+    features: [
+      ...organizationCapabilities.features,
+      'workspace_session_metadata',
+    ],
+  };
+  active.sessions = [makeSession('group-shadow', { displayName })];
+  active.data = active.sessions;
+  workspaceActions.listSessionGroups.mockResolvedValue({
+    groups: [],
+    colorOptions: ['red'],
+  });
+  portalHostForCleanup = document.createElement('div');
+  const portalRoot = portalHostForCleanup.attachShadow({ mode: 'open' });
+  portalRoot.appendChild(document.createElement('div'));
+  document.body.appendChild(portalHostForCleanup);
+  renderSidebar({ portalRoot: portalRoot.firstElementChild as HTMLElement });
+  await flushSidebar();
+  const title = Array.from(
+    container.querySelectorAll('[data-web-shell-session-title]'),
+  ).find((item) => item.textContent === displayName)!;
+  const more = title
+    .closest('[role="button"]')!
+    .querySelector<HTMLButtonElement>('[aria-label="More actions"]')!;
+  await act(async () => click(more, true));
+  const portalMenu = portalRoot.querySelector('[role="menu"]')!;
+  const group = Array.from(
+    portalMenu.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+  ).find((item) => item.textContent === 'Group')!;
+  await act(async () => click(group, true));
+  await flushSidebar();
+  const selected = container.querySelector<HTMLButtonElement>(
+    '[data-web-shell-session-group-menu] [role="menuitemradio"]',
+  )!;
+  await act(async () => {
+    await vi.waitFor(() => expect(document.activeElement).toBe(selected));
+  });
+  return { more, portalRoot };
+}
+
+it('does not steal external focus when Escape closes a Group menu', async () => {
+  const { more } = await openShadowGroup('External focus');
+  const input = document.createElement('input');
+  document.body.appendChild(input);
+  await act(async () => input.focus());
+  expect(document.activeElement).toBe(input);
+  expect(
+    container.querySelector('[data-web-shell-session-group-menu]'),
+  ).not.toBeNull();
+
+  await act(async () => {
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+    );
+  });
+
+  expect(
+    container.querySelector('[data-web-shell-session-group-menu]'),
+  ).toBeNull();
+  expect(document.activeElement).toBe(input);
+  expect(document.activeElement).not.toBe(more);
+  input.remove();
+});
+
+it('keeps Rename focused when More reopens while a Group menu is mounted', async () => {
+  const { more, portalRoot } = await openShadowGroup('Rename focus');
+
+  await act(async () => more.focus());
+  await act(async () => {
+    more.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'ArrowDown',
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  });
+  await vi.waitFor(() => {
+    expect(more.getAttribute('aria-expanded')).toBe('true');
+  });
+  const menuItems = () =>
+    Array.from(portalRoot.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+  expect(menuItems().map((item) => item.textContent)).toContain('Rename');
+  const rename = menuItems().find((item) => item.textContent === 'Rename');
+  await act(async () => click(rename));
+  await flushSidebar();
+  const input = container.querySelector('input[aria-label^="Rename:"]');
+  expect(input).not.toBeNull();
+  expect(document.activeElement).toBe(input);
+});
+
 describe('WebShellSidebar pinned group members (issue #10391)', () => {
   const defaultGroupsCatalog = {
     groups: [],
@@ -935,7 +1229,7 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     });
   }
 
-  it('keeps the group section visible when search only matches pinned members', async () => {
+  it('finds pinned members in the dialog without changing sidebar groups', async () => {
     mockDesignGroupCatalog();
     const member = makeSession('pinned-member', {
       displayName: 'Pinned member',
@@ -962,7 +1256,7 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
       searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flushSidebar();
-    const searchInput = container.querySelector<HTMLInputElement>(
+    const searchInput = document.querySelector<HTMLInputElement>(
       'input[aria-label="Search sessions"]',
     );
     expect(searchInput).not.toBeNull();
@@ -976,9 +1270,12 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     });
     await flushSidebar();
 
-    // The only match is pinned, so the pinned-filtered flat list is empty;
-    // the body must still render the group section holding that member
-    // instead of the empty-state notice.
+    expect(document.querySelector('[role="listbox"]')?.textContent).toContain(
+      'Pinned member',
+    );
+    expect(
+      document.querySelector('[role="listbox"]')?.textContent,
+    ).not.toContain('Plain session');
     const group = container.querySelector<HTMLElement>(
       'section[aria-label="Design"]',
     );
@@ -1117,7 +1414,7 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     // One pinned member plus five unpinned: the bucket exceeds the preview
     // limit (5), so the pinned row must keep its catalog position (pinned
     // sorts first) instead of being appended after every unpinned member,
-    // which would hide it behind "Show all".
+    // which would hide it behind the expand button.
     const unpinnedMembers = [1, 2, 3, 4, 5].map((index) =>
       makeSession(`unpinned-${index}`, {
         displayName: `Unpinned ${index}`,
@@ -1142,12 +1439,12 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     ).map((node) => node.textContent ?? '');
     expect(rows).toHaveLength(5);
     expect(rows[0]).toBe('Pinned member');
-    expect(group?.textContent).toContain('Show all');
+    expect(group?.textContent).toContain('Show 1 more');
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });
 
-  it('drops a pinned member from its group when search only matches unpinned members', async () => {
+  it('filters dialog results without removing pinned members from sidebar groups', async () => {
     mockDesignGroupCatalog();
     const pinnedMember = makeSession('pinned-member', {
       displayName: 'Pinned member',
@@ -1177,7 +1474,7 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
       searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flushSidebar();
-    const searchInput = container.querySelector<HTMLInputElement>(
+    const searchInput = document.querySelector<HTMLInputElement>(
       'input[aria-label="Search sessions"]',
     );
     expect(searchInput).not.toBeNull();
@@ -1191,16 +1488,19 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     });
     await flushSidebar();
 
-    // The query matches only the unpinned member: the grouped bucket must
-    // read the search-filtered list, so the pinned member leaves the group
-    // instead of lingering as a stale row with a stale count.
+    expect(document.querySelector('[role="listbox"]')?.textContent).toContain(
+      'Active member',
+    );
+    expect(
+      document.querySelector('[role="listbox"]')?.textContent,
+    ).not.toContain('Pinned member');
     const group = container.querySelector<HTMLElement>(
       'section[aria-label="Design"]',
     );
     expect(group).not.toBeNull();
-    expect(group?.textContent).toContain('\u00b7 1');
+    expect(group?.textContent).toContain('\u00b7 2');
     expect(group?.textContent).toContain('Active member');
-    expect(group?.textContent ?? '').not.toContain('Pinned member');
+    expect(group?.textContent).toContain('Pinned member');
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });
@@ -1576,8 +1876,8 @@ describe('WebShellSidebar content-search ghosts', () => {
 
   function sessionRowCount(displayName: string): number {
     return Array.from(
-      container.querySelectorAll('[data-web-shell-session-title]'),
-    ).filter((node) => node.textContent?.startsWith(displayName)).length;
+      document.querySelectorAll('[role="listbox"] [role="option"]'),
+    ).filter((node) => node.textContent?.includes(displayName)).length;
   }
 
   async function typeSearchQuery(text: string): Promise<void> {
@@ -1589,7 +1889,7 @@ describe('WebShellSidebar content-search ghosts', () => {
       searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flushSidebar();
-    const searchInput = container.querySelector<HTMLInputElement>(
+    const searchInput = document.querySelector<HTMLInputElement>(
       'input[aria-label="Search sessions"]',
     );
     expect(searchInput).not.toBeNull();
@@ -1608,7 +1908,7 @@ describe('WebShellSidebar content-search ghosts', () => {
     await flushSidebar();
   }
 
-  it('renders a pinned ghost hit with its snippet in the flat list', async () => {
+  it('renders a pinned ghost hit with its snippet in the search dialog', async () => {
     connection.capabilities = { qwenCodeVersion: '1.2.3', features: [] };
     workspace.capabilities = connection.capabilities;
     workspace.client.searchWorkspaceSessions.mockResolvedValue({
@@ -1624,13 +1924,14 @@ describe('WebShellSidebar content-search ghosts', () => {
     await flushSidebar();
     await typeSearchQuery('qdrant');
 
-    // R2-2: the ghost is pinned, but no Pinned-section source carries it,
-    // so the pinned-row filters must not make it vanish (R3-2).
     expect(sessionRowCount('Ghost pinned')).toBe(1);
-    expect(container.textContent).toContain('qdrant excerpt');
+    expect(document.querySelector('[role="listbox"]')?.textContent).toContain(
+      'qdrant excerpt',
+    );
+    expect(container.textContent).not.toContain('Ghost pinned');
   });
 
-  it('renders a pinned ghost hit in the Ungrouped section when organization is enabled', async () => {
+  it('finds a pinned ghost with organization enabled without injecting it into sidebar groups', async () => {
     mockDesignGroupCatalog();
     // The group section must survive the query filter for the sectioned
     // renderer to exist at all (empty sections are hidden while searching),
@@ -1659,8 +1960,10 @@ describe('WebShellSidebar content-search ghosts', () => {
       'section[aria-label="Ungrouped"]',
     );
     expect(ungrouped).not.toBeNull();
-    expect(ungrouped?.textContent).toContain('Ghost pinned');
-    expect(ungrouped?.textContent).toContain('qdrant excerpt');
+    expect(ungrouped?.textContent).not.toContain('Ghost pinned');
+    expect(document.querySelector('[role="listbox"]')?.textContent).toContain(
+      'qdrant excerpt',
+    );
     expect(sessionRowCount('Ghost pinned')).toBe(1);
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
@@ -1688,8 +1991,7 @@ describe('WebShellSidebar content-search ghosts', () => {
       pinnedListTitles().some((title) => title.startsWith('Ghost pinned')),
     ).toBe(true);
 
-    // Inverse arm: the pinned page settles WITHOUT the session — the ghost
-    // exemption keeps it visible, exactly once, in the main list.
+    // A sidebar catalog refresh must not duplicate or drop the search hit.
     pinned.sessions = [];
     pinned.data = pinned.sessions;
     renderSidebar();
@@ -1698,7 +2000,7 @@ describe('WebShellSidebar content-search ghosts', () => {
     expect(sessionRowCount('Ghost pinned')).toBe(1);
   });
 
-  it('mounts the rename form for a pinned ghost row in the org section renderer', async () => {
+  it('opens a pinned ghost result without exposing sidebar editing actions', async () => {
     mockDesignGroupCatalog();
     // The group section must survive the query filter for the sectioned
     // renderer to exist at all (empty sections are hidden while searching),
@@ -1726,25 +2028,19 @@ describe('WebShellSidebar content-search ghosts', () => {
     await flushSidebar();
     await typeSearchQuery('qdrant');
 
-    const ungrouped = container.querySelector<HTMLElement>(
-      'section[aria-label="Ungrouped"]',
-    );
-    expect(ungrouped).not.toBeNull();
     const ghostRow = Array.from(
-      ungrouped!.querySelectorAll<HTMLElement>('[role="button"]'),
+      document.querySelectorAll<HTMLElement>(
+        '[role="listbox"] [role="option"]',
+      ),
     ).find((element) => element.textContent?.includes('Ghost pinned'));
     expect(ghostRow).not.toBeUndefined();
+    expect(ghostRow!.querySelector('button, input')).toBeNull();
     act(() => {
-      ghostRow!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      ghostRow!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flushSidebar();
 
-    // R4-2: the ghost never renders in the Pinned section, so the section
-    // renderer's renameFormDisabled must not suppress the form here.
-    expect(
-      container.querySelectorAll('input[aria-label="Rename: Ghost pinned"]')
-        .length,
-    ).toBe(1);
+    expect(document.querySelector('[data-slot="dialog-content"]')).toBeNull();
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });
@@ -1762,7 +2058,7 @@ describe('WebShellSidebar PR badge rows', () => {
     return slot;
   }
 
-  it('keeps the hover actions width reserved on rows that show a PR badge', async () => {
+  it('reserves the default dropdown width on rows that show a PR badge', async () => {
     active.sessions = [
       makeSession('with-pr', {
         displayName: 'With PR',
@@ -1776,15 +2072,14 @@ describe('WebShellSidebar PR badge rows', () => {
     ];
     active.data = active.sessions;
 
-    renderSidebar();
+    renderSidebar({ sessionActions: { inlineItems: [] } });
     await flushSidebar();
 
-    // Revealing Pin + More on hover must not slide the badge under the
-    // pointer, so the slot already holds both buttons' width at rest.
+    // The default More button must not slide the badge under the pointer.
     const withPr = metaSlotFor('With PR');
     expect(withPr.className).toMatch(/sessionMetaSlotReserved/);
     expect(withPr.style.getPropertyValue('--session-actions-width')).toBe(
-      '52px',
+      '26px',
     );
     // A filtered binding renders no badge, so there is nothing to hold still.
     expect(metaSlotFor('Unsafe PR').className).not.toMatch(
@@ -1793,6 +2088,128 @@ describe('WebShellSidebar PR badge rows', () => {
     expect(metaSlotFor('Plain session').className).not.toMatch(
       /sessionMetaSlotReserved/,
     );
+  });
+
+  it('follows pointer media changes with explicit inline actions', async () => {
+    const narrowViewportQuery = '(max-width: 280px)';
+    const states = new Map([
+      [TOUCH_COMPOSER_QUERY, false],
+      [narrowViewportQuery, false],
+    ]);
+    const listeners = new Map<
+      string,
+      Set<(event: MediaQueryListEvent) => void>
+    >();
+    const coarseMedia = vi
+      .spyOn(window, 'matchMedia')
+      .mockImplementation((query) => {
+        const registered = new Set<(event: MediaQueryListEvent) => void>();
+        listeners.set(query, registered);
+        return {
+          matches: states.get(query) === true,
+          media: query,
+          addEventListener: (
+            type: string,
+            listener: (event: MediaQueryListEvent) => void,
+          ) => {
+            if (type === 'change') registered.add(listener);
+          },
+          removeEventListener: (
+            type: string,
+            listener: (event: MediaQueryListEvent) => void,
+          ) => {
+            if (type === 'change') registered.delete(listener);
+          },
+        } as MediaQueryList;
+      });
+    const setCoarse = async (matches: boolean) => {
+      states.set(TOUCH_COMPOSER_QUERY, matches);
+      await act(async () => {
+        for (const listener of listeners.get(TOUCH_COMPOSER_QUERY) ?? [])
+          listener({ matches } as MediaQueryListEvent);
+      });
+    };
+    const setNarrowViewport = async (matches: boolean) => {
+      states.set(narrowViewportQuery, matches);
+      await act(async () => {
+        for (const listener of listeners.get(narrowViewportQuery) ?? [])
+          listener({ matches } as MediaQueryListEvent);
+      });
+    };
+    try {
+      active.sessions = [
+        makeSession('coarse-actions', { displayName: 'Coarse actions' }),
+      ];
+      active.data = active.sessions;
+      renderSidebar({ sessionActions: { inlineItems: ['pin'] } });
+      await flushSidebar();
+
+      const slot = metaSlotFor('Coarse actions');
+      const row = slot.closest('[role="button"]');
+      expect(row?.querySelector('button[aria-label="Pin"]')).not.toBeNull();
+      expect(slot.style.getPropertyValue('--session-actions-width')).toBe(
+        '52px',
+      );
+
+      await setCoarse(true);
+      expect(row?.querySelector('button[aria-label="Pin"]')).toBeNull();
+      expect(slot.style.getPropertyValue('--session-actions-width')).toBe(
+        '26px',
+      );
+
+      // Fine pointers preserve an explicitly configured inline action again.
+      await setCoarse(false);
+      expect(row?.querySelector('button[aria-label="Pin"]')).not.toBeNull();
+      await setNarrowViewport(true);
+      expect(row?.querySelector('button[aria-label="Pin"]')).not.toBeNull();
+
+      await setCoarse(true);
+      expect(row?.querySelector('button[aria-label="Pin"]')).toBeNull();
+      await setNarrowViewport(false);
+      expect(row?.querySelector('button[aria-label="Pin"]')).toBeNull();
+      const more = row?.querySelector<HTMLButtonElement>(
+        'button[aria-label="More actions"]',
+      );
+      await act(async () => click(more!, true));
+      const pin = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).find((item) => item.textContent?.trim() === 'Pin');
+      expect(pin).toBeDefined();
+    } finally {
+      coarseMedia.mockRestore();
+    }
+  });
+
+  it('keeps plain-title double-click rename while excluding PR controls', async () => {
+    active.sessions = [
+      makeSession('session-a', {
+        displayName: 'With PR',
+        prs: [{ number: 14990, url: 'https://github.com/o/r/pull/14990' }],
+      }),
+    ];
+    active.data = active.sessions;
+    connection.sessionId = 'session-a';
+    renderSidebar({ sessionActions: { inlineItems: [] } });
+    await flushSidebar();
+
+    const pr = container.querySelector(
+      'a[href="https://github.com/o/r/pull/14990"]',
+    );
+    expect(pr).not.toBeNull();
+    await act(async () => {
+      pr?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    expect(
+      container.querySelector('input[aria-label="Rename: With PR"]'),
+    ).toBeNull();
+
+    const title = container.querySelector('[data-web-shell-session-title]');
+    await act(async () => {
+      title?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    expect(
+      container.querySelector('input[aria-label="Rename: With PR"]'),
+    ).not.toBeNull();
   });
 
   it('reserves nothing on a row without actions', async () => {

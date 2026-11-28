@@ -2,17 +2,19 @@
 
 [English](managed-agent-reference-deployment.md) | [简体中文](managed-agent-reference-deployment.zh-CN.md)
 
-Managed Agent 参考分发产物仍处于实验阶段。首个已接受拓扑为：一台可信 Linux 主机上的单 Java 控制面及其嵌入式 Runtime Broker、一个 MySQL 数据库，以及一个兼容的 Qwen Hosted Harness。每个发布版本中的兼容性 manifest 是该版本的权威依据。
+本指南面向在一台可信 Linux 主机上安装、运行和升级实验版 Managed Agent 独立参考分发包的运维人员，包含使用 systemd 运行常驻服务的步骤。首版验收覆盖一个 Java 控制面实例及其嵌入式 Runtime Broker、一个 MySQL 数据库，以及一个兼容的 Qwen Hosted Harness。每个版本的验收范围以该版本的兼容性 manifest 为准。
 
 ## 选择部署档位
 
-每一档都建立在前一档之上：
+第 2 档在第 1 档的部署上开启 Workspace 工具。第 3 档指向独立的 Kubernetes Helm 部署。
 
-| 档位                     | 运行的内容                                                            | 新增的内容                                                                                                       |
-| ------------------------ | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| 1. 纯文本 Hosted Session | 一台可信 Linux 主机上的 Java 控制面、一个 Hosted Harness 和 MySQL     | —                                                                                                                |
-| 2. local-process 工具    | 作用于 Workspace 的 Hosted 工具，例如文件访问，以及开启后的前台 Shell | 嵌入式 Runtime Broker、同一主机上的 Runtime worker、Runtime 凭据密钥、Runtime state 目录和一个已登记的 Workspace |
-| 3. Kubernetes            | 集群中的 API、Harness 和 MySQL                                        | 从源码构建的容器镜像，用 Helm chart 安装，不在本分发产物的验收范围内                                             |
+| 档位                     | 运行的内容                                                            | 新增的内容                                                                                                       | Harness pool |
+| ------------------------ | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------ |
+| 1. 纯文本 Hosted Session | 一台可信 Linux 主机上的 Java 控制面、一个 Hosted Harness 和 MySQL     | —                                                                                                                | 关闭         |
+| 2. local-process 工具    | 作用于 Workspace 的 Hosted 工具，例如文件访问，以及开启后的前台 Shell | 嵌入式 Runtime Broker、同一主机上的 Runtime worker、Runtime 凭据密钥、Runtime state 目录和一个已登记的 Workspace | 关闭         |
+| 3. Kubernetes            | API 和两个 Harness 池成员运行在同一应用 Pod，MySQL 运行在集群中       | 从源码构建的容器镜像，用 Helm chart 安装，不在本分发产物的验收范围内                                             | 开启         |
+
+自定义部署需要使用多个 Harness 实例时，参见 [Harness pool 配置](managed-agent-configuration-reference.zh-CN.md#qwenmanaged-agentharnesspool)。
 
 即使目标是使用工具，也请从第 1 档开始。完成一个不调用工具的 Turn，能同时证明控制面、Harness、模型和数据库都已就绪；之后由第 2 档在同一部署上开启工具。
 
@@ -90,16 +92,16 @@ qwen serve --profile hosted-harness --port 4170 --hostname 127.0.0.1 --no-web
 
 ### 预检
 
-在第二个终端加载 `config/server.env`；不使用 bootstrap 生成的文件时，改为导出下文控制面一节列出的变量。在 Harness 运行的情况下，于首次启动前以及每次安装新产物后，用启动脚本运行 `--check`。它绑定与服务器相同的配置（`config/application.yml` 加环境变量），不启动监听，并按输入项逐行输出结果：
+在第二个终端加载 `config/server.env`；不使用 bootstrap 生成的文件时，改为导出下文控制面一节列出的变量。在 Harness 运行的情况下，于首次启动前以及每次安装新产物后，用启动脚本运行 `--check`。它按服务端的方式读取配置，因此请在发行包根目录（即服务端的工作目录）下运行：读取 `SPRING_CONFIG_ADDITIONAL_LOCATION` 指定的文件、工作目录下的 `application.yml` 和 `config/application.yml`、这些文件导入的文件及其 profile 变体，以及环境变量。由 systemd 运行服务端时，请改按 `systemd/README.zh-CN.md` 中的方式在 unit 的沙箱内运行，该沙箱会对服务端隐藏 `/home`、`/root`、`/run/user`，以及主机的 `/tmp` 和 `/var/tmp`。预检不启动监听，按输入项逐行输出结果，读到的每个文件各占一行 `config`；服务端会因配置无法启动时，只输出一行 `config` 说明原因：
 
 ```bash
 set -a; . config/server.env; set +a
 bin/qwen-managed-agent-server --check
 ```
 
-检查范围包括 JDK、服务账号、配置文件及其权限、凭据密钥环、启动期属性校验、auth 与绑定组合、Harness、Workspace files 与 Shell 的交叉配置（含 mount、creation root 或 SSH 节点要求）、Broker 凭据与目录、Workspace `cwd`、端口占用、上次运行遗留的 Runtime worker，以及 MySQL 连通性、`performance_schema` 授权和 Flyway 版本与 `manifest.json` 的一致性。`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 退出码为 1。
+检查范围包括 JDK、服务账号、每个配置文件及其权限（或服务端会因此无法启动的原因：指定的文件不存在、服务账号读不了的文件、YAML 错误及其行号（除非位于由另一个文件内部 import 的文件中，否则也给出所在文件））、服务账号能读、能进入或能列出，但运行检查的账号读不了、进不去或列不出的文件或目录（此时提示以该账号或 root 运行检查）、凭据密钥环、启动期属性校验、auth 与绑定组合、Harness、Workspace files 与 Shell 的交叉配置（含 mount、creation root 或 SSH 节点要求）、Broker 凭据与目录、Workspace `cwd`、端口占用、上次运行遗留的 Runtime worker，以及 MySQL 连通性、`performance_schema` 授权和 Flyway 版本与 `manifest.json` 的一致性。含 secret 的配置文件对 group 或 others 可读时为 `WARN`。`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 退出码为 1。
 
-`harness` 行会像第一个 Session 那样与单个配置的 Harness 协商；使用 Harness pool 时，只有在 Session Store 已启用且配置了 binding key 后，才对 pool 的端点跳过，否则报 FAIL。capability digest 不一致、缺少协议或必需的 feature、或者 Harness 缺少某个已配置 Workspace profile 所需的 lifecycle 时报 FAIL；Harness 运行的 Qwen Code 版本与 `manifest.json` 写明的不同，或者 Harness 没有说明版本时报 WARN。端口检查会像服务端一样实际绑定配置地址，因此刚停止的服务端留在 `TIME_WAIT` 的端口算作空闲；`workers` 行会对仍在 Runtime 状态目录中运行的 worker 给出警告，因此应先停止服务。服务运行期间请加上 `--online`：端口相关的行改为检查是否有进程在监听；`workers` 行只报告已停止的服务端遗留的 worker，对持久模式的 Broker 则跳过，因为它会接管这些 worker。该命令不校验原生 Workspace storage 注册。
+`harness` 行会像第一个 Session 那样与单个配置的 Harness 协商；使用 Harness pool 时，只有在 Session Store 已启用且配置了 binding key 后，才对 pool 的端点跳过，否则报 FAIL。capability digest 不一致、缺少协议或必需的 feature、或者 Harness 缺少某个已配置 Workspace profile 所需的 lifecycle 时报 FAIL；Harness 运行的 Qwen Code 版本与 `manifest.json` 写明的不同，或者 Harness 没有说明版本时报 WARN。`server-port` 检查会像服务端一样实际绑定配置的服务端地址；Broker 不增加监听器或端口。刚停止的服务端留在 `TIME_WAIT` 的端口算作空闲；`workers` 行会对仍在 Runtime 状态目录中运行的 worker 给出警告，因此应先停止服务。服务运行期间请加上 `--online`：`server-port` 行改为检查该监听器；`workers` 行只报告已停止的服务端遗留的 worker，对持久模式的 Broker 则跳过，因为它会接管这些 worker。该命令不校验原生 Workspace storage 注册。
 
 首次启动前数据库是空的：`database` 行报告 schema 尚未迁移，`capacity` 行报 WARN，提示它要读的表不存在。首次启动会建好这些表，之后两行都通过。
 
@@ -143,7 +145,7 @@ curl --fail http://127.0.0.1:8080/actuator/health
 
 开启 Harness 即开启 Managed Session Store。Store 的 base URL 默认指向本服务的明文 loopback 监听；workspace ID 默认取 Runtime Broker 从 `QWEN_MANAGED_AGENT_WORKSPACE_CWD` 推导出的值，因此第 2 档开启工具路径后身份保持不变。已经设置过 `QWEN_MANAGED_AGENT_WORKSPACE_ID` 的部署必须保留它：未绑定 Session 从该 ID 解析其 Store 作用域。只有当 Harness 需要通过其他地址访问本服务，或该监听提供 TLS 时，才设置 `QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL`。
 
-基础配置支持纯文本 Hosted Session。除非配置签名或认证入口，否则服务只能监听 loopback。全部设置及其环境变量和默认值见[配置参考](managed-agent-configuration-reference.zh-CN.md)，随包提供于 `docs/configuration.zh-CN.md`。完整认证、API 与 capability 配置随包提供于 `docs/server-reference.md`。
+基础配置支持不创建 Runtime Broker 服务或路由的纯文本 Hosted Session。第 1 档不要求 Harness 环境包含 `QWEN_MANAGED_RUNTIME_BROKER_URL` 或 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`；只要 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED` 保持 false，两项都不设置也受支持。bootstrap 写入这两项只是为了以后能用同一批文件开启第 2 档，并不会启用 Broker。除非配置签名或认证入口，否则服务只能监听 loopback。全部设置及其环境变量和默认值见[配置参考](managed-agent-configuration-reference.zh-CN.md)，随包提供于 `docs/configuration.zh-CN.md`。完整认证、API 与 capability 配置随包提供于 `docs/server-reference.md`。
 
 ### 运行第一个 Session
 
@@ -188,19 +190,19 @@ export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/opt/qwen-code/dist/cli.js'
 export QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED='true'
 ```
 
-Hosted Harness 通过它自己的环境访问同一个 Broker，既不经命令行，也不经上面这些控制面变量：在 `harness.env`（或启动 Harness 的环境）中设置 `QWEN_MANAGED_RUNTIME_BROKER_URL='http://127.0.0.1:4182'`，并把 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 设为 Broker token。`qwen serve` 读取后会把这两个变量从自己的环境中删除，因此 Harness 启动的进程都不会继承该 token；控制面也会把 `QWEN_MANAGED_RUNTIME_BROKER_` 开头的变量挡在 Runtime worker 之外。使用 bootstrap 生成的文件时，`harness.env` 已包含这两项，控制面也从该文件读取 Broker token，因此不要设置 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`；两份都设置时拒绝启动。Harness 的这两行要么同时设置，要么都不设置，并且每行都写成普通的 `KEY=value`：只有其中一行或其中一行为空的文件（Harness 同样会拒绝），以及 systemd 会忽略的 `export KEY=value` 这类写法，都会拒绝启动。预检的 `broker-url` 行按 Harness 的 URL 解析器的方式读取文件中的 URL，因此 `http://127.1:4182` 等同于 `http://127.0.0.1:4182`。该 URL 以 `http` 直接指向 Broker 自己的监听时，该行通过。以下两种情况报 FAIL：Harness 会拒绝这个 URL（URL 必须是 `http` 或 `https` 的 origin，且只有在回环接口上才可以用明文 `http`）；或者以 `https` 指向这个监听，而明文 HTTP 的 Broker 无法接受。URL 指向其他地址或端口时报 WARN，因为只有代理才可能转发过去；Broker 绑定在回环以外的具体地址时（需要 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK=true`），总是通过这种方式访问。绑定 `0.0.0.0` 同样需要这项设置，但它仍在回环上提供服务，Harness 直接经 `http://127.0.0.1:4182` 访问，该行通过。此时 `http://[::1]:4182` 这类 IPv6 URL 报 WARN，因为只有控制面 JVM 同时监听两个地址族时，该绑定才接受 IPv6，而在 `-Djava.net.preferIPv4Stack=true` 下并非如此。文件中没有 Broker URL 时也报 WARN：通过自身环境或命令行拿到这两个变量的 Harness，在预检看来就是这样，此时该告警属于预期；若要把这两个变量移进文件，就要从 `server.env` 中删除 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`。
+Hosted Harness 通过它自己的环境访问同一个 Broker，既不经命令行，也不经上面这些控制面变量：在 `harness.env`（或启动 Harness 的环境）中设置 `QWEN_MANAGED_RUNTIME_BROKER_URL='http://127.0.0.1:8080'`，并把 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 设为 Broker token。这个 URL 是 Managed Agent Spring 监听器的 origin；该监听器同时承载 Session Store 与 Broker 的 `/internal/runtime-broker/v1/**` 路由，协议路径由 Harness 自行拼接，不再有独立的 Broker 监听器或端口。配置独立内部连接器时，Broker URL 与 `QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL` 都使用该连接器的 origin。独立部署的主连接器绑定非回环地址且启用 Broker 时，必须配置独立的内部连接器。远端 Harness 通过部署提供的 TLS 内部入口访问；同一入口承载两种路由时，这两个 URL 都指向该入口的 origin。`qwen serve` 读取后会把这两个变量从自己的环境中删除，因此 Harness 启动的进程都不会继承该 token；控制面也会把 `QWEN_MANAGED_RUNTIME_BROKER_` 开头的变量挡在 Runtime worker 之外。使用 bootstrap 生成的文件时，`harness.env` 已包含这两项，控制面也从该文件读取 Broker token，因此不要设置 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`；两份都设置时拒绝启动。Harness 的这两行要么同时设置，要么都不设置，并且每行都写成普通的 `KEY=value`：只有其中一行或其中一行为空的文件（Harness 同样会拒绝），以及 systemd 会忽略的 `export KEY=value` 这类写法，都会拒绝启动。预检的 `broker-url` 行用与 Harness 解析器相同的规范形状门读取文件中的 URL，因此写法必须规范：`http://127.1:8080`、八进制或十六进制 IPv4、尾点主机或非根路径都会被拒绝，而不会折叠成 `http://127.0.0.1:8080`。该 URL 按共享 Spring 监听器实际使用的 scheme 直接指向它时，该行通过。以下情况报 FAIL：Harness 会拒绝这个 URL（URL 必须是 `http` 或 `https` 的 origin，且只有在回环接口上才可以用明文 `http`）。URL 使用其他地址、端口或 scheme 时报 WARN，因为只有代理才可能转发过去。旧的 `qwen.managed-agent.runtime-broker.host`、`qwen.managed-agent.runtime-broker.port` 与 `qwen.managed-agent.runtime-broker.allow-non-loopback` 设置已不存在。文件中没有 Broker URL 时也报 WARN：通过自身环境或命令行拿到这两个变量的 Harness，在预检看来就是这样，此时该告警属于预期；若要把这两个变量移进文件，就要从 `server.env` 中删除 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`。
 
 在准入文件、Shell 或 child Git 工作前，必须完成 `docs/server-reference.md` 中 “Verified physical Workspace recovery” 所述的原生 storage 注册与 mount identity 校验。未注册或有歧义的 mount 必须保持不可用。Public Shell 执行仍默认关闭。Shell lifecycle v2 默认声明；显式生命周期列表替换默认值，空列表禁用它。MCP 生命周期仍须显式加入。能力声明不等于部署资格验收。
 
 ## 第 3 档：Kubernetes
 
-[Helm chart](https://github.com/QwenLM/qwen-code/tree/main/deploy/kubernetes) 用你在已评审源码 revision 上构建的镜像，在一个 Pod 中安装签名认证的 Managed Agent API 和私有 Hosted Harness，并在持久卷上运行 MySQL 8.4。默认支持文本 Session；可选设置可开启可信单节点的 Workspace 文件和前台 Shell，以及 Managed WebShell 网关。它从源码安装，而不是从本压缩包安装，遵循自己的说明文档，也不扩大本分发产物的验收范围。K2 CSI 常驻 Workspace 是另一种独立部署，见 [`deploy/k2-resident`](https://github.com/QwenLM/qwen-code/tree/main/deploy/k2-resident)。
+[Helm chart](https://github.com/QwenLM/qwen-code/tree/main/deploy/kubernetes) 用你在已评审源码 revision 上构建的镜像，在一个应用 Pod 中安装签名认证的 Managed Agent API 和由两个私有 Hosted Harness 组成的池，并在持久卷上运行 MySQL 8.4。默认支持文本 Session；可选设置可开启可信单节点的 Workspace 文件和前台 Shell，以及 Managed WebShell 网关。它从源码安装，而不是从本压缩包安装，遵循自己的说明文档，也不扩大本分发产物的验收范围。K2 CSI 常驻 Workspace 曾是另一种独立部署，现已从 `managed-agent-server` 移除并归档至 [`packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident`](https://github.com/QwenLM/qwen-code/tree/main/packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident)。
 
 ## 运维部署
 
 ### 维护命令
 
-`bin/qwen-managed-agent-admin <command> [arguments]` 通过 Spring Boot 的 `PropertiesLauncher`，从 server jar 运行各个离线维护入口，例如 `storage-registration`、`workspace-migration` 和各条 CSI 命令。不带参数运行可列出所有命令；某条命令不带参数运行会打印它的用法。与 server 启动脚本一样，当 `config/application.yml` 存在且未设置 `SPRING_CONFIG_ADDITIONAL_LOCATION` 时，它会使用该文件。大多数需要连接数据库的命令使用各自的凭据，而不是 `server.env` 中的 `SPRING_DATASOURCE_*`：Workspace 相关命令读取 `W1_JDBC_URL`、`W1_JDBC_USER` 和 `W1_JDBC_PASSWORD`，CSI 相关命令读取 `K2_JDBC_URL`、`K2_JDBC_USER` 和 `K2_JDBC_PASSWORD`。有两个例外：`operator-recovery` 和 `resident-retirement` 会启动服务端的 Spring 配置并使用其数据源，因此从环境变量和 `config/application.yml` 读取 `SPRING_DATASOURCE_URL`、`SPRING_DATASOURCE_USERNAME`、`SPRING_DATASOURCE_PASSWORD` 以及控制面的其他设置；运行它们时需先载入 `server.env`。`csi-protection` 不连接数据库，`resolved-configuration` 也不连接：它打印服务端配置在其运行环境中解析出的 Runtime 状态目录、认证模式和可信 actor 请求头，以及控制面、其健康端点和 Hosted Harness 的 URL；升级命令以同样的方式运行它来确定 Runtime 状态和这些 URL。每条命令都是一个离线流程，各有前提条件，写在相应的文档中；运行前请先满足这些条件。Hosted Shell 恢复流程仍以 `bin/qwen-managed-agent-operator-recovery` 为入口，`bin/qwen-managed-agent-admin operator-recovery` 运行的是同一条命令。
+`bin/qwen-managed-agent-admin <command> [arguments]` 通过 Spring Boot 的 `PropertiesLauncher`，从 server jar 运行各个离线维护入口——`storage-registration`、`workspace-recovery`、`workspace-migration`、`maintenance-recovery`、`operator-recovery`、`resolved-configuration` 和 `workspace-identity-reattest`。不带参数运行可列出所有命令；某条命令不带参数运行会打印它的用法。与 server 启动脚本一样，当 `config/application.yml` 存在且未设置 `SPRING_CONFIG_ADDITIONAL_LOCATION` 时，它会使用该文件。大多数需要连接数据库的命令使用各自的凭据，而不是 `server.env` 中的 `SPRING_DATASOURCE_*`：Workspace 相关命令读取 `W1_JDBC_URL`、`W1_JDBC_USER` 和 `W1_JDBC_PASSWORD`。有一个例外：`operator-recovery` 会启动服务端的 Spring 配置并使用其数据源，因此从环境变量和 `config/application.yml` 读取 `SPRING_DATASOURCE_URL`、`SPRING_DATASOURCE_USERNAME`、`SPRING_DATASOURCE_PASSWORD` 以及控制面的其他设置；运行它时需先载入 `server.env`。`resolved-configuration` 不连接数据库：它打印服务端配置在其运行环境中解析出的 Runtime 状态目录、认证模式和可信 actor 请求头，以及控制面、其健康端点和 Hosted Harness 的 URL；升级命令以同样的方式运行它来确定 Runtime 状态和这些 URL。每条命令都是一个离线流程，各有前提条件，写在相应的文档中；运行前请先满足这些条件。`workspace-identity-reattest` 用于整机重启改变数值设备号之后，升级未发生变化的 macOS 旧版存储登记：它需要原始与当前的 boot 身份，会围栏所有别名，并通过 Broker 停止证明退役原有 Runtime 绑定，运行前请先按包内 README 的 macOS 重启恢复流程操作。Hosted Shell 恢复流程以 `bin/qwen-managed-agent-admin operator-recovery` 为入口。
 
 ### 升级
 
@@ -241,7 +243,7 @@ bin/qwen-managed-agent-upgrade verify --tenant <tenant> --turn
 2. 停止新的入口准入，按照部署既有 drain 流程等待已准入工作完成结算。
 3. 备份 MySQL、Runtime 状态目录、完整 Runtime credential key ring、运维自有的 `server.env` 与 `harness.env`，以及精确旧版分发产物。分发产物升级期间不要轮换 credential key。载入 `server.env` 后运行 `bin/qwen-managed-agent-admin resolved-configuration`，可以打印配置解析出的 Runtime 状态目录。
 4. 停止 Java 服务与 Hosted Harness，保留 Workspace 和 durable Runtime state。随包的控制面 unit 使用 `KillMode=process`，`systemctl stop` 不会终止 Runtime worker；启动新版本前先用 `systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server` 回收。
-5. 安装与 manifest 匹配的 Qwen Code/Harness，并使用既有 token 与 capability digest 启动。工具路径的主机需先把 `harness.env` 中的 `QWEN_HOSTED_HARNESS_BROKER_ARGS` 行换成 `QWEN_MANAGED_RUNTIME_BROKER_URL` 和 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`：已经没有组件读取那一行，不替换的话 Harness 启动时没有 Broker。如果 `server.env` 启用了 Harness 并把 `harness.env` 指定为凭据文件（bootstrap 生成的文件就是这样），还要从 `server.env` 中删除 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`：此后控制面从 `harness.env` 读取 token，两份都保留会拒绝启动。旧版分发产物不读取这两个新键，缺少被删除的 token 时也不会启动其 Broker，因此回滚到旧版时要从第 3 步的备份恢复这两个文件。新版发行产物的 `--check` 会在 `workers` 行列出现在仍存活的 worker；请在此处以离线模式运行——服务仍停止、Harness 已启动——因为在线模式下持久模式的 Broker 会让该行 SKIP。
+5. 安装与 manifest 匹配的 Qwen Code/Harness，并使用既有 token 与 capability digest 启动。工具路径的主机需先把 `harness.env` 中的 `QWEN_HOSTED_HARNESS_BROKER_ARGS` 行换成 `QWEN_MANAGED_RUNTIME_BROKER_URL` 和 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`：已经没有组件读取那一行，不替换的话 Harness 启动时没有 Broker。如果 `server.env` 启用了 Harness 并把 `harness.env` 指定为凭据文件（bootstrap 生成的文件就是这样），还要从 `server.env` 中删除 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`：此后控制面从 `harness.env` 读取 token，两份都保留会拒绝启动。旧版分发产物不读取这两个新键，缺少被删除的 token 时也不会启动其 Broker，因此回滚到旧版时要从第 3 步的备份恢复这两个文件。新版发行产物的 `--check` 会在 `workers` 行列出现在仍存活的 worker；请在此处以离线模式运行——服务仍停止、Harness 已启动——因为在线模式下持久模式的 Broker 会让该行 SKIP。从使用独立 Broker 监听器的版本升级时，还要把 `QWEN_MANAGED_RUNTIME_BROKER_URL`（旧默认值 `http://127.0.0.1:4182`）替换为共享的 Managed Agent origin（独立部署默认 `http://127.0.0.1:8080`，或与 Session Store 共用的实际内部入口 origin），Broker token 保持不变。删除 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST`、`QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT`、`QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK`，以及对应的 `runtime-broker.host`、`runtime-broker.port`、`runtime-broker.allow-non-loopback` YAML 键。主 `server.address` 为非回环地址时，启动前必须配置独立的内部连接器，并让 Harness Broker URL 与 Session Store base URL 都指向 TLS 保护的内部入口。回滚到使用独立监听器的旧 binary 时，必须从第 3 步备份中成对恢复旧 URL 与旧监听器设置；不要把新的共享监听器 URL 与该旧 binary 混用。
 6. 使用相同数据库和 durable 配置启动新版 `bin/qwen-managed-agent-server`，由 Flyway 向前迁移 schema。
 7. 要求 actuator 健康检查通过，读取一个既有 Session 与历史，再完成一个新的无工具 Turn，之后才能恢复入口流量。任何可选工具 capability 都必须在重新验收后才能开启。
 
@@ -304,14 +306,16 @@ Session 模型配置只在创建时写入，关闭或删除 Session 会保留相
 
 该 key ring 是映射结构，无法通过 `QWEN_MANAGED_AGENT_*` 环境变量提供：宽松绑定会把环境变量形式静默解析为空 ring 或键名错误的 ring，且启动时不报错。`previous-credential-keys` 配置在 `config/application.yml` 中。分发产物随包提供 `config/application.example.yml`，两个启动脚本都会在该文件存在时导出 `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<分发产物根目录>/config/application.yml`，因此加载位置不再取决于进程工作目录，也不会向命令的位置参数注入选项。若该变量已设置，启动脚本保留原值。只依赖环境变量的部署会以空 ring 启动，因此在未配置旧密钥的情况下轮换 `credential-key-id` 会使旧密钥写入的记录不可读。显式的 `--spring.config.additional-location` 命令行参数优先于该环境变量默认值；两者同时存在时命令行值生效，随包的 `config/application.yml` 不会被加载。
 
-`operator-recovery` 入口与服务器读取相同的 active pair 和 `previous-credential-keys` 映射。其启动脚本同样加载 `config/application.yml`；文件位于其他位置时，设置 `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<绝对路径>/application.yml`。保持新密钥为 active，并保留持久化记录仍引用的每把旧密钥。CSI/迁移维护入口（含 CSI Hosted 探针）仍只读取单个 credential key pair；这些入口继续以加密目标 binding 的密钥作为 active pair 启动。
+`operator-recovery` 入口与服务器读取相同的 active pair 和 `previous-credential-keys` 映射。其启动脚本同样加载 `config/application.yml`；文件位于其他位置时，设置 `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<绝对路径>/application.yml`。保持新密钥为 active，并保留持久化记录仍引用的每把旧密钥。迁移维护入口仍只读取单个 credential key pair；该入口继续以加密目标 binding 的密钥作为 active pair 启动。
 
 密钥环配置成功后，服务器和恢复入口会为每个 protector 实例记录一次解析后的 active ID 和 configured IDs。这些 ID 是已随密文保存的非 secret 标识；诊断通过 JSON 转义控制字符与非 ASCII 字符、保留空格和大小写，绝不包含密钥材料、密文或 token。使用轮换后的部署前，应将 configured IDs 与退场查询返回的精确 ID 对照。密钥不可用错误会同时给出 requested、active 和 configured IDs，便于定位被静默规整或拼错的映射，同时避免泄露 secret。这些诊断不能证明每条持久化记录都能解密。
 
 ### 运维恢复
 
-`bin/qwen-managed-agent-operator-recovery` 启动独立打包的 recovery 入口。除非设置 recovery 专用环境，否则该入口保持关闭，并且不会启动 HTTP 服务或 worker。严格遵循 `docs/hosted-workspace-recovery.zh-CN.md`；不得推断物理停止，也不得通过删除 durable row 清除安全围栏。
+`bin/qwen-managed-agent-admin operator-recovery` 从可执行 server jar 运行 recovery 入口。除非设置 recovery 专用环境，否则该入口保持关闭，并且不会启动 HTTP 服务或 worker。严格遵循 `docs/hosted-workspace-recovery.zh-CN.md`；不得推断物理停止，也不得通过删除 durable row 清除安全围栏。
 
 ## 范围边界
 
-该分发产物不认证多 Java 控制面、跨主机接管、公开 CSI、Kubernetes retirement、public Shell、v2 advertisement 或稳定生产支持。这些能力需要独立发布证据。
+MySQL 集成测试使用两个 Java 控制面实例，共享同一个 Session Store 和 Hosted Harness。测试覆盖首个 Turn 复用已有 attachment、取消原 Turn，以及从没有本地 attachment 的副本投递 Shell 审批决定。见[跨实例 attachment 恢复](https://github.com/QwenLM/qwen-code/pull/18433)。
+
+多副本部署需要在目标拓扑下验收路由。开启 Workspace 工具时，验收还需覆盖 Runtime Broker 和 Workspace 所有权。跨主机接管、公开 CSI、Kubernetes retirement、public Shell、v2 advertisement 和稳定生产支持各自需要发布验收证据。

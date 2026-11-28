@@ -26,10 +26,7 @@ import {
   LoadedHookApprovals,
   type ProjectHooksApproval,
 } from './hook-approvals.js';
-import {
-  ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
-  PRIVATE_RELAUNCH_ENV_PROVENANCE,
-} from './shared-env-keys.js';
+import { PRIVATE_RELAUNCH_ENV_PROVENANCE } from './shared-env-keys.js';
 import {
   NPM_RUNTIME_CONTEXT,
   RELAUNCH_SUPERVISED_ENV,
@@ -119,7 +116,6 @@ const TRACKED_ENV = [
   RELAUNCH_SUPERVISED_ENV,
   NPM_RUNTIME_CONTEXT,
   NPM_RUNTIME_CONTEXT.toLowerCase(),
-  ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   'QWEN_CODE_PENDING_COMPILE_CACHE',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
   'QWEN_RUNTIME_DIR',
@@ -275,6 +271,42 @@ describe('operator container requirement across environment reload', () => {
         expect(stderr).toHaveBeenCalledWith(
           expect.stringContaining(
             `cannot set ${spelling}; ignored. Set verifyPr.assetsBranch at user scope in settings.json, or export it in the launch environment.`,
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+    'qwen_code_enable_event_bus_agent_loop',
+  ])(
+    'warns when settings.env tries to set a loop-rollout switch as %s',
+    (spelling) => {
+      // The merged settings.env map cannot tell an operator entry from a
+      // workspace one, so the switch is dropped at every settings scope; the
+      // diagnostic must name the spelling actually written (the gate folds
+      // case) and the channel that works.
+      resetEnvironmentTrackingForTesting();
+      const workspace = makeWorkspace();
+      const settingsFile = path.join(os.homedir(), '.qwen', 'settings.json');
+      fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+      fs.writeFileSync(
+        settingsFile,
+        JSON.stringify({ env: { [spelling]: '1' } }),
+      );
+      const settings = testSettings(
+        JSON.parse(fs.readFileSync(settingsFile, 'utf8')),
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        loadEnvironment(settings, workspace);
+        expect(process.env[spelling.toUpperCase()]).toBeUndefined();
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `cannot set ${spelling}; ignored. Export it in the launch environment instead.`,
           ),
         );
       } finally {
@@ -780,6 +812,45 @@ describe('daemon registration capacity environment', () => {
   );
 });
 
+describe('PR watch operator-only environment overrides', () => {
+  it.each([
+    'QWEN_SESSION_PR_WATCH_EVENTS',
+    'QWEN_SESSION_PR_WATCH_WAKE_DORMANT',
+  ])('refuses %s from a project .env and .qwen/.env', (key) => {
+    const workspace = makeWorkspace();
+    fs.writeFileSync(path.join(workspace, '.env'), `${key}=from-project\n`);
+    fs.mkdirSync(path.join(workspace, SETTINGS_DIRECTORY_NAME), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(workspace, SETTINGS_DIRECTORY_NAME, '.env'),
+      `${key}=from-qwen-dir\n`,
+    );
+    delete process.env[key];
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env[key]).toBeUndefined();
+    reloadEnvironment(testSettings({}), workspace);
+    expect(process.env[key]).toBeUndefined();
+  });
+
+  it('still applies the override from a home .env', () => {
+    const homeEnv = path.join(os.homedir(), '.env');
+    const previous = fs.existsSync(homeEnv)
+      ? fs.readFileSync(homeEnv, 'utf-8')
+      : undefined;
+    try {
+      fs.writeFileSync(homeEnv, 'QWEN_SESSION_PR_WATCH_EVENTS=head_change\n');
+      delete process.env['QWEN_SESSION_PR_WATCH_EVENTS'];
+      loadEnvironment(testSettings({}), makeWorkspace());
+      expect(process.env['QWEN_SESSION_PR_WATCH_EVENTS']).toBe('head_change');
+    } finally {
+      if (previous === undefined) fs.rmSync(homeEnv, { force: true });
+      else fs.writeFileSync(homeEnv, previous);
+      delete process.env['QWEN_SESSION_PR_WATCH_EVENTS'];
+    }
+  });
+});
+
 describe('Conversations root environment', () => {
   beforeEach(() => {
     resetHomeEnvBootstrapForTesting();
@@ -924,7 +995,6 @@ describe('buildRuntimeEnvironment', () => {
         'NPM_CONFIG_NODE_OPTIONS=--require ./bad.js',
         'QWEN_SERVER_TOKEN=dotenv-token',
         'QWEN_HOME=/tmp/ignored-qwen-home',
-        `${ENV_ACP_REPEATED_TOOL_FAILURE_GUARD}=enforce`,
         '',
       ].join('\n'),
     );
@@ -947,7 +1017,6 @@ describe('buildRuntimeEnvironment', () => {
           // line pins the settings.env gate in buildRuntimeEnvironment.
           NPM_CONFIG_NODE_OPTIONS: '--require ./bad.js',
           QWEN_RUNTIME_DIR: '/tmp/ignored-runtime-dir',
-          [ENV_ACP_REPEATED_TOOL_FAILURE_GUARD]: 'warn',
         },
       }),
       workspace,
@@ -969,9 +1038,6 @@ describe('buildRuntimeEnvironment', () => {
     expect(snapshot.effectiveEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
     expect(snapshot.effectiveEnv['QWEN_HOME']).toBeUndefined();
     expect(snapshot.effectiveEnv['QWEN_RUNTIME_DIR']).toBeUndefined();
-    expect(
-      snapshot.effectiveEnv[ENV_ACP_REPEATED_TOOL_FAILURE_GUARD],
-    ).toBeUndefined();
     expect(snapshot.overlayKeys).toEqual([
       'RUNTIME_DOTENV',
       'RUNTIME_EMPTY',
@@ -1170,7 +1236,6 @@ describe('loadEnvironment', () => {
           BASH_ENV: '/tmp/bad-profile',
           NODE_OPTIONS: '--require ./bad.js',
           QWEN_SERVER_TOKEN: 'bad-token',
-          [ENV_ACP_REPEATED_TOOL_FAILURE_GUARD]: 'enforce',
         },
       }),
       workspace,
@@ -1180,7 +1245,6 @@ describe('loadEnvironment', () => {
     expect(process.env['BASH_ENV']).toBeUndefined();
     expect(process.env['NODE_OPTIONS']).toBeUndefined();
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
-    expect(process.env[ENV_ACP_REPEATED_TOOL_FAILURE_GUARD]).toBeUndefined();
   });
 
   // Regression for #8653: the daemon scrubs loader vars from process.env,

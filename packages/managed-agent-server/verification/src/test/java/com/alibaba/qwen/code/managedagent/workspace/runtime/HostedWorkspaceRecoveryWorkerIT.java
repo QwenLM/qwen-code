@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.*;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
@@ -45,7 +45,7 @@ class HostedWorkspaceRecoveryWorkerIT {
     @Autowired private DataSource source;
     @Autowired private JdbcTemplate jdbc;
     @Autowired private ManagedAgentStore store;
-    @Autowired private WorkspaceExecutionStore authority;
+    @Autowired private JdbcWorkspaceExecutionStore authority;
 
     @TempDir private Path temporary;
 
@@ -118,7 +118,7 @@ class HostedWorkspaceRecoveryWorkerIT {
                 assertThat(released.getLossEvidence()).isEqualTo(firstLoss);
                 assertThat(released.getStopEvidence().source()).isEqualTo("trusted-host-reboot");
                 assertThat(fixture.sessions.countActiveByBinding(original.getBindingId(), original.getGeneration())).isZero();
-                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_key IS NOT NULL",
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_id IS NOT NULL",
                         Long.class, original.getBindingId())).isZero();
                 assertThat(fixture.bindings.findActive(original.getRequest())).isNull();
                 assertThat(worker.isAlive()).isFalse();

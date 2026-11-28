@@ -1,3 +1,4 @@
+import { randomUUID } from '../../utils/random-uuid.js';
 import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import {
   useCallback,
@@ -117,6 +118,12 @@ export interface AgentMentionSession {
   sessionId: string;
   /** Unset: the hook's own `cwd`. */
   workspaceCwd?: string;
+  /**
+   * Releases a detached session client. The daemon closes an idle session
+   * when its last client detaches, so this must run only after the mention
+   * posts — the hook calls it in its finally.
+   */
+  release?: () => void;
 }
 
 /**
@@ -177,10 +184,7 @@ const NO_MENTION_TEXTS: readonly string[] = [];
 
 /** Idempotency key for one @-mention post (`[A-Za-z0-9_.:-]{1,128}`). */
 function newClientMessageId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
-    return `mention:${crypto.randomUUID()}`;
-  const random = Math.random().toString(36).slice(2);
-  return `mention:${Date.now().toString(36)}-${random}`;
+  return `mention:${randomUUID()}`;
 }
 
 export function useAgentChatEntry({
@@ -216,7 +220,9 @@ export function useAgentChatEntry({
    * same lazy creation an ordinary first prompt goes through), with the
    * workspace it was created in.
    */
-  ensureSession: () => Promise<AgentMentionSession | string | undefined>;
+  ensureSession: () => Promise<
+    AgentMentionSession | string | { paused: true } | undefined
+  >;
   onSubmit: Submit;
   onError: (message: string) => void;
   /** Offered as the picker's last item: open the New agent page. */
@@ -432,6 +438,7 @@ export function useAgentChatEntry({
       setPending(true);
       const submissionId = ++submission.current;
       void (async () => {
+        let releaseDetachedSession: (() => void) | undefined;
         try {
           // No roster (collaboration off here, or the daemon unreachable)
           // means no agent can be addressed: send it as an ordinary message.
@@ -469,8 +476,23 @@ export function useAgentChatEntry({
           // workspace settles on the new session's), so no staleness check
           // from here on: the message belongs to the session just created.
           const ensured = await ensureSessionRef.current();
+          if (
+            ensured &&
+            typeof ensured === 'object' &&
+            'paused' in ensured &&
+            ensured.paused
+          ) {
+            // Overload pause was already surfaced by ensureSession; keep the
+            // draft without throwing a contradictory collab.mention.noSession.
+            return;
+          }
           const target: AgentMentionSession | undefined =
-            typeof ensured === 'string' ? { sessionId: ensured } : ensured;
+            typeof ensured === 'string'
+              ? { sessionId: ensured }
+              : ensured && 'paused' in ensured
+                ? undefined
+                : ensured;
+          releaseDetachedSession = target?.release;
           if (!target?.sessionId)
             throw new Error(t('collab.mention.noSession'));
           // A new chat whose workspace picker pointed elsewhere created its
@@ -543,6 +565,9 @@ export function useAgentChatEntry({
             error instanceof Error ? error.message : String(error),
           );
         } finally {
+          // After the mention settles (or fails): releasing earlier would
+          // let the daemon close the idle session before the post lands.
+          releaseDetachedSession?.();
           if (submission.current === submissionId) {
             busy.current = false;
             setPending(false);

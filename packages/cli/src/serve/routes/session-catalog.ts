@@ -53,6 +53,7 @@ const catalogRequestSchema = z
     ]),
     options: z
       .object({
+        sortBy: z.enum(['updatedAt', 'lastUserPromptAt']).optional(),
         size: z.number().int().min(1).max(100).optional(),
         archiveState: z.enum(['active', 'archived']).optional(),
         view: z.literal('organized').optional(),
@@ -189,6 +190,7 @@ export function registerSessionCatalogRoutes(
                   { ...options, cursor },
                   {
                     mergeLive: runtime.trusted,
+                    allowSidecarWrite: runtime.trusted,
                     paginateMerged: true,
                     includeGroups,
                     runtimeBaseDir: runtime.sessionRuntimeBaseDir,

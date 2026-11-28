@@ -29,6 +29,7 @@
 
 import type { RestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import type { PartListUnion } from '@google/genai';
+import { createElement } from 'react';
 import {
   createDebugLogger,
   logSlashCommand,
@@ -48,6 +49,7 @@ import {
   type CommandContext,
   type SlashCommand,
 } from '../commands/types.js';
+import { quitCommand } from '../commands/quitCommand.js';
 import {
   MAX_STACKED_SKILLS,
   parseSlashCommand,
@@ -56,6 +58,7 @@ import {
 import {
   hasSlashCommandPathSeparator,
   isBtwCommand,
+  isPrivateBuiltinSlashCommand,
 } from '../utils/commandUtils.js';
 import { recordAutoSkillCommandUsage } from '../../services/SkillCommandLoader.js';
 import {
@@ -78,6 +81,7 @@ import {
 } from '../../utils/userPromptExpansionHook.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
+import { isExitInProgress } from './exit-lifecycle.js';
 import {
   getInteractiveModSession,
   isModRecoveryCommand,
@@ -187,7 +191,7 @@ export type OpenTuiDispatchOutcome =
       /** What the Mods' prompt hooks attached to the `?`-form input. */
       promptContext?: readonly string[];
     }
-  | { kind: 'quit'; messages: HistoryItem[] }
+  | { kind: 'quit'; messages: HistoryItem[]; invocationItemId?: number }
   | { kind: 'open_dialog'; request: OpenTuiDialogRequest }
   /** Typed input the Mods' prompt hooks kept out; the composer gets it back. */
   | { kind: 'refused' };
@@ -246,6 +250,7 @@ export class OpenTuiSlashDispatcher {
   private activeCommand: {
     controller: AbortController;
     canCancel: boolean;
+    committing: boolean;
   } | null = null;
   private recentCommands = new Map<string, RecentSlashCommand>();
   private readonly extensionRefreshState: ExtensionRefreshState;
@@ -498,13 +503,17 @@ export class OpenTuiSlashDispatcher {
     return !(trimmed.startsWith('/') && hasSlashCommandPathSeparator(trimmed));
   }
 
+  isCommitInProgress(): boolean {
+    return this.activeCommand?.committing === true;
+  }
+
   /**
    * Parity of `cancelSlashCommand` in slashCommandProcessor.ts: ESC while a
    * slash command runs aborts it and reports the cancellation.
    */
   cancel(): void {
     this.host.cancelBtw();
-    if (!this.activeCommand?.canCancel) {
+    if (!this.activeCommand?.canCancel || this.activeCommand.committing) {
       return;
     }
     this.activeCommand.controller.abort();
@@ -528,6 +537,8 @@ export class OpenTuiSlashDispatcher {
     if (!this.takesAsSlashCommand(trimmed)) {
       return false;
     }
+    // The gateway may have waited for the registry after the shell admitted input.
+    if (isExitInProgress()) return { kind: 'handled' };
     this.services.onInputProcessed?.();
     return this.run(trimmed, { recordRecall: true, typed });
   }
@@ -639,7 +650,11 @@ export class OpenTuiSlashDispatcher {
       options.wasIdleBeforeDispatch ?? this.host.isIdle();
     this.host.setIsProcessing(true);
     const abortController = new AbortController();
-    const activeCommand = { controller: abortController, canCancel: true };
+    const activeCommand = {
+      controller: abortController,
+      canCancel: true,
+      committing: false,
+    };
     this.activeCommand = activeCommand;
     const releaseOwnership = () => {
       if (this.activeCommand === activeCommand) {
@@ -936,6 +951,27 @@ export class OpenTuiSlashDispatcher {
             },
             overwriteConfirmed: options.overwriteConfirmed,
             abortSignal: abortController.signal,
+            confirmAction: (title) =>
+              this.host.presentActionConfirmation(
+                createElement('text', null, title),
+                {
+                  signal: abortController.signal,
+                  isCurrent: () => this.activeCommand === activeCommand,
+                  allowHistoryScroll: true,
+                },
+              ),
+            beginCommit: () => {
+              if (
+                this.activeCommand !== activeCommand ||
+                abortController.signal.aborted ||
+                isExitInProgress() ||
+                !fullCommandContext.ui.isIdleRef.current
+              ) {
+                return false;
+              }
+              activeCommand.committing = true;
+              return true;
+            },
           };
 
           // Parity: a "Proceed" confirmation temporarily augments the session
@@ -1032,14 +1068,16 @@ export class OpenTuiSlashDispatcher {
                 return { kind: 'handled' };
               }
               case 'dialog': {
-                if (result.dialog === 'resume') {
-                  if (result.sessionId) {
+                if (result.dialog === 'resume' && result.sessionId) {
+                  if (fullCommandContext.beginCommit?.() !== false) {
                     await this.host.handleResume(result.sessionId);
-                    return { kind: 'handled' };
                   }
+                  return { kind: 'handled' };
                 }
                 if (result.dialog === 'branch') {
-                  await this.host.handleBranch(result.name);
+                  if (fullCommandContext.beginCommit?.() !== false) {
+                    await this.host.handleBranch(result.name);
+                  }
                   return { kind: 'handled' };
                 }
                 return {
@@ -1072,7 +1110,15 @@ export class OpenTuiSlashDispatcher {
                 return { kind: 'handled' };
               }
               case 'quit':
-                return { kind: 'quit', messages: result.messages };
+                return {
+                  kind: 'quit',
+                  messages: result.messages,
+                  ...(commandToExecute.kind === CommandKind.BUILT_IN &&
+                  commandToExecute.action === quitCommand.action &&
+                  invocationItemId !== undefined
+                    ? { invocationItemId }
+                    : {}),
+                };
               case 'submit_prompt': {
                 const invocation = fullCommandContext.invocation;
                 let content = result.content;
@@ -1253,15 +1299,12 @@ export class OpenTuiSlashDispatcher {
         resolvedCommandPath[0] ||
         trimmed.replace(/^[/?]/, '').split(/\s+/u)[0] ||
         trimmed;
-      // The built-in /advisor is skipped by identity (kind + name) so a
-      // user-defined command shadowing the name is still recorded like
-      // any other custom command (ink parity).
-      const isBuiltInAdvisor =
-        primaryCommand === 'advisor' &&
-        commandToExecute?.kind === CommandKind.BUILT_IN;
+      const privateBuiltin =
+        commandToExecute?.kind === CommandKind.BUILT_IN &&
+        isPrivateBuiltinSlashCommand(trimmed, primaryCommand);
       const shouldRecord =
         !delegatedToRecursiveInvocation &&
-        !isBuiltInAdvisor &&
+        !privateBuiltin &&
         !SLASH_COMMANDS_SKIP_RECORDING.has(primaryCommand);
       try {
         if (shouldRecord) {

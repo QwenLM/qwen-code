@@ -30,6 +30,9 @@ public interface ManagedSessionStore {
     public void authorizeOrdinary(String tenantId, String sessionId, String writerToken,
             ManagedSessionStoreModels.AuthorizeLifecycleRequest request);
 
+    /** The Session's creator actor; empty when it has no creator key. */
+    public String creatorActor(String tenantId, String sessionId);
+
     public Map<String, Object> approvalSelection(String tenantId, String sessionId, String writerToken,
             ManagedSessionStoreModels.AuthorizeLifecycleRequest request);
 
@@ -108,6 +111,15 @@ public interface ManagedSessionStore {
             RuntimeLifecycleAuthority authority);
 
     public boolean hasLiveWriter(String tenantId, String sessionId);
+
+    /**
+     * Authenticates an event-ingest request as the Session's current writer
+     * and returns the head's committed sequence. The writer must be live; with
+     * {@code sealed} it may instead be the incarnation of a clean seal.
+     */
+    public long authenticateEventIngest(String tenantId, String sessionId,
+            String writerToken, String workspaceId, String writerId,
+            long writerGeneration, boolean sealed);
 
     public static String sessionScopeKey(String tenantId, String sessionId) {
         return ManagedSchemaKeys.key(tenantId, sessionId);

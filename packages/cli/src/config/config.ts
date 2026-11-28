@@ -4,14 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { registerTopLevelCommands } from '../commands/register-top-level-commands.js';
 import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
 import type { ContentGeneratorConfig } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { isInteractiveInvocation } from '../utils/interactive-mode.js';
 import { SshExecutionEnvironment } from '@qwen-code/qwen-code-core/services/ssh-execution-environment.js';
-import {
-  isLoopProtectionMode,
-  type LoopProtectionMode,
-} from '@qwen-code/qwen-code-core/services/loop-protection.js';
 import type { SessionExecutionEngine } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import {
   type ModelProposedGoalsMode,
@@ -69,12 +66,10 @@ import {
   AGENT_HOST_SESSION_SOURCE_TYPE,
   AGENT_SESSION_SOURCE_TYPE,
 } from '../runtime/agent-session-source.js';
-import { extensionsCommand } from '../commands/extensions.js';
 import {
   agentExecutionBackend,
   agentExecutionFactory,
 } from './agent-execution.js';
-import { hooksCommand } from '../commands/hooks.js';
 import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
@@ -83,6 +78,7 @@ import { getSettingsSchema } from './settingsSchema.js';
 import { resolveHookSettingsForConfig } from './hook-settings.js';
 import { createBundledMem0Server } from './mem0-settings.js';
 import { prepareBundledGeneratedUi } from './generated-ui-settings.js';
+import { isLspOptedIn } from './lsp-opt-in.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -114,24 +110,14 @@ import {
 } from './execution-sandbox-settings.js';
 import { createExecutionSandboxPolicy } from './execution-sandbox-config.js';
 import { appEvents, AppEvent } from '../utils/events.js';
-import { mcpCommand } from '../commands/mcp.js';
-import { memoryCommand } from '../commands/memory.js';
-import { channelCommand } from '../commands/channel.js';
-import { authCommand } from '../commands/auth.js';
-import { serveCommand } from '../commands/serve.js';
-import { daemonCommand } from '../commands/daemon.js';
-import { attachCommand } from '../commands/attach.js';
-import { sessionsCommand } from '../commands/sessions.js';
-import { agentsCommand } from '../commands/agents.js';
-import { batchCommand } from '../commands/batch.js';
-import { boardCommand } from '../commands/board.js';
-import { updateCommand } from '../commands/update.js';
-import { sandboxCommand } from '../commands/sandbox.js';
 import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
 
-import { isWorkspaceTrusted } from './trustedFolders.js';
+import {
+  getTrustFileDecisionBelowIdeRoot,
+  isWorkspaceTrusted,
+} from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
 import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import {
@@ -898,33 +884,9 @@ export async function parseArguments(): Promise<CliArgs> {
           }
           return true;
         }),
-    )
-    // Register MCP subcommands
-    .command(mcpCommand)
-    .command(memoryCommand)
-    // Register Extension subcommands
-    .command(extensionsCommand)
-    .command(authCommand)
-    // Register Hooks subcommands
-    .command(hooksCommand)
-    // Register Channel subcommands
-    .command(channelCommand)
-    .command(boardCommand)
-    // Register `qwen serve` (Stage 1 daemon)
-    .command(serveCommand)
-    // Register `qwen daemon` (local daemon inspection and control)
-    .command(daemonCommand)
-    // Register `qwen attach` (terminal client for a running daemon session)
-    .command(attachCommand)
-    // Register sessions subcommands
-    .command(sessionsCommand)
-    // Register `qwen agents` (join a coordinator; session_send MCP server)
-    .command(agentsCommand)
-    .command(batchCommand)
-    // Register update command
-    .command(updateCommand)
-    // Register `qwen sandbox` (inspect / prove the resolved sandbox backend)
-    .command(sandboxCommand);
+    );
+
+  await registerTopLevelCommands(yargsInstance, rawArgv);
 
   // /review skill helpers (presubmit checks, cleanup). The module pulls in
   // every review subcommand, so it is only loaded when it can match.
@@ -1694,25 +1656,6 @@ function warnAboutOutputStyle(warning: string): void {
   console.error(`WARNING: ${warning}`);
 }
 
-// Reported once per value for the same reason as the output-style warnings.
-const loopProtectionWarningsShown = new Set<string>();
-
-/**
- * Resolves `model.loopProtection`. An invalid value (a typo or the wrong
- * case) falls back to the default with a warning, so a user who asked for
- * `stop` learns that the turn will not stop.
- */
-function resolveLoopProtection(value: unknown): LoopProtectionMode | undefined {
-  if (value === undefined || isLoopProtectionMode(value)) return value;
-  const warning = `Invalid model.loopProtection value ${JSON.stringify(value)}: expected "warn", "stop" or "off"; using the default "warn".`;
-  if (loopProtectionWarningsShown.has(warning)) return undefined;
-  loopProtectionWarningsShown.add(warning);
-  debugLogger.warn(warning);
-  // eslint-disable-next-line no-console
-  console.error(`WARNING: ${warning}`);
-  return undefined;
-}
-
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -1776,6 +1719,7 @@ export async function loadCliConfig(
    */
   hostPolicy?: {
     modelConfiguration?: ContentGeneratorConfig & { authType: AuthType };
+    modelPreferences?: ConfigParameters['modelPreferences'];
     toolInvocationGuard?: ToolInvocationGuard;
     workflowAncestorTrustProvider?: ConfigParameters['workflowAncestorTrustProvider'];
     shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
@@ -1783,6 +1727,13 @@ export async function loadCliConfig(
     provisionalWorkspace?: true;
     /** Daemon-owned remote-runtime session with no ambient executable inputs. */
     agentHostReadOnly?: true;
+    /**
+     * A host-owned Config that must never start language servers, whatever the
+     * user's setting or the environment says. `experimentalLsp: false` in argv
+     * cannot express this: the flag parser defaults it to `false`, so the two
+     * are indistinguishable there.
+     */
+    lspDisabled?: true;
     sessionRestore?: {
       projectionSource: (
         sessionId: string,
@@ -1830,6 +1781,10 @@ export async function loadCliConfig(
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
   }
   const bareMode = isBareMode(argv.bare);
+  const modelPreferences =
+    !bareMode && !sshWorkspace && !modelConfiguration
+      ? hostPolicy?.modelPreferences
+      : undefined;
   const executionSandboxSettings = agentHostReadOnly
     ? undefined
     : validateExecutionSandboxSelection(settings, argv);
@@ -1841,6 +1796,25 @@ export async function loadCliConfig(
       'Choose operator settings or a programmatic execution sandbox policy, not both.',
     );
   }
+  // Resolve LSP enablement once, here, because the execution-sandbox guard
+  // below has to see the same answer the session gets: the flag, the
+  // user/system-scope setting and the env pair all start the same subsystem,
+  // and a sandboxed tool runner must refuse every entrance, not just the one
+  // it happens to read. The host-mode terms below are the modes that refuse
+  // LSP wholesale — read-only agent host, SSH workspace, provisional
+  // workspace, bare and safe mode — so the guard asks the question the session
+  // will actually answer rather than one it would decline anyway.
+  const safeMode =
+    agentHostReadOnly ||
+    (argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv());
+  const lspEnabled =
+    !hostPolicy?.lspDisabled &&
+    !agentHostReadOnly &&
+    !sshWorkspace &&
+    !provisionalWorkspace &&
+    !bareMode &&
+    !safeMode &&
+    isLspOptedIn(argv.experimentalLsp, settings);
   if (
     sandboxEnabled &&
     (argv.promptInteractive !== undefined ||
@@ -1848,7 +1822,7 @@ export async function loadCliConfig(
       argv.acp ||
       argv.experimentalAcp ||
       argv.worktree !== undefined ||
-      argv.experimentalLsp ||
+      lspEnabled ||
       argv.mcpConfig ||
       argv.extensions?.length ||
       argv.includeDirectories?.length ||
@@ -1856,14 +1830,14 @@ export async function loadCliConfig(
       Object.keys(sessionMcpServers ?? {}).length ||
       provisionalWorkspace)
   ) {
+    const lspEntrance =
+      lspEnabled && argv.experimentalLsp !== true
+        ? 'LSP enabled through tools.lspEnabled or QWEN_CODE_ENABLE_LSP'
+        : 'LSP';
     throw new Error(
-      'tools.executionSandbox does not yet support ACP, worktree management, LSP, MCP, extensions or provisional workspaces.',
+      `tools.executionSandbox does not yet support ${lspEntrance}, ACP, worktree management, MCP, extensions or provisional workspaces.`,
     );
   }
-  const safeMode =
-    agentHostReadOnly ||
-    (argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv());
-
   // Surface `--insecure` as an env var so it reaches the undici dispatcher
   // layer (which controls TLS verification) without threading a flag through
   // every content generator and the preconnect path. Resolution there ORs this
@@ -1908,8 +1882,11 @@ export async function loadCliConfig(
 
   const ideMode = !sandboxEnabled && (settings.ide?.enabled ?? false);
 
+  const isAcpMode = argv.acp || argv.experimentalAcp;
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
-  const trustedFolder = isWorkspaceTrusted(settings).isTrusted === true;
+  const trustedFolder =
+    isWorkspaceTrusted(settings, undefined, isAcpMode ? cwd : undefined)
+      .isTrusted === true;
 
   // Custom style files are prompts: a project's are read only from a trusted
   // workspace, and none at all in --bare / --safe-mode, which keep built-ins.
@@ -1968,13 +1945,9 @@ export async function loadCliConfig(
           .map(resolvePath)
           .concat((argv.includeDirectories || []).map(resolvePath));
 
-  // LSP configuration: enabled only via --experimental-lsp flag
-  const lspEnabled =
-    !agentHostReadOnly &&
-    !sshWorkspace &&
-    !provisionalWorkspace &&
-    !bareMode &&
-    argv.experimentalLsp === true;
+  // LSP configuration: `lspEnabled` above already carries the
+  // `--experimental-lsp` flag, the tools.lspEnabled setting,
+  // QWEN_CODE_ENABLE_LSP and the host modes that refuse it.
   let lspClient: LspClient | undefined;
   const question = argv.promptInteractive || argv.prompt || '';
   const inputFormat: InputFormat =
@@ -2197,7 +2170,6 @@ export async function loadCliConfig(
   // In non-interactive mode, tools that require a user prompt are denied unless
   // the caller has explicitly allowed them. Stream-JSON input is excluded from
   // this logic because approval can be sent programmatically via JSON messages.
-  const isAcpMode = argv.acp || argv.experimentalAcp;
   if (
     !bareMode &&
     !interactive &&
@@ -2353,6 +2325,7 @@ export async function loadCliConfig(
           },
           settings,
           selectedAuthType,
+          deferReasoningEffort: modelPreferences !== undefined,
           env: process.env as Record<string, string | undefined>,
         });
 
@@ -2634,7 +2607,9 @@ export async function loadCliConfig(
   // said no to this exact block, and trust does not override that decision.
   // Mirror Config.isExplicitlyTrustedFolder(): IDE-reported workspace trust
   // counts even with the feature off, as the docs promise.
-  const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+  const ideTrust = isAcpMode
+    ? ideContextStore.getWorkspaceTrust(cwd)
+    : ideContextStore.get()?.workspaceState?.isTrusted;
   const explicitlyTrusted =
     (folderTrust || ideTrust !== undefined) && trustedFolder;
   const projectHooksPendingApproval = gateHooks
@@ -2667,6 +2642,11 @@ export async function loadCliConfig(
 
   const configParams: ConfigParameters = {
     sessionId,
+    modelPreferences,
+    modelPreferenceDefaultEffort:
+      modelPreferences === undefined
+        ? undefined
+        : settings.model?.reasoningEffort,
     sessionData,
     sessionRestoreProjection,
     sessionRestoreProjectionSource: boundSessionRestoreProjectionSource,
@@ -2765,17 +2745,23 @@ export async function loadCliConfig(
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     shellExecutionSandbox,
     // Permission rule persistence callback (writes to settings files).
-    onPersistPermissionRule: async (scope, ruleType, rule) => {
-      const currentSettings = loadSettings(cwd);
+    onPersistPermissionRule: async (scope, ruleType, rule, workspaceDir) => {
+      const currentSettings = loadSettings(workspaceDir, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: scope === 'user',
+      });
       const settingScope =
         scope === 'project' ? SettingScope.Workspace : SettingScope.User;
-      const key = `permissions.${ruleType}`;
-      const currentRules: string[] =
-        currentSettings.forScope(settingScope).settings.permissions?.[
-          ruleType
-        ] ?? [];
-      if (!currentRules.includes(rule)) {
-        currentSettings.setValue(settingScope, key, [...currentRules, rule]);
+      const file = currentSettings.forScope(settingScope);
+      const rawRules = file.originalSettings.permissions?.[ruleType] ?? [];
+      if (
+        !rawRules.includes(rule) &&
+        !file.settings.permissions?.[ruleType]?.includes(rule)
+      ) {
+        currentSettings.setValue(settingScope, `permissions.${ruleType}`, [
+          ...rawRules,
+          rule,
+        ]);
       }
     },
     toolDiscoveryCommand:
@@ -2871,7 +2857,7 @@ export async function loadCliConfig(
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     // Undefined flows through to Config's default (5) and clamp logic.
     maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
-    experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
+    experimentalZedIntegration: isAcpMode ?? false,
     // ACP/serve-scoped: only the spawned ACP child can re-hang a restored
     // ask_user_question. In the plain TUI the flag would skip load-time
     // orphan repair (client.ts) with nothing able to re-hang the question,
@@ -2887,7 +2873,9 @@ export async function loadCliConfig(
     lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
     todoWriteEnabled: settings.tools?.todoWrite?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
-    unifiedAgentLoopEnabled: settings.experimental?.unifiedAgentLoop ?? false,
+    unifiedAgentLoopEnabled: settings.experimental?.unifiedAgentLoop,
+    eventBusAgentLoopEnabled: settings.experimental?.eventBusAgentLoop,
+    modelAvailabilityTracking: settings.experimental?.modelAvailabilityTracking,
     agentCollaborationEnabled:
       settings.experimental?.agentCollaboration ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
@@ -2971,6 +2959,8 @@ export async function loadCliConfig(
     folderTrust,
     interactive,
     trustedFolder,
+    trustFileDecisionBelowIdeRoot: (dir, ideRoot) =>
+      getTrustFileDecisionBelowIdeRoot(settings, dir, ideRoot),
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,
@@ -2991,8 +2981,6 @@ export async function loadCliConfig(
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,
-    skipLoopDetection: settings.model?.skipLoopDetection ?? true,
-    loopProtection: resolveLoopProtection(settings.model?.loopProtection),
     maxToolCallsPerTurn: settings.model?.maxToolCallsPerTurn,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,
@@ -3060,7 +3048,12 @@ export async function loadCliConfig(
       bareMode || safeMode ? true : (settings.disableAllHooks ?? false),
     stopHookBlockingCap:
       bareMode || safeMode ? undefined : settings.stopHookBlockingCap,
-    channel: argv.channel,
+    // Synthesized ACP argv (the Hosted Harness per-turn configs) never passes
+    // through parseArguments, so resolve the same launcher-marker fallback
+    // here; an explicit --channel still wins. isAcpMode covers the deprecated
+    // experimentalAcp alias exactly like the parseArguments copy.
+    channel:
+      argv.channel ?? (isAcpMode ? resolveAcpChannelFallback() : undefined),
     // CLI flag wins over settings.json. `--json-fd` is fd-only (no settings
     // equivalent — fd passing is a spawn-time concern). `--json-file` and
     // `--input-file` fall back to settings.dualOutput.* when the flag is
@@ -3087,6 +3080,7 @@ export async function loadCliConfig(
             : undefined,
           modelGrades: settings.agents.modelGrades,
           allowedGrades: settings.agents.allowedGrades,
+          defaultBackground: settings.agents.defaultBackground,
           maxParallelAgents: settings.agents.maxParallelAgents,
           maxParallelAgentsByModel: settings.agents.maxParallelAgentsByModel,
           displayMode: settings.agents.displayMode,

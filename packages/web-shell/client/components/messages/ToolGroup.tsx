@@ -1,5 +1,4 @@
 import {
-  Fragment,
   memo,
   useCallback,
   useContext,
@@ -14,6 +13,7 @@ import type {
   ACPToolCall,
   PermissionRequest,
   TodoItem,
+  ToolGroupMessage,
 } from '../../adapters/types';
 import type { SessionContentGenerator } from './AssistantMessage';
 import {
@@ -38,10 +38,16 @@ import { useSharedNow } from '../../hooks/useSharedNow';
 import { useSubagentDetails } from '../../subagentDetailsContext';
 import { useMonitorDetails } from '../../monitorDetailsContext';
 import { useWorkflowDetails } from '../../workflowDetailsContext';
+import {
+  REVEAL_REMOUNT_GRACE_MS,
+  useToolRevealRequest,
+} from '../../toolRevealContext';
 import { findWorkflowTaskForTool } from '../../utils/workflowTasks';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { WorkflowExecutionView } from './WorkflowExecutionView';
 import { Markdown } from './Markdown';
+import { ThinkingBody, useThinkingBodyRewrite } from './ThinkingBody';
+import { openSessionLink } from './session-link';
 import { ThinkingDoneIcon, ThinkingTranslateButton } from './AssistantMessage';
 import {
   formatDurationMs,
@@ -109,11 +115,7 @@ interface ToolGroupProps {
    * the original order. Streaming entries drive the "Thinking…" summary;
    * each entry renders as a click-to-expand row.
    */
-  thoughts?: Array<{
-    content: string;
-    isStreaming?: boolean;
-    beforeToolCallId?: string;
-  }>;
+  thoughts?: ToolGroupMessage['thoughts'];
   pendingApproval?: PermissionRequest | null;
   workspaceCwd?: string;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
@@ -585,6 +587,8 @@ interface ToolLineProps {
   detailsVisible?: boolean;
   hideHeader?: boolean;
   hideCollapsedOutput?: boolean;
+  /** Bumped by the enclosing group to open this row from elsewhere. */
+  revealSeq?: number;
 }
 
 function WorkflowToolDetail({
@@ -1202,6 +1206,7 @@ function areToolLinePropsEqual(
   if (prev.detailsVisible !== next.detailsVisible) return false;
   if (prev.hideHeader !== next.hideHeader) return false;
   if (prev.hideCollapsedOutput !== next.hideCollapsedOutput) return false;
+  if (prev.revealSeq !== next.revealSeq) return false;
   const a = prev.tool;
   const b = next.tool;
   return (
@@ -1274,7 +1279,7 @@ function renderWithSessionLinks(
     if (match.index > lastIndex) {
       parts.push(text.slice(lastIndex, match.index));
     }
-    const sessionId = match[2];
+    const target = match[2];
     parts.push(
       renderMode !== 'interactive' ? (
         <span key={match.index} style={{ textDecoration: 'underline' }}>
@@ -1289,9 +1294,7 @@ function renderWithSessionLinks(
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
-            window.dispatchEvent(
-              new CustomEvent('qwen:open-session', { detail: sessionId }),
-            );
+            openSessionLink(target);
           }}
         >
           {match[1]}
@@ -1315,6 +1318,7 @@ export const ToolLine = memo(function ToolLine({
   detailsVisible = true,
   hideHeader = false,
   hideCollapsedOutput = false,
+  revealSeq,
 }: ToolLineProps) {
   const { t } = useI18n();
   const transcriptRenderMode = useTranscriptRenderMode();
@@ -1342,21 +1346,27 @@ export const ToolLine = memo(function ToolLine({
       (!summaryOnly && shouldAutoExpand(tool) && !locksPendingEditApproval),
   );
   const monitorDetailsRequestRef = useRef<object | null>(null);
-  // Set once the user explicitly toggles this row, so auto-collapse-on-
-  // completion never silently overrides their choice.
+  // Set once the user explicitly toggles this row, so regrouping or
+  // auto-collapse-on-completion never silently overrides their choice.
   const userToggledRef = useRef(false);
   const isWorkflow = isWorkflowToolName(tool.toolName);
 
+  useEffect(() => {
+    userToggledRef.current = false;
+  }, [locksPendingEditApproval, tool.callId, tool.toolName]);
+
   useEffect(
     () => {
-      setExpanded(
-        isForcedExpanded ||
-          (!summaryOnly && shouldAutoExpand(tool) && !locksPendingEditApproval),
-      );
+      if (!userToggledRef.current || isForcedExpanded) {
+        setExpanded(
+          isForcedExpanded ||
+            (!summaryOnly &&
+              shouldAutoExpand(tool) &&
+              !locksPendingEditApproval),
+        );
+      }
       setMonitorDetailsUnavailable(false);
       monitorDetailsRequestRef.current = null;
-      // A new tool identity resets the manual latch.
-      userToggledRef.current = false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
@@ -1404,6 +1414,16 @@ export const ToolLine = memo(function ToolLine({
       setExpanded(false);
     }
   }, [isForcedExpanded, isAgent, tool.status]);
+
+  // The enclosing group was asked to open this row (the composer task chips
+  // locate a workflow). Runs after the reset and auto-collapse effects above
+  // so it wins on mount, and latches like a click so completion does not fold
+  // the row back.
+  useEffect(() => {
+    if (!revealSeq) return;
+    userToggledRef.current = true;
+    setExpanded(true);
+  }, [revealSeq]);
 
   if (isAgent) {
     const info = getAgentDisplayInfo(tool, now);
@@ -1926,6 +1946,7 @@ interface ThoughtLineHeaderProps {
    * header's memo boundary.
    */
   translateContent?: string;
+  hideTranslateWhenClosed: boolean;
   generateContent?: SessionContentGenerator;
   onToggle: () => void;
 }
@@ -1935,10 +1956,12 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
   expanded,
   documentMode,
   translateContent,
+  hideTranslateWhenClosed,
   generateContent,
   onToggle,
 }: ThoughtLineHeaderProps) {
   const { language, t } = useI18n();
+  const summaryRef = useRef<HTMLButtonElement>(null);
   return (
     <div
       className={`${styles.chatSummaryThoughtHeader}${
@@ -1954,6 +1977,7 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
       }}
     >
       <button
+        ref={summaryRef}
         type="button"
         disabled={documentMode}
         tabIndex={documentMode ? -1 : undefined}
@@ -1977,13 +2001,15 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
           {t(isStreaming ? 'thinking.running' : 'thinking.done')}
         </span>
       </button>
-      {language === 'zh-CN' &&
+      {(language === 'zh-CN' || language === 'zh-TW') &&
         translateContent !== undefined &&
         generateContent && (
           <ThinkingTranslateButton
             content={translateContent}
             generateContent={generateContent}
             className={styles.chatSummaryThoughtTranslate}
+            hideWhenClosed={hideTranslateWhenClosed}
+            fallbackFocusRef={summaryRef}
           />
         )}
       <span
@@ -2001,16 +2027,21 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
 const ThoughtLine = memo(function ThoughtLine({
   content,
   isStreaming,
+  fromSubagent,
+  showGroupContent,
   generateContent,
 }: {
   content: string;
   isStreaming?: boolean;
+  fromSubagent: boolean;
+  showGroupContent: boolean;
   generateContent?: SessionContentGenerator;
 }) {
   const transcriptRenderMode = useTranscriptRenderMode();
   const documentMode = transcriptRenderMode === 'document';
   const documentExpanded = useTranscriptDocumentExpanded();
   const [expanded, setExpanded] = useState(false);
+  const [rewritten, onRewrittenChange] = useThinkingBodyRewrite(content);
   const showContent = documentMode ? documentExpanded : expanded;
   const handleToggle = useCallback(() => {
     if (!documentMode) setExpanded((value) => !value);
@@ -2022,15 +2053,17 @@ const ThoughtLine = memo(function ThoughtLine({
         expanded={showContent}
         documentMode={documentMode}
         translateContent={documentMode || isStreaming ? undefined : content}
+        hideTranslateWhenClosed={!fromSubagent && rewritten}
         generateContent={generateContent}
         onToggle={handleToggle}
       />
-      {showContent && (
+      {showGroupContent && showContent && (
         <div className={styles.chatSummaryThoughtContent}>
-          <Markdown
+          <ThinkingBody
             content={content}
-            source="thinking"
             isStreaming={isStreaming}
+            fromSubagent={fromSubagent}
+            onRewrittenChange={onRewrittenChange}
           />
         </div>
       )}
@@ -2145,6 +2178,27 @@ export const ToolGroup = memo(function ToolGroup({
       setChatExpanded(true);
     }
   }, [singleMcpAppResourceUri, hasMcpApp]);
+  // Another surface (the composer task chips) asked to open one of this
+  // group's calls: unfold the group and tell that call's row to open.
+  const [reveal, setReveal] = useState<{ callId: string; seq: number }>();
+  const revealSequence = useRef(0);
+  useToolRevealRequest(
+    (callId) => tools.some((tool) => toolContainsCallId(tool, callId)),
+    (callId) => {
+      setChatExpanded(true);
+      setReveal({ callId, seq: ++revealSequence.current });
+    },
+  );
+  useEffect(() => {
+    if (!reveal) return;
+    const timer = setTimeout(
+      () => setReveal(undefined),
+      REVEAL_REMOUNT_GRACE_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [reveal]);
+  const revealSeqFor = (tool: ACPToolCall) =>
+    reveal && toolContainsCallId(tool, reveal.callId) ? reveal.seq : undefined;
 
   const tryOpenMonitorDetails = () => {
     if (!singleMonitor || !monitorDetails) return;
@@ -2159,6 +2213,23 @@ export const ToolGroup = memo(function ToolGroup({
   };
 
   if (!hasApprovalTool) {
+    const renderThoughts = (beforeToolCallId?: string) =>
+      (thoughts ?? [])
+        .filter((thought) => thought.beforeToolCallId === beforeToolCallId)
+        .map((thought, index) => (
+          <ThoughtLine
+            key={
+              thought.id === undefined
+                ? `thought-position:${beforeToolCallId ?? ''}:${index}`
+                : `thought:${thought.id}`
+            }
+            content={thought.content}
+            isStreaming={thought.isStreaming}
+            fromSubagent={thought.parentToolCallId !== undefined}
+            showGroupContent={showGroupContent}
+            generateContent={generateContent}
+          />
+        ));
     return (
       <div className={isLocateFlashing ? flashStyles.flash : undefined}>
         <button
@@ -2260,82 +2331,52 @@ export const ToolGroup = memo(function ToolGroup({
           >
             <div className={styles.chatSummaryContentInner}>
               <div className={`${styles.group} ${styles.chatSummaryGroup}`}>
-                {tools.map((tool) => {
-                  if (groupedAgentCallIds.has(tool.callId)) return null;
-                  const parallelAgents = parallelAgentsByFirstCallId.get(
-                    tool.callId,
-                  );
-                  return (
-                    <Fragment key={tool.callId}>
-                      {thoughts
-                        ?.filter(
-                          (thought) => thought.beforeToolCallId === tool.callId,
-                        )
-                        .map((thought, index) => (
-                          <ThoughtLine
-                            key={`thought-${tool.callId}-${index}`}
-                            content={thought.content}
-                            isStreaming={thought.isStreaming}
-                            generateContent={generateContent}
+                {[
+                  ...tools.flatMap((tool) => {
+                    if (groupedAgentCallIds.has(tool.callId)) return [];
+                    const beforeTool = renderThoughts(tool.callId);
+                    const parallelAgents = parallelAgentsByFirstCallId.get(
+                      tool.callId,
+                    );
+                    if (parallelAgents) {
+                      return [
+                        ...beforeTool,
+                        <div
+                          key={`tool:${tool.callId}`}
+                          className={styles.chatSummaryParallelAgents}
+                          data-testid="compact-parallel-agents"
+                        >
+                          <ParallelAgentsGroup
+                            agents={parallelAgents}
+                            pendingApproval={pendingApproval}
                           />
-                        ))}
-                      {parallelAgents ? (
-                        <>
-                          <div
-                            className={styles.chatSummaryParallelAgents}
-                            data-testid="compact-parallel-agents"
-                          >
-                            <ParallelAgentsGroup
-                              agents={parallelAgents}
-                              pendingApproval={pendingApproval}
-                            />
-                          </div>
-                          {parallelAgents
-                            .slice(1)
-                            .flatMap((agent) =>
-                              thoughts
-                                ?.filter(
-                                  (thought) =>
-                                    thought.beforeToolCallId === agent.callId,
-                                )
-                                .map((thought, index) => (
-                                  <ThoughtLine
-                                    key={`thought-${agent.callId}-${index}`}
-                                    content={thought.content}
-                                    isStreaming={thought.isStreaming}
-                                    generateContent={generateContent}
-                                  />
-                                )),
-                            )}
-                        </>
-                      ) : (
-                        <ToolLine
-                          tool={tool}
-                          approval={pendingApproval}
-                          workspaceCwd={workspaceCwd}
-                          onTurnOutputOpen={onTurnOutputOpen}
-                          onToolResultOpen={onToolResultOpen}
-                          summaryOnly={!singleTool || compactToolLines}
-                          forceExpanded={
-                            documentMode || (!!singleTool && !compactToolLines)
-                          }
-                          detailsVisible={showGroupContent}
-                          hideHeader={!!singleTool && !compactToolLines}
-                        />
-                      )}
-                    </Fragment>
-                  );
-                })}
-                {thoughts
-                  ?.filter((thought) => thought.beforeToolCallId === undefined)
-                  .map((thought, index) => (
-                    <ThoughtLine
-                      key={`thought-trailing-${index}`}
-                      content={thought.content}
-                      isStreaming={thought.isStreaming}
-                      generateContent={generateContent}
-                    />
-                  ))}
+                        </div>,
+                        ...parallelAgents
+                          .slice(1)
+                          .flatMap((agent) => renderThoughts(agent.callId)),
+                      ];
+                    }
+                    return [
+                      ...beforeTool,
+                      <ToolLine
+                        key={`tool:${tool.callId}`}
+                        tool={tool}
+                        approval={pendingApproval}
+                        workspaceCwd={workspaceCwd}
+                        onTurnOutputOpen={onTurnOutputOpen}
+                        onToolResultOpen={onToolResultOpen}
+                        summaryOnly={!singleTool || compactToolLines}
+                        forceExpanded={
+                          documentMode || (!!singleTool && !compactToolLines)
+                        }
+                        detailsVisible={showGroupContent}
+                        hideHeader={!!singleTool && !compactToolLines}
+                        revealSeq={revealSeqFor(tool)}
+                      />,
+                    ];
+                  }),
+                  ...renderThoughts(),
+                ]}
               </div>
             </div>
           </div>
@@ -2359,6 +2400,7 @@ export const ToolGroup = memo(function ToolGroup({
           onTurnOutputOpen={onTurnOutputOpen}
           onToolResultOpen={onToolResultOpen}
           forceExpanded={documentMode}
+          revealSeq={revealSeqFor(tool)}
         />
       ))}
     </div>

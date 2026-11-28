@@ -15,29 +15,57 @@ import {
   SUBSCRIPTION_MODELS_UNAVAILABLE,
 } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
-import { SettingScope, loadSettings } from '../../config/settings.js';
+import {
+  SettingScope,
+  loadSettings,
+  type LoadedSettings,
+} from '../../config/settings.js';
+import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
   createBuildWorkspaceCtx,
   parseAndValidateWorkspaceClientId,
 } from '../server/request-helpers.js';
 import {
+  isGenerationClosedError,
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
 } from '../workspace-route-runtime.js';
-import type { WorkspaceRegistry } from '../workspace-registry.js';
+import type { ServeModelProviderRuntimeSyncResult } from '../types.js';
+import {
+  WorkspaceGenerationClosedError,
+  type WorkspaceRegistry,
+} from '../workspace-registry.js';
+import type { WorkspaceSettingsWrites } from '../workspace-service/types.js';
+
+class SubscriptionActivationPolicyError extends Error {}
+
+function assertSubscriptionPolicy(settings: LoadedSettings): void {
+  const enforced = settings.merged.security?.auth?.enforcedType;
+  if (enforced && enforced !== AuthType.QWEN_SUBSCRIPTION) {
+    throw new SubscriptionActivationPolicyError(
+      'Authentication is restricted by policy.',
+    );
+  }
+}
 
 // Account credentials are global; model selection belongs to the resolved runtime.
 export function registerWorkspaceSubscriptionRoutes(
   app: Application,
   deps: {
     workspaceRegistry: WorkspaceRegistry;
+    qwenCodeVersion?: string;
     mutate: (opts?: { strict?: boolean }) => RequestHandler;
     persistSettings?: (
       workspace: string,
-      writes: Array<{ scope: SettingScope; key: string; value: unknown }>,
+      writes: WorkspaceSettingsWrites,
       assertGenerationOpen?: () => void,
     ) => Promise<void>;
+    syncModelProvidersRuntime: (
+      route: string,
+      scope: SettingScope,
+    ) => Promise<ServeModelProviderRuntimeSyncResult>;
     sendBridgeError: SendBridgeError;
   },
 ): void {
@@ -52,9 +80,17 @@ export function registerWorkspaceSubscriptionRoutes(
         (!runtime || !requireTrustedWorkspaceRuntime(runtime, res))
       )
         return;
+      const requestedScope = req.body?.settingsScope;
+      const useUserScope = runtime && requestedScope === 'user';
+      const primary =
+        requestedScope === 'provider'
+          ? deps.workspaceRegistry.primaryEntry
+          : undefined;
+      const primaryGuard =
+        primary?.state === 'active' ? primary.current?.guard : undefined;
       const { persistSettings } = deps;
-      const target = runtime && persistSettings && { runtime, persistSettings };
-      if (workspace && !target) {
+      const shouldPersist = Boolean(runtime || primary);
+      if (shouldPersist && !persistSettings) {
         res.status(501).json({ code: 'not_implemented' });
         return;
       }
@@ -70,29 +106,34 @@ export function registerWorkspaceSubscriptionRoutes(
       const assertActive = () => {
         controller.signal.throwIfAborted();
         runtime?.generationGuard?.assertOpen();
+        if (primary && !primaryGuard)
+          throw new WorkspaceGenerationClosedError();
+        primaryGuard?.assertOpen();
       };
-      try {
-        assertActive();
-        const settings = loadSettings(runtime?.workspaceCwd ?? homedir(), {
+      const activationCwd = runtime?.workspaceCwd ?? homedir();
+      const saveCwd = primary?.workspaceCwd ?? activationCwd;
+      const loadPolicySettings = (workspaceCwd?: string) =>
+        loadSettings(workspaceCwd ?? homedir(), {
           skipLoadEnvironment: true,
-          skipWorkspaceSettings: !runtime,
+          skipWorkspaceSettings: workspaceCwd === undefined,
           workspaceTrusted: true,
         });
-        if (runtime && !settings.workspaceSettingsActive) {
+      try {
+        assertActive();
+        const settings = loadPolicySettings(runtime?.workspaceCwd);
+        if (
+          runtime &&
+          !settings.workspaceSettingsActive &&
+          !useUserScope &&
+          !primary
+        ) {
           res.status(409).json({
             code: 'workspace_settings_unavailable',
             message: 'Open a project folder to activate Qwen Subscription.',
           });
           return;
         }
-        const enforced = settings.merged.security?.auth?.enforcedType;
-        if (enforced && enforced !== AuthType.QWEN_SUBSCRIPTION) {
-          res.status(403).json({
-            code: 'auth_type_enforced',
-            message: 'Authentication is restricted by policy.',
-          });
-          return;
-        }
+        assertSubscriptionPolicy(settings);
         const session = new QwenSubscriptionSession();
         const info = await session.getUserInfo(controller.signal);
         assertActive();
@@ -103,46 +144,92 @@ export function registerWorkspaceSubscriptionRoutes(
           res.status(403).json({ code: 'subscription_required' });
           return;
         }
-        const { models } = await session.getModels(controller.signal);
+        const { models } = await session.getModels(
+          controller.signal,
+          deps.qwenCodeVersion,
+        );
         assertActive();
         const modelId = selectSubscriptionModel(models);
-        if (!target) {
-          res.status(200).json({ modelId });
-          return;
+        let savedScope: SettingScope | undefined;
+        if (shouldPersist && persistSettings) {
+          await persistSettings(
+            saveCwd,
+            (fresh) => {
+              const scope = useUserScope
+                ? SettingScope.User
+                : primary
+                  ? getPersistScopeForModelSelection(fresh)
+                  : SettingScope.Workspace;
+              if (scope === SettingScope.User || !runtime) {
+                assertSubscriptionPolicy(loadPolicySettings());
+              }
+              if (
+                scope === SettingScope.Workspace ||
+                runtime?.workspaceCwd === saveCwd
+              ) {
+                assertSubscriptionPolicy(fresh);
+              }
+              if (runtime && runtime.workspaceCwd !== saveCwd) {
+                assertSubscriptionPolicy(
+                  loadPolicySettings(runtime.workspaceCwd),
+                );
+              }
+              savedScope = scope;
+              return [
+                {
+                  scope,
+                  key: 'security.auth.selectedType',
+                  value: AuthType.QWEN_SUBSCRIPTION,
+                },
+                { scope, key: 'model.name', value: modelId },
+                {
+                  scope,
+                  key: 'model.baseUrl',
+                  value: QWEN_SUBSCRIPTION_BASE_URL,
+                },
+              ];
+            },
+            assertActive,
+          );
+          assertActive();
         }
-        const { workspaceCwd, workspaceService } = target.runtime;
-        await target.persistSettings(
-          workspaceCwd,
-          [
-            {
-              scope: SettingScope.Workspace,
-              key: 'security.auth.selectedType',
-              value: AuthType.QWEN_SUBSCRIPTION,
-            },
-            {
-              scope: SettingScope.Workspace,
-              key: 'model.name',
-              value: modelId,
-            },
-            {
-              scope: SettingScope.Workspace,
-              key: 'model.baseUrl',
-              value: QWEN_SUBSCRIPTION_BASE_URL,
-            },
-          ],
-          assertActive,
-        );
-        assertActive();
-        const runtimeSync = await workspaceService.reloadModelProviders(
-          createBuildWorkspaceCtx(workspaceCwd)(route, clientId),
-        );
+        let runtimeSync: ServeModelProviderRuntimeSyncResult | undefined;
+        if (primary && savedScope !== undefined) {
+          try {
+            runtimeSync = await deps.syncModelProvidersRuntime(
+              route,
+              savedScope,
+            );
+          } catch (error) {
+            assertActive();
+            if (isGenerationClosedError(error)) throw error;
+            writeStderrLine(
+              `qwen serve: ${route} runtime sync failed after persistence`,
+            );
+            runtimeSync = { status: 'failed' };
+          }
+        } else if (runtime) {
+          const { workspaceCwd, workspaceService } = runtime;
+          runtimeSync = await workspaceService.reloadModelProviders(
+            createBuildWorkspaceCtx(workspaceCwd)(route, clientId),
+          );
+        }
         assertActive();
         res.status(200).json({
-          authType: AuthType.QWEN_SUBSCRIPTION,
+          ...(runtime ? { authType: AuthType.QWEN_SUBSCRIPTION } : {}),
           modelId,
-          runtimeSync,
+          ...(runtimeSync ? { runtimeSync } : {}),
         });
       } catch (error) {
+        if (
+          !res.destroyed &&
+          error instanceof SubscriptionActivationPolicyError
+        ) {
+          res
+            .status(403)
+            .json({ code: 'auth_type_enforced', message: error.message });
+          return;
+        }
         if (!res.destroyed && error instanceof SubscriptionOAuthError) {
           if (error.retryAfterMs)
             res.setHeader('Retry-After', Math.ceil(error.retryAfterMs / 1000));

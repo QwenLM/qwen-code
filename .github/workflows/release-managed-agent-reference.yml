@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/release-managed-agent-reference.yml'
+      - '.github/scripts/maven-cache-seed.sh'
       - 'scripts/package-managed-agent-reference.mjs'
       - 'scripts/generate-managed-agent-configuration-reference.mjs'
       - 'scripts/contract-version-utils.js'
@@ -16,7 +17,7 @@ on:
       - 'packages/sdk-java/qwencode/**'
       - 'packages/managed-agent-server/**'
       - 'packages/core/src/managed-runtime/contracts/**'
-      - 'packages/cli/src/serve/capabilities.ts'
+      - 'packages/sdk-typescript/src/daemon/capabilities.ts'
       - 'packages/cli/src/serve/broker-managed-runtime-provider.ts'
       - 'packages/cli/src/serve/hosted-harness-contract.ts'
       - 'docs/users/managed-agent-reference-deployment.md'
@@ -326,11 +327,14 @@ jobs:
           set -euo pipefail
           export MAVEN_ARGS="--settings ${RUNNER_TEMP}/setup-java-m2/settings.xml --toolchains ${RUNNER_TEMP}/setup-java-m2/toolchains.xml"
           if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
-            # Both in-house artifacts use fixed release coordinates, so this
-            # PR's build must never reach the host-shared ~/.m2.
+            # The in-house artifacts use fixed release coordinates and the
+            # resolver rewrites its bookkeeping through hardlinked seeds, so
+            # this build must never reach the host-shared ~/.m2.
             repo="${RUNNER_TEMP}/m2-repo"
-            cp -aln "${HOME}/.m2/repository" "${repo}" 2>/dev/null || true
-            rm -rf -- "${repo}/com/alibaba/qwencode-sdk" "${repo}/com/alibaba/"qwen-managed-agent-*
+            # Unlike sdk-java.yml's immutable older-ref callers, this
+            # workflow always builds its own workflow revision.
+            seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"
+            source "${seed_helper}"
             MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${repo}"
           fi
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true clean install

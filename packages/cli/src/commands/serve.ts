@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { commandMetadata } from './command-metadata.js';
 import { parseJoinLink } from '../serve/agent-host-join.js';
+import { listExplicitCandidates } from '../serve/local-control/lan-interfaces.js';
 import type { Argv, CommandModule } from 'yargs';
 import type { ServeChannelSelection } from '../serve/types.js';
 import type { RunHandle } from '../serve/run-qwen-serve.js';
@@ -125,16 +127,44 @@ async function startLocalControl(
   }
   let status;
   try {
-    status = await service.enable(address ? { address } : {});
+    status = await service.enable(
+      // The flag is the operator's explicit opt-in: record the named address
+      // as the daemon's standing grant so the HTTP enable route (and the Web
+      // Shell card) can re-enable it, while ungranted non-candidate POSTs
+      // keep failing with unknown_lan_interface.
+      address ? { address, allowExplicitAddress: true } : {},
+    );
   } catch (err) {
     // The service reports ambiguity to its caller rather than picking for
     // them; in a terminal the way to answer is a flag, which only this caller
-    // knows about.
+    // knows about. The same holds for the no-candidate and unknown-address
+    // failures: their messages are rendered verbatim to browser clients, so
+    // the CLI-only remedy hints belong here, not in the shared errors.
     if (
       err instanceof Error &&
       (err as { code?: string }).code === 'ambiguous_lan_interface'
     ) {
       throw new Error(`${err.message}. Pass --local-control-address <ip>.`);
+    }
+    if (
+      err instanceof Error &&
+      (err as { code?: string }).code === 'no_lan_interface'
+    ) {
+      throw new Error(
+        `${err.message} If this host's usable address is outside private/link-local space, or sits on a VPN/tunnel interface, name it: --local-control-address <ip>.`,
+      );
+    }
+    if (
+      err instanceof Error &&
+      (err as { code?: string }).code === 'unknown_lan_interface'
+    ) {
+      // Enumerate the acceptance space, not the automatic-candidate list:
+      // the operator reaches this failure precisely on hosts whose usable
+      // address is one listLanCandidates would never offer (#14136).
+      const candidates = listExplicitCandidates();
+      throw new Error(
+        `${err.message}${candidates.length ? ` This host currently has: ${candidates.map((c) => `${c.interfaceName} (${c.address})`).join(', ')}.` : ''}`,
+      );
     }
     throw err;
   }
@@ -251,8 +281,10 @@ interface ServeArgs {
   token?: string;
   'max-sessions'?: number;
   'max-total-sessions'?: number;
+  'load-admission': boolean;
   'max-pending-prompts-per-session': number;
   'max-connections': number;
+  'max-sse-connections'?: number;
   'event-ring-size': number;
   'event-ring-max-bytes': number;
   'compacted-replay-max-bytes': number;
@@ -324,9 +356,7 @@ function primaryWorkspaceArg(
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
-  command: 'serve',
-  describe:
-    'Run Qwen Code as a local HTTP daemon (Stage 1 experimental: --http-bridge)',
+  ...commandMetadata.serve,
   builder: (yargs: Argv) =>
     yargs
       .option('port', {
@@ -368,7 +398,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         requiresArg: true,
         description:
-          'Run only the authenticated Managed Web gateway using a JSON file with apiUrl, tenantId, actorId and signingKeyFile. Requires an independent browser token of at least 32 bytes via QWEN_SERVER_TOKEN or --token.',
+          'Run only the authenticated Managed Web gateway using a JSON file with apiUrl, tenantId, actorId and signingKeyFile. Requires a non-empty independent browser token via QWEN_SERVER_TOKEN or --token.',
       })
       .option('token', {
         type: 'string',
@@ -388,6 +418,15 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Non-negative integer cap on concurrent live sessions across all ' +
           'workspace runtimes. Set to 0 to disable.',
+      })
+      .option('load-admission', {
+        type: 'boolean',
+        default: true,
+        description:
+          'Refuse new sessions with 503 system_overloaded while host load ' +
+          'stays saturated corroborated by daemon event-loop lag, or while ' +
+          'event-loop lag alone is severe. Live sessions and the control ' +
+          'plane are never gated. Use --no-load-admission to disable.',
       })
       .option('max-pending-prompts-per-session', {
         type: 'number',
@@ -416,9 +455,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         choices: MEMORY_PROJECT_SCOPES,
         description:
-          'Choose how project memory is partitioned. ' +
-          'Defaults to "workspace" so each daemon workspace stays isolated; "git-root" preserves the legacy shared scope. ' +
-          'Overrides QWEN_CODE_MEMORY_PROJECT_SCOPE when provided.',
+          'Deprecated compatibility option. Project memory uses the registered workspace path.',
       })
       .option('max-connections', {
         type: 'number',
@@ -427,6 +464,19 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Listener-level TCP connection cap (server.maxConnections). Bounds raw ' +
           'sockets — slow/phantom SSE clients get rejected at accept time once full. ' +
           'Set to 0 to disable.',
+      })
+      .option('max-sse-connections', {
+        type: 'number',
+        description:
+          'Admission cap on concurrent long-lived streams: every SSE surface ' +
+          '(session events, agent session-events, generation, artifact-library, ' +
+          'hosted-harness events) plus ACP SSE/WebSocket. ' +
+          'Defaults to 80% of --max-connections so short requests (/health, static ' +
+          'assets) keep listener headroom; streams at the cap get 503 + Retry-After ' +
+          'instead of a silent socket close. Pairing listeners (local-control / ' +
+          'remote-access) additionally clamp at 80% of their own 64-socket budget. ' +
+          'Explicit values floor to at least one ' +
+          'stream and clamp to that headroom ceiling. Set to 0 to disable.',
       })
       .option('require-auth', {
         type: 'boolean',
@@ -511,7 +561,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('local-control-address', {
         type: 'string',
         description:
-          'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice.',
+          'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice. Naming an address outside RFC 1918/3927 space, or one on a VPN/tunnel interface (e.g. phone and laptop on the same corporate VPN), is accepted as an explicit opt-in; out-of-private-space picks are logged with a warning.',
       })
       .option('join', {
         type: 'string',
@@ -802,8 +852,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('writer-idle-timeout-ms', {
         type: 'number',
         description:
-          'Per-SSE-connection idle deadline (ms). ' +
-          'Falls back to QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS. Positive integer.',
+          'Per-SSE-connection writer stall budget (ms): evict a stream whose ' +
+          'write is stuck waiting for drain (consumer stopped reading) longer ' +
+          'than this. Default 60000 when unset; healthy idle streams are never ' +
+          'evicted. Falls back to QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS. Positive integer.',
       })
       .option('channel-idle-timeout-ms', {
         type: 'number',
@@ -1199,8 +1251,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(argv['max-total-sessions'] !== undefined
           ? { maxTotalSessions: argv['max-total-sessions'] }
           : {}),
+        loadAdmission: argv['load-admission'],
         maxPendingPromptsPerSession,
         maxConnections: argv['max-connections'],
+        ...(argv['max-sse-connections'] !== undefined
+          ? { maxSseConnections: argv['max-sse-connections'] }
+          : {}),
         eventRingSize: argv['event-ring-size'],
         eventRingMaxBytes: argv['event-ring-max-bytes'],
         compactedReplayMaxBytes: argv['compacted-replay-max-bytes'],

@@ -5,10 +5,33 @@
 ## Current PR scope
 
 The suite/write-back lock split described below already landed on main through
-#15128 and #15254. PR #15274 now carries the remaining hardening: preserving
-failed-suite status through cache write-back, excluding mutable resolver
-metadata, and keeping cache seeding best-effort and observable. The historical
-lock design below is context, not a new relocation delivered by this PR.
+#15128 and #15254. PR #15274 introduced the remaining
+hardening: preserving failed-suite status through cache write-back, excluding
+mutable resolver metadata, and observable cache seeding. Follow-up #18065 makes
+safe job-local repository reconstruction part of that contract. The host cache
+copy remains optional and observable, but required job-local de-aliasing,
+mount-boundary inspection, permission repair, and resolver/coordinate pruning
+fail closed before Maven. The reconstruction is centralized in
+`.github/scripts/maven-cache-seed.sh`. The reference workflow always builds
+its own workflow checkout and sources that helper directly. The four SDK call
+sites check for a local helper and, when an older immutable source checkout
+predates it, obtain the same helper version as the running workflow,
+identified by `GITHUB_SHA`.
+A fetch failure or missing helper stops Maven; it never silently degrades to
+the host cache. Each fallback download uses an atomically created `mktemp` file,
+not a fixed output path that could be an existing symlink or hardlink. An
+exit-scoped trap attempts to remove only the downloaded copy, including when
+fetch or seed fails. It never targets the workspace helper, and a removal
+failure preserves the original step status and, when the output channel is
+writable, emits a `::warning::` annotation with the helper's residual path in
+a subshell. A closed log pipe can terminate that diagnostic subshell without
+terminating the step shell before it restores the original status. Other
+source, seed, mount, and prune failures remain fail-closed. Before
+copying, the helper checks the host source for mounts; a mounted or uninspectable
+host source skips that optional copy and uses a clean job-local repository. The
+tooling lookup does not change the immutable source revision being validated.
+The historical lock design below is context, not a new
+relocation delivered by this PR.
 
 Database integration now runs on MySQL only. References below to the former MariaDB integration site retain historical measurements; its unchanged lock, cache write-back and budget rules apply to the retained MySQL job. See the [current database verification scope](managed-runtime-broker-jdbc.md#database-verification-scope).
 
@@ -116,25 +139,35 @@ the bound.
 
 Both Maven runs already resolve from a job-local repository, so they touch no
 host-shared state. Only the cache write-back mutates `~/.m2`, so only the
-write-back takes the lock. The seed (`cp -aln`) is read-only and best-effort
-and runs before the acquisition; it then drops the in-house fixed-release
+write-back takes the lock. The host-cache copy (`cp -aln`) runs before the acquisition; a missing host
+cache stays quiet and a cross-device or failed copy falls back to a clean local
+repository. Safe reconstruction is not best-effort: it must sever aliases,
+reclaim historical quarantine, inspect mount boundaries and repair local
+directories before Maven runs. Failure of a required step stops Maven. Failure
+to remove only the newly-created quarantine leaves any undeleted content in
+quarantine and remains warning-only. It also drops the in-house fixed-release
 coordinates from the job-local copy, so the unlocked `mvn install` writes
 fresh inodes instead of rewriting the host cache through a hardlink. Maven
-maintains tracking markers (`resolver-status.properties`, `*.lastUpdated`,
-`_remote.repositories`), version metadata and checksums (`maven-metadata-*.xml*`).
-The seed drops those entries too, along with `*.tmp`, `*.part` and
-`*.part.lock` residue, so each job resolves this state locally. This does not
-assume every Resolver version writes through an existing inode.
-The prune clears inherited mutable state as well: `RUNNER_TEMP` survives
-across jobs on the pool, so a previous job's single-link markers go the same
-way as the hardlinks this seed created. A missing host cache stays quiet
-while a real copy failure warns, so the warning still means the seed failed.
-The Maven runs run unlocked; the write-back holds one acquisition, and its
-`mkdir` and bounded `find`/`cp` children drop fd 9 so a survivor cannot
-retain the lock. The write-back publishes artifacts only: the resolver
-markers and version metadata record this run's resolution outcomes and are
-not copied into the shared cache. A hold now measures the copy instead of
-the suite, and the fast tier's budget is again far above one hold.
+can truncate and rewrite its tracking markers (`resolver-status.properties`,
+`*.lastUpdated`, `_remote.repositories`), version metadata and checksums
+(`maven-metadata-*.xml*`) in place. The seed drops those entries too, along
+with `*.tmp`, `*.part` and `*.part.lock` residue, so each job resolves this
+state locally; this does not assume every Resolver version writes through an
+existing inode. The prune clears inherited mutable state as well:
+`RUNNER_TEMP` survives across jobs on the pool, so a previous job's
+single-link markers go the same way as the hardlinks this seed created. A
+missing host cache stays quiet while a real copy failure warns, so the
+warning still means the seed failed. Seed removal and the locked host purge
+match `qwencode-sdk` and `qwen-managed-agent-*` at any depth, including the
+legacy nested `repository/com/alibaba/` tree. Both write-back prunes retain
+every explicit coordinate and also exclude that module glob, so a host-side
+unlink cannot make its seeded inode eligible for copy-back. The Maven runs
+run unlocked; the write-back holds one acquisition, and its `mkdir` and
+bounded `find`/`cp` children drop fd 9 so a survivor cannot retain the lock.
+The write-back publishes artifacts only: resolver bookkeeping records this
+run's resolution outcomes and is not copied into the shared cache. A hold now
+measures the copy instead of the suite, and the fast tier's budget is again
+far above one hold.
 
 The test job follows the same rule. Its suite was the other long hold: on
 2026-10-22, run 39771949573's fast-tier job failed at its 5400-second budget
@@ -325,7 +358,58 @@ order this section exists to prevent.
   ordering stubs park `flock --wait` until release, as the kernel does, so a
   head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
-  `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper, the
+  `scripts/tests/sdk-java-workflow.test.js` keeps the four SDK source sites
+  byte-identical, and requires the reference build to source its checked-out
+  helper directly without a download fallback. It checks the real
+  `maven-cache-seed.sh` including its guarded presence, directory permission
+  and mount-boundary checks, retained and dangling quarantine links,
+  fallback cleanup, and required prune failures. The call stops before Maven
+  when neither a local nor a revision-pinned helper is available, and also on
+  source or required seed/guard failures. A helper already in the workspace, or obtained from the workflow's revision, really sources a warm
+  hardlinked cache in a private fixture. The immutable validation
+  source revision does not change. Downloads use fresh `mktemp` regular files,
+  leaving the targets of pre-existing symlinks or hardlinks untouched, and
+  attempt to remove only the downloaded copy on exit. If that removal fails,
+  cleanup is advisory, preserves the saved step status, and emits a
+  `::warning::` annotation with the residual path when the output channel is
+  writable. The warning subshell confines `SIGPIPE` from a closed log pipe
+  to that diagnostic process, so it cannot abort restoration of the saved step
+  status. Other cleanup and warning I/O failures do not replace that status.
+  Permission-denial cleanup cases are gated by an actual removal probe rather
+  than uid alone, so root CI lanes without DAC bypass still run them. Probe
+  setup errors and unexpected unlink errors raise failures instead of silently
+  removing coverage. Each `seed_helper` step's sole trap must sit inside the
+  unbroken missing-helper guard (`if ... fi`) after `mktemp` and before `curl`,
+  pinned to a single-operand `${seed_helper}` removal with the warning
+  subshell and saved status restoration — rejecting extra operands and extra
+  traps. That trap is the step's only `rm`/`unlink`, so a removal cannot hide
+  behind an aliased target, and the only `find -delete` allowed outside it is
+  the write-back's host-cache coordinate purge, pinned to that whole command
+  verbatim so neither an aliased target nor a broader purge of the shared
+  cache can pass. This is a lexical pin: other destructive verbs, and
+  obfuscated spellings of the same verbs (escaped or quoted tokens such as
+  `r\m` or `-de'lete'`), are outside its reach.
+  These cleanup and missing-helper
+  probes set both `cwd` and `GITHUB_WORKSPACE` to a private fixture workspace
+  so a `$PWD`-based deletion cannot touch the source checkout; the log-pipe
+  cleanup probe initializes a fixture workspace helper from the checkout
+  helper's bytes and checks that copy stays unchanged. A directory operand
+  makes its cleanup fail independently of DAC privileges; the closed-pipe FIFO
+  arm checks that `SIGPIPE` does not kill the enclosing shell and that the
+  saved status is preserved, while the ordinary pipe arm checks the single
+  annotated warning and residual path.
+  The reference build directly sources its checked-out helper and never
+  requires a fallback fetch. Tests pin the step's YAML attributes (no
+  `continue-on-error`, `if`, `env`, or `shell` override), `set -euo pipefail`,
+  the exact `self-hosted` helper block, and `mvn`-only follow-up lines with no
+  downloaders or extra shell chaining; they also run the full step without
+  forcing `-e` externally in a private workspace containing `.github/scripts`
+  with only `maven-cache-seed.sh` absent to assert via executed-command
+  tracing that failure occurs specifically at `source "${seed_helper}"` before
+  Maven, leaving the helper absent and invoking no fetcher. A
+  host-source mount or mount-inspection failure skips the optional copy and
+  uses a clean repository; required job-local guards still stop Maven. It then
+  also pins the sourced helper, the
   test lane's 9600 s budget and 200-minute ceiling, the red leg's 300 s
   clamp, the MariaDB write-back's 5400 s budget and 310-minute ceiling, the
   prelude and write-back tail at both sites — byte-identical apart from the
@@ -335,19 +419,31 @@ order this section exists to prevent.
   line ending in `|| mvn_status=$?` with a named stage, the tolerated-skip
   arms exercised with both a green and a red status (the red ones assert the
   stage annotation and the 300 s budget), their write-back children's fd 9
-  close, the in-house coordinates' and the tracking-marker, version
-  metadata and `*.tmp` names' absence from every seeded job-local repository
-  and from both write-back prunes, the seed prune staying best-effort behind
-  its `2>/dev/null || true` while still de-aliasing what it can delete, the
-  annotation staying clear of `INFRA_FAILURE_SIGNATURES`, and the
-  seed-drop/prune sets agreeing at every site. The fault arms cover a missing
-  `flock`, a broken `mkdir`, a stray queue file, a lock path that is a
-  directory, a timed-out `flock`, an unexpected `flock` status, an unusable
-  host cache, a missing job-local repository, a seeded entry the prune
-  cannot delete, which must still reach Maven, and inherited single-link
-  resolver state in a reused job-local repository, which the prune must
-  clear. The `.size-baseline` entry is re-measured to the workflow's size
-  after the last edit.
+  close, the in-house coordinates' and the resolver bookkeeping's —
+  `_remote.repositories`, `maven-metadata-*.xml*`,
+  `resolver-status.properties`, `*.lastUpdated`, `*.part`, `*.part.lock`, and
+  `*.tmp` — the non-directory resolver and transfer-state files filtered from
+  every seeded job-local repository and both write-back prunes. A legitimate
+  Maven artifact directory is not deleted merely because its name matches
+  those globs. Its JAR files are retained; matching resolver and transfer
+  files within it are the residue removed before Maven,
+  the write-back's host-side, any-depth removal of the
+  in-house coordinates, the host-copy attempt staying best-effort while a
+  failed mount check, permission repair, resolver-state prune or coordinate
+  prune stops Maven before it can use an unsafe local tree, the
+  annotation staying clear of `INFRA_FAILURE_SIGNATURES`, the seed and
+  host-purge family globs agreeing at every site, and each write-back prune
+  retaining every explicit coordinate plus the module glob. The fault arms
+  cover a missing `flock`, a broken `mkdir`, a stray queue file, a lock path
+  that is a directory, a timed-out `flock`, an unexpected `flock` status, an
+  unusable host cache, a missing job-local repository, a historical
+  quarantine or required prune that fails, which must stop Maven before it
+  writes, and inherited single-link resolver state in a reused job-local
+  repository, which the prune must clear. Only deleting the newly-created
+  quarantine remains best-effort and warning-only; previous quarantine
+  symlinks are reclaimed by the full loop, including dangling links that
+  `[ -e ]` cannot see. The `.size-baseline` entry is re-measured to the
+  workflow's size after the last edit.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
@@ -359,7 +455,16 @@ order this section exists to prevent.
   defaults to normal. Both sites run their Maven suites from a job-local
   repository before the acquisition. Every job that seeds a job-local
   repository drops the in-house fixed-release coordinates from the copy
-  before running Maven.
+  before running Maven. A failed or cross-device host copy may fall back to a
+  clean network-backed repository; a mounted or uninspectable host source
+  skips the optional copy without preventing a clean Maven run. An uninspectable
+  job-local mount boundary,
+  unrepairable local directory, historical quarantine that cannot be
+  reclaimed, or required resolver/coordinate prune failure must stop before
+  Maven. An older SDK checkout without the helper must be able to load the same helper
+  version belonging to the workflow revision, still without modifying the
+  immutable source under test. Only deleting the quarantine created for this
+  run remains warning-only; any undeleted contents remain in quarantine.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.

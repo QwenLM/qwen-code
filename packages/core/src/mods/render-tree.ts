@@ -4,12 +4,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// The trees a `ui.render` hook draws, judged by Claude Code 2.1.318's rules.
+// The trees a `ui.render` hook draws, judged by Claude Code 2.1.332's rules.
 // The worker checks each hook's answer and the host the tree the chain settles
 // on, so a tree Qwen Code accepts is one Claude Code accepts.
 
-export const MOD_RENDER_SITES = ['AbovePrompt'] as const;
+export const MOD_RENDER_SITES = [
+  'AbovePrompt',
+  'AssistantMessage',
+  'Thinking',
+] as const;
 export type ModRenderSite = (typeof MOD_RENDER_SITES)[number];
+
+/**
+ * The transcript rows: a hook rewrites the props the engine draws the row
+ * with, never the row's tree.
+ */
+export const MOD_ROW_SITES: ReadonlySet<string> = new Set<ModRenderSite>([
+  'AssistantMessage',
+  'Thinking',
+]);
+
+/** The surfaces a host draws Mod renders on. */
+export type ModRenderSurface = 'terminal' | 'desktop';
 
 /** The terminal's element table, as Claude Code declares it. */
 export const TERMINAL_ELEMENTS = [
@@ -21,11 +37,27 @@ export const TERMINAL_ELEMENTS = [
   'Link',
   'Code',
   'Markdown',
+  'Progress',
   'Client',
   'Raster',
   'Image',
 ] as const;
-const DRAWN = new Set(['Box', 'Text']);
+/** The desktop's element table, as Claude Code declares it. */
+export const DESKTOP_ELEMENTS = [
+  'Box',
+  'Text',
+  'Button',
+  'Input',
+  'Select',
+  'Svg',
+  'Link',
+  'Code',
+  'Markdown',
+  'Progress',
+  'Client',
+  'Shader',
+] as const;
+const DRAWN = new Set(['Box', 'Text', 'Progress']);
 
 /** The events `$.ui.invalidate` names. */
 export const INVALIDATABLE_EVENTS = [
@@ -36,6 +68,9 @@ export const INVALIDATABLE_EVENTS = [
   'tool.describe',
   'command.describe',
   'config.describe',
+  'tool.list',
+  'tool.offer',
+  'ui.offer',
 ] as const;
 
 export type ModRenderProps = Record<string, string | number | boolean>;
@@ -47,6 +82,7 @@ export type ModRenderElement =
       hover?: ModRenderProps;
       children?: ModRenderNode[];
     }
+  | { type: 'Progress'; props: ModRenderProps }
   | { type: 'engine'; ref: number };
 
 /** What `next(e)` resolves to: the engine's own drawing, nothing at the band. */
@@ -64,12 +100,73 @@ export interface ModAbovePromptProps {
   view: { agentId?: string };
 }
 
-export interface ModRenderInput {
-  surface: 'terminal';
-  component: ModRenderSite;
+/**
+ * One block of an assistant reply in the transcript, raised once the block
+ * is complete. A hook rewrites `text` to change what the row shows; the
+ * stored message and what the model reads stay as they were.
+ */
+export interface ModAssistantMessageProps {
+  text: string;
+  isFirstOfReply: boolean;
+}
+
+/**
+ * One block of the model's thinking, raised once the block is complete and
+ * shown expanded. Qwen Code's own site. A hook rewrites `text` to change what
+ * the expanded block shows; the collapsed line and the stored thought stay as
+ * they were.
+ */
+export interface ModThinkingProps {
+  text: string;
+}
+
+interface ModRenderInputBase {
+  surface: ModRenderSurface;
   requestId: string;
   viewport?: { columns: number; rows: number; isFullscreen?: boolean };
+}
+
+/** The band above the prompt. */
+export interface ModBandInput extends ModRenderInputBase {
+  component: 'AbovePrompt';
   props: ModAbovePromptProps;
+}
+
+/** A row of the transcript that shows an assistant reply's text. */
+export interface ModAssistantMessageInput extends ModRenderInputBase {
+  component: 'AssistantMessage';
+  props: ModAssistantMessageProps;
+}
+
+/** A row of the transcript that shows a block of the model's thinking. */
+export interface ModThinkingInput extends ModRenderInputBase {
+  component: 'Thinking';
+  props: ModThinkingProps;
+}
+
+export type ModRenderInput =
+  | ModBandInput
+  | ModAssistantMessageInput
+  | ModThinkingInput;
+
+/**
+ * The props each site pins: a hook that passes another value down fails.
+ * The others may be rewritten, each keeping its kind.
+ */
+export const MOD_RENDER_PINNED_PROPS: Record<ModRenderSite, readonly string[]> =
+  {
+    AbovePrompt: ['view'],
+    AssistantMessage: ['isFirstOfReply'],
+    Thinking: [],
+  };
+
+/** Whether a text a hook wrote into a row breaks the rules a tree's text keeps. */
+export function invalidRenderText(text: string): string | undefined {
+  if (text.length > MOD_RENDER_TEXT_CAP)
+    return `holds more than ${MOD_RENDER_TEXT_CAP} characters`;
+  if (CONTROL.test(text) || LONE_SURROGATE.test(text))
+    return 'holds a control character (an escape sequence)';
+  return undefined;
 }
 
 export const BORDER_STYLES = [
@@ -172,6 +269,8 @@ const BOX_PROPS: Record<string, Rule> = {
   borderDimColor: flag,
   backgroundColor: color,
   overflow: oneOf('visible', 'hidden'),
+  overflowX: oneOf('visible', 'scroll'),
+  mono: flag,
   display: oneOf('flex', 'none'),
   position: oneOf('relative', 'absolute'),
   ...Object.fromEntries(OFFSETS.map((name) => [name, offset])),
@@ -198,7 +297,25 @@ const TEXT_PROPS: Record<string, Rule> = {
     'truncate-start',
     'truncate-middle',
     'truncate-end',
+    'clip',
   ),
+  maxLines: (value) =>
+    Number.isSafeInteger(value) && (value as number) >= 1
+      ? undefined
+      : 'must be a whole number from 1',
+};
+const shown: Rule = (value) =>
+  typeof value === 'string' ? invalidRenderText(value) : 'must be a string';
+const PROGRESS_PROPS: Record<string, Rule> = {
+  label: (value) =>
+    typeof value === 'string' && !value.trim()
+      ? 'must not be blank'
+      : shown(value),
+  value: (value) =>
+    typeof value === 'number' ? undefined : 'must be a number',
+  max: (value) => (typeof value === 'number' ? undefined : 'must be a number'),
+  valueText: shown,
+  color,
 };
 const HOVER_PROPS: Record<'Box' | 'Text', Record<string, Rule>> = {
   Box: {
@@ -225,6 +342,7 @@ const HOVER_PROPS: Record<'Box' | 'Text', Record<string, Rule>> = {
 // A Box that sets one of these may not hold the engine's own node.
 const ENGINE_BLOCKERS = [
   'display',
+  'mono',
   'overflow',
   'position',
   'width',
@@ -244,7 +362,7 @@ const kind = (value: unknown) =>
   value === null ? 'null' : Array.isArray(value) ? 'an array' : typeof value;
 
 function checkProps(
-  type: 'Box' | 'Text',
+  type: 'Box' | 'Text' | 'Progress',
   props: unknown,
   rules: Record<string, Rule>,
   label: string,
@@ -298,6 +416,16 @@ export function validateRenderTree(tree: unknown): void {
       if ((TERMINAL_ELEMENTS as readonly string[]).includes(type))
         throw new Error(`${type} is not drawn by Qwen Code yet`);
       throw new Error(`${type} is not an element of the terminal`);
+    }
+    if (type === 'Progress') {
+      if (Object.keys(node).some((key) => key !== 'type' && key !== 'props'))
+        throw new Error('Progress holds fields other than props');
+      if (inline) throw new Error('Progress inside an inline element');
+      const props = node['props'];
+      checkProps('Progress', props, PROGRESS_PROPS, 'props');
+      if (!('label' in (props as ModRenderProps)))
+        throw new Error('Progress prop "label" is missing');
+      return;
     }
     const tag = type as 'Box' | 'Text';
     if (
@@ -383,6 +511,14 @@ export function adjustRenderTree(
   const walk = (node: ModRenderNode): ModRenderNode => {
     if (typeof node === 'string') return text(node);
     if (node.type === 'engine') return node;
+    if (node.type === 'Progress') {
+      const props = { ...node.props };
+      for (const key of ['label', 'valueText']) {
+        const value = props[key];
+        if (typeof value === 'string') props[key] = text(value);
+      }
+      return { ...node, props };
+    }
     let props = node.props;
     let hover = node.hover;
     if (node.type === 'Box' && props) {

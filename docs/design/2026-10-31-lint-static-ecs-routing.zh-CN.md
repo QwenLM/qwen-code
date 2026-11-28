@@ -18,12 +18,17 @@
 | `ubuntu_runner` | 同仓库 head、`OWNER` / `MEMBER` / `COLLABORATOR` 作者、`merge_group`、`push`，其余走 hosted | `integration_cli`、`web_shell_e2e_smoke`（`test` 已改读 `pr_test_runner`；本文被 [2026-11-07-ephemeral-container-runners](2026-11-07-ephemeral-container-runners.zh-CN.md) 取代） |
 | `lint_runner`   | 每一个 `pull_request`，未受信 fork 也算；其余情况与 `ubuntu_runner` 相同                    | `lint_and_static`、`integration_no_ak`（2026-11-02 加入）                                                                                                                         |
 
-`classify_pr` 自身的 runner 对其接纳的所有事件一律走 ECS（kill-switch 除外）。
-门禁 job 只执行可信 base-SHA 的代码、拿只读 token——暴露面严格小于 lint
-车道；而把它对不可信 fork 留在 hosted，会让整条 fork CI 链（classify 是所有
-Linux 车道的 `needs` 前置）排在稀缺的 hosted 池后面。association 门禁保留在
-它真正约束重 PR 代码执行的地方：`ubuntu_runner`（test 车道与仅 merge-queue
-的 CLI 集成车道读取）。
+`classify_pr` 自身的 runner 走 association 门禁的 ECS（kill-switch 除外）：
+同仓库 head、`OWNER` / `MEMBER` / `COLLABORATOR` 的 fork 作者、`merge_group`、
+`push` 与 `workflow_dispatch` 进池——但 `linux_runner` 输入为 `hosted` 的调度
+除外，按下方 2026-11-14 修订仍走 hosted；不可信 fork PR 退回 `ubuntu-latest`。
+门禁 job 只执行可信 base-SHA 的代码、拿只读 token——暴露面严格小于 lint 车道。
+
+2026-11-14（PR #17178）反转了 2026-10-31 把门禁扩到无条件 ECS 的决定：门禁
+很轻量，不可信 fork 排 hosted 队的延迟可以接受，而默认把未评审 fork 挡在持久
+池外是值得的。这是吞吐策略，不是围栏——fork 能改写这条 `runs-on`（见下方
+残余面说明）。association 门禁仍在真正约束重 PR 代码执行的地方生效：
+`ubuntu_runner`（test 车道与仅 merge-queue 的 CLI 集成车道读取）。
 
 2026-11-02：`integration_no_ak` 加入 `lint_runner`。与 lint 同信任类——该车
 道从 checkout 与 install 步骤起就执行 fork 代码（生命周期脚本加
@@ -32,7 +37,8 @@ scripts/prepare.js）——但按构造零密钥：集成门禁清空所有模�
 （fork 代码在约 14 个步骤之前就开始执行），因此该车道现在完全镜像 lint：
 首步通过 GITHUB_ENV 发布 run 唯一的 HOME 并把 COREPACK_HOME 放在其内
 （corepack 缓存命中不重验条目——共享 home 是跨 job 投毒通道），XDG_CACHE_HOME
-留在共享的可校验 tool cache 上，末尾 always() 清理步骤回收该 HOME。路由电池
+留在共享的内容可校验 tool cache 上，XDG_DATA_HOME 仅在受信任持久 fleet 上加入，
+末尾 always() 清理步骤回收该 HOME。路由电池
 钉住车道集合、首步隔离、清理步骤，以及按值强制（非按名）的零密钥 env 契约
 （非路径 key 必须为空——包括 `ANTHROPIC_AUTH_TOKEN`（Anthropic SDK 的鉴权解析器会从 env 回填它）、gate 不得引用任何 secrets.\*）。
 
@@ -64,15 +70,40 @@ job 级 `env` 读不到 `runner` 上下文（GitHub 会拒绝整个 workflow 文
 `~`/`$HOME` 解析的配置。它拦不住用绝对路径写账号真实 home 的 job；那仍在下文
 已接受的残余暴露面里。仍然接受的限制：
 
-- **包缓存是冷的。** npm 与 pnpm store 落在 per-run HOME 下，每次运行都要从
-  registry 安装；yamllint 每次重新 pip 到 `$HOME/.local`，corepack shim 每次
-  重新下载。实测冷装约 900 s，90/45 的时限本来就是按这个口径定的。只有
-  linter 归档缓存保持共享温热：`XDG_CACHE_HOME` 指向
-  `${RUNNER_TOOL_CACHE}/qwen-ci-cache`，lint.js 在每次缓存命中时、解压之前
-  对归档做 SHA-256 校验，被篡改的条目会被拒绝并重新拉取。`COREPACK_HOME`
-  留在 run 唯一的 HOME 内：corepack 缓存命中时不会重新校验已解压的条目
-  （在 0.34.6 与 0.36.0 上复现——记录的 hash 不变，被篡改的 pnpm 入口照样
-  执行），共享 corepack home 是一条跨 job 投毒通道。
+- **npm 缓存是冷的；pnpm store 只在受信任 fleet 上温热共享。** `NPM_CONFIG_CACHE`
+  落在 per-run HOME 下、随 job 消亡，yamllint 每次重新 pip 到 `$HOME/.local`，
+  corepack shim 每次重新下载。`XDG_CACHE_HOME` 指向
+  `${RUNNER_TOOL_CACHE}/qwen-ci-cache`，lint.js 在每次缓存命中时、解压之前对归档
+  做 SHA-256 校验，被篡改的条目会被拒绝并重新拉取——正是这个「每次命中都校验
+  内容」的性质使它可以共享。
+  `XDG_DATA_HOME` 指向 `${RUNNER_TOOL_CACHE}/qwen-ci-data`（pnpm 由此解析 store），
+  **但仅当该 job 落在受信任的持久 fleet 上**。pnpm 的 store 校验是损坏检测，
+  不是信任边界：只要 size 与 mtime 仍与索引一致，`verifyFile()` 就跳过摘要读取；
+  pnpm 自己的源码写明该校验「不能让不可信用户可写的 store 变安全」。在 11.24.0
+  上每臂用全新 store 实测：等长写入并恢复 mtime 后，原地 `r+b`、truncate、原子
+  替换三种写法**都**让投毒字节落地（`reused 1, downloaded 0`），只有让 mtime
+  保持被 bump 的状态才会触发重新拉取。所以门控依据是信任而非校验：
+  `SHARED_STORE_ELIGIBLE` 要求 `runner.environment == 'self-hosted'`，并排除
+  `pick_runner` 分配给不可信 fork 的 `ephemeral` 池。那些 fork 保持 per-run 数据
+  目录，仍付冷装成本。受信任 fleet 上 `verifyStoreIntegrity` 也必须保持默认值
+  （它是那里的损坏防护网），且两个配置面都被钉住——pnpm 除 `.npmrc` 外也会从
+  `pnpm-workspace.yaml` 读该设置。
+  2026-11-27 之前 store 在每次运行都落在 per-run HOME 下，因此每次都要重新拉取
+  全部约 2300 个包。该成本按约 900 s 被接受，但分布有长尾：当天五条绿色 lint 在
+  安装步花了 6m32s–24m35s，而 PR #18543 的 run（job 140553347054，
+  `ecs-qwen-hz7-14`）在还差两个包时撞上该步 30 分钟上限，其后 20 个 lint 步骤
+  全部跳过。registry 出口是另一个因子——同一个 12 MB tarball，杭州直连实测
+  86 KB/s，经 fleet 的 HK 出口 19 MB/s。`COREPACK_HOME` 无条件留在 run 唯一的
+  HOME 内：corepack 缓存命中时不会重新校验已解压的条目（在 0.34.6 与 0.36.0 上
+  复现——记录的 hash 不变，被篡改的 pnpm 入口照样执行），共享 corepack home
+  是一条跨 job 投毒通道。
+- **共享 store 既没有属主恢复、也没有自己的磁盘闸。** 每个
+  `Restore workspace ownership` 步骤只 chown `$GITHUB_WORKSPACE`，
+  `check-disk-floor.sh` 也只拿到 workspace 与 `RUNNER_TEMP`，两者都不覆盖
+  `${RUNNER_TOOL_CACHE}/qwen-ci-data`。今天只有同 UID 的非容器化 job 会写它，
+  因此不预期出现 root 所有的残留；若将来有容器化车道共享该路径，就需要
+  workspace 已有的那套属主恢复，且该目录的增长需要自己的下限闸。这两条今天
+  都未被强制。
 - **`$GITHUB_WORKSPACE` 仍然共享。** 检出前的 "Restore workspace ownership" 与
   检出本身只能减轻、不能消除同机并行 job 留下的残留。该车道唯一的凭证是只读
   `GITHUB_TOKEN`（`contents: read`、`pull-requests: read`），绑定在 freshness、
@@ -121,8 +152,10 @@ smoke 60、no-AK 集成 30。
 ## 测试
 
 `.github/scripts/ci-runner-routing.test.mjs`（在 `HELPER_TESTS` 里，因此门禁
-每个 full-profile PR）钉住：门禁 job 在全 association 矩阵下无条件走 ECS
-（kill-switch 可退回、association 子句不得回潮）、生产者绑定
+每个 full-profile PR）钉住：门禁 job 在全 association 矩阵下的 association
+门禁默认路由（可信/同仓库 → ECS、不可信 fork → hosted、kill-switch 对所有人
+退回，且 merge_group/push/dispatch 进 ECS）、把 association 与 head-repo 子句
+作为防漂移保留的结构断言（不是围栏——fork 会改写整份 YAML）、生产者绑定
 （`classify_pr.outputs.lint_runner` ← `pick_runner`）、真实选择器 shell 在全
 association/事件矩阵下的行为、`lint_runner` 的两车道范围（超集必须更新本记录）、
 首步发布的 run 唯一 HOME（先清后建、共享可校验缓存）、清理步骤先于收集器、
@@ -145,9 +178,30 @@ lane。
   并注明 association 门禁对改写 workflow YAML 的 fork 不可强制，因此接受范围
   覆盖上述残余暴露面，而不是一道单车道围栏。欢迎第二位维护者确认（triage
   stage-3 正是因此暂缓）；这是人的决定，不是代码变更。
+- 2026-11-14 修订（PR #17178）：classify_pr 门禁回到 association 门禁的默认
+  路由（不可信 fork → hosted），反转上面同日扩到无条件 ECS 的决定。门禁足够
+  轻量，hosted 排队延迟可以接受，且默认路由应把未评审 fork 挡在持久池外。
+  风险接受不变——池已在 lint 与 no-AK 车道执行 fork 代码，association 门禁
+  仍是吞吐策略、不是可强制边界（fork 会改写 workflow YAML）。dispatch 路由
+  不再无条件：门禁改为跟随 `linux_runner` 输入，`hosted` 落 `ubuntu-latest`，
+  `self-hosted` 与 `self-hosted-arm64` 落 `ecs-qwen`。这是本次修订记录的行为
+  变化——无条件门禁不带任何 event 子句、一律送 `ecs-qwen`——所以移动的不只是
+  不可信 fork 的 classify，dispatch 这条边也一并变了（ECS → hosted）。
+  `self-hosted-arm64` 不是干净的跟随，本次修订要记下这个例外，而不是暗示该输入
+  端到端被遵守：门禁没有 arm64 label，它请求的是
+  `["self-hosted","linux","x64","ecs-qwen"]`，而 `pick_runner` 把下游车道送到
+  `["self-hosted","linux","arm64"]`。若当时没有 x64 runner 在线，`classify_pr`
+  ——所有 Linux 车道的 `needs` 前置——会无界排队，因为 `timeout-minutes` 只在
+  runner 接单后才起算；那个 10 分钟上限兜的是「已开跑但挂住」的 classify，不是
+  这段排队。维护者最可能正是在 x64 机队被排空时去调度 `self-hosted-arm64`，而那
+  恰恰是没人会接走门禁的时候。
 - PR 自身 CI 在池上验证路由管道（作者是 collaborator，该运行中两个输出一致）；
   fork 分歧由路由回归矩阵证明，其首个线上端到端见证是下一个不可信 fork PR。
-- 另行拥有的后续：per-run HOME 下恢复热共享 pnpm store（no-AK 车道现在与 lint 同付已接受的冷装成本）（如通过 `XDG_DATA_HOME`
-  指向内容可校验的共享路径），找回约 900 s 的冷装成本；磁盘下限门覆盖 `/tmp`
-  inode；fleet metadata 加固；`test` 车道固定 `qwen-ci-home` 的持久化问题；
-  若重新审视已接受的残余暴露面，则建隔离 fleet。
+- 另行拥有的后续：磁盘下限门覆盖 `/tmp` inode；fleet metadata 加固；`test`
+  车道固定 `qwen-ci-home` 的持久化问题；若重新审视已接受的残余暴露面，则建
+  隔离 fleet。2026-11-27 已落地：两条 ungated 车道的热共享 pnpm store，通过
+  `XDG_DATA_HOME` 并置于信任门控之后（见上文隔离边界）。该修订的初稿曾用
+  pnpm 的「每次命中校验」为共享作论证，评审证伪了它——size 与 mtime 一致时
+  校验被跳过，保持元数据的写入会被采纳——门控依据因此从「内容可校验的路径」
+  改为「只有受信任的写入方」。仍有两条性质未被强制、已作为残余风险记在上文：
+  store 目录在 registration 上增长而没有自己的磁盘下限闸，也没有属主恢复覆盖它。
