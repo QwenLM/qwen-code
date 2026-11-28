@@ -120,7 +120,7 @@ describe('qwen pr review runner routing', () => {
   it('admits only a positively identified trusted head to the write-capable review job', () => {
     const review = parse(workflow).jobs['review-pr'];
     expect(review.if).toMatch(
-      /needs\.review-trust\.result == 'success' &&\s+needs\.review-trust\.outputs\.untrusted == 'false' &&\s+needs\.review-trust\.outputs\.head_sha != '' &&/,
+      /needs\.review-trust\.result == 'success' &&\s+needs\.review-trust\.outputs\.untrusted != '' &&\s+needs\.review-trust\.outputs\.head_sha != '' &&/,
     );
     expect(review.permissions).toEqual({
       contents: 'read',
@@ -176,17 +176,65 @@ describe('qwen pr review runner routing', () => {
     expect(review.run).toContain(
       '"${QWEN_CI_REAL_RM:-rm}" -f .qwen/tmp/qwen-skill-args-review.txt',
     );
-    expect(review.run).toContain('UPSTREAM_OPENAI_API_KEY="$OPENAI_API_KEY"');
-    expect(review.run).toContain('UPSTREAM_API_KEY="$UPSTREAM_OPENAI_API_KEY"');
-    expect(review.run).toContain('OPENAI_API_KEY="${PROXY_TOKEN}"');
-    expect(review.run).toContain('env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN');
-    const invocation = review.run.slice(
-      review.run.indexOf('timeout --kill-after=10s "${attempt_timeout}s"'),
+    expect(review.env.OPENAI_API_KEY).toBe(
+      "${{ needs.review-trust.outputs.untrusted != 'true' && secrets.REVIEW_OPENAI_API_KEY || '' }}",
     );
-    expect(invocation).not.toContain('UPSTREAM_API_KEY');
-    expect(invocation).toContain('-u SECURITY_GITHUB_TOKEN -u GITHUB_TOKEN');
-    expect(review.run).toContain('/usr/bin/docker run --detach');
+    expect(review.env.REVIEW_API_KEY_CANARY).toContain(
+      "needs.review-trust.outputs.untrusted != 'true'",
+    );
+    expect(review.env.GITHUB_TOKEN).toContain(
+      "!= 'true' && secrets.CI_BOT_PAT || ''",
+    );
+    expect(String(parse(workflow).jobs['review-pr'].container)).toContain(
+      '--init --user root',
+    );
+    expect(review.run).toContain('UPSTREAM_API_KEY_FILE="$proxy_key"');
+    expect(review.run).toContain('AGENT_LAUNCH=(runuser -u node -- env -i');
+    const agentLaunch = runReviewStep().slice(
+      runReviewStep().indexOf('AGENT_ENV=('),
+      runReviewStep().indexOf(
+        'set +e',
+        runReviewStep().indexOf('AGENT_LAUNCH='),
+      ),
+    );
+    for (const secret of [
+      'OPENAI_PROXY_CONTAINER',
+      'OPENAI_PROXY_PORT',
+      'PROXY_TOKEN',
+      'FORK_OPENAI_API_KEY',
+      'UPSTREAM_API_KEY',
+      'SECURITY_GITHUB_TOKEN',
+      'GITHUB_TOKEN',
+      'GITHUB_EVENT_PATH',
+      'ACTIONS_ID_TOKEN_REQUEST_TOKEN',
+      'ACTIONS_RUNTIME_TOKEN',
+    ]) {
+      expect(agentLaunch).not.toContain(secret);
+    }
+    expect(review.run).toContain('OPENAI_API_KEY="${PROXY_TOKEN}"');
+    expect(review.run).toContain('-u ACTIONS_ID_TOKEN_REQUEST_TOKEN');
+    expect(review.run).not.toContain('UPSTREAM_API_KEY="$');
+    expect(review.run).not.toContain('/usr/bin/docker run --detach');
+    expect(review.run).not.toContain('docker inspect');
+    expect(review.run).toContain('-u SECURITY_GITHUB_TOKEN -u GITHUB_TOKEN');
     expect(review.run).toContain('if [ "$FORK_LIFECYCLE_REVIEW" = \'true\' ]');
+
+    const guarded = parse(workflow).jobs['review-pr'].steps.filter((step) =>
+      [
+        'Report docs-only medium outcome',
+        'Supersede stale docs-only badge',
+        'Post fallback comment on failure',
+      ].includes(step.name),
+    );
+    expect(guarded).toHaveLength(3);
+    for (const step of guarded) {
+      expect(step.if).toContain(
+        "needs.review-trust.outputs.untrusted != 'true'",
+      );
+    }
+    expect(review.run).toContain(
+      '[ "$CURRENT_HEAD_SHA" != "$TRUSTED_HEAD_SHA" ]',
+    );
 
     const publisher = parse(workflow).jobs['publish-review'];
     expect(publisher.uses).toBeUndefined();
@@ -215,19 +263,6 @@ describe('qwen pr review runner routing', () => {
     );
     expect(publish.env.GH_TOKEN).toBe('${{ secrets.CI_BOT_PAT }}');
     expect(publish.run).toContain('review-publish-comment.mjs');
-    for (const step of parse(workflow).jobs['review-pr'].steps) {
-      if (
-        [
-          'Report docs-only medium outcome',
-          'Supersede stale docs-only badge',
-          'Post fallback comment on failure',
-        ].includes(step.name)
-      ) {
-        expect(step.if).toContain(
-          "needs.review-trust.outputs.untrusted != 'true'",
-        );
-      }
-    }
   });
 
   it('routes the command gate to ECS for payload-less events, keeps the fork guard', () => {
@@ -732,6 +767,7 @@ function runScenario(
           // (R28-1); the pins below re-establish the ones this replay
           // needs to point somewhere specific.
           ...neutralizedRealPins(),
+          UNTRUSTED_PR: 'false',
           // The review lane exports QWEN_CI_REAL_GH; inherited, it would
           // bypass the PATH gh stub every replay decides through. Empty
           // restores the stub — the production :-gh fallback treats it as
@@ -5044,7 +5080,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     // so none of the review-pr outputs the trusted publish-review relay
     // consumes may reintroduce a head comparison into THIS job.
     expect(doc.jobs['review-pr'].outputs).not.toBeUndefined();
-    expect(doc.jobs['review-pr'].outputs.reviewed_head_sha).toBeUndefined();
+    expect(Object.keys(step.env ?? {})).not.toContain('EXPECTED_HEAD_SHA');
     expect(step.env.REVIEWED_HEAD_SHA).toBeUndefined();
     expect(step.run).not.toContain('REVIEWED_HEAD_SHA');
     expect(inJobStep.run).not.toContain('commit_id ==');
@@ -7816,7 +7852,7 @@ describe('review model canary routing', () => {
       '${{ vars.QWEN_PR_REVIEW_BASE_URL_CANARY }}',
     );
     expect(step.env.REVIEW_API_KEY_CANARY).toBe(
-      '${{ secrets.REVIEW_OPENAI_API_KEY_CANARY }}',
+      "${{ needs.review-trust.outputs.untrusted != 'true' && secrets.REVIEW_OPENAI_API_KEY_CANARY || '' }}",
     );
     // The runner class is wired from the runner context (not pinned), so the
     // endpoint override can gate itself to the self-hosted pool.

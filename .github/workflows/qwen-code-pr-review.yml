@@ -523,7 +523,7 @@ jobs:
     if: |-
       !cancelled() &&
       needs.review-trust.result == 'success' &&
-      needs.review-trust.outputs.untrusted == 'false' &&
+      needs.review-trust.outputs.untrusted != '' &&
       needs.review-trust.outputs.head_sha != '' &&
       ((github.event_name == 'workflow_dispatch' &&
        (github.event.inputs.command == 'review' || github.event.inputs.command == '')) ||
@@ -570,6 +570,10 @@ jobs:
     # Trust is resolved before the head repo is known for comment/dispatch
     # events. Every fork lane uses a disposable VM, not only lifecycle events.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && needs.review-trust.outputs.untrusted != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    container: >-
+      ${{ needs.review-trust.outputs.untrusted == 'true' &&
+          fromJSON('{"image":"node:22-bookworm","options":"--init --user root"}') ||
+          null }}
     permissions:
       contents: 'read'
       pull-requests: 'write'
@@ -653,6 +657,12 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      - name: 'Install isolated review tools'
+        if: "needs.review-trust.outputs.untrusted == 'true'"
+        run: |-
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git gh jq util-linux
 
       # Self-hosted runners reuse $HOME, /tmp and the workspace, so a prior run
       # can bleed into this one: its agent session/memory (under QWEN_HOME),
@@ -1288,7 +1298,8 @@ jobs:
         env:
           UNTRUSTED_PR: '${{ needs.review-trust.outputs.untrusted }}'
           SECURITY_GITHUB_TOKEN: "${{ needs.review-trust.outputs.untrusted != 'true' && secrets.CI_BOT_PAT || '' }}"
-          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_API_KEY: "${{ needs.review-trust.outputs.untrusted != 'true' && secrets.REVIEW_OPENAI_API_KEY || '' }}"
+          FORK_OPENAI_API_KEY: "${{ needs.review-trust.outputs.untrusted == 'true' && secrets.REVIEW_OPENAI_API_KEY || '' }}"
           GITHUB_TOKEN: "${{ needs.review-trust.outputs.untrusted != 'true' && secrets.CI_BOT_PAT || '' }}"
           JOB_GH_TOKEN: '${{ github.token }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
@@ -1310,7 +1321,8 @@ jobs:
           # own key would send the default key to another provider, so the
           # override below refuses that shape and keeps the default cohort.
           REVIEW_BASE_URL_CANARY: '${{ vars.QWEN_PR_REVIEW_BASE_URL_CANARY }}'
-          REVIEW_API_KEY_CANARY: '${{ secrets.REVIEW_OPENAI_API_KEY_CANARY }}'
+          REVIEW_API_KEY_CANARY: "${{ needs.review-trust.outputs.untrusted != 'true' && secrets.REVIEW_OPENAI_API_KEY_CANARY || '' }}"
+          FORK_OPENAI_API_KEY_CANARY: "${{ needs.review-trust.outputs.untrusted == 'true' && secrets.REVIEW_OPENAI_API_KEY_CANARY || '' }}"
           # Runner class gates the canary endpoint override below: the canary
           # gateway is reachable only from the self-hosted pool, so a
           # GitHub-hosted runner keeps the default cohort. Passed as env (not
@@ -1458,6 +1470,7 @@ jobs:
           LOG_PATH="${RUNNER_TEMP:-/tmp}/qwen-review-pr-${PR_NUMBER}.jsonl"
           # Set by configure_qwen_network once the wrapper dir exists.
           PROXY_BIN=""
+          OPENAI_PROXY_PID=""
           # WATCHER_PID/SALVAGE_DIR are set once the supersede watcher exists.
           # The trap must reap the watcher on EVERY exit path (fail() included):
           # a background watcher outliving this step on the reused self-hosted
@@ -1472,9 +1485,9 @@ jobs:
           # and the wait spans a ceding watcher's TERM-immune wind-down
           # (<= 15s) so the group KILL it owes lands before the step exits
           # (R30-1).
-          trap '[ -z "${OPENAI_PROXY_CONTAINER:-}" ] || /usr/bin/docker rm -f "$OPENAI_PROXY_CONTAINER" >/dev/null 2>&1 || true; [ -z "${WATCHER_PID:-}" ] || { kill "${WATCHER_PID}" 2>/dev/null || true; wait "${WATCHER_PID}" 2>/dev/null || true; }; "${QWEN_CI_REAL_RM:-rm}" -rf "$LOG_PATH" 2>/dev/null || true; [ -z "$PROXY_BIN" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "$PROXY_BIN" 2>/dev/null || true; [ -z "${SALVAGE_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}" 2>/dev/null || true; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SUPERSEDE_KILL_DIR}" 2>/dev/null || true' EXIT
+          trap '[ -z "${OPENAI_PROXY_PID:-}" ] || { kill "$OPENAI_PROXY_PID" 2>/dev/null || true; wait "$OPENAI_PROXY_PID" 2>/dev/null || true; }; [ -z "${WATCHER_PID:-}" ] || { kill "${WATCHER_PID}" 2>/dev/null || true; wait "${WATCHER_PID}" 2>/dev/null || true; }; "${QWEN_CI_REAL_RM:-rm}" -rf "$LOG_PATH" 2>/dev/null || true; [ -z "$PROXY_BIN" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "$PROXY_BIN" 2>/dev/null || true; [ -z "${SALVAGE_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}" 2>/dev/null || true; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SUPERSEDE_KILL_DIR}" 2>/dev/null || true' EXIT
 
-          if [ -z "${OPENAI_API_KEY:-}" ]; then
+          if [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${FORK_OPENAI_API_KEY:-}" ]; then
             fail "REVIEW_OPENAI_API_KEY secret is required for Qwen PR review."
           fi
           if [ -z "${OPENAI_BASE_URL:-}" ]; then
@@ -1496,7 +1509,10 @@ jobs:
           # fail with Bad credentials (R1-12).
           if [ "$UNTRUSTED_PR" = 'true' ]; then
             GH_TOKEN="$JOB_GH_TOKEN"
+            OPENAI_API_KEY="$FORK_OPENAI_API_KEY"
+            REVIEW_API_KEY_CANARY="$FORK_OPENAI_API_KEY_CANARY"
           fi
+          unset FORK_OPENAI_API_KEY FORK_OPENAI_API_KEY_CANARY
           export GH_TOKEN
           readonly SECURITY_GITHUB_TOKEN GH_TOKEN
 
@@ -1771,6 +1787,16 @@ jobs:
             printf 'hosts:\n  github.com:\n    oauth_token: %s\n' \
               "$GH_TOKEN" > "$GH_CONFIG_DIR/hosts.yml"
             chmod 600 "$GH_CONFIG_DIR/hosts.yml"
+            mkdir -p "$QWEN_HOME"
+            chown -R node:node "$GITHUB_WORKSPACE" "$QWEN_HOME" "$PROXY_BIN" "$TMPDIR"
+            chown node:node "$GITHUB_OUTPUT" "$GITHUB_ENV" "$GITHUB_PATH" "$GITHUB_STEP_SUMMARY"
+            runuser -u node -- git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            runuser -u node -- mkdir -p /home/node/.local/bin /home/node/.cache/qwen-tools
+            if [ -r /etc/profile.d/github_path.sh ]; then
+              export QWEN_REVIEW_AGENT_PATH="$(printf '%s\n' "$PATH"; cat /etc/profile.d/github_path.sh):/usr/local/bin:/usr/bin:/bin"
+            else
+              export QWEN_REVIEW_AGENT_PATH="$PATH:/usr/local/bin:/usr/bin:/bin"
+            fi
           fi
 
           case "$TIMEOUT_MINUTES" in
@@ -2111,33 +2137,32 @@ jobs:
           export OPENAI_MODEL OPENAI_BASE_URL OPENAI_API_KEY
           REVIEW_ENDPOINT_HOST="$(openai_base_host)"
           if [ "$FORK_LIFECYCLE_REVIEW" = 'true' ]; then
-            # Keep the real model key outside the PR agent's PID namespace;
-            # same-uid children can otherwise read /proc/<parent>/environ.
-            # Only network-publish it on the disposable hosted VM.
-            UPSTREAM_OPENAI_API_KEY="$OPENAI_API_KEY"
+            # Root owns the key file and proxy; the agent runs as node.
+            proxy_key="$(mktemp /tmp/qwen-review-key.XXXXXX)"
+            chmod 600 "$proxy_key"
+            printf '%s' "$OPENAI_API_KEY" > "$proxy_key"
             unset OPENAI_API_KEY
             PROXY_TOKEN="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-            export PROXY_TOKEN UPSTREAM_OPENAI_API_KEY
-            OPENAI_PROXY_CONTAINER="qwen-review-openai-${GITHUB_RUN_ID}-${RANDOM}"
-            export OPENAI_PROXY_CONTAINER
-            /usr/bin/docker run --detach --rm --name "$OPENAI_PROXY_CONTAINER" \
-              --publish "127.0.0.1::8080" \
-              --env PROXY_TOKEN --env UPSTREAM_API_KEY="$UPSTREAM_OPENAI_API_KEY" \
-              --env HTTPS_PROXY="${QWEN_CI_HTTPS_PROXY:-${QWEN_CI_https_proxy:-}}" \
-              --env HTTP_PROXY="${QWEN_CI_HTTP_PROXY:-${QWEN_CI_http_proxy:-}}" \
-              --env NO_PROXY=127.0.0.1,localhost --env no_proxy=127.0.0.1,localhost \
-              --env UPSTREAM_BASE_URL="$OPENAI_BASE_URL" \
-              --volume "${GITHUB_WORKSPACE}/.github/scripts/ci/review-openai-proxy.cjs:/proxy.cjs:ro" \
-              --entrypoint node node:22-bookworm-slim \
-              /proxy.cjs >/dev/null
-            OPENAI_PROXY_PORT="$(/usr/bin/docker port "$OPENAI_PROXY_CONTAINER" 8080/tcp | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')"
-            [ "$OPENAI_PROXY_PORT" ] || fail 'The model proxy did not publish a loopback port.'
+            proxy_port_file="$(mktemp /tmp/qwen-review-port.XXXXXX)"
+            chmod 600 "$proxy_port_file"
+            PROXY_TOKEN="$PROXY_TOKEN" UPSTREAM_API_KEY_FILE="$proxy_key" \
+              UPSTREAM_BASE_URL="$OPENAI_BASE_URL" OPENAI_PROXY_PORT=0 \
+              OPENAI_PROXY_PORT_FILE="$proxy_port_file" \
+              HTTPS_PROXY="${QWEN_CI_HTTPS_PROXY:-${QWEN_CI_https_proxy:-}}" \
+              HTTP_PROXY="${QWEN_CI_HTTP_PROXY:-${QWEN_CI_http_proxy:-}}" \
+              NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost \
+              node .github/scripts/ci/review-openai-proxy.cjs &
+            OPENAI_PROXY_PID="$!"
+            for _ in {1..20}; do [ -s "$proxy_port_file" ] && break; sleep 0.5; done
+            OPENAI_PROXY_PORT="$(cat "$proxy_port_file" 2>/dev/null || true)"
+            [ "${OPENAI_PROXY_PORT:-}" ] || fail 'The model proxy did not publish a loopback port.'
             OPENAI_PROXY_HEALTH="$(curl --retry 10 --retry-connrefused --retry-delay 1 --noproxy '*' -fsS "http://127.0.0.1:${OPENAI_PROXY_PORT}/__health")"
             [ "$OPENAI_PROXY_HEALTH" = 'ok' ] || fail 'The model proxy health check failed.'
             OPENAI_BASE_URL="http://127.0.0.1:${OPENAI_PROXY_PORT}"
             OPENAI_API_KEY="${PROXY_TOKEN}"
-            unset UPSTREAM_OPENAI_API_KEY REVIEW_API_KEY_CANARY REVIEW_BASE_URL_CANARY
+            unset REVIEW_API_KEY_CANARY REVIEW_BASE_URL_CANARY
             export OPENAI_API_KEY OPENAI_BASE_URL
+            trap '[ -n "${proxy_key:-}" ] && rm -f "$proxy_key"; [ -z "${OPENAI_PROXY_PID:-}" ] || { kill "$OPENAI_PROXY_PID" 2>/dev/null || true; wait "$OPENAI_PROXY_PID" 2>/dev/null || true; }; [ -z "${WATCHER_PID:-}" ] || { kill "${WATCHER_PID}" 2>/dev/null || true; wait "${WATCHER_PID}" 2>/dev/null || true; }; [ -z "$PROXY_BIN" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "$PROXY_BIN" 2>/dev/null || true; [ -z "${SALVAGE_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}" 2>/dev/null || true; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SUPERSEDE_KILL_DIR}" 2>/dev/null || true' EXIT
           fi
           # The run's own record of which cohort served this review: the model
           # is not carried anywhere else a later comparison could read it (the
@@ -2146,8 +2171,7 @@ jobs:
           # one — the raw percent would certify a split the bucket test
           # clamped away.
           echo "::notice title=Review model::${OPENAI_MODEL:-<CLI default>} (PR #${PR_NUMBER:-?}, canary ${CANARY_PERCENT_EFFECTIVE}%, bucket ${REVIEW_BUCKET}/${REVIEW_BUCKET_COUNT}, cohort ${REVIEW_COHORT}, endpoint ${REVIEW_ENDPOINT_HOST})"
-          # Trust isolation is the disposable hosted VM. Containers separate
-          # PID namespaces, not same-host user permissions or privileged Docker.
+          # The agent never runs as root in the credential-bearing fork job.
 
           MODEL_ARGS=()
           if [ -n "${OPENAI_MODEL:-}" ]; then
@@ -2289,6 +2313,47 @@ jobs:
               QWEN_REVIEW_DEADLINE_RESERVE_SECONDS=4800
             fi
             export QWEN_REVIEW_DEADLINE_RESERVE_SECONDS
+            AGENT_LAUNCH=(env
+              -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL
+              -u ACTIONS_RUNTIME_TOKEN -u ACTIONS_CACHE_URL -u ACTIONS_RUNTIME_URL
+              -u REVIEW_API_KEY_CANARY -u REVIEW_BASE_URL_CANARY
+              -u SECURITY_GITHUB_TOKEN -u GITHUB_TOKEN
+            )
+            if [ "$UNTRUSTED_PR" = 'true' ]; then
+              AGENT_ENV=(
+                "HOME=/home/node" "USER=node" "PATH=$QWEN_REVIEW_AGENT_PATH" "TMPDIR=$TMPDIR"
+                "GH_TOKEN=$GH_TOKEN"
+                "PROXY_BIN=$PROXY_BIN" "PWD=$GITHUB_WORKSPACE"
+                "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+                "GITHUB_SERVER_URL=$GITHUB_SERVER_URL" "GITHUB_API_URL=$GITHUB_API_URL"
+                "GITHUB_ACTIONS=true" "GITHUB_RUN_ID=$GITHUB_RUN_ID" "CI=true"
+                "GH_HOST=${GH_HOST:-github.com}" "GH_CONFIG_DIR=$GH_CONFIG_DIR"
+                "OPENAI_API_KEY=$OPENAI_API_KEY" "OPENAI_BASE_URL=$OPENAI_BASE_URL"
+                "OPENAI_MODEL=${OPENAI_MODEL:-}" "QWEN_HOME=$QWEN_HOME"
+                "NO_PROXY=${NO_PROXY:-}" "no_proxy=${no_proxy:-}"
+                "QWEN_CI_HTTPS_PROXY=${QWEN_CI_HTTPS_PROXY:-}" "QWEN_CI_https_proxy=${QWEN_CI_https_proxy:-}"
+                "QWEN_CI_HTTP_PROXY=${QWEN_CI_HTTP_PROXY:-}" "QWEN_CI_http_proxy=${QWEN_CI_http_proxy:-}"
+                "QWEN_CI_REAL_DATE=$QWEN_CI_REAL_DATE" "QWEN_CI_REAL_GH=${QWEN_CI_REAL_GH:-}"
+                "QWEN_CI_REAL_GIT=${QWEN_CI_REAL_GIT:-}" "QWEN_CI_REAL_RM=$QWEN_CI_REAL_RM"
+                "QWEN_CI_REAL_TEE=$QWEN_CI_REAL_TEE" "QWEN_CI_REAL_SLEEP=$QWEN_CI_REAL_SLEEP"
+                "QWEN_CI_REAL_TIMEOUT=$QWEN_CI_REAL_TIMEOUT" "QWEN_CI_REAL_HEAD=$QWEN_CI_REAL_HEAD"
+                "QWEN_CI_REAL_NODE=$QWEN_CI_REAL_NODE" "QWEN_CI_REAL_MKTEMP=$QWEN_CI_REAL_MKTEMP"
+                "QWEN_CI_REAL_MV=$QWEN_CI_REAL_MV"
+                "QWEN_SANDBOX_IMAGE=${QWEN_SANDBOX_IMAGE:-}" "QWEN_REVIEW_ASSETS_REPO=${QWEN_REVIEW_ASSETS_REPO:-}"
+                "QWEN_REVIEW_PREBUILD=${QWEN_REVIEW_PREBUILD:-}" "QWEN_REVIEW_SANDBOX=${QWEN_REVIEW_SANDBOX:-}"
+                "QWEN_CODE_API_TIMEOUT_MS=${QWEN_CODE_API_TIMEOUT_MS:-}"
+                "QWEN_STREAM_IDLE_TIMEOUT_MS=${QWEN_STREAM_IDLE_TIMEOUT_MS:-}"
+                "QWEN_STREAM_MAX_LIFETIME_MS=${QWEN_STREAM_MAX_LIFETIME_MS:-}"
+                "QWEN_CI_REVIEW_REPO=$QWEN_CI_REVIEW_REPO"
+                "QWEN_CI_REVIEW_PR_NUMBER=$QWEN_CI_REVIEW_PR_NUMBER"
+                "QWEN_CI_REVIEW_EXPECTED_HEAD_SHA=$QWEN_CI_REVIEW_EXPECTED_HEAD_SHA"
+                "QWEN_CI_REVIEW_SALVAGE_OK_FILE=$QWEN_CI_REVIEW_SALVAGE_OK_FILE"
+                "QWEN_REVIEW_DEADLINE_EPOCH=$QWEN_REVIEW_DEADLINE_EPOCH"
+                "QWEN_REVIEW_DEADLINE_RESERVE_SECONDS=$QWEN_REVIEW_DEADLINE_RESERVE_SECONDS"
+              )
+              AGENT_LAUNCH=(runuser -u node -- env -i "${AGENT_ENV[@]}"
+                /bin/bash --noprofile --norc -c 'exec "$@"' agent-launch)
+            fi
             set +e
             # The agent streams its ENTIRE transcript to stdout, and the runner
             # scans every line for workflow commands. A tool result that quotes
@@ -2326,10 +2391,7 @@ jobs:
             GITHUB_OUTPUT="$PROXY_BIN/decoy.github-output" \
             GITHUB_STEP_SUMMARY="$PROXY_BIN/decoy.github-step-summary" \
             timeout --kill-after=10s "${attempt_timeout}s" \
-              env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL \
-              -u ACTIONS_RUNTIME_TOKEN -u ACTIONS_CACHE_URL -u ACTIONS_RUNTIME_URL \
-              -u REVIEW_API_KEY_CANARY -u REVIEW_BASE_URL_CANARY \
-              -u SECURITY_GITHUB_TOKEN -u GITHUB_TOKEN \
+              "${AGENT_LAUNCH[@]}" \
               qwen \
               --auth-type openai \
               --approval-mode yolo \

@@ -16,7 +16,7 @@ const failSafe = (reason) => {
     process.env.GITHUB_OUTPUT,
     `untrusted=true\npr_number=\nhead_sha=\n`,
   );
-  console.log(`review-pr-trust: no review requested (${reason}); untrusted.`);
+  console.log(`review-pr-trust: ${reason}; fail-safe, not a trusted review.`);
   process.exit(0);
 };
 const prNumber =
@@ -31,13 +31,19 @@ const prNumber =
 if (!repository || !Number.isInteger(prNumber) || prNumber <= 0) {
   failSafe('no PR number in this event');
 }
-const pr =
-  event.pull_request ||
-  JSON.parse(
-    execFileSync('gh', ['api', `repos/${repository}/pulls/${prNumber}`], {
-      encoding: 'utf8',
-    }),
-  );
+let pr;
+if (event.pull_request) pr = event.pull_request;
+else {
+  try {
+    pr = JSON.parse(
+      execFileSync('gh', ['api', `repos/${repository}/pulls/${prNumber}`], {
+        encoding: 'utf8',
+      }),
+    );
+  } catch {
+    failSafe('PR lookup failed');
+  }
+}
 const untrusted =
   pr.head?.repo?.full_name?.toLowerCase() !== repository.toLowerCase();
 if (

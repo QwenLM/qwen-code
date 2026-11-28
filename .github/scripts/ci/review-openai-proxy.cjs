@@ -1,18 +1,23 @@
 const http = require('node:http');
 const { Readable } = require('node:stream');
 const { timingSafeEqual } = require('node:crypto');
+const fs = require('node:fs');
 
 const base = new URL(process.env.UPSTREAM_BASE_URL);
 const basePath = base.pathname.replace(/\/+$/, '');
 const token = process.env.PROXY_TOKEN;
-const upstreamKey = process.env.UPSTREAM_API_KEY;
+const upstreamKey = process.env.UPSTREAM_API_KEY_FILE
+  ? fs.readFileSync(process.env.UPSTREAM_API_KEY_FILE, 'utf8').trim()
+  : process.env.UPSTREAM_API_KEY;
+const portFile = process.env.OPENAI_PROXY_PORT_FILE;
 if (!token || !upstreamKey) {
   console.error(
-    'review-openai-proxy: PROXY_TOKEN and UPSTREAM_API_KEY are required',
+    'review-openai-proxy: PROXY_TOKEN and an upstream key are required',
   );
   process.exit(1);
 }
 const tokenBuf = Buffer.from(String(token));
+const timeoutMs = Number(process.env.OPENAI_PROXY_TIMEOUT_MS || 600_000);
 function bearerMatches(header) {
   if (typeof header !== 'string' || !header.startsWith('Bearer ')) return false;
   const presented = Buffer.from(header.slice('Bearer '.length));
@@ -64,7 +69,7 @@ const server = http.createServer(async (req, res) => {
   headers.delete('content-length');
   headers.set('authorization', `Bearer ${upstreamKey}`);
   const controller = new AbortController();
-  let timer = setTimeout(() => controller.abort(), 600_000);
+  let timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const upstream = await fetch(target, {
       method: 'POST',
@@ -95,11 +100,11 @@ const server = http.createServer(async (req, res) => {
     // Re-arm after the headers so an upstream that flushes headers then stalls
     // before the first byte still trips the budget (R1-16).
     clearTimeout(timer);
-    timer = setTimeout(() => controller.abort(), 600_000);
+    timer = setTimeout(() => controller.abort(), timeoutMs);
     const body = Readable.fromWeb(upstream.body);
     body.on('data', () => {
       clearTimeout(timer);
-      timer = setTimeout(() => controller.abort(), 600_000);
+      timer = setTimeout(() => controller.abort(), timeoutMs);
     });
     body.on('end', () => clearTimeout(timer));
     body.on('error', () => res.destroy());
@@ -114,4 +119,8 @@ const server = http.createServer(async (req, res) => {
     res.end();
   }
 });
-server.listen(8080, '0.0.0.0');
+server.listen(Number(process.env.OPENAI_PROXY_PORT ?? 8080), '0.0.0.0', () => {
+  if (portFile) {
+    fs.writeFileSync(portFile, String(server.address().port), { mode: 0o600 });
+  }
+});
