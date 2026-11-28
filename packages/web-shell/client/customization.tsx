@@ -201,6 +201,7 @@ export type WebShellChatHeaderItem =
   | 'title'
   | 'environment'
   | 'rightPanel'
+  | 'scheduledTasks'
   | 'artifacts'
   | 'tokenUsage'
   | 'contextUsage';
@@ -218,7 +219,8 @@ export type WebShellRightPanelItem =
   | 'sideTask'
   | 'terminal'
   | 'webPreview'
-  | 'trajectory';
+  | 'trajectory'
+  | 'changeOverview';
 
 export interface WebShellRightPanelOptions {
   /** Empty-state actions to show. Defaults to review and sideTask. */
@@ -230,6 +232,7 @@ export type WebShellEnvironmentPanelItem =
   | 'sources'
   | 'subagents'
   | 'backgroundTasks'
+  | 'scheduledTasks'
   /** Legacy attachment-only view in the Sources section. */
   | 'attachments'
   | 'artifacts';
@@ -267,12 +270,31 @@ export interface ChatHeaderRenderInfo {
   onOpenContextUsage?: () => void;
   /**
    * Number of session artifacts. Published together with `onOpenArtifacts`
-   * only when the artifacts section can actually be opened, so a count never
-   * appears without a way to act on it.
+   * only when the artifacts list tab can actually be opened or closed, so a
+   * count never appears without a way to act on it: either there are artifacts
+   * to reveal, or the artifacts list tab is the active right-panel tab and the
+   * entry serves as its close affordance.
    */
   artifactCount?: number;
-  /** Opens the environment panel's artifacts section, when available. */
+  /**
+   * Toggles the right panel's artifacts list tab, when available. Opening
+   * reveals the session's artifacts; clicking again closes the right panel.
+   */
   onOpenArtifacts?: () => void;
+  /**
+   * Whether the artifacts list tab is the active right-panel tab. With zero
+   * artifacts the entry renders only in that case (as the close affordance),
+   * not while unrelated right-panel tabs are open.
+   */
+  artifactsTabActive?: boolean;
+  /** Scheduled tasks belonging to this session, including paused entries. */
+  scheduledTaskCount?: number;
+  /** Scheduled tasks in this session that can still fire. */
+  scheduledTaskActiveCount?: number;
+  /** Earliest next fire time among active session tasks. */
+  scheduledTaskNextRunAt?: number | null;
+  /** Opens this session's scheduled-tasks section when the host includes it. */
+  onOpenScheduledTasks?: () => void;
   /** Opens Settings deep-linked to Local Control (Daemon category). */
   onOpenLocalControlSettings?: () => void;
 }
@@ -576,6 +598,8 @@ export interface WebShellComposerApi {
   focus?(): void;
   insertText(text: string, options?: WebShellComposerTextOptions): void;
   setText(text: string): void;
+  /** Saves the current nonblank prompt text to Input history without sending it. */
+  saveCurrentDraftToHistory(): void;
   addTags(
     tags: readonly WebShellComposerTag[],
     options?: WebShellComposerTagOptions,
@@ -764,6 +788,7 @@ export interface WebShellCustomization {
   renderUserMessageContent?: UserMessageContentRenderer;
   composerTagIcons?: WebShellComposerTagIconMap;
   composerVariant?: 'default' | 'simple';
+  composerGlowEnabled?: boolean;
   /**
    * Built-in / host @ mention providers. Split-view panes share this context
    * so they match the main composer without ChatPane prop drilling.
@@ -837,6 +862,7 @@ export interface WebShellCustomization {
    * expanded. Defaults to enabled when unset.
    */
   collapseCompletedTurns?: boolean;
+  overscan?: number;
   markdownTableMode?: MarkdownTableMode;
   markdown?: WebShellMarkdownCustomization;
   loadingPhrases?: LoadingPhrasesResolver;

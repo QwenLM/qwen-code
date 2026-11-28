@@ -8,6 +8,8 @@ import type { ReactNode } from 'react';
 import type {
   CreateSessionRequest,
   DaemonBranchSessionRequest,
+  DaemonWorktreeBranchResult,
+  DaemonWorktreeHandoffResult,
   DaemonCapabilities,
   DaemonBackgroundTurn,
   DaemonEvent,
@@ -37,8 +39,8 @@ import type {
   DaemonSessionPrInfo,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionCancelableTaskKind,
   DaemonSessionTaskRuntimeStatus,
-  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionWorkflowTasksStatus,
@@ -191,6 +193,19 @@ export interface DaemonConnectionState {
    * the previous session's artifacts leak under the new one.
    */
   restoredArtifactsSessionId?: string;
+  /**
+   * Artifact count captured from the session-list summary at click time, so
+   * the header artifact entry can show it before the load response lands.
+   * A hint only: the load-embedded snapshot and the gated fetch supersede it,
+   * and the provider clears it once authoritative data commits.
+   */
+  artifactCountHint?: number;
+  /**
+   * Session the artifactCountHint belongs to. Same keying contract as
+   * restoredArtifactsSessionId: consumers must only use the hint when this
+   * matches the current sessionId.
+   */
+  artifactCountHintSessionId?: string;
   error?: string;
   /** Latest HTTP error status kept for diagnostics; use missingSession for UI. */
   errorStatus?: number;
@@ -390,6 +405,8 @@ export type DaemonNoticeOperation =
   | 'generate_session_content'
   | 'btw_session'
   | 'branch_session'
+  | 'create_worktree_branch'
+  | 'handoff_worktree'
   | 'fork_session'
   | 'record_session'
   | 'stream'
@@ -451,6 +468,8 @@ export interface DaemonCommandInfo {
 export interface SendPromptOptions {
   /** Original text declared at the user submission boundary, before host preparation. */
   submittedPrompt?: string;
+  /** Keep host-initiated commands out of the user's cross-device input history. */
+  suppressInputHistory?: boolean;
   source?: 'mcp-app';
   optimisticUserMessage?: boolean;
   /**
@@ -470,8 +489,10 @@ export interface SendPromptOptions {
   retry?: boolean;
   /** Fired after local validation, immediately before dispatch to the daemon. */
   onAdmissionStarted?: () => void;
-  /** Revalidates the caller before every HTTP attempt, including client recovery. */
-  beforeDispatch?: (clientId: string | undefined) => void;
+  /** Caller-generated key used to deduplicate retried prompt admissions. */
+  idempotencyKey?: string;
+  /** Client-only revalidation, awaited before every HTTP attempt including recovery. */
+  beforeDispatch?: (clientId: string | undefined) => void | Promise<void>;
   /**
    * Fired once the daemon has ACCEPTED the prompt (admission), before the turn
    * runs to completion. Lets a caller act on "the prompt reached the session"
@@ -495,6 +516,8 @@ export interface PendingPromptActionOptions {
 
 export interface GetTasksActionOptions {
   silent?: boolean;
+  /** Also list the sends the daemon reports back to this session. */
+  includeSubSessions?: boolean;
 }
 
 export interface DaemonPromptImage {
@@ -591,13 +614,18 @@ export interface DaemonSessionActions {
     options?: Pick<
       SendPromptOptions,
       | 'submittedPrompt'
+      | 'suppressInputHistory'
       | 'images'
       | 'files'
       | 'inputAnnotations'
       | 'retry'
+      | 'idempotencyKey'
       | 'onAdmissionStarted'
       | 'onAdmitted'
-    >,
+    > & {
+      /** Extra guard for an operation during detached client recovery. */
+      beforeDetachedDispatch?: SendPromptOptions['beforeDispatch'];
+    },
   ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
@@ -640,8 +668,25 @@ export interface DaemonSessionActions {
     options?: {
       workspaceCwd?: string;
       sessionContext?: DaemonProductSessionContext;
+      /** Artifact count from the clicked session's list summary, shown in
+       * the header entry before the load response lands. Omit when unknown. */
+      artifactCountHint?: number;
+      /**
+       * Hydrated client returned by restoreWorktreeSession. Ownership moves
+       * to this load; the provider consumes its replay instead of loading again.
+       */
+      restoredSession?: DaemonSessionClient;
     },
   ): Promise<void>;
+  /**
+   * Restore a retained worktree into a hydrated client without binding it to
+   * this provider. Pass the result to loadSession, or detach it if navigation
+   * never takes ownership.
+   */
+  restoreWorktreeSession(
+    sessionId: string,
+    options: { workspaceCwd: string },
+  ): Promise<DaemonSessionClient>;
   /** `memory` replay is reserved for the provider's live-journal repair. */
   reloadSession(
     signal: AbortSignal,
@@ -723,6 +768,13 @@ export interface DaemonSessionActions {
     pr: Omit<DaemonSessionPrInfo, 'issues'>,
   ): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
+  /**
+   * Report a per-turn satisfied/not-satisfied mark to telemetry.
+   * Best-effort: with no live session this is a no-op, and failures are
+   * logged, never surfaced as notices — the local mark never depends on
+   * the outcome.
+   */
+  rateAssistantTurn(promptId: string, rating: 'up' | 'down'): Promise<void>;
   generateSessionContent(
     prompt: string,
     opts?: { signal?: AbortSignal },
@@ -817,7 +869,8 @@ export interface DaemonSessionActions {
   ): Promise<DaemonSessionWorkflowTasksStatus>;
   cancelTask(
     taskId: string,
-    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
+    kind: DaemonSessionCancelableTaskKind,
+    source?: 'cron' | 'wakeup',
   ): Promise<{ cancelled: boolean }>;
   controlWorkflowTask(
     taskId: string,
@@ -866,8 +919,16 @@ export interface DaemonSessionActions {
     sessionId: string;
     displayName: string;
     switchStarted: boolean;
+    /** False when an initiated switch fails to load or is aborted. */
+    switchCompleted?: Promise<boolean>;
     sourceWarnings?: string[];
   }>;
+  /** "Create branch here" on the session's detached managed worktree. */
+  createWorktreeBranch(name: string): Promise<DaemonWorktreeBranchResult>;
+  /** "Hand off" between the managed worktree and the local checkout. */
+  handoffWorktree(
+    to: 'local' | 'worktree',
+  ): Promise<DaemonWorktreeHandoffResult>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
 
@@ -890,6 +951,11 @@ export interface DaemonWorkspaceEventSignals {
   extensionsVersion: number;
   artifactsVersion: number;
   sourcesVersion?: number;
+  /**
+   * Per caller session: how many times a send it made that the daemon
+   * reports back started or settled. Re-read its sub-session tasks on change.
+   */
+  subSessionTaskVersions?: Record<string, number>;
   lastExtensionChange?: {
     status?:
       | 'installed'
@@ -933,5 +999,7 @@ export interface PendingSessionLoad {
   reject: (error: unknown) => void;
   signal?: AbortSignal;
   replaySource?: 'configured' | 'memory';
+  /** Present until the provider takes ownership of this restored client. */
+  restoredSession?: DaemonSessionClient;
   reconcilePromptActivity?: boolean;
 }

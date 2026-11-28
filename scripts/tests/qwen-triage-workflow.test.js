@@ -1321,7 +1321,7 @@ describe('qwen-triage tmux workflow', () => {
         ],
       };
 
-      const run = (reviews, head) => {
+      const run = (reviews, head, { hasBotPat = true } = {}) => {
         const dir = mkdtempSync(join(tmpdir(), 'triage-notify-'));
         try {
           const bin = join(dir, 'bin');
@@ -1335,7 +1335,7 @@ describe('qwen-triage tmux workflow', () => {
             [
               '#!/usr/bin/env bash',
               'case "$*" in',
-              `  "api user --jq .login") echo bot ;;`,
+              ...(hasBotPat ? ['  "api user --jq .login") echo bot ;;'] : []),
               `  "pr view 1 --repo QwenLM/qwen-code --json state,closedAt") echo '{"state":"OPEN","closedAt":null}' ;;`,
               `  *"/pulls/1/reviews"*) cat "${join(dir, 'reviews.json')}" ;;`,
               `  *"/pulls/1 --jq .head.sha") [ -n "$FAKE_HEAD" ] && echo "$FAKE_HEAD" || exit 1 ;;`,
@@ -1352,6 +1352,7 @@ describe('qwen-triage tmux workflow', () => {
               ...process.env,
               PATH: `${bin}:${process.env.PATH}`,
               GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+              HAS_BOT_PAT: String(hasBotPat),
               NUMBER: '1',
               TRIGGERED_AT: '2026-01-02T00:00:00Z',
               RUN_URL: 'https://example.invalid/run',
@@ -1377,7 +1378,7 @@ describe('qwen-triage tmux workflow', () => {
 
       // The silent skip must surface as a warning AND in the posted comment.
       const humanOnly = run(REVIEWS.humanOnly, 'head');
-      expect(humanOnly.status).toBe(0);
+      expect(humanOnly.status, humanOnly.log).toBe(0);
       expect(humanOnly.log).toContain('Triage re-run left no bot review');
       // Wording fixed: the bot DOES have a review here — a COMMENTED one,
       // visible on the page — it just carries no vote. "No review of its own"
@@ -1400,6 +1401,17 @@ describe('qwen-triage tmux workflow', () => {
       expect(postedNow.status).toBe(0);
       expect(postedNow.log).toContain('no summary comment needed');
       expect(postedNow.comment).toBe('');
+
+      // The fallback identity should recognize its review without GET /user.
+      const fallbackReview = run(
+        [{ ...REVIEWS.postedNow[0], user: { login: 'github-actions[bot]' } }],
+        'head',
+        { hasBotPat: false },
+      );
+      expect(fallbackReview.status, fallbackReview.log).toBe(0);
+      expect(fallbackReview.log).toContain('no summary comment needed');
+      expect(fallbackReview.log).not.toContain('unexpected gh call');
+      expect(fallbackReview.comment).toBe('');
 
       // A true none: the bot has no review at all on the head commit.
       // This exercises the none) arm's bash, which the humanOnly fixture
@@ -1468,6 +1480,7 @@ describe('qwen-triage tmux workflow', () => {
               ...process.env,
               PATH: `${bin}:${process.env.PATH}`,
               GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+              HAS_BOT_PAT: 'true',
               NUMBER: '1',
               TRIGGERED_AT: '2026-01-02T00:00:00Z',
               RUN_URL: 'https://example.invalid/run',
@@ -1490,16 +1503,15 @@ describe('qwen-triage tmux workflow', () => {
         }
       };
 
-      // The close-exit shape: closed after the trigger, no review left.
+      // The close-exit shape: closed at or after the trigger, no review left.
       // Neither the summary comment nor the warning may fire.
-      const closeExit = run({
-        state: 'CLOSED',
-        closedAt: '2026-01-03T00:00:00Z',
-      });
-      expect(closeExit.status).toBe(0);
-      expect(closeExit.comment).toBe('');
-      expect(closeExit.log).not.toContain('Triage re-run left no bot review');
-      expect(closeExit.log).toContain('no re-run summary needed');
+      for (const closedAt of ['2026-01-02T00:00:00Z', '2026-01-03T00:00:00Z']) {
+        const closeExit = run({ state: 'CLOSED', closedAt });
+        expect(closeExit.status, closeExit.log).toBe(0);
+        expect(closeExit.comment).toBe('');
+        expect(closeExit.log).not.toContain('Triage re-run left no bot review');
+        expect(closeExit.log).toContain('no re-run summary needed');
+      }
 
       // The boundary: a close BEFORE the trigger comment is not this run's
       // terminal action, so the old notify behaviour stays intact.
@@ -1507,7 +1519,7 @@ describe('qwen-triage tmux workflow', () => {
         state: 'CLOSED',
         closedAt: '2026-01-01T00:00:00Z',
       });
-      expect(closedBefore.status).toBe(0);
+      expect(closedBefore.status, closedBefore.log).toBe(0);
       expect(closedBefore.log).toContain('Triage re-run left no bot review');
       expect(closedBefore.comment).toContain(
         '<!-- qwen-triage stage=rerun-summary -->',
@@ -1831,14 +1843,56 @@ describe('qwen-triage verify workflow', () => {
             },
           ],
         };
+        const issueComments = {
+          totalCount: 104,
+          nodes: [
+            {
+              createdAt: '2026-11-01T01:15:00Z',
+              updatedAt: '2026-11-01T01:20:00Z',
+              url: 'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-501',
+              body: '**[P1]** Separate git dir objects under `.qwen/tmp/` are dropped.',
+              author: { login: 'maintainer' },
+              authorAssociation: 'COLLABORATOR',
+              isMinimized: false,
+            },
+            {
+              createdAt: '2026-11-01T01:25:00Z',
+              updatedAt: '2026-11-01T01:25:00Z',
+              url: 'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-502',
+              body: '**[Critical]** Deleted owner account review',
+              author: null,
+              authorAssociation: 'OWNER',
+              isMinimized: false,
+            },
+            {
+              createdAt: '2026-11-01T01:30:00Z',
+              updatedAt: '2026-11-01T01:30:00Z',
+              url: 'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-503',
+              body: 'Hidden outdated comment **[P1]**',
+              author: { login: 'colleague' },
+              authorAssociation: 'MEMBER',
+              isMinimized: true,
+            },
+            {
+              createdAt: '2026-11-01T01:35:00Z',
+              updatedAt: '2026-11-01T01:35:00Z',
+              url: 'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-504',
+              body: 'External comment must stay out of token-free context',
+              author: { login: 'outsider' },
+              authorAssociation: 'NONE',
+              isMinimized: false,
+            },
+          ],
+        };
         // Two pages, as --paginate --slurp returns them: the threads continue,
-        // and the change requests repeat with every page.
+        // and the change requests and top-level comments repeat with every page.
         const pages = [
           {
             data: {
               repository: {
                 pullRequest: {
                   latestOpinionatedReviews: opinionated,
+                  comments: issueComments,
                   reviewThreads: {
                     pageInfo: { hasNextPage: true, endCursor: 'c1' },
                     nodes: [
@@ -1882,6 +1936,7 @@ describe('qwen-triage verify workflow', () => {
               repository: {
                 pullRequest: {
                   latestOpinionatedReviews: opinionated,
+                  comments: issueComments,
                   reviewThreads: {
                     pageInfo: { hasNextPage: false, endCursor: 'c2' },
                     nodes: [
@@ -1946,6 +2001,21 @@ describe('qwen-triage verify workflow', () => {
           ['maintainer', 'a'.repeat(40)],
           [null, null],
         ]);
+        expect(ok.state.issueCommentCount).toBe(104);
+        expect(
+          ok.state.issueComments.map((c) => [c.author, c.association, c.url]),
+        ).toEqual([
+          [
+            'maintainer',
+            'COLLABORATOR',
+            'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-501',
+          ],
+          [
+            null,
+            'OWNER',
+            'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-502',
+          ],
+        ]);
         // The query the local preflight sends, against this PR of this repo.
         expect(ok.args).toEqual(
           expect.arrayContaining([
@@ -1963,19 +2033,162 @@ describe('qwen-triage verify workflow', () => {
 
         // A failed fetch, or pages that are not this query's answer, leave no
         // file: the skill reads its absence as "unknown", and a partial file
-        // would read as "nothing open".
+        // would read as "nothing open". Both the workflow jq filter and local
+        // reviewState() must reject the exact same malformed shapes, including
+        // arrays masquerading as objects (`[[]]`) and null comment entries.
+        const pull0 = pages[0].data.repository.pullRequest;
+        const malformedPages = [
+          [{ data: null }],
+          [],
+          [{ data: { repository: { pullRequest: [] } } }],
+          [
+            {
+              data: {
+                repository: { pullRequest: { ...pull0, comments: null } },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    comments: { totalCount: 1, nodes: [null] },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    comments: { totalCount: 1, nodes: [[]] },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    comments: {
+                      totalCount: 1,
+                      nodes: [
+                        {
+                          createdAt: '2026-11-01T01:15:00Z',
+                          updatedAt: '2026-11-01T01:15:00Z',
+                          url: 'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-1',
+                          body: 'x',
+                          author: [],
+                          authorAssociation: 'COLLABORATOR',
+                          isMinimized: false,
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    comments: {
+                      totalCount: 1,
+                      nodes: [
+                        {
+                          createdAt: '2026-11-01T01:15:00Z',
+                          updatedAt: '2026-11-01T01:15:00Z',
+                          url: 'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-2',
+                          body: 'x',
+                          author: [],
+                          authorAssociation: 'NONE',
+                          isMinimized: false,
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    latestOpinionatedReviews: { nodes: [[]] },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    reviewThreads: {
+                      ...pull0.reviewThreads,
+                      nodes: [
+                        {
+                          ...pull0.reviewThreads.nodes[0],
+                          comments: { totalCount: 1, nodes: [null] },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    reviewThreads: {
+                      ...pull0.reviewThreads,
+                      nodes: [
+                        {
+                          ...pull0.reviewThreads.nodes[0],
+                          comments: { totalCount: 1, nodes: [[]] },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        ];
         for (const [input, env] of [
           [pages, { GH_STUB_FAIL_LIST: '1' }],
           // gh exits 0 with nothing on stdout, and jq then exits 0 too.
           [pages, { GH_STUB_EMPTY_LIST: '1' }],
-          [[{ data: null }], {}],
-          [[], {}],
+          ...malformedPages.map((bad) => [bad, {}]),
         ]) {
           const failed = run(input, env);
           expect(failed.state).toBeNull();
           expect(failed.out).toContain(
             "Could not snapshot the PR's review threads",
           );
+        }
+        for (const bad of malformedPages) {
+          expect(reviewState(bad)).toBeNull();
         }
         expect(reviewState([{ data: null }])).toBeNull();
         expect(reviewState([])).toBeNull();
@@ -2056,6 +2269,95 @@ describe('qwen-triage verify workflow', () => {
     expect(flat).toContain('report item 7 (_Not covered_)');
     expect(verifySkill).toMatch(/^7\. \*\*Not covered\*\*/m);
     expect(flat).toContain('Title, body, comments, review threads,');
+    // Top-level maintainer blocking comments carry the same merge-ready bar.
+    expect(flat).toContain(
+      "top-level blocking review comments in `review-threads.json`'s `issueComments`",
+    );
+    expect(flat).toContain(
+      'treat every remaining top-level comment tagged Critical, Blocker, P0, or P1 as an **open blocking review item** on par with open blocking review threads',
+    );
+    expect(flat).toContain(
+      'When `issueCommentCount > 100`, disclose under _Not covered_ that only the latest 100 top-level comments were snapshotted',
+    );
+  });
+
+  // PR #18494 showed five rounds of A/B + mutation matrices missing silent
+  // data loss, multi-round archive duplication, quadratic ignore-rule scans,
+  // and symlinked external objects until manual review constructed adversarial
+  // counterexamples. Pin the diff-triggered protocol, recovery oracle, and
+  // guard binding in SKILL.md.
+  it('requires adversarial axes, independent recovery oracles, and mechanical guard binding', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain(
+      'For destructive, exclusion, ignore, cleanup, snapshot, or migration diffs, apply the same diff-triggered rule',
+    );
+    expect(flat).toContain('Path indirection and reverse dependencies');
+    expect(flat).toContain('Placement and nesting depth');
+    expect(flat).toContain(
+      'Rule-spelling variants, mixed layouts, and complexity ladders',
+    );
+    expect(flat).toContain(
+      'Real caller entry point and multi-round steady state',
+    );
+    expect(flat).toContain('Combinatorial control-flow interaction');
+    expect(flat).toContain('Anti-over-refusal (liveness) control');
+    expect(flat).toContain(
+      "**Snapshot, backup, cleanup, and pruning PRs**: never treat the system under test's own `verify()` return value",
+    );
+    expect(flat).toContain('adversarially attack your own patch too');
+    expect(flat).toContain('**Bind the guard before every local publish.**');
+    expect(flat).toContain(
+      "Keep every round's start snapshot, final snapshot, verdict, log, and digest in a **per-round host directory** outside the container-mounted verify cache (`qwen-verify-guard/pr<n>/<round-id>/`",
+    );
+    expect(flat).toContain(
+      'create `guard-start.json` exclusively with `--no-clobber` **before** `verify-pr-prepare.mjs` fetches `review-threads.json`',
+    );
+    expect(verifySkill).toContain(
+      'mkdir -p ~/.cache/qwen-verify-guard/pr<n>/<round-id>',
+    );
+    expect(verifySkill).toContain(
+      '--snapshot ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-start.json \\',
+    );
+    expect(verifySkill).toContain('--no-clobber \\');
+    expect(flat).toContain(
+      'clear stale guard files in that same `<round-id>` directory, refresh `guard-now.json` in the same publish step',
+    );
+    expect(flat).toContain(
+      'run `verify-pr-check.mjs` with `--require-guard` before posting the PR comment',
+    );
+    expect(verifySkill).toContain(
+      'rm -f ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-now.json ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256',
+    );
+    expect(verifySkill).toContain(
+      '--snapshot ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-now.json \\',
+    );
+    expect(verifySkill).toContain(
+      '--out ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json',
+    );
+    expect(verifySkill).toContain(
+      "sed -n 's/^  guard-sha256  //p' ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log > ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256",
+    );
+    expect(verifySkill).toContain('--require-guard \\');
+    expect(verifySkill).toContain(
+      '--guard ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json \\',
+    );
+    expect(verifySkill).toContain(
+      '--guard-sha256 "$(cat ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256)" \\',
+    );
+    // Guard paths must never live inside the container-mounted verify-context directory.
+    expect(verifySkill).not.toContain(
+      '~/.cache/qwen-verify/pr<n>/<round-id>/guard-',
+    );
+    expect(verifySkill).not.toContain('~/.cache/qwen-verify/pr<n>/guard-');
+    // Runner-backed VM publish preserves --execution-record and its digest in
+    // the same final verify-pr-check.mjs invocation as --require-guard.
+    expect(flat).toContain(
+      'For runner-backed VM rounds (`microvm` or `provider-vm`, such as Firecracker, vfkit, or provider VM)',
+    );
+    expect(verifySkill).toContain('--execution-record <execution-record> \\');
+    expect(verifySkill).toContain(
+      '--execution-record-sha256 <execution-record-sha256> \\',
+    );
   });
 
   // The deepen step's cutoff comes from the resolve step, which holds the
@@ -2734,6 +3036,160 @@ describe('qwen-triage verify workflow', () => {
     expect(concBlock).toContain(
       "vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'",
     );
+  });
+});
+
+describe('qwen-triage verify scratch isolation (#17037)', () => {
+  const scriptFor = (stepName) => {
+    const source = stepIn('verify', stepName);
+    const match = source.match(/\n\s+run: \|-\n([\s\S]*)/);
+    expect(match, `${stepName} run script`).not.toBeNull();
+    return match[1]
+      .split('\n')
+      .map((line) => (line.startsWith('          ') ? line.slice(10) : line))
+      .join('\n');
+  };
+
+  it('passes a RUNNER_TEMP scratch directory through the isolated agent environment', () => {
+    const prepare = stepIn('verify', 'Prepare verify scratch directory');
+    const run = stepIn('verify', 'Run verification agent');
+    const cleanup = stepIn('verify', 'Clean verify scratch directory');
+
+    expect(prepare).toContain(
+      'scratch=$(mktemp -d "${RUNNER_TEMP:?}/qwen-verify-scratch.XXXXXXXX")',
+    );
+    expect(run).toContain(
+      "VERIFY_SCRATCH: '${{ steps.verify_scratch.outputs.dir }}'",
+    );
+    expect(run).toContain(
+      '"TMPDIR=${VERIFY_SCRATCH:?verify scratch directory was not prepared}"',
+    );
+    expect(run).toContain(
+      'Store all temporary verification clones, A/B worktrees, install trees, and test files under TMPDIR=${VERIFY_SCRATCH}.',
+    );
+    expect(run).toContain('Pass this directory requirement to every subagent.');
+    expect(cleanup).toContain(
+      '"always() && steps.pr.outputs.decision == \'run\'"',
+    );
+    expect(cleanup).toContain(
+      'rm -rf -- "${RUNNER_TEMP:?}"/qwen-verify-scratch.*',
+    );
+    // Scratch cleanup must not relax the existing untrusted-worktree boundary.
+    expect(stepIn('verify', 'Clean up runner workspace')).toContain(
+      '"$WS_ABS"/tmp/*) git worktree remove --force',
+    );
+  });
+
+  it('pins the producer id and the ownership hand-off the run step depends on', () => {
+    const prepare = stepIn('verify', 'Prepare verify scratch directory');
+    const run = stepIn('verify', 'Run verification agent');
+
+    // GitHub evaluates an unknown `steps.<id>.outputs.*` to the empty string
+    // instead of failing, so the id the run step reads is the only runtime
+    // link between the two steps; renaming it on the producer leaves the
+    // reference intact and silently hands the agent an empty TMPDIR.
+    expect(prepare).toContain("id: 'verify_scratch'");
+    expect(run).toContain('steps.verify_scratch.outputs.dir');
+
+    // `mktemp -d` mints a root-owned 0700 directory while the agent runs as
+    // `node`; this chown is the only thing that makes the scratch writable,
+    // and nothing later in the run step re-chowns it.
+    expect(prepare).toContain('chown node:node "$scratch"');
+  });
+
+  it('refuses to start the agent with an empty VERIFY_SCRATCH', () => {
+    // Executes the literal the workflow uses, not a copy of it: set -u alone
+    // does not catch this, because the step-level `env:` supplies an empty
+    // string rather than an unset variable.
+    const literal = stepIn('verify', 'Run verification agent')
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.startsWith('"TMPDIR=${VERIFY_SCRATCH'));
+    expect(literal, 'guarded TMPDIR assignment').toBeDefined();
+    const script = [
+      'set -u',
+      `QWEN_ENV=(${literal})`,
+      'printf "%s" "${QWEN_ENV[0]}"',
+    ].join('\n');
+    const empty = spawnSync(
+      'bash',
+      ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script],
+      { encoding: 'utf8', env: { ...process.env, VERIFY_SCRATCH: '' } },
+    );
+    expect(empty.status).not.toBe(0);
+    expect(empty.stderr).toContain('verify scratch directory was not prepared');
+
+    const set = spawnSync(
+      'bash',
+      ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, VERIFY_SCRATCH: '/tmp/qwen-scratch' },
+      },
+    );
+    expect(set.status, set.stderr).toBe(0);
+    expect(set.stdout).toBe('TMPDIR=/tmp/qwen-scratch');
+  });
+
+  it('reclaims prior and current scratch directories without touching neighbors', () => {
+    const root = mkdtempSync(join(tmpdir(), 'verify-scratch-workflow-'));
+    try {
+      const runnerTemp = join(root, 'runner-temp');
+      const output = join(root, 'github-output');
+      const stale = join(runnerTemp, 'qwen-verify-scratch.stale');
+      const unrelated = join(runnerTemp, 'unrelated');
+      const reviewScratch = join(runnerTemp, 'qwen-review-scratch.keep');
+      mkdirSync(stale, { recursive: true });
+      mkdirSync(unrelated);
+      mkdirSync(reviewScratch);
+      writeFileSync(join(stale, 'leftover'), 'stale');
+      writeFileSync(output, '');
+      const prepare = join(root, 'prepare.sh');
+      // The real step runs as root and hands the mint to the build user. The
+      // lifecycle under test does not depend on this host having a node user.
+      writeFileSync(
+        prepare,
+        `chown() { :; }\n${scriptFor('Prepare verify scratch directory')}`,
+      );
+      const prepared = spawnSync(
+        'bash',
+        ['--noprofile', '--norc', '-e', '-o', 'pipefail', prepare],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            RUNNER_TEMP: runnerTemp,
+            GITHUB_OUTPUT: output,
+          },
+        },
+      );
+      expect(prepared.status, prepared.stderr).toBe(0);
+      expect(existsSync(stale)).toBe(false);
+      expect(existsSync(unrelated)).toBe(true);
+      expect(existsSync(reviewScratch)).toBe(true);
+
+      const scratch = readFileSync(output, 'utf8').trim().replace(/^dir=/, '');
+      expect(scratch).toMatch(/^.*\/qwen-verify-scratch\.[a-zA-Z0-9]{8}$/);
+      expect(scratch.startsWith(`${runnerTemp}/`)).toBe(true);
+      expect(existsSync(scratch)).toBe(true);
+
+      const cleanup = join(root, 'cleanup.sh');
+      writeFileSync(cleanup, scriptFor('Clean verify scratch directory'));
+      const cleaned = spawnSync(
+        'bash',
+        ['--noprofile', '--norc', '-e', '-o', 'pipefail', cleanup],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, RUNNER_TEMP: runnerTemp },
+        },
+      );
+      expect(cleaned.status, cleaned.stderr).toBe(0);
+      expect(existsSync(scratch)).toBe(false);
+      expect(existsSync(unrelated)).toBe(true);
+      expect(existsSync(reviewScratch)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -6177,20 +6633,11 @@ describe('qwen-triage verify hardening round 2', () => {
 
     // #13174 R9: a cancel fix held for turn 1 and wedged later turns.
     // #13598 R2: round-1 prompts never reached a tool. #13572 R5: the
-    // defect appeared only with approvals on. The loop-guard count is
-    // read from core, so the skill cannot drift from the real threshold.
+    // defect appeared only with approvals on.
     expect(flat).toContain(
       'Parameterise scenarios along the axes author tests collapse',
     );
     expect(flat).toContain('approval mode (default versus auto-approve)');
-    expect(flat).toContain(
-      'five consecutive identical calls trip the core loop guard',
-    );
-    const loopSource = readFileSync(
-      'packages/core/src/services/loopDetectionService.ts',
-      'utf8',
-    );
-    expect(loopSource).toMatch(/const TOOL_CALL_LOOP_THRESHOLD = 5;/);
 
     // #13354 R1: a PR Harness against a pre-PR server blocked every hosted
     // turn. #12855 R2: after rollback and re-upgrade the Java row lagged
@@ -6410,6 +6857,35 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(targetedGates).toContain('is a semantic merge conflict');
     expect(targetedGates).toContain('`expected 112 to be 104`');
 
+    const webShellPath = '.qwen/skills/verify-pr/references/web-shell.md';
+    if (flat.includes('references/web-shell.md') || existsSync(webShellPath)) {
+      expect(flat).toContain('references/web-shell.md');
+      expect(flat).toContain(
+        "Verify the model's reply from backend assistant output",
+      );
+      expect(flat).toContain(
+        'Confirm turn completion from the backend terminal state for the prompt',
+      );
+      const webShell = readFileSync(webShellPath, 'utf8').replace(/\s+/g, ' ');
+      expect(webShell).toContain("page.route('**/capabilities'");
+      expect(webShell).toContain(
+        'Verify that no stale Finished badge appears for Home.',
+      );
+      expect(webShell).toContain(
+        '`storedKey: true`, `keyConfigured: true`, and `enabled: false`',
+      );
+      expect(webShell).toContain('Use the same isolated `QWEN_HOME`');
+      expect(webShell).toContain('qwen serve --channel my-plugin-test');
+      expect(webShell).toContain(
+        'the channel session appears in the intended workspace and that the reply reaches the sender',
+      );
+      expect(webShell).toContain('GET /session/<sessionId>/turns/<promptId>');
+      expect(webShell).toContain(
+        'Require the response to report `state: completed` for that prompt in that session.',
+      );
+      expect(webShell).toContain('`context.sessionId` and `request.model`');
+    }
+
     // The Android recipe lives in a reference file the restored .qwen tree
     // carries, so the pointer must resolve.
     expect(flat).toContain('references/android.md');
@@ -6573,6 +7049,44 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('do not ask the maintainer to restate them');
   });
 
+  it('scopes both historical watch designs to the current migration contract', () => {
+    const read = (name) => readFileSync(`docs/design/${name}`, 'utf8');
+    const watch = read('verify-pr-watch.md');
+    const watchChinese = read('verify-pr-watch.zh-CN.md');
+    const register = read('verify-pr-register-ahead-of-prepare.md');
+    const registerChinese = read(
+      'verify-pr-register-ahead-of-prepare.zh-CN.md',
+    );
+    expect(watch).toContain('## Current contract / migration note');
+    expect(register).toContain('**Current contract / migration note');
+    for (const document of [watch, register]) {
+      const flat = document.replace(/\s+/g, ' ');
+      expect(flat).toContain('default trusted-clone');
+      expect(flat).toContain('exact matching `--registration-nonce`');
+      expect(flat).toContain('genuinely legacy');
+      expect(flat).toContain('same head/round/root');
+      expect(flat).toContain('never infer it from');
+      expect(flat).toContain('commentId: null');
+    }
+    expect(watchChinese).toContain('## 当前契约／迁移说明');
+    expect(registerChinese).toContain('**当前契约／迁移说明');
+    for (const document of [watchChinese, registerChinese]) {
+      const plain = document.replaceAll('**', '');
+      expect(plain).toContain('不因此新增必填项');
+      expect(plain).toContain('从当前');
+      expect(plain).toContain('推断');
+      expect(plain).toContain('只有确实没有');
+      expect(plain).toContain('head/round/root');
+      expect(plain).toContain('commentId: null');
+    }
+    expect(register.replace(/\s+/g, ' ')).toContain(
+      "Coordinated comment-approved preparation now does perform a read-only live-registration check: after the final network responses it takes the state lock, rechecks the same explicit root's head/round/nonce, and refuses stale identity before any authority write.",
+    );
+    expect(registerChinese.replace(/\s+/g, '')).toContain(
+      '在最后一次网络应答后取得状态锁，复核同一显式root的head/round/nonce，并在任何authority写入前拒绝陈旧身份',
+    );
+  });
+
   // Watch mode composes the shipped gate probe with cron_create. Each piece is
   // pinned because dropping one turns the watch back into a polling task that
   // spends a model turn per fire — the cost the design exists to avoid.
@@ -6605,6 +7119,20 @@ describe('qwen-triage verify hardening round 2', () => {
   // precede the round, as the watch prompt's own write-before-start rule does.
   it('registers a manual re-verification round before it starts', () => {
     const flat = verifySkill.replace(/\s+/g, ' ');
+    // R4-2: pin shared sentences on the manual section's own slice, so the
+    // watch prompt's copy is not an alibi for a deleted manual sentence.
+    // R4-2 (round 5): resolve both sentinels and assert their order before
+    // slicing — slice(start, -1) returns the whole tail, so a renamed end
+    // sentinel would silently widen the slice past the manual section.
+    const manualStart = verifySkill.indexOf(
+      'When the maintainer says a previously verified PR has moved',
+    );
+    const manualEnd = verifySkill.indexOf('To make this trigger automatic');
+    expect(manualStart).toBeGreaterThan(-1);
+    expect(manualEnd).toBeGreaterThan(manualStart);
+    const manualSlice = verifySkill
+      .slice(manualStart, manualEnd)
+      .replace(/\s+/g, ' ');
 
     // The phrase is a documented trigger, and an ambiguous PR is asked about.
     expect(flat).toContain('有更新了，重新验证');
@@ -6616,12 +7144,115 @@ describe('qwen-triage verify hardening round 2', () => {
     // the hand-written completion write and left the file two heads stale,
     // so the contract now names one command per step instead of a JSON edit.
     expect(flat).toContain(
-      'Register the round in the shared watch state before starting it',
+      'Register the round in the shared watch state **ahead of prepare**',
     );
     expect(flat).toContain('never hand-write');
+    // R17-2: registration runs ahead of prepare, so --start carries no
+    // --artifact-dir (prepare has not printed the directory yet); a prepare
+    // window kill then leaves a recoverable marker, not a dropped head.
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --artifact-dir <dir> --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo> --state-root "<trusted-dir>"',
     );
+    // R4-2: shared sentences on the manual slice (the watch copy is no alibi).
+    expect(manualSlice).toContain(
+      'no `--artifact-dir`, because prepare has not printed the directory yet',
+    );
+    expect(manualSlice).toContain(
+      'A release alone leaves the head unregistered',
+    );
+    expect(manualSlice).toContain(
+      'Do not `git checkout` the named head under the old marker',
+    );
+    // R1-1: the prepare-failure recovery must carry the full --release form
+    // with --repo (a recorded repo refuses an omitted --repo, so a shortened
+    // copy would strand the marker — reintroducing R17-2). Removing --repo
+    // from the sentence reds this whole-form pin.
+    expect(manualSlice).toContain(
+      'If prepare fails after `--start` and the round is being abandoned, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> --round <r> --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"`',
+    );
+    // R1-11: a released registration gets a new nonce, including at the same
+    // round; comment approval and container-only recovery stay distinct.
+    expect(manualSlice).toContain(
+      'After the release, restart at the SAME `<r>` (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo> --state-root "<trusted-dir>"`) and retry prepare',
+    );
+    expect(manualSlice).toContain(
+      'To restart comment approval at `<r+1>` instead, register it and ask the maintainer for a fresh comment marker at `<r+1>` as well',
+    );
+    expect(manualSlice).toContain(
+      'prepare reads the watch state only to validate an `--approval` registration',
+    );
+    expect(manualSlice).toContain(
+      'retrying prepare at the original round and completing there recovers `H` with no release',
+    );
+    expect(manualSlice).toContain(
+      "The restarted round's number (`<r>` after the requested restart, or `<r+1>`) becomes this round's number — repeat that value in `--complete`",
+    );
+    // R3-1: the manual inconclusive-recovery prohibition (colon variant).
+    expect(manualSlice).toContain(
+      'Do not recover with `--complete inconclusive` instead: it increments the retry counter whose cap is the terminal not-covered state',
+    );
+    // R1-1 (round 3) + R4-1: the manual moved-head terminal case (<H> variant)
+    // re-resolves and starts the newer head itself — there is no watch fire.
+    expect(manualSlice).toContain(
+      'If prepare refuses because the head it names is not the head this round registered — moved forward or force-pushed; prepare tests exact equality and states no ordering — the registered head can never prepare: `--release --head <H> --round <r> --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"` it and do not restart it',
+    );
+    expect(manualSlice).toContain(
+      'There is no watch fire here to deliver the live head, so re-resolve it yourself',
+    );
+    expect(manualSlice).toContain(
+      '`--start --head <live> --round <next> --repo <owner>/<repo> --state-root "<trusted-dir>"` and run prepare',
+    );
+    // Deferred (round 6): after the moved-head restart the completion
+    // placeholders re-bind to <live>/<next> — the completion form below still
+    // prints <H>/<r>, so without this clause a restarted round would complete
+    // under the original head and round and be refused (exit 3).
+    expect(manualSlice).toContain(
+      'The restarted round is now `<live>` at `<next>` — repeat those values in `--complete`, not the original `<H>` and `<r>`',
+    );
+    // Deferred (round 13): a force-push can return the live head to one already
+    // verified, so the --start <live> may be refused — the head needs no new
+    // round; and the follow-up protocol re-measures at <live>, not the original H.
+    expect(manualSlice).toContain(
+      'is refused because `<live>` is already verified (a force-push can return to an earlier, already-covered head), the head needs no new round',
+    );
+    expect(manualSlice).toContain(
+      'classifies the delta and re-measures at `<live>` (the new head), not the original `H`',
+    );
+    // P1 (maintainer, round 14): the manual flow also compares the prepared head
+    // with the registered one when prepare SUCCEEDS (the <H> twin of the watch
+    // pin); the shared release-without-complete sentence is pinned on this
+    // slice so the watch copy is not its alibi.
+    expect(manualSlice).toContain(
+      "When prepare succeeds, compare the `head` line it printed (the trusted snapshot's `headRefOid`) with `<H>` before the battery",
+    );
+    expect(manualSlice).toContain(
+      "A differing head is the moved-head case below: release this round's marker and run neither the battery nor `--complete`",
+    );
+    // R1-2: a positional pin — registration precedes prepare in this section
+    // (an order-insensitive toContain would stay green if --start moved back
+    // below prepare). Round 13: scope it to manualSlice, not the whole flattened
+    // skill, so it guards this section as claimed.
+    expect(
+      manualSlice.indexOf(
+        'Register the round in the shared watch state **ahead of prepare**',
+      ),
+    ).toBeLessThan(
+      manualSlice.indexOf(
+        'Run prepare with `--execution container | vm | host`',
+      ),
+    );
+    // Deferred (round 10): the heading pin above is not enough — guard the
+    // --start COMMAND's position too, so moving the command below prepare (while
+    // the heading stays above) reds this per-section assertion. Presence guards
+    // (round 11): if either placeholder spelling changes, indexOf returns -1 and
+    // the ordering comparison would go vacuous — assert both are found first.
+    const manualStartAt = manualSlice.indexOf('--start --head <H>');
+    const manualPrepareAt = manualSlice.indexOf(
+      'Run prepare with `--execution container | vm | host`',
+    );
+    expect(manualStartAt).toBeGreaterThan(-1);
+    expect(manualPrepareAt).toBeGreaterThan(-1);
+    expect(manualStartAt).toBeLessThan(manualPrepareAt);
     expect(flat).toContain(
       'Exit 3 means the file already records `H` as verified or in flight',
     );
@@ -6634,14 +7265,19 @@ describe('qwen-triage verify hardening round 2', () => {
     // head: recovery releases the head the error names, not `H` itself.
     // Both forms carry --repo: the guard refuses them without it (D9-1).
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"',
     );
     expect(flat).toContain('the head the exit-3 message names as in flight');
     expect(flat).toContain(
       'the same write-before-start rule the watch prompt follows',
     );
-    expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--comment-id <id>] --repo <owner>/<repo>',
+    // R17-2: the directory prepare printed is recorded at --complete.
+    expect(manualSlice).toContain(
+      'verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --registration-nonce <nonce> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo> --state-root "<trusted-dir>"',
+    );
+    // Deferred (round 6): the replay-omission clause is pinned in this section.
+    expect(manualSlice).toContain(
+      'omit it on a replayed completion to inherit the directory already recorded for `H`',
     );
     // Registration is a step of its own ahead of the round, not an
     // afterthought behind it.
@@ -6695,20 +7331,331 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('not consent for this one');
   });
 
+  it('distinguishes published and successful no-publish completion from abandonment', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain(
+      'After a published comment, when this round registered (watch rounds and comment-backed rounds), complete the registration with that numeric comment ID',
+    );
+    expect(flat).toContain(
+      'A fresh local-trust round has no marker and no nonce, so it has nothing to `--complete` or `--release`',
+    );
+    expect(flat).toContain(
+      'For a withheld or `--no-publish` report, once this checker succeeds still use `--complete` with the exact same head/round/nonce/state-root and artifact directory, but omit the optional comment ID',
+    );
+    expect(flat).toContain(
+      'That successful branch preserves `commentId: null`, clears the in-flight marker and retains the verdict and local artifacts',
+    );
+    expect(flat).toContain(
+      'A successful no-publish round is completed, never released or left in flight',
+    );
+    const promptStart = verifySkill.indexOf('The prompt consumes the gate');
+    const promptEnd = verifySkill.indexOf('On `action: "stop"`');
+    expect(promptStart).toBeGreaterThan(-1);
+    expect(promptEnd).toBeGreaterThan(promptStart);
+    const prompt = verifySkill
+      .slice(promptStart, promptEnd)
+      .replace(/\s+/g, ' ');
+    expect(prompt).toContain(
+      'For a withheld/no-publish report, after the local checker succeeds still complete the same registration with that exact artifact directory and omit the optional comment ID; the verified entry keeps `commentId: null`',
+    );
+    expect(prompt).toContain('`--release`, which is only for abandonment');
+  });
+
+  it('preserves explicit state roots and distinguishes genuine legacy nonces', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    const calls = [
+      ...verifySkill.matchAll(
+        /node <(?:trusted-)?clone>\/scripts\/verify-pr-watch-state\.mjs [^\n`]+/g,
+      ),
+    ].map((match) => match[0]);
+    expect(calls).toHaveLength(12);
+    for (const call of calls) {
+      expect(call).toContain(' --state-root "<trusted-dir>"');
+    }
+    expect(flat).toContain(
+      'an older genuine default-clone/container invocation needs no new option',
+    );
+    expect(flat).toContain(
+      'Every `--start`, completion (including replay), release and restart below repeats this explicit absolute `--state-root`',
+    );
+    expect(flat).toContain(
+      'Every later start, completion/replay, release and restart in this step carries this identical explicit root',
+    );
+    expect(flat).toContain(
+      'A genuinely legacy stored entry that has no `registrationNonce` may deliberately omit that option on complete/replay/release for the same head/round/root, without inventing a nonce',
+    );
+    expect(flat).toContain(
+      'A bare persisted prompt that predates the flag is not authority to infer the nonce from whichever registration is current now',
+    );
+    expect(flat).toContain(
+      'Only a stored entry that actually has no `registrationNonce` may omit it as above; a new nonce-bearing entry is never migrated to the no-nonce form',
+    );
+  });
+
   // The watch prompt must spell out the completion form: a fire that follows
   // "the same script's --complete form" literally exits 2 (no --verdict) and
   // strands the head in flight forever. <headSha> is unique to the prompt —
   // the manual section's identical command uses <H> and cannot satisfy this.
   it('spells out the watch prompt completion and release forms', () => {
     const flat = verifySkill.replace(/\s+/g, ' ');
+    // R4-2: a sentence that also exists verbatim in the manual section must be
+    // pinned on the prompt's own slice, or the manual copy is its alibi.
+    // R4-2 (round 5): resolve both sentinels and assert their order before
+    // slicing — slice(start, -1) returns the whole tail, so a renamed end
+    // sentinel would silently widen the slice into the manual section.
+    const promptStart = verifySkill.indexOf('The prompt consumes the gate');
+    const promptEnd = verifySkill.indexOf('On `action: "stop"`');
+    expect(promptStart).toBeGreaterThan(-1);
+    expect(promptEnd).toBeGreaterThan(promptStart);
+    const promptSlice = verifySkill
+      .slice(promptStart, promptEnd)
+      .replace(/\s+/g, ' ');
     // The full registration form, every required flag included.
+    // R17-2: the watch prompt registers ahead of prepare, so --start carries
+    // no --artifact-dir; the directory is recorded at --complete.
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --artifact-dir <dir> --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo> --state-root "<trusted-dir>"',
     );
+    // Deferred (round 6): the no-artifact-dir invariant is a shared sentence
+    // (the manual section carries it too) — pin the prompt's own copy so the
+    // manual copy is not its alibi. A positive form pin alone would stay green
+    // if --artifact-dir crept back into the watch registration prose.
+    expect(promptSlice).toContain(
+      'no `--artifact-dir`, because prepare has not printed the directory yet',
+    );
+    expect(flat).toContain(
+      'Register the round **first, ahead of prepare** (R17-2)',
+    );
+    expect(flat).toContain(
+      'a round killed in the prepare window leaves a recoverable in-flight marker rather than a silently dropped head',
+    );
+    // R4-3 / deferred (round 6): the general "Start here" maintainer entry
+    // describes the prepare block (registration is a watch/re-verification
+    // procedure, not claimed for every maintainer round); the boundary
+    // section qualifies that the watch-state registration precedes prepare.
+    // Reverting the boundary sentence to the unqualified form reds these pins.
+    expect(flat).toContain(
+      'Maintainer round on a workstation** — `/verify-pr <n>`, first choose `--execution container | vm | host`, then run the full step-1 prepare block',
+    );
+    expect(flat).toContain(
+      'Run the full step-1 prepare block on the host before any work inside the boundary — the watch-state registration precedes it (R17-2)',
+    );
+    expect(flat).not.toContain('before anything else');
+    // R5-1 (round 8): the wrong-HEAD remedy keys off IDENTITY, not recency — the
+    // plain checkout is the remedy only when the named head IS this round's
+    // registered head; a head that DIFFERS (moved or force-pushed — prepare tests
+    // exact equality, no ordering) is the moved-head case. A fresh /verify-pr <n>
+    // registers nothing, so it reads the state's in-flight entry and defers to a
+    // live marker rather than checking out under it (which would file the named
+    // head's evidence under the registered head's verdict). The round-7 "newer
+    // than" framing was ill-defined for a fresh round and missed force-push;
+    // reverting to it reds these pins.
+    expect(flat).toContain(
+      'a wrong HEAD names the `git checkout` to run — but if this round registered a head, the plain checkout is the remedy only when the named head **is** that head',
+    );
+    expect(flat).toContain(
+      "a head that differs is the moved-head case below (release this round's marker; never check out the named head under it",
+    );
+    expect(flat).toContain(
+      'A round that registered nothing (a fresh `/verify-pr <n>`) has no marker of its own',
+    );
+    expect(flat).toContain(
+      "read the state file's in-flight entry first — while another round's marker is live, let that round answer, never checking out under a live marker",
+    );
+    // Deferred (round 11): the fresh-round case also needs the dead-marker branch
+    // (recover a dead round's marker, then check out), not only the live case.
+    expect(flat).toContain(
+      'if that round is dead, recover its marker per the dead-round recovery below, then check out',
+    );
+    expect(flat).not.toContain("newer than this round's registered head");
+    expect(flat).not.toContain(
+      'let that round answer — do not release a live marker or check out under it',
+    );
+    // Deferred (round 12): the flow must explicitly compare prepare's named head
+    // with the registered head — a differing head is the moved-head case, not a
+    // transient prepare failure.
+    expect(promptSlice).toContain(
+      'a differing head is the moved-head case below, not a transient failure',
+    );
+    // P1 (maintainer, round 14): the comparison must also run when prepare
+    // SUCCEEDS — prepare checks the tree against the live PR head, not the
+    // registered one, so a force-push back to a head the tree already sits at
+    // prepares successfully while the round registered a different head; the
+    // refusal-handler comparison alone never fires, and completing would file
+    // the other head's evidence under the registered head. Removing the
+    // post-success comparison reds these pins.
+    expect(promptSlice).toContain(
+      "When prepare succeeds, compare the `head` line it printed (the trusted snapshot's `headRefOid`) with `<headSha>` before the battery",
+    );
+    expect(promptSlice).toContain(
+      "A differing head is the moved-head case below: release this round's marker and run neither the battery nor `--complete`",
+    );
+    // The registration nonce is an identity, not an optional comment field.
+    expect(flat).toContain(
+      'new nonce-bearing registrations match by head, round and this nonce',
+    );
+    expect(flat).toContain(
+      'A completed verdict keeps its nonce for replay verification',
+    );
+    // R1-1: the watch prompt's prepare-failure recovery carries the full
+    // --release form with --repo (the <headSha> variant; the manual section
+    // uses <H>). Removing --repo reds this whole-form pin.
+    expect(flat).toContain(
+      'If prepare fails after `--start` and the round is being abandoned, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> --round <r> --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"`',
+    );
+    // R1-11: after release, even a same-round comment marker must name the
+    // new registration; a non-comment container restart asks for no marker.
+    expect(flat).toContain(
+      'then start the head again at the SAME round (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo> --state-root "<trusted-dir>"`) and retry prepare',
+    );
+    expect(promptSlice).toContain(
+      'To restart comment approval at `<r+1>` instead, register it and ask for a fresh marker at `<r+1>` too',
+    );
+    // Prepare reads watch state only for --approval identity validation.
+    expect(promptSlice).toContain(
+      'prepare reads the watch state only to validate an `--approval` registration',
+    );
+    expect(promptSlice).toContain(
+      'retrying prepare at the original round and completing there recovers the head with no release',
+    );
+    // R4-2: these sentences exist verbatim in both sections — pin the prompt's
+    // own copy so deleting it reds this block while the manual stays green.
+    expect(promptSlice).toContain(
+      'A release alone leaves the head unregistered',
+    );
+    // Completion repeats the restart's actual round; after release, the
+    // marker is re-issued for that new registration at r or r+1.
+    expect(promptSlice).toContain(
+      "The restarted round's number (`<r>` after the requested restart, or `<r+1>`) becomes this round's number — repeat that value in `--complete`",
+    );
+    expect(flat).toContain(
+      'A non-comment container restart needs no marked approval',
+    );
+    expect(flat).toContain('Do not release it merely to change modes');
+    expect(flat).toContain("Still run step 7's teardown");
+    expect(flat).toContain(
+      "this recipe's step 6 and step 7's declaration clear/write and in-container checker no longer apply",
+    );
+    expect(flat).toContain(
+      'finish with the local checker command under `## Start here`',
+    );
+    expect(flat).toContain(
+      "passing the re-run prepare's new `context-sha256` and `artifacts` directory",
+    );
+    expect(flat).toContain('`<trusted-dir>` is `<clone>`');
+    expect(flat).toContain(
+      "the trusted checkout whose main worktree is also the helper's default root",
+    );
+    expect(flat).not.toContain('release any in-flight registration');
+    expect(
+      flat.match(/release followed by `--start` creates a new/gi),
+    ).toHaveLength(2);
+    expect(flat.match(/prepare reads the watch state only to/g)).toHaveLength(
+      2,
+    );
+    expect(promptSlice).toContain(
+      'Do not `git checkout` the named head under the old marker',
+    );
+    // R3-1: the inconclusive-recovery prohibition (watch em-dash variant).
+    expect(promptSlice).toContain(
+      'Do not recover with `--complete inconclusive` instead — only that verdict increments the retry counter',
+    );
+    // R1-1 (round 3) + R4-1 (round 5): the moved-head terminal case — release
+    // without restart; the newer head arrives by the next fire (the gate
+    // cursor tracks the live head) or is already deferred, which you start.
+    expect(promptSlice).toContain(
+      'If prepare refuses because the head it names is not the head this round registered — moved forward or force-pushed; prepare tests exact equality and states no ordering — the registered head can never prepare: `--release --head <headSha> --round <r> --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"` it and do not restart it',
+    );
+    expect(promptSlice).toContain(
+      'the live head is delivered by the next fire (the gate cursor tracks the live head), or is already in the deferred list the release prints, which you then start',
+    );
+    // Deferred (round 7): the watch moved-head branch rebinds the completion to
+    // the started head's own round (the manual twin carries the same clause); a
+    // literal completion under the released head would exit 3.
+    expect(promptSlice).toContain(
+      "The started head is its own round — repeat its head and round in `--complete`, not the released head's",
+    );
+    // Deferred (round 7): registering ahead records --repo before prepare can
+    // validate it; a mistyped slug poisons the state, and the contract documents
+    // the reset (delete the state file) rather than leaving it undiscoverable.
+    expect(promptSlice).toContain(
+      'a mistyped `--repo` is recorded at `--start` before prepare can reject it',
+    );
+    expect(promptSlice).toContain(
+      "is to delete the state file `.qwen/tmp/verify-pr-watch-<n>.json` in the trusted clone's main worktree",
+    );
+    // Deferred (round 8): the reset drops the delivered head's only delivery
+    // record, so the contract must say to re-register it (the cursor already
+    // advanced; no fire delivers it again).
+    // Deferred (round 10): the delete also drops deferred heads no fire will
+    // re-deliver, and the re-register covers them too — not just dedup history.
+    expect(promptSlice).toContain(
+      "this drops the PR's dedup history and any deferred heads, which no fire will re-deliver",
+    );
+    // Deferred (round 12/13): the reset must not strand another live round — it
+    // is only safe when no OTHER round is live (the sole in-flight marker is the
+    // mistyped one being reset); gating on "no in-flight marker" at all would
+    // deadlock, since the mistyped --start itself writes that marker.
+    expect(promptSlice).toContain(
+      "only when no other round is live (the sole in-flight marker is the mistyped one being reset), since deleting the file would strand any other live round's marker",
+    );
+    expect(promptSlice).toContain(
+      'and then re-register the delivered head — and any deferred head you still want covered — with the correct slug (`--start`)',
+    );
+    // Deferred (round 12): a pre-register-ahead watch keeps the old prompt (a
+    // persisted snapshot); re-creating it through the standard install does not
+    // work (the probe cursor blocks step 3 and --release clears only the claim),
+    // and another session's live watch must not be deleted to make room.
+    expect(flat).toContain(
+      'Re-creating it through the standard install does not work',
+    );
+    expect(flat).toContain(
+      'blocked by the probe cursor as well as the claim, and `--release` clears only the claim',
+    );
+    expect(flat).toContain(
+      "Do not delete another session's live watch to make room; the claim guard forbids it",
+    );
+    // R2-1: the watch prompt's exit-3 dead-marker bullet carries the full
+    // --release form with --repo (anchored on the watch-only continuation, so
+    // the manual twin cannot satisfy it). Removing --repo reds it.
+    expect(flat).toContain(
+      'recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"` and then start the last deferred head, or the deferral is never delivered',
+    );
+    // R2-1 (round 4): the bullet tells the operator to read the marker's round
+    // from the state file and pass it — an omitted --round skips the match and
+    // a retried release would delete a newer round's live marker.
+    expect(flat).toContain(
+      "Here `<r>` is the dead round's number (the blocking marker's), not this round's. Read it from the state file's in-flight entry and pass it",
+    );
+    expect(flat).toContain(
+      "an omitted `--round` skips the round match, so a retried release would delete a newer round's live marker for the same head",
+    );
+    // R1-2: positional pin — registration precedes prepare in the watch prompt.
+    expect(
+      flat.indexOf('Register the round **first, ahead of prepare** (R17-2)'),
+    ).toBeLessThan(
+      flat.indexOf('Then run prepare with the selected execution'),
+    );
+    // Deferred (round 10): guard the --start COMMAND's position too, so moving
+    // the command below prepare (while the heading stays above) reds this.
+    // Presence guards (round 11) keep the comparison from going vacuous if a
+    // placeholder spelling changes (indexOf would return -1).
+    const watchStartAt = promptSlice.indexOf('--start --head <headSha>');
+    const watchPrepareAt = promptSlice.indexOf(
+      'Then run prepare with the selected execution',
+    );
+    expect(watchStartAt).toBeGreaterThan(-1);
+    expect(watchPrepareAt).toBeGreaterThan(-1);
+    expect(watchStartAt).toBeLessThan(watchPrepareAt);
     // The completion and release forms carry --repo too: the guard
     // refuses a registered round's completion without it (D9-1).
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--comment-id <id>] --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --registration-nonce <nonce> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo> --state-root "<trusted-dir>"',
+    );
+    // Deferred (round 6): the replay-omission clause is pinned in this section
+    // (the manual twin uses `H`, so it cannot satisfy this prompt-only form).
+    expect(promptSlice).toContain(
+      'omit it on a replayed completion to inherit the directory already recorded for the head rather than overwriting it',
     );
     // The duty, not just the command string: deleting the consequence
     // sentence while keeping the command must go red too.
@@ -6717,7 +7664,7 @@ describe('qwen-triage verify hardening round 2', () => {
       'a completion without it exits 2 and leaves the head in flight forever',
     );
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"',
     );
     // The state root is the trusted clone's main worktree, and <dir> is
     // the directory prepare printed — not a value invented at registration.
@@ -6765,14 +7712,9 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('A corrupt state file is refused (exit 1)');
     // Section slices, not the whole flattened skill: a sentence that also
     // exists in the manual section stays green after the watch prompt's
-    // own copy is deleted unless the pin reads the prompt's slice.
-    const promptStart = verifySkill.indexOf('The prompt consumes the gate');
-    const promptEnd = verifySkill.indexOf('On `action: "stop"`');
-    expect(promptStart).toBeGreaterThan(-1);
-    expect(promptEnd).toBeGreaterThan(promptStart);
-    const prompt = verifySkill
-      .slice(promptStart, promptEnd)
-      .replace(/\s+/g, ' ');
+    // own copy is deleted unless the pin reads the prompt's slice. The
+    // sentinel-resolved promptSlice is defined at the top of this block.
+    const prompt = promptSlice;
     expect(prompt).toContain('repeat the same value in `--complete`');
     expect(prompt).toContain('recorded as deferred');
     expect(prompt).toContain('no second event will arrive');
@@ -6824,16 +7766,29 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('The boundary is a declaration, not a vibe');
     expect(flat).toContain('`boundary.json` must be in the artifact directory');
     expect(flat).toContain('the checker refuses a round without it');
-    // The boundary's operator owns the declaration, not the inner round —
-    // container, CI lane, and VM alike.
-    expect(flat).toContain("the boundary's operator writes it");
-    expect(flat).toContain("the VM's operator for a VM boundary");
+    // Prepare authors host/VM declarations before execution; an operator
+    // authors only the container/lane declaration in its documented step.
+    expect(flat).toContain('**prepare** writes the approved declaration');
+    expect(flat).toContain('the round never hand-writes it');
+    expect(flat).toContain(
+      "the boundary's operator writes the container declaration",
+    );
     // R16-4: the VM path runs no --require-isolation gate (no observed
     // marker exists to pass, and mode:"vm" needs no gate record); the
     // scratch HOME protects the round itself, and the home/env gate checks
     // belong to the container recipe's step 5.
     expect(flat).toContain(
       'The VM path runs **no `--require-isolation` gate**',
+    );
+    // R16-4 / R3-4: the preflight VM sentence is scoped to exclude the gate
+    // and names no in-boundary gate command / boundary-gate.json, so it cannot
+    // push a VM operator to run the container gate (or an --artifact-dir
+    // invocation parseArgs refuses) the VM bullet says it skips.
+    expect(flat).toContain(
+      'a VM boundary takes the same trusted copy but runs **no `--require-isolation` gate**',
+    );
+    expect(flat).toContain(
+      'there is no in-boundary gate command and no `boundary-gate.json` to produce. Select `--execution vm` and its approval arguments in prepare before the battery; prepare writes the declaration. Never hand-write it afterward.',
     );
     expect(flat).toContain(
       'The VM round still runs under a **scratch `HOME`**',
@@ -6843,6 +7798,21 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     // A container declaration is backed by a gate record.
     expect(flat).toContain('backed by `boundary-gate.json`');
+    // R16-1 (residual): the record carries only the nonce hash, never the
+    // plaintext; step 5 says so and the checker — the SINGLE authoritative
+    // matcher (the step-7 shell no longer re-implements it, R1-2/R2-6) —
+    // hash-compares a container-nonce log line against it.
+    expect(flat).toContain('stores only its **sha256** in the gate record');
+    expect(flat).toContain('(`nonceSha256`), never the plaintext');
+    expect(flat).toContain('the SINGLE authoritative implementation');
+    // R6 (deferred): step 5's container-nonce spelling and the checker's
+    // matcher literal are pinned together, so rewording either side cannot
+    // silently refuse every compliant round.
+    expect(flat).toContain('echo a line beginning `container-nonce: <nonce>`');
+    expect(flat).toContain('matches only that prefix');
+    expect(readFileSync('scripts/verify-pr-check.mjs', 'utf8')).toContain(
+      '/container-nonce:[ \\t]*(\\S+)/',
+    );
     // The record and the lane flag corroborate an operator; they are not
     // proof against a round that forges them. The honest wording is the
     // contract — an overclaim ("cannot be minted", "never for a local
@@ -6873,22 +7843,46 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'an agent-forwarded shell carries `SSH_AUTH_SOCK` even under a scratch home',
     );
+    expect(flat).toContain('Prepare writes the resulting `executionApproval`');
     expect(flat).toContain(
-      '{"mode":"waived","by":"<maintainer>","approval":"<permalink to the maintainer\'s approval comment>","reason":"<why this round may run outside a boundary>"}',
+      'and the object also names `basis`, `by`, `permission`, `head`, `round`, `reason`, optional `attestation`, and for a comment its permalink, id, body digest and registrationNonce.',
     );
-    // The maintainer is the sole author of the approval comment: the
-    // round never posts the comment it cites (N9-1).
+    expect(flat).toContain('checks the object shapes and their deep equality');
+    expect(flat).toContain('`mode`, `source`, `basis`, `by`, `permission`');
     expect(flat).toContain(
-      'if the maintainer approves, **they** record that approval as a PR comment (the round never authors the comment it cites)',
+      '--trust-pr-head` after the maintainer approves that whole current head for this round',
+    );
+    // The maintainer is the sole author of an other-fork approval comment;
+    // own and same-repository local trust deliberately needs no public URL.
+    expect(flat).toContain('**they**, never the round, post the PR comment');
+    expect(flat).toContain('verify-pr-boundary-approval:');
+    expect(flat).toContain('"round":<r from this --start>');
+    expect(flat).toContain(
+      'Replace `<r from this --start>` with the exact `--round` value used for this registration',
+    );
+    expect(flat).toContain(
+      'node <trusted-clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <40hex> --round <r> --repo <owner>/<repo> --state-root "<trusted-dir>"',
+    );
+    expect(flat).toContain(
+      "--attestation 'nothing mounted, no host credentials'",
+    );
+    expect(flat).toContain(
+      "pass that **identical trusted root** to every prepare retry and to the registration's `--complete` or `--release`",
+    );
+    expect(flat).toContain(
+      'An unattended container retains the old default and needs neither a comment marker nor this approval path.',
+    );
+    expect(flat).not.toContain(
+      "--attestation '<nothing mounted, no host credentials>'",
     );
     expect(flat).not.toContain('or the round, under the local publish path');
-    // The coordinate check reads the host-held --context snapshot, never
-    // the PR-writable artifact context.json (R9-1).
+    // The trusted snapshot remains external to the PR-writable artifact
+    // context; its deep-equal record and digest back the waiver at publication.
     expect(flat).toContain(
-      'When the host-held snapshot passed as `--context` carries `repo` and the PR number',
+      'Publication requires `--context <host snapshot>` and a matching `--context-sha256`',
     );
     expect(flat).toContain(
-      "The round's own artifact-directory `context.json` never supplies these coordinates — it is PR-writable",
+      'An old waiver without this host record or digest is refused',
     );
     // The completion duty is a top-level paragraph, not folded into the
     // last exit-3 bullet by a two-space indent.
@@ -6905,10 +7899,12 @@ describe('qwen-triage verify hardening round 2', () => {
       'a self-chosen `container=<name>` string is a _declaration_, not an observed boundary',
     );
     expect(flat).toContain('"mode":"vm"');
-    expect(flat).toContain('explicitly approves host execution for this round');
-    expect(flat).toContain('The invocation itself is not that approval');
+    expect(flat).toContain('Neither fact alone is an automatic waiver');
     expect(flat).toContain(
-      'a waiver never carries over to the next round unasked',
+      'a changed head or requested new round is a fresh decision',
+    );
+    expect(flat).toContain(
+      'never let an unattended watch apply it to unknown future heads',
     );
     // The Java gap is named, not left as a silent host fallback.
     expect(flat).toContain('carries no JDK or Maven');
@@ -6954,10 +7950,21 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(verifySkill).toContain(
       'grep -Eq \'^[0-9a-f]{64}$\' ~/.cache/qwen-verify/pr<n>/pr.sha256 || { echo "prepare printed no valid context-sha256; see prepare.log" >&2; exit 1; }',
     );
-    // R5-3: clear last round's log/digest and gate on prepare's own exit status,
-    // so a failed cd/prepare cannot certify a stale snapshot.
-    expect(verifySkill).toContain(
+    // R5-3: clear the transient log and the previous digest. The transactional
+    // writer may preserve the previous pr.json, but a stale digest must not
+    // certify a later checker invocation for the failed round.
+    const prepareCleanup = verifySkill.match(
+      /^\s*rm -f .*prepare\.log.*$/m,
+    )?.[0];
+    expect(prepareCleanup?.trim()).toBe(
       'rm -f ~/.cache/qwen-verify/pr<n>/prepare.log ~/.cache/qwen-verify/pr<n>/pr.sha256',
+    );
+    expect(prepareCleanup).not.toMatch(/pr\.json/);
+    expect(flat).toContain(
+      'transactional writer preserves the previous pr.json on failure',
+    );
+    expect(flat).toContain(
+      'stale pr.sha256 must not certify a later checker invocation',
     );
     expect(verifySkill).toContain(
       '|| { cat ~/.cache/qwen-verify/pr<n>/prepare.log >&2; exit 1; }',
@@ -7039,7 +8046,6 @@ describe('qwen-triage verify hardening round 2', () => {
       symlinkRound = false,
       spacesInPath = false,
       slashSuffix = '',
-      noNonce = false,
     } = {}) => {
       const root = mkdtempSync(join(tmpdir(), 'verify-step7-'));
       // R10-48: a round path with a space exercises the quoted expansions.
@@ -7065,26 +8071,11 @@ describe('qwen-triage verify hardening round 2', () => {
       writeFileSync(join(proxyDir, 'proxy.pid'), '424242\n');
       writeFileSync(join(proxyDir, 'proxy.json'), '{"token":"bearer"}');
       writeFileSync(join(proxyDir, 'proxy.err'), '');
-      // R16-1: the gate record carries a per-round nonce; the round's raw
-      // harness logs must echo it for step 7 to declare mode:"container".
-      // noNonce leaves the logs without it (the gate still passed).
-      const nonce = 'n0nce1234567890abcdef';
-      if (!planted && !readOnlyRound && !symlinkRound) {
-        writeFileSync(
-          join(round, 'boundary-gate.json'),
-          JSON.stringify({
-            gate: 'require-isolation',
-            passed: true,
-            observed: ['/.dockerenv'],
-            credentialFree: true,
-            nonce,
-          }),
-        );
-        writeFileSync(
-          join(round, 'harness.log'),
-          noNonce ? 'PASS cell\n' : `container-nonce: ${nonce}\nPASS cell\n`,
-        );
-      }
+      // The nonce binding's accept/refuse/parity witnesses live in the checker
+      // tests (containerNonceErrors), which read a real round dir; this
+      // shimmed-node replay only pins the declaration write + checker
+      // invocation + proxy teardown, so it plants no gate record / nonce log
+      // that nothing here would read (R4-3).
       const calls = join(root, 'calls.log');
       for (const [tool, body] of [
         [
@@ -7161,24 +8152,11 @@ describe('qwen-triage verify hardening round 2', () => {
       }
     });
 
-    // R16-1: the gate record passes but the round logs carry no container
-    // nonce (the battery ran on the host) — step 7 must refuse to mint a
-    // mode:"container" declaration and exit non-zero, proxy still torn down.
-    it('refuses a container declaration when the logs carry no nonce', () => {
-      const { res, log, round, root, proxyDir } = replay({ noNonce: true });
-      try {
-        expect(res.status).toBe(1);
-        expect(res.stderr).toMatch(/round logs carry no container nonce/);
-        expect(existsSync(join(round, 'boundary.json'))).toBe(false);
-        expect(log).not.toMatch(/^node /m);
-        expect(log).toMatch(/kill 424242/);
-        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
-          expect(existsSync(join(proxyDir, f))).toBe(false);
-        }
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    });
+    // The container nonce binding is enforced by the checker, the single
+    // authoritative matcher (R1-2/R2-6) — the step-7 shell no longer
+    // re-implements it, so the nonce accept/refuse/parity witnesses live in
+    // scripts/tests/verify-pr-check.test.js (containerNonceErrors) and the
+    // real-environment round trip, not in this shimmed-node shell replay.
 
     // R10-47: a PR-planted symlink at the round dir is refused, the victim
     // is untouched, and the proxy is still torn down.
@@ -7386,7 +8364,7 @@ describe('qwen-triage verify hardening round 2', () => {
     const frontmatter = parse(/^---\n([\s\S]*?)\n---/.exec(verifySkill)[1]);
 
     expect(frontmatter['argument-hint']).toBe(
-      '<pr-number> [--publish] [--no-publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]',
+      '<pr-number> [--publish] [--no-publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>] [--execution <container|vm|host>] [--trust-pr-head]',
     );
   });
 
@@ -11183,10 +12161,31 @@ describe('qwen-triage verify Java toolchain', () => {
       expect(envValue(mavenRepoProducerWorkflow, name)).toBe(pin);
       expect(envValue(sdkJavaWorkflow, name)).toBe(pin);
     }
-    for (const name of ['TEMURIN_VERSION', 'TEMURIN_SHA256', 'TEMURIN_URL']) {
+    for (const name of [
+      'TEMURIN_VERSION',
+      'TEMURIN_SHA256_X64',
+      'TEMURIN_SHA256_AARCH64',
+    ]) {
       const pin = envValue(consumer, name);
       expect(pin).toBeTruthy();
       expect(envValue(mavenRepoProducerWorkflow, name)).toBe(pin);
+    }
+    // The pool advertises both architectures on the same runners, so both
+    // workflows must bind each host architecture to its own checksum.
+    expect(envValue(consumer, 'TEMURIN_SHA256_X64')).toBe(
+      'ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94',
+    );
+    expect(envValue(consumer, 'TEMURIN_SHA256_AARCH64')).toBe(
+      '23e37e026f12f3e706f18938ff611db3032d075b09d0879a25d06718c773e223',
+    );
+    for (const text of [consumer, mavenRepoProducerWorkflow]) {
+      expect(text).toContain('case "$(uname -m)" in');
+      expect(text).toMatch(
+        /x86_64\) temurin_arch='x64'; temurin_sha="\$TEMURIN_SHA256_X64"/,
+      );
+      expect(text).toMatch(
+        /aarch64\|arm64\) temurin_arch='aarch64'; temurin_sha="\$TEMURIN_SHA256_AARCH64"/,
+      );
     }
   });
 

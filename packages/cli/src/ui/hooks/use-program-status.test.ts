@@ -36,7 +36,6 @@ const base: ProgramStatusInputs = {
   turnOutcome: 'idle',
   authPending: false,
   shellConfirmationPending: false,
-  loopDetectionPending: false,
   startupApprovalPending: false,
 };
 
@@ -164,9 +163,6 @@ describe('deriveProgramStatus', () => {
     expect(
       deriveProgramStatus({ ...base, shellConfirmationPending: true }),
     ).toMatchObject({ state: 'blocked', kind: 'permission' });
-    expect(
-      deriveProgramStatus({ ...base, loopDetectionPending: true }),
-    ).toMatchObject({ state: 'blocked', kind: 'question' });
     expect(
       deriveProgramStatus({ ...base, startupApprovalPending: true }),
     ).toMatchObject({ state: 'blocked', kind: 'permission' });

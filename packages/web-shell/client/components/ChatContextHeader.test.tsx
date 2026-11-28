@@ -6,21 +6,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider, type WebShellLanguage } from '../i18n';
 import { ChatContextHeader } from './ChatContextHeader';
 
-// The QR entry reads the workspace connection from context.
-vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
-  const actual =
-    await importOriginal<
-      typeof import('@qwen-code/web-shell/daemon-react-sdk')
-    >();
-  return {
-    ...actual,
-    useWorkspace: () => ({
-      baseUrl: 'http://127.0.0.1:8080/',
-      token: 'test-token',
-    }),
-  };
-});
-
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 let container: HTMLDivElement | null = null;
@@ -61,6 +46,25 @@ function mount(
 }
 
 describe('ChatContextHeader', () => {
+  it('uses the correct Russian singular label for one scheduled task', () => {
+    mount(
+      {
+        scheduledTaskCount: 1,
+        scheduledTaskActiveCount: 1,
+        scheduledTaskNextRunAt: Date.now() + 60_000,
+        onOpenScheduledTasks: vi.fn(),
+      },
+      'ru',
+    );
+    const button = container?.querySelector(
+      '[data-web-shell-scheduled-tasks-entry]',
+    );
+    expect(button).not.toBeNull();
+    expect(button?.getAttribute('aria-label') ?? '').toContain(
+      'Задача по расписанию (1)',
+    );
+  });
+
   it('renders custom content inside the persistent action shell', () => {
     const view = mount({ content: <span>Custom header</span> });
 
@@ -197,15 +201,30 @@ describe('ChatContextHeader', () => {
     expect(view.querySelector('[aria-label="Context Usage"]')).toBeNull();
   });
 
-  it('shows the Local Control QR entry ahead of the other actions', () => {
+  it('renders the leading action slot ahead of the other actions with the shared action class', () => {
+    let receivedClassName: string | undefined;
     const view = mount({
       rightPanelAvailable: true,
-      onOpenLocalControlSettings: vi.fn(),
+      renderLeadingAction: (actionClassName) => {
+        receivedClassName = actionClassName;
+        return (
+          <button
+            type="button"
+            className={actionClassName}
+            aria-label="Mobile access"
+          />
+        );
+      },
     });
     const actions = Array.from(
       view.querySelectorAll<HTMLButtonElement>('button'),
     );
+    const environmentButton = view.querySelector<HTMLButtonElement>(
+      '[aria-label="Toggle environment information"]',
+    );
 
+    expect(environmentButton?.className).toBeTruthy();
+    expect(receivedClassName).toBe(environmentButton?.className);
     expect(actions.map((button) => button.getAttribute('aria-label'))).toEqual([
       'Mobile access',
       'Toggle environment information',
@@ -280,14 +299,60 @@ describe('ChatContextHeader', () => {
     );
 
     expect(entry).not.toBeNull();
-    expect(entry!.getAttribute('aria-label')).toBe('Open artifacts (3)');
+    expect(entry!.getAttribute('aria-label')).toBe('Artifacts (3)');
     expect(entry!.textContent).toContain('3');
     act(() => entry!.click());
     expect(onOpenArtifacts).toHaveBeenCalledOnce();
   });
 
+  it('reflects the right panel open state on the artifacts entry', () => {
+    const closed = mount({
+      artifactCount: 3,
+      onOpenArtifacts: vi.fn(),
+      rightPanelOpen: false,
+    });
+    expect(
+      closed
+        .querySelector('[data-web-shell-artifacts-entry]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('false');
+
+    const open = mount({
+      artifactCount: 3,
+      onOpenArtifacts: vi.fn(),
+      rightPanelOpen: true,
+    });
+    expect(
+      open
+        .querySelector('[data-web-shell-artifacts-entry]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+  });
+
   it('hides the artifacts entry when the count is zero', () => {
     const view = mount({ artifactCount: 0, onOpenArtifacts: vi.fn() });
+    expect(view.querySelector('[data-web-shell-artifacts-entry]')).toBeNull();
+  });
+
+  it('keeps the artifacts entry as the close affordance for a restored zero-artifact artifacts tab', () => {
+    const view = mount({
+      artifactCount: 0,
+      onOpenArtifacts: vi.fn(),
+      rightPanelOpen: true,
+      artifactsTabActive: true,
+    });
+    const entry = view.querySelector('[data-web-shell-artifacts-entry]');
+    expect(entry).not.toBeNull();
+    expect(entry!.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('does not invent an artifacts entry for unrelated open tabs at zero artifacts', () => {
+    const view = mount({
+      artifactCount: 0,
+      onOpenArtifacts: vi.fn(),
+      rightPanelOpen: true,
+      artifactsTabActive: false,
+    });
     expect(view.querySelector('[data-web-shell-artifacts-entry]')).toBeNull();
   });
 
@@ -307,7 +372,7 @@ describe('ChatContextHeader', () => {
       view
         .querySelector('[data-web-shell-artifacts-entry]')
         ?.getAttribute('aria-label'),
-    ).toBe('打开产物（3）');
+    ).toBe('产物（3）');
   });
 
   it('places the artifacts entry after the right-panel action', () => {
@@ -323,7 +388,64 @@ describe('ChatContextHeader', () => {
     expect(actions.map((button) => button.getAttribute('aria-label'))).toEqual([
       'Toggle environment information',
       'Toggle right panel',
-      'Open artifacts (2)',
+      'Artifacts (2)',
     ]);
+  });
+
+  it('shows the scheduled tasks entry with countdown or count and opens on click', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-01T08:00:00Z'));
+    const onOpenScheduledTasks = vi.fn();
+
+    const single = mount({
+      scheduledTaskCount: 1,
+      scheduledTaskActiveCount: 1,
+      scheduledTaskNextRunAt: Date.parse('2026-06-01T08:05:00Z'),
+      onOpenScheduledTasks,
+    });
+    const singleButton = single.querySelector<HTMLButtonElement>(
+      '[data-web-shell-scheduled-tasks-entry]',
+    );
+    expect(singleButton).not.toBeNull();
+    expect(singleButton?.getAttribute('data-active')).toBe('true');
+    expect(singleButton?.textContent).toBe('5m');
+    expect(singleButton?.getAttribute('aria-label')).toContain('Next in 5m');
+    expect(singleButton?.getAttribute('title')).toContain('Next in 5m');
+    act(() => singleButton?.click());
+    expect(onOpenScheduledTasks).toHaveBeenCalledOnce();
+
+    const paused = mount({
+      scheduledTaskCount: 2,
+      scheduledTaskActiveCount: 0,
+      scheduledTaskNextRunAt: null,
+      onOpenScheduledTasks,
+    });
+    const pausedButton = paused.querySelector<HTMLButtonElement>(
+      '[data-web-shell-scheduled-tasks-entry]',
+    );
+    expect(pausedButton?.getAttribute('data-active')).toBe('false');
+    expect(pausedButton?.textContent).toBe('2');
+
+    const due = mount({
+      scheduledTaskCount: 1,
+      scheduledTaskActiveCount: 1,
+      scheduledTaskNextRunAt: Date.parse('2026-06-01T08:00:00Z'),
+      onOpenScheduledTasks,
+    });
+    const dueEntry = due.querySelector(
+      '[data-web-shell-scheduled-tasks-entry]',
+    );
+    expect(dueEntry?.getAttribute('aria-label')).toContain('Due now');
+    expect(dueEntry?.getAttribute('title')).toContain('Due now');
+    expect(dueEntry?.getAttribute('title')).not.toContain('Next in Due now');
+
+    const empty = mount({
+      scheduledTaskCount: 0,
+      scheduledTaskActiveCount: 0,
+      onOpenScheduledTasks,
+    });
+    expect(
+      empty.querySelector('[data-web-shell-scheduled-tasks-entry]'),
+    ).toBeNull();
   });
 });

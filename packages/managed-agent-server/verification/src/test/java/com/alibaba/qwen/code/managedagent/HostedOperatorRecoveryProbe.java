@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.maintenance.WorkspaceRecoveryCommand;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -136,7 +137,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
         assertThat(command("complete", recovery, evidence.toString())).contains("completed");
         assertThat(command("complete", recovery, evidence.toString())).contains("completed");
         assertOriginalSeed(binding, originalSeed);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_key IS NOT NULL",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_id IS NOT NULL",
                 Integer.class, binding)).isZero();
         assertThat(jdbc.queryForObject("SELECT binding_state FROM ma_runtime_binding WHERE binding_id = ?",
                 String.class, binding)).isEqualTo("RELEASED");
@@ -157,13 +158,14 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
     }
 
     private void assertHeld(String binding, String holder) {
-        var members = jdbc.queryForList("SELECT runtime_generation, runtime_session_id, execution_storage_key"
-                + " FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_key IS NOT NULL", binding);
+        var members = jdbc.queryForList("SELECT runtime_generation, runtime_session_id, execution_storage_id"
+                + " FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_id IS NOT NULL", binding);
         assertThat(members).hasSize(1);
         var member = members.getFirst();
-        assertThat(org.apache.commons.codec.digest.DigestUtils.sha256Hex((binding + "\u0000"
-                + member.get("runtime_generation") + "\u0000" + member.get("runtime_session_id"))
-                .getBytes(StandardCharsets.UTF_8))).isEqualTo(holder);
+        assertThat(ManagedIdentityRefs.ref(ManagedIdentityRefs.HOLDER_REF_BYTES,
+                "external-workspace-holder/1", binding,
+                member.get("runtime_generation").toString(), member.get("runtime_session_id").toString()))
+                .isEqualTo(holder);
     }
 
     private void assertOriginalSeed(String binding, String ciphertext) {

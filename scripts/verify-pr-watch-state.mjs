@@ -18,16 +18,20 @@
  *
  * Usage:
  *   node verify-pr-watch-state.mjs <pr> --start --head <oid> --round <n> \
- *     --artifact-dir <dir> [--repo <owner>/<repo>] [--state-root <dir>]
+ *     [--artifact-dir <dir>] [--repo <owner>/<repo>] [--state-root <dir>]
  *   node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> \
- *     --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] \
+ *     --registration-nonce <nonce> --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] \
  *     [--repo <owner>/<repo>] [--state-root <dir>]
  *   node verify-pr-watch-state.mjs <pr> --release --head <oid> \
- *     [--round <n>] [--repo <owner>/<repo>] [--state-root <dir>]
+ *     [--round <n>] [--registration-nonce <nonce>] [--repo <owner>/<repo>] [--state-root <dir>]
  *
  * Every verb exits 3 when the state belongs to another repository (a PR
  * number is only unique within its repo); an omitted --repo does not
  * disarm the guard once a repo is recorded.
+ *
+ * `--start` allocates a fresh registration nonce; an in-flight retry keeps
+ * it, while completion, release or a fresh start consumes it. A comment
+ * approval must name that current registration, not just its head and round.
  *
  * `--start` exits 3 when the head is already verified, or while any round
  * is in flight for the PR. Verified heads are remembered as a list, so a
@@ -45,7 +49,8 @@
  * that entry's `seq` (legacy seq-less entries stay seq-less); the list is kept
  * in seq order and the supersede filter keys on it, never on the write clock.
  * `--complete` removes only its own round's in-flight entry (matched by
- * head and round) and upserts its verified entry, except for
+ * head, round and, when present, its exact registration nonce). A recorded
+ * verified entry keeps that nonce to reject replacement replays, except for
  * `inconclusive`, which releases the marker without filing the head as
  * verified and re-defers the head at its original seq so the next command
  * names it again (a head that already keeps an earlier verdict is not
@@ -60,7 +65,9 @@
  * in-flight entry and refuses a head with no entry, including when no
  * markers exist at all — a release aimed at the wrong state root must not
  * read as success. A supplied `--round` must match the marker's round, so
- * a retried recovery cannot delete a newer round's live marker.
+ * a retried recovery cannot delete a newer round's live marker. Likewise,
+ * nonce-bearing entries require their exact registration nonce, and a
+ * delayed old registration cannot release or complete over its replacement.
  *
  * Every read-modify-write holds an exclusive lock file beside the state
  * file, so two concurrent invocations cannot each build state from the same
@@ -135,45 +142,91 @@ export function readState(stateRoot, prNumber) {
       `state file ${path} is not a JSON object; inspect or remove it before the next round`,
     );
   }
-  // A well-formed object whose keys are ALL unknown is not a state this
-  // helper can migrate: reading it as "no state" would let --start rewrite
-  // the file from empty lists and erase a live in-flight record (R16-2).
-  // Fail closed on shape, like corrupt JSON, rather than silently reset.
-  // The legacy `inFlight` key counts only as a string head: `inFlight:true`
-  // (the old flag) or `inFlight:{…}` alone is not a migratable marker.
-  const keys = Object.keys(parsed);
-  const knownPresent = keys.some((key) =>
-    key === 'inFlight' ? typeof parsed[key] === 'string' : STATE_KEYS.has(key),
+  // A well-formed object the migration ladder cannot consume is not a state
+  // this helper can migrate: reading it as "no state" would let --start
+  // rewrite the file from empty lists and erase a live in-flight record
+  // (R16-2). The guard is DERIVED from what the ladder actually consumes, so
+  // the two cannot drift (R2-1): a key whose value the ladder rejects (a
+  // string under an array key, an empty list with no legacy marker) does not
+  // count, and an identity key plus a misspelled head marker fails closed like
+  // corrupt JSON. Every state the helper writes goes through deriveView, which
+  // emits the lists as arrays plus an integer seqCounter, so a legitimate file
+  // is never refused.
+  const bearingPresent =
+    inFlightEntries(parsed).length > 0 ||
+    verifiedEntries(parsed).length > 0 ||
+    deferredEntries(parsed).length > 0 ||
+    releasedEntries(parsed).length > 0 ||
+    Number.isInteger(parsed.seqCounter) ||
+    (parsed.retiredSeqs != null &&
+      typeof parsed.retiredSeqs === 'object' &&
+      Object.keys(parsed.retiredSeqs).length > 0);
+  // A legacy resting body predates the list/seqCounter format: it carries only
+  // identity keys and the pre-list single-marker head keys, all holding resting
+  // values (null/empty/false). The ladder consumes it as resting (every
+  // *Entries returns []), so refusing it would strand a PR whose state file
+  // holds no dedup history at all — --start/--complete/--release could never
+  // run again (R7-1). Admit it as no-state. The clause is scoped to the legacy
+  // single-marker keys: a body carrying a *Heads LIST key (even empty) is the
+  // new format, which always writes seqCounter, so an empty list with no
+  // bearing entry stays refused. An UNKNOWN key (a misspelled head marker) is
+  // neither identity nor legacy-head, so the R16-2 refusal still fires for an
+  // identity key plus an unknown spelling.
+  const IDENTITY_KEYS = new Set([
+    'pr',
+    'repo',
+    'round',
+    'artifactDir',
+    'startedAt',
+    'completedAt',
+    'verdict',
+    'commentId',
+  ]);
+  const LEGACY_HEAD_KEYS = new Set([
+    'inFlightHead',
+    'inFlight',
+    'verifiedHead',
+    'previousHead',
+  ]);
+  const restingValue = (value) =>
+    value === null ||
+    value === false ||
+    value === '' ||
+    (Array.isArray(value) && value.length === 0) ||
+    (typeof value === 'object' &&
+      value !== null &&
+      Object.keys(value).length === 0);
+  const restingView = Object.entries(parsed).every(
+    ([key, value]) =>
+      IDENTITY_KEYS.has(key) ||
+      (LEGACY_HEAD_KEYS.has(key) && restingValue(value)),
   );
-  if (keys.length > 0 && !knownPresent) {
+  if (Object.keys(parsed).length > 0 && !bearingPresent && !restingView) {
     throw new Error(
-      `state file ${path} has no recognised state key; inspect or remove it before the next round`,
+      `state file ${path} carries no state-bearing entry the migration ladder can consume (a *Heads key must hold an array of {head} entries; inFlight/inFlightHead a non-empty string head); inspect it before removing — removal discards the verified/deferred dedup history`,
+    );
+  }
+  // A *Heads key that is PRESENT but holds a non-array value is a marker the
+  // ladder cannot consume and would silently erase on the next --start, even
+  // when another bearing key (an integer seqCounter, which every written file
+  // carries) admits the file above. Refuse it independently so the guard's
+  // "fails closed rather than admitted and erased" claim holds for every
+  // written shape, not only the identity-only one (R6-1). The list keys are
+  // always arrays in a written state; an empty array is the legitimate resting
+  // shape and stays admitted via seqCounter.
+  const unusableListKey = [
+    'inFlightHeads',
+    'verifiedHeads',
+    'deferredHeads',
+    'releasedHeads',
+  ].find((key) => parsed[key] !== undefined && !Array.isArray(parsed[key]));
+  if (unusableListKey) {
+    throw new Error(
+      `state file ${path} carries a ${unusableListKey} value the migration ladder cannot consume (a *Heads key must hold an array of {head} entries, not a bare string or other non-array); inspect it before removing — removal discards the verified/deferred dedup history`,
     );
   }
   return parsed;
 }
-
-/** The state keys the migration ladder recognises (R16-2 shape guard). */
-const STATE_KEYS = new Set([
-  'pr',
-  'repo',
-  'round',
-  'artifactDir',
-  'startedAt',
-  'completedAt',
-  'verdict',
-  'commentId',
-  'seqCounter',
-  'verifiedHeads',
-  'verifiedHead',
-  'previousHead',
-  'inFlightHeads',
-  'inFlightHead',
-  'inFlight',
-  'deferredHeads',
-  'releasedHeads',
-  'retiredSeqs',
-]);
 
 /**
  * OIDs are quoted at every length from 7 to 40; compare by prefix. An
@@ -190,6 +243,16 @@ export function sameCommit(a, b) {
   );
 }
 
+/** Returns the one normalized in-flight registration used by approvals. */
+export function inFlightRegistration(state, head, round) {
+  const flights = inFlightEntries(state);
+  return flights.length === 1 &&
+    sameCommit(flights[0]?.head, head) &&
+    (flights[0]?.round === null || flights[0]?.round === round)
+    ? flights[0]
+    : null;
+}
+
 /** A list entry is usable only with a non-empty string head. */
 function hasHead(entry) {
   return entry && typeof entry.head === 'string' && entry.head !== '';
@@ -197,19 +260,23 @@ function hasHead(entry) {
 
 /** In-flight entries, migrating the pre-list single-marker shape. */
 function inFlightEntries(existing) {
-  if (Array.isArray(existing?.inFlightHeads)) {
-    return existing.inFlightHeads.filter(hasHead);
-  }
-  // A hand-written legacy marker may name the head in `inFlight` itself
-  // (a string) rather than `inFlightHead`; accept either spelling so it
-  // still blocks a second round instead of reading as "no round in flight".
+  const list = Array.isArray(existing?.inFlightHeads)
+    ? existing.inFlightHeads.filter(hasHead)
+    : null;
+  // A non-empty list is authoritative (it is what deriveView writes). Only
+  // when the list is absent or EMPTY does a hand-written legacy marker name
+  // the head — in `inFlightHead` alone or in `inFlight` itself (a string).
+  // Consuming it even alongside an empty `inFlightHeads: []` (the helper's
+  // resting shape) is what makes the marker block a second round instead of
+  // being read as empty and erased (R1-1, R2-1).
+  if (list && list.length > 0) return list;
   const legacyHead =
     typeof existing?.inFlightHead === 'string' && existing.inFlightHead !== ''
       ? existing.inFlightHead
       : typeof existing?.inFlight === 'string' && existing.inFlight !== ''
         ? existing.inFlight
         : null;
-  if (existing?.inFlight && legacyHead) {
+  if (legacyHead) {
     return [
       {
         head: legacyHead,
@@ -217,12 +284,12 @@ function inFlightEntries(existing) {
         // operation wrote last, verified or in-flight — so the migrated
         // marker matches completion by head alone (round null).
         round: null,
-        artifactDir: existing.artifactDir ?? null,
-        startedAt: existing.startedAt ?? null,
+        artifactDir: existing?.artifactDir ?? null,
+        startedAt: existing?.startedAt ?? null,
       },
     ];
   }
-  return [];
+  return list ?? [];
 }
 
 /** Verified entries, migrating the pre-list verifiedHead/previousHead pair. */
@@ -596,6 +663,7 @@ export function startRound(
         {
           head,
           round,
+          registrationNonce: randomUUID(),
           artifactDir,
           startedAt,
           seq,
@@ -619,7 +687,7 @@ export function startRound(
 
 export function completeRound(
   stateRoot,
-  { pr, head, round, verdict, commentId, artifactDir, repo },
+  { pr, head, round, verdict, commentId, artifactDir, repo, registrationNonce },
   now = new Date(),
 ) {
   return withStateLock(stateRoot, pr, () => {
@@ -669,6 +737,16 @@ export function completeRound(
         };
       }
     }
+    const registration = ownFlight ?? prior;
+    if (
+      registration?.registrationNonce !== undefined &&
+      registration.registrationNonce !== registrationNonce
+    ) {
+      return {
+        registrationMismatch: true,
+        path: statePath(stateRoot, pr),
+      };
+    }
     // A verdict needs a head some round actually ran: an in-flight marker
     // or an earlier verdict. A deferred entry is NOT a registration — a
     // deferred head was refused because another round was in flight, so
@@ -700,6 +778,7 @@ export function completeRound(
               verdict,
               commentId: commentId ?? prior?.commentId ?? null,
               artifactDir: dir,
+              registrationNonce: registration.registrationNonce,
               completedAt,
             },
           ];
@@ -765,6 +844,7 @@ export function completeRound(
       state,
       deferred,
       keptVerdict,
+      artifactDir: dir,
     };
   });
 }
@@ -779,7 +859,10 @@ export function completeRound(
  * match the marker's round: a retried recovery of a dead round must not
  * delete the live marker of a newer round that restarted the same head.
  */
-export function releaseRound(stateRoot, { pr, head, round, repo }) {
+export function releaseRound(
+  stateRoot,
+  { pr, head, round, repo, registrationNonce },
+) {
   return withStateLock(stateRoot, pr, () => {
     const existing = readState(stateRoot, pr);
     if (existing?.repo && !sameRepo(repo, existing.repo)) {
@@ -805,6 +888,12 @@ export function releaseRound(stateRoot, { pr, head, round, repo }) {
         recordedRound: entry.round,
         path: statePath(stateRoot, pr),
       };
+    }
+    if (
+      entry.registrationNonce !== undefined &&
+      entry.registrationNonce !== registrationNonce
+    ) {
+      return { registrationMismatch: true, path: statePath(stateRoot, pr) };
     }
     const deferred = deferredEntries(existing).filter(
       (candidate) => !sameCommit(candidate.head, head),
@@ -843,11 +932,34 @@ export function releaseRound(stateRoot, { pr, head, round, repo }) {
 }
 
 const HELP = `Usage:
-  node verify-pr-watch-state.mjs <pr> --start --head <oid> --round <n> --artifact-dir <dir> [--repo <owner>/<repo>] [--state-root <dir>]
-  node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] [--repo <owner>/<repo>] [--state-root <dir>]
-  node verify-pr-watch-state.mjs <pr> --release --head <oid> [--round <n>] [--repo <owner>/<repo>] [--state-root <dir>]
+  node verify-pr-watch-state.mjs <pr> --start --head <oid> --round <n> [--artifact-dir <dir>] [--repo <owner>/<repo>] [--state-root <dir>]
+  node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> --verdict <word> [--registration-nonce <nonce>] [--comment-id <id>] [--artifact-dir <dir>] [--repo <owner>/<repo>] [--state-root <dir>]
+  node verify-pr-watch-state.mjs <pr> --release --head <oid> [--round <n>] [--registration-nonce <nonce>] [--repo <owner>/<repo>] [--state-root <dir>]
 
 Owns .qwen/tmp/verify-pr-watch-<pr>.json so rounds never hand-write it.
+Register with --start AHEAD of prepare (R17-2): --artifact-dir is optional on
+--start because prepare has not printed the directory yet; a round killed in
+the prepare window then leaves a recoverable in-flight marker, not a silently
+dropped head. Record the directory prepare printed at --complete
+(--artifact-dir <dir>). A completion that omits it inherits the in-flight
+marker's directory when the start carried one, else an earlier verdict's
+directory for the same head, else none — a non-inconclusive verdict that
+resolves to none warns that it has no evidence directory. Each actual start
+allocates and prints registrationNonce; a comment approval must match the
+current registration's value. The flag is REQUIRED for nonce-bearing
+registrations: it is shown in brackets only for the explicit legacy no-nonce
+migration path. Repeat that exact value with --registration-nonce on
+--complete and --release so a delayed call cannot consume a replacement
+registration or replay over its verdict. No nonce is inferred from current
+state for the owner of the call. A persisted watch that predates the flag
+must recover by passing, explicitly, the nonce printed by that exact --start;
+if its output is lost, read the matching inFlightHeads entry (or the
+verifiedHeads entry after completion) in its own trusted state file, then
+place that identity on --complete/--release. That recovery never grants
+missing/stale identities permission to consume a replacement registration.
+Only legacy entries without a stored nonce may use the explicit no-nonce
+migration path. Completion or release consumes the live marker, so a later
+start needs a fresh marked approval rather than replaying the old comment.
 --start exits 3 when the head is already verified or any round is in flight
 for the PR (one round per PR). Every verb exits 3 when the state belongs to
 another repo (a PR number is only unique within its repository); an omitted
@@ -887,6 +999,7 @@ function parseArgs(argv) {
     artifactDir: null,
     repo: null,
     stateRoot: null,
+    registrationNonce: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -900,6 +1013,7 @@ function parseArgs(argv) {
     else if (arg === '--artifact-dir') out.artifactDir = argv[++i];
     else if (arg === '--repo') out.repo = argv[++i];
     else if (arg === '--state-root') out.stateRoot = argv[++i];
+    else if (arg === '--registration-nonce') out.registrationNonce = argv[++i];
     else if (!arg.startsWith('-') && out.pr === null) out.pr = Number(arg);
     else throw new Error(`unknown argument ${arg}\n\n${HELP}`);
   }
@@ -926,9 +1040,9 @@ function parseArgs(argv) {
   if (out.round !== null && (!Number.isInteger(out.round) || out.round <= 0)) {
     throw new Error(`--round must be a positive integer\n\n${HELP}`);
   }
-  if (out.start && !out.artifactDir) {
-    throw new Error(`--start requires --artifact-dir\n\n${HELP}`);
-  }
+  // --artifact-dir is optional on --start: registration runs ahead of prepare
+  // (R17-2), before the directory exists. The directory is recorded at
+  // --complete; a start that already knows it may still pass it.
   // A valueless or empty --artifact-dir on --complete would blank the
   // recorded directory ('' is not null, so the ?? fallback never fires);
   // reject it like every sibling flag.
@@ -955,6 +1069,16 @@ function parseArgs(argv) {
   }
   if (out.stateRoot !== null && !isAbsolute(out.stateRoot)) {
     throw new Error(`--state-root must be an absolute path\n\n${HELP}`);
+  }
+  if (
+    out.registrationNonce !== null &&
+    (out.start ||
+      typeof out.registrationNonce !== 'string' ||
+      out.registrationNonce.trim() === '')
+  ) {
+    throw new Error(
+      `--registration-nonce must be a non-empty value on --complete or --release\n\n${HELP}`,
+    );
   }
   // --repo is persisted as the PR's permanent identity and compared by exact
   // string equality on every later verb, so it must be the canonical
@@ -1059,12 +1183,19 @@ function main(argv) {
         return 3;
       }
       process.stdout.write(
-        `verify-pr watch-state: PR ${args.pr} round ${args.round} in flight at ${result.path}\n`,
+        `verify-pr watch-state: PR ${args.pr} round ${args.round} in flight at ${result.path}\n` +
+          `verify-pr watch-state: registrationNonce ${result.state.inFlightHeads[0].registrationNonce} (a comment approval must carry it)\n`,
       );
     } else if (args.complete) {
       const result = completeRound(root, args);
       if (result.locked) return lockHeld(args.pr);
       if (result.repoMismatch) return repoMismatch(args.pr, result, args.repo);
+      if (result.registrationMismatch) {
+        process.stderr.write(
+          `verify-pr watch-state: PR ${args.pr} head ${args.head} does not match the supplied registration nonce; pass --registration-nonce printed by the exact --start. For an older snapshot, read that registration's matching live or verified nonce in its trusted state file and pass it explicitly; missing or stale identity cannot consume or replay a replacement registration\n`,
+        );
+        return 3;
+      }
       if (result.staleCompletion) {
         process.stderr.write(
           `verify-pr watch-state: PR ${args.pr} head ${args.head} was already answered by round ${result.recordedRound}; refusing a stale completion from round ${args.round}\n`,
@@ -1095,6 +1226,16 @@ function main(argv) {
               : `verify-pr watch-state: PR ${args.pr} round ${args.round} recorded inconclusive for ${args.head} (not verified; the head stays startable and is re-deferred for the next round) at ${result.path}\n`
           : `verify-pr watch-state: PR ${args.pr} round ${args.round} verified ${args.head} (${args.verdict}) at ${result.path}\n`,
       );
+      // Registration runs ahead of prepare, so the in-flight marker carries no
+      // directory; a non-inconclusive completion that resolves to no directory
+      // files a verdict with no machine-readable pointer to its evidence (R1-3).
+      // Disclose it rather than silently dropping the link; --artifact-dir stays
+      // optional so a replayed completion can still inherit a prior directory.
+      if (args.verdict !== 'inconclusive' && result.artifactDir === null) {
+        process.stderr.write(
+          `verify-pr watch-state: PR ${args.pr} round ${args.round} recorded ${args.verdict} with no artifact directory (--artifact-dir omitted and the marker carries none); pass --artifact-dir <dir> prepare printed to link the verdict to its evidence\n`,
+        );
+      }
       printDeferred(args.pr, result.deferred);
     } else {
       const result = releaseRound(root, args);
@@ -1109,6 +1250,12 @@ function main(argv) {
       if (result.noMarker) {
         process.stderr.write(
           `verify-pr watch-state: PR ${args.pr} has no in-flight marker for ${args.head} at ${root}; nothing to release (check --state-root)\n`,
+        );
+        return 3;
+      }
+      if (result.registrationMismatch) {
+        process.stderr.write(
+          `verify-pr watch-state: PR ${args.pr} head ${args.head} does not match the supplied registration nonce; recover its own nonce from the exact start output or matching live state entry and pass --registration-nonce explicitly. Refusing to consume a replacement registration with stale or missing identity\n`,
         );
         return 3;
       }

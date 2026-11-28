@@ -51,7 +51,11 @@ async function install(
     channelsFail?: boolean;
     contactsFail?: boolean;
     deferPrimaryContacts?: boolean;
-    configuredWebhook?: 'dingtalk-webhook' | 'feishu-webhook' | 'wecom-webhook';
+    configuredWebhook?:
+      | 'dingtalk-webhook'
+      | 'feishu-webhook'
+      | 'wecom-webhook'
+      | 'generic-webhook';
   } = {},
 ) {
   const scenario = createWebShellDaemonScenario({
@@ -62,6 +66,7 @@ async function install(
         'session_source_metadata',
         'channel_management',
         'workspace_qualified_rest_core',
+        'scheduled_task_owner_selection',
         'workspace_channel_observed_contacts',
         ...(options.capable === false ? [] : ['channel_delivery']),
       ],
@@ -98,18 +103,23 @@ async function install(
             {
               type: options.configuredWebhook,
               displayName:
-                options.configuredWebhook === 'wecom-webhook'
-                  ? 'WeCom Webhook'
-                  : options.configuredWebhook === 'feishu-webhook'
-                    ? 'Feishu Webhook'
-                    : 'DingTalk Webhook',
+                options.configuredWebhook === 'generic-webhook'
+                  ? 'Generic Webhook'
+                  : options.configuredWebhook === 'wecom-webhook'
+                    ? 'WeCom Webhook'
+                    : options.configuredWebhook === 'feishu-webhook'
+                      ? 'Feishu Webhook'
+                      : 'DingTalk Webhook',
               manageable: true,
               fields: [],
               outboundOnly: true,
               defaultDeliveryTarget: {
                 type: 'chat' as const,
                 id: 'default',
-                label: 'Configured group',
+                label:
+                  options.configuredWebhook === 'generic-webhook'
+                    ? 'Configured endpoint'
+                    : 'Configured group',
               },
             },
           ]
@@ -276,7 +286,11 @@ async function useConfiguredDestination(
   page: Page,
   baseURL: string,
   info: TestInfo,
-  type: 'dingtalk-webhook' | 'feishu-webhook' | 'wecom-webhook',
+  type:
+    | 'dingtalk-webhook'
+    | 'feishu-webhook'
+    | 'wecom-webhook'
+    | 'generic-webhook',
 ) {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
@@ -284,6 +298,10 @@ async function useConfiguredDestination(
     if (message.type() === 'error') errors.push(message.text());
   });
   const state = await install(page, baseURL, { configuredWebhook: type });
+  const configuredHint =
+    type === 'generic-webhook'
+      ? 'Messages are sent to the endpoint configured for this Channel.'
+      : 'Messages are sent to the group configured for this Channel.';
   await createForm(page);
   const channels = page.getByRole('combobox', {
     name: 'Delivery Channel',
@@ -295,19 +313,14 @@ async function useConfiguredDestination(
     exact: true,
   });
   await channels.selectOption('ops-bot');
-  await expect(
-    page.getByText(
-      'Messages are sent to the group configured for this Channel.',
-      { exact: true },
-    ),
-  ).toBeVisible();
+  await expect(page.getByText(configuredHint, { exact: true })).toBeVisible();
   await expect(id).toHaveCount(0);
   await expect(suggestions).toHaveCount(0);
   expect(
     state.reads.filter((path) => path.endsWith('/channel/observed-contacts')),
   ).toEqual([]);
   await page
-    .getByText('Messages are sent to the group configured for this Channel.', {
+    .getByText(configuredHint, {
       exact: true,
     })
     .scrollIntoViewIfNeeded();
@@ -324,7 +337,7 @@ async function useConfiguredDestination(
   await expect(suggestions).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
   await page
-    .getByText('Messages are sent to the group configured for this Channel.', {
+    .getByText(configuredHint, {
       exact: true,
     })
     .scrollIntoViewIfNeeded();
@@ -346,14 +359,20 @@ async function useConfiguredDestination(
     },
   });
   await expect(page.getByTestId('scheduled-task-delivery')).toContainText(
-    'ops-bot · Chat · default',
+    'ops-bot · default',
   );
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await expect(id).toHaveCount(0);
-  await channels.selectOption('');
+  await expect(channels).toHaveValue('ops-bot');
+  await expect(page.getByText(configuredHint, { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect.poll(() => state.writes.length).toBe(2);
-  expect(state.writes[1]!.body.delivery).toBeNull();
+  expect(state.writes[1]!.body).not.toHaveProperty('delivery');
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await channels.selectOption('');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(3);
+  expect(state.writes[2]!.body.delivery).toBeNull();
   expect(errors).toEqual([]);
 }
 
@@ -361,6 +380,7 @@ for (const type of [
   'dingtalk-webhook',
   'feishu-webhook',
   'wecom-webhook',
+  'generic-webhook',
 ] as const) {
   test(`uses a ${type} configured destination without contacts and switches back to manual delivery @smoke`, async ({
     page,
@@ -588,7 +608,7 @@ test('uses the primary cwd when bootstrap capabilities omit workspaces @smoke', 
   );
   expect(state.reads).toContain('/workspace/channel/observed-contacts');
   await expect(page.getByTestId('scheduled-task-delivery')).toContainText(
-    'release-bot · Chat · chat-1',
+    'release-bot · chat-1',
   );
   await page.screenshot({
     path: info.outputPath('delivery-bootstrap-primary.png'),

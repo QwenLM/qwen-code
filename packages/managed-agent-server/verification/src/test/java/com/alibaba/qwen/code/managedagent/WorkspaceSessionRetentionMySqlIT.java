@@ -228,11 +228,10 @@ class WorkspaceSessionRetentionMySqlIT {
         publication(tenant, session);
         var deletion = deleteClaim(store, tenant, session);
         String digest = "c".repeat(64);
-        String projectionScope = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant, session);
-        String projectionKey = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.TOOL_RESULT_PROJECTION,
-                projectionScope, digest, "result-1");
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind, target_key, operation_kind, operation_id, tenant_id, workspace_id, session_id, execution_key, request_json, request_digest, state, phase, claim_generation, claim_until, gmt_create, gmt_modified) VALUES (?, ?, ?, 'TOOL_EXECUTION', ?, 'TOOL_RESULT_PROJECTION', 'result-1', ?, 'workspace', ?, ?, '{}', ?, 'LEASED', 'PROJECTING', 1, (" + ManagedSchemaTime.SQL_NOW + " + 60000), 0, 0)", projectionKey, projectionScope, projectionScope,
+        String projectionRef = com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.operationRef(
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.TOOL_RESULT_PROJECTION.name(),
+                tenant, "SESSION", session, digest, "result-1");
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, target_kind, target_id, operation_kind, operation_id, tenant_id, workspace_id, session_id, execution_call_id, request_json, request_digest, state, phase, claim_generation, claim_until, gmt_create, gmt_modified) VALUES (?, 'SESSION', ?, 'TOOL_EXECUTION', ?, 'TOOL_RESULT_PROJECTION', 'result-1', ?, 'workspace', ?, ?, '{}', ?, 'LEASED', 'PROJECTING', 1, (" + ManagedSchemaTime.SQL_NOW + " + 60000), 0, 0)", projectionRef, session,
                 digest, tenant, session, digest, digest);
         var projection = new JdbcManagedToolResultStore(jdbc, new DataSourceTransactionManager(source), store);
         var claim = new JdbcManagedToolResultStore.Claim(new JdbcManagedToolResultStore.Source("result-1", tenant,
@@ -493,13 +492,14 @@ class WorkspaceSessionRetentionMySqlIT {
 
     private void publication(String tenant, String session) {
         String key = "b".repeat(64);
-        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
-                + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_ref, tenant_id, workspace_id, session_id,"
+                + " publication_id, execution_call_id, capture_id, binding_json, binding_digest, token_hash, state,"
                 + " capture_bytes, producer_bytes, admission_bytes, producer_phase, is_write_evidence, is_accepted_complete,"
                 + " capture_held_bytes, producer_held_bytes, admission_held_bytes, capture_used_bytes)"
-                + " VALUES (?, ?, ?, 'workspace', ?, 'pub-1', ?, 'capture-1', '{}', ?, ?, 'FENCED',"
+                + " VALUES (?, ?, 'workspace', ?, 'pub-1', ?, 'capture-1', '{}', ?, ?, 'FENCED',"
                 + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE, 1000, 1000, 1000, 123)",
-                key, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant), tenant, session, key, key, key);
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.publicationScopeRef(tenant, "workspace", session),
+                tenant, session, key, key, key);
     }
 
     private static byte[] sha256(String value) {

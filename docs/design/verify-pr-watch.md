@@ -136,7 +136,28 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   verdict and its dedup. A late completion for a _different_ head changes
   the top-level view but erases no verification. A corrupt state body is
   refused (exit 1), never silently rewritten from empty lists; the refusal
-  covers unparseable JSON, a non-object and an array. The lists themselves
+  covers unparseable JSON, a non-object, an array, and a well-formed object
+  the migration ladder cannot consume — the guard is derived from what the
+  ladder actually consumes. When no bearing entry is consumable, a `*Heads`
+  key holding a bare string or an empty list with no legacy marker fails
+  closed rather than being admitted and erased (a legacy
+  `inFlight`/`inFlightHead` counts only as a non-empty string head).
+  Independently, a `*Heads` key that is present but holds a non-array value is
+  refused even when an integer `seqCounter` admits the file, so the marker is
+  not erased on the next `--start` (R6-1); an empty list is the legitimate
+  resting shape and stays admitted via `seqCounter`. A legacy resting body
+  that predates the list/seqCounter format — only identity keys and the
+  pre-list single-marker head keys, all holding null/empty/false — is admitted
+  as no-state, since the ladder consumes it as resting and refusing it would
+  strand a PR whose state holds no dedup history (R7-1); the clause is scoped
+  to the legacy single-marker keys, so an empty `*Heads` list with no bearing
+  entry stays refused. An identity key plus a misspelled (unknown) head marker
+  is likewise not read as "no state". A bare `inFlightHead` is consumed even
+  alongside the resting empty `inFlightHeads: []`, blocking a second round on
+  that head. The
+  refusal message names the condition (no state-bearing entry the ladder can
+  consume) and warns to inspect before removing, since removal discards the
+  verified/deferred dedup history. The lists themselves
   are validated lazily — each is filtered on read, and an entry without a
   usable head is dropped — so a malformed list degrades the dedup silently
   rather than being refused. `--start` writes the sha
@@ -152,6 +173,34 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   blocking marker may belong to a different head than the one being
   started: recovery releases the head the refusal names. This mirrors the
   gate's recovery for a dead claim.
+
+## Current contract / migration note (post-preflight)
+
+The state transitions and root-less, nonce-less commands above are preserved as
+history for the original proposal. Apply these later preflight rules when using
+them with the current skill and watch-state helper:
+
+- If registration used an explicit external/trusted `--state-root`, every later
+  start, completion (including replay), release and restart must pass the
+  **identical** root. Changing or omitting it selects different state. A genuine
+  older invocation that used the helper's default trusted-clone root keeps that
+  omission on every verb; this is not a new required option for default
+  clone/container recovery.
+- A stored entry that carries a `registrationNonce` requires the exact matching
+  `--registration-nonce` on completion/replay/release. A bare prompt that
+  predates the flag is not enough for nonce-bearing state: recover the exact
+  start output or read only the matching live/verified entry in that same root
+  and pass its value explicitly; never infer it from whichever registration is
+  current now.
+- Only a genuinely legacy stored entry with **no** `registrationNonce` may use
+  the explicit no-nonce migration form (omit that option) for the same
+  head/round/root; never invent a nonce or remove it from a nonce-bearing
+  entry. Comment approval is deliberately different: a legacy in-flight
+  registration must be released/restarted to obtain a new nonce and a fresh
+  marked approval.
+- A successful withheld/no-publish round completes rather than releases, with
+  the same head/round/nonce/root and artifact directory, no comment ID, and
+  `commentId: null` retained in the verdict.
 
 ## Design decisions
 

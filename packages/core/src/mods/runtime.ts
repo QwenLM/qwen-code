@@ -31,6 +31,7 @@ import {
   type ModRenderElement,
   type ModRenderInput,
   type ModRenderSite,
+  type ModRenderSurface,
 } from './render-tree.js';
 import type {
   ModToolCallInput,
@@ -146,7 +147,7 @@ export class ModRuntime {
     private readonly log: (entry: ModLog, plugin: string) => void,
     private readonly facts: () => ModSessionFacts,
     private readonly resolveTool?: ModToolResolver,
-    private readonly surface: 'terminal' | null = null,
+    private readonly surface: ModRenderSurface | null = null,
     private readonly abortTurn?: (turnId: string) => void,
     private readonly renderHost?: ModRenderHost,
     private readonly queuePrompt?: ModPromptQueue,
@@ -248,7 +249,7 @@ export class ModRuntime {
     log: (entry: ModLog, plugin: string) => void,
     signal: AbortSignal,
     resolveTool?: ModToolResolver,
-    surface: 'terminal' | null = null,
+    surface: ModRenderSurface | null = null,
     version = 'unknown',
     facts?: () => ModSessionFacts,
     abortTurn?: (turnId: string) => void,
@@ -261,6 +262,8 @@ export class ModRuntime {
     completeModel?: ModModelHost,
     // Where each plugin's `$.store` is kept; absent, the host keeps none.
     store?: ModStore,
+    // Whether this host raises `tool.call` and `tool.check`.
+    tools = true,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
@@ -303,6 +306,7 @@ export class ModRuntime {
           version,
           sites: render?.sites ?? [],
           prompts,
+          tools,
           submits: queuePrompt !== undefined,
           models: completeModel !== undefined,
           stores: store !== undefined,
@@ -342,7 +346,18 @@ export class ModRuntime {
             !/^[a-zA-Z0-9_-]{1,64}$/.test(command.name) ||
             typeof command.description !== 'string' ||
             (command.argumentHint !== undefined &&
-              typeof command.argumentHint !== 'string'),
+              typeof command.argumentHint !== 'string') ||
+            (command.aliases !== undefined &&
+              !(
+                Array.isArray(command.aliases) &&
+                command.aliases.every(
+                  (alias: unknown) =>
+                    typeof alias === 'string' &&
+                    /^[a-zA-Z0-9_-]{1,64}$/.test(alias),
+                )
+              )) ||
+            (command.isTerminalOnly !== undefined &&
+              command.isTerminalOnly !== true),
         )
       )
         throw new Error('Invalid Mod command declarations.');

@@ -22,10 +22,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  completeRound,
+  completeRound as completeRoundImpl,
   duplicateHead,
+  inFlightRegistration,
   readState,
-  releaseRound,
+  releaseRound as releaseRoundImpl,
   sameCommit,
   startRound,
   statePath,
@@ -52,10 +53,61 @@ function makeRoot() {
   return dir;
 }
 
+// Modern starts need to carry their registration identity into completion
+// and release. The unwrapped imports retain missing/stale-nonce controls.
+function withRegistrationNonce(root, invocation, allowHeadOnly = false) {
+  if (Object.hasOwn(invocation, 'registrationNonce')) return invocation;
+  const state = readState(root, invocation.pr);
+  const registration =
+    (allowHeadOnly && invocation.round == null
+      ? (state?.inFlightHeads ?? []).find((entry) =>
+          sameCommit(entry.head, invocation.head),
+        )
+      : null) ??
+    inFlightRegistration(state, invocation.head, invocation.round ?? null) ??
+    (state?.verifiedHeads ?? []).find(
+      (entry) =>
+        sameCommit(entry.head, invocation.head) &&
+        entry.round === invocation.round,
+    );
+  return registration?.registrationNonce
+    ? { ...invocation, registrationNonce: registration.registrationNonce }
+    : invocation;
+}
+
+function completeRound(root, invocation, now) {
+  return completeRoundImpl(root, withRegistrationNonce(root, invocation), now);
+}
+
+function releaseRound(root, invocation) {
+  return releaseRoundImpl(root, withRegistrationNonce(root, invocation, true));
+}
+
 function run(root, args) {
-  return spawnSync(process.execPath, [SCRIPT, ...args, '--state-root', root], {
-    encoding: 'utf8',
-  });
+  const headIndex = args.indexOf('--head');
+  const roundIndex = args.indexOf('--round');
+  const invocation =
+    !args.includes('--start') &&
+    !args.includes('--registration-nonce') &&
+    (args.includes('--complete') || args.includes('--release'))
+      ? withRegistrationNonce(
+          root,
+          {
+            pr: Number(args[0]),
+            head: headIndex < 0 ? undefined : args[headIndex + 1],
+            round: roundIndex < 0 ? null : Number(args[roundIndex + 1]),
+          },
+          args.includes('--release') && !args.includes('--complete'),
+        )
+      : null;
+  const commandArgs = invocation?.registrationNonce
+    ? [...args, '--registration-nonce', invocation.registrationNonce]
+    : args;
+  return spawnSync(
+    process.execPath,
+    [SCRIPT, ...commandArgs, '--state-root', root],
+    { encoding: 'utf8' },
+  );
 }
 
 const START = ['16866', '--start', '--head', HEAD, '--round', '11'];
@@ -69,6 +121,283 @@ const COMPLETE = [
   '--verdict',
   'merge-ready',
 ];
+
+describe('registration identity', () => {
+  function replacedRegistration(root) {
+    startRound(root, { pr: 1, head: HEAD, round: 11 });
+    const first = readState(root, 1).inFlightHeads[0].registrationNonce;
+    expect(releaseRound(root, { pr: 1, head: HEAD, round: 11 }).released).toBe(
+      true,
+    );
+    startRound(root, { pr: 1, head: HEAD, round: 11 });
+    const second = readState(root, 1).inFlightHeads[0].registrationNonce;
+    expect(second).not.toBe(first);
+    return { first, second };
+  }
+
+  it('refuses an old or missing nonce without consuming the new live marker', () => {
+    const root = makeRoot();
+    const { first, second } = replacedRegistration(root);
+    const before = readState(root, 1);
+    for (const registrationNonce of [first, undefined]) {
+      expect(
+        completeRoundImpl(root, {
+          pr: 1,
+          head: HEAD,
+          round: 11,
+          registrationNonce,
+          verdict: 'merge-ready',
+        }),
+      ).toMatchObject({ registrationMismatch: true });
+      expect(readState(root, 1)).toEqual(before);
+    }
+    expect(before.inFlightHeads[0].registrationNonce).toBe(second);
+  });
+
+  it('retains the nonce in a verdict and rejects a replacement replay', () => {
+    const root = makeRoot();
+    const { first, second } = replacedRegistration(root);
+    completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 11,
+      registrationNonce: second,
+      verdict: 'findings',
+      commentId: 'current-findings',
+      artifactDir: 'current-artifacts',
+    });
+    const before = readState(root, 1);
+    expect(before.verifiedHeads[0]).toMatchObject({
+      verdict: 'findings',
+      commentId: 'current-findings',
+      artifactDir: 'current-artifacts',
+      registrationNonce: second,
+    });
+    for (const registrationNonce of [first, undefined]) {
+      expect(
+        completeRoundImpl(root, {
+          pr: 1,
+          head: HEAD,
+          round: 11,
+          registrationNonce,
+          verdict: 'merge-ready',
+          commentId: 'old-merge-ready',
+          artifactDir: 'old-artifacts',
+        }),
+      ).toMatchObject({ registrationMismatch: true });
+      expect(readState(root, 1)).toEqual(before);
+    }
+    const replay = completeRoundImpl(root, {
+      pr: 1,
+      head: HEAD,
+      round: 11,
+      registrationNonce: second,
+      verdict: 'findings',
+    });
+    expect(replay.artifactDir).toBe('current-artifacts');
+    expect(replay.state.verifiedHeads[0].commentId).toBe('current-findings');
+  });
+
+  it('refuses to release a replacement marker with an old or missing nonce', () => {
+    const root = makeRoot();
+    const { first, second } = replacedRegistration(root);
+    const before = readState(root, 1);
+    for (const registrationNonce of [first, undefined]) {
+      expect(
+        releaseRoundImpl(root, {
+          pr: 1,
+          head: HEAD,
+          round: 11,
+          registrationNonce,
+        }),
+      ).toMatchObject({ registrationMismatch: true });
+      expect(readState(root, 1)).toEqual(before);
+    }
+    expect(
+      releaseRoundImpl(root, {
+        pr: 1,
+        head: HEAD,
+        round: 11,
+        registrationNonce: second,
+      }).released,
+    ).toBe(true);
+    expect(readState(root, 1).inFlightHeads).toEqual([]);
+  });
+
+  it('keeps the explicit legacy no-nonce completion and release migration', () => {
+    for (const action of ['complete', 'release']) {
+      const root = makeRoot();
+      const path = statePath(root, 1);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(
+        path,
+        JSON.stringify({ pr: 1, inFlightHead: HEAD, artifactDir: 'legacy' }),
+      );
+      if (action === 'release') {
+        expect(releaseRoundImpl(root, { pr: 1, head: HEAD }).released).toBe(
+          true,
+        );
+      } else {
+        const result = completeRoundImpl(root, {
+          pr: 1,
+          head: HEAD,
+          round: 11,
+          verdict: 'findings',
+        });
+        expect(result.state.verifiedHeads[0].registrationNonce).toBeUndefined();
+      }
+      expect(readState(root, 1).inFlightHeads).toEqual([]);
+    }
+  });
+
+  it('binds the real CLI to the supplied identity without inferring it', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    const before = readState(root, 16866);
+    const nonce = before.inFlightHeads[0].registrationNonce;
+    const missing = spawnSync(
+      process.execPath,
+      [SCRIPT, ...COMPLETE, '--state-root', root],
+      { encoding: 'utf8' },
+    );
+    expect(missing.status).toBe(3);
+    expect(missing.stderr).toMatch(/registration nonce/);
+    expect(readState(root, 16866)).toEqual(before);
+
+    const stale = run(root, [
+      ...COMPLETE,
+      '--registration-nonce',
+      '00000000-0000-4000-8000-000000000000',
+    ]);
+    expect(stale.status).toBe(3);
+    expect(stale.stderr).toMatch(/registration nonce/);
+    expect(readState(root, 16866)).toEqual(before);
+
+    const current = run(root, [...COMPLETE, '--registration-nonce', nonce]);
+    expect(current.status).toBe(0);
+    expect(readState(root, 16866).verifiedHeads[0].registrationNonce).toBe(
+      nonce,
+    );
+
+    expect(
+      run(makeRoot(), [...START, '--registration-nonce', nonce]).status,
+    ).toBe(2);
+    expect(
+      run(root, ['16866', '--release', '--head', HEAD, '--registration-nonce'])
+        .status,
+    ).toBe(2);
+  });
+
+  it('completes a successful unpublished round with a null comment id', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    const registrationNonce = readState(root, 16866).inFlightHeads[0]
+      .registrationNonce;
+    const artifactDir = makeRoot();
+    const completed = run(root, [
+      ...COMPLETE,
+      '--registration-nonce',
+      registrationNonce,
+      '--artifact-dir',
+      artifactDir,
+    ]);
+    expect(completed.status, completed.stderr).toBe(0);
+    const state = readState(root, 16866);
+    expect(state.inFlightHeads).toEqual([]);
+    expect(state.verifiedHeads[0]).toMatchObject({
+      head: HEAD,
+      round: 11,
+      verdict: 'merge-ready',
+      commentId: null,
+      artifactDir,
+      registrationNonce,
+    });
+    expect(existsSync(artifactDir)).toBe(true);
+  });
+
+  it('recovers a persisted snapshot without inferring a replacement identity', () => {
+    const root = makeRoot();
+    const started = run(root, START);
+    expect(started.status).toBe(0);
+    const before = readState(root, 16866);
+    const nonce = before.inFlightHeads[0].registrationNonce;
+    expect(started.stdout).toContain(nonce);
+    const originalBytes = readFileSync(statePath(root, 16866), 'utf8');
+
+    const legacyCompletion = spawnSync(
+      process.execPath,
+      [SCRIPT, ...COMPLETE, '--state-root', root],
+      { encoding: 'utf8' },
+    );
+    expect(legacyCompletion.status).toBe(3);
+    expect(legacyCompletion.stderr).toContain(
+      'matching live or verified nonce',
+    );
+    expect(readFileSync(statePath(root, 16866), 'utf8')).toBe(originalBytes);
+
+    const completed = run(root, [
+      ...COMPLETE,
+      '--registration-nonce',
+      nonce,
+      '--artifact-dir',
+      'round-evidence',
+      '--comment-id',
+      'round-comment',
+    ]);
+    expect(completed.status).toBe(0);
+    const replay = run(root, [...COMPLETE, '--registration-nonce', nonce]);
+    expect(replay.status).toBe(0);
+    expect(readState(root, 16866).verifiedHeads[0]).toMatchObject({
+      registrationNonce: nonce,
+      artifactDir: 'round-evidence',
+      commentId: 'round-comment',
+    });
+
+    const releaseRoot = makeRoot();
+    expect(run(releaseRoot, START).status).toBe(0);
+    const live = readState(releaseRoot, 16866);
+    const liveNonce = live.inFlightHeads[0].registrationNonce;
+    const legacyRelease = spawnSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '16866',
+        '--release',
+        '--head',
+        HEAD,
+        '--round',
+        '11',
+        '--state-root',
+        releaseRoot,
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(legacyRelease.status).toBe(3);
+    expect(legacyRelease.stderr).toContain('matching live state entry');
+    expect(readState(releaseRoot, 16866)).toEqual(live);
+    expect(
+      run(releaseRoot, [
+        '16866',
+        '--release',
+        '--head',
+        HEAD,
+        '--round',
+        '11',
+        '--registration-nonce',
+        liveNonce,
+      ]).status,
+    ).toBe(0);
+    expect(readState(releaseRoot, 16866).inFlightHeads).toEqual([]);
+
+    const help = spawnSync(process.execPath, [SCRIPT, '--help'], {
+      encoding: 'utf8',
+    });
+    expect(help.status).toBe(0);
+    expect(help.stdout).toContain('inFlightHeads');
+    expect(help.stdout).toContain('verifiedHeads');
+    expect(help.stdout).toContain('exact --start');
+  });
+});
 
 describe('startRound', () => {
   it('writes the in-flight state with a UTC timestamp', () => {
@@ -100,6 +429,42 @@ describe('startRound', () => {
       artifactDir: 'tmp/pr16866-verify-20261114-020119',
     });
     expect(state.startedAt).toBe(now.toISOString());
+    expect(state.inFlightHeads[0].registrationNonce).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+  });
+
+  it('keeps one nonce for an in-flight retry and rotates it after release', () => {
+    const root = makeRoot();
+    const started = run(root, START);
+    expect(started.status).toBe(0);
+    const nonce = readState(root, 16866).inFlightHeads[0].registrationNonce;
+    expect(started.stdout).toContain(`registrationNonce ${nonce}`);
+
+    const retry = startRound(root, {
+      pr: 16866,
+      head: HEAD.slice(0, 12),
+      round: 11,
+      artifactDir: 'retry',
+    });
+    expect(retry.duplicate).toBe('in-flight');
+    expect(
+      inFlightRegistration(readState(root, 16866), HEAD, 11),
+    ).toMatchObject({ registrationNonce: nonce });
+
+    expect(
+      releaseRound(root, { pr: 16866, head: HEAD, round: 11 }).released,
+    ).toBe(true);
+    const restarted = startRound(root, {
+      pr: 16866,
+      head: HEAD,
+      round: 11,
+      artifactDir: 'after-release',
+    });
+    expect(restarted.duplicate).toBeUndefined();
+    expect(readState(root, 16866).inFlightHeads[0].registrationNonce).not.toBe(
+      nonce,
+    );
   });
 
   it('preserves the previous verified heads and repo', () => {
@@ -1105,6 +1470,35 @@ describe('withStateLock', () => {
     expect(existsSync(statePath(root, 1))).toBe(false);
   });
 
+  it('recovers a killed holder only by explicitly removing its stale lock', () => {
+    const root = makeRoot();
+    const state = statePath(root, 1);
+    const lock = `${state}.lock`;
+    const stateBytes = '{"pr":1,"inFlightHeads":[]}\n';
+    const owner = '99999:01234567-89ab-4cde-8fab-0123456789ab\n';
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(state, stateBytes);
+    writeFileSync(lock, owner);
+    let calls = 0;
+    const attempt = () =>
+      withStateLock(root, 1, () => {
+        calls += 1;
+        return 'ran';
+      });
+
+    expect(attempt()).toEqual({ locked: true });
+    expect(attempt()).toEqual({ locked: true });
+    expect(calls).toBe(0);
+    expect(readFileSync(lock, 'utf8')).toBe(owner);
+    expect(readFileSync(state, 'utf8')).toBe(stateBytes);
+
+    unlinkSync(lock);
+    expect(attempt()).toBe('ran');
+    expect(calls).toBe(1);
+    expect(existsSync(lock)).toBe(false);
+    expect(readFileSync(state, 'utf8')).toBe(stateBytes);
+  });
+
   // A real I/O fault on the lock must surface as itself, not be retried into
   // a misleading "another invocation holds the lock" that retrying cannot fix.
   // Probe the kernel rather than checking uid 0: ci.yml runs unit tests as
@@ -1163,11 +1557,229 @@ describe('readState', () => {
       JSON.stringify({ something: 'else' }),
     ]) {
       writeFileSync(statePath(root, 1), body);
-      expect(() => readState(root, 1)).toThrow(/no recognised state key/);
+      expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
     }
     // A legacy string inFlight head is still migratable.
     writeFileSync(statePath(root, 1), JSON.stringify({ inFlight: HEAD }));
     expect(() => readState(root, 1)).not.toThrow();
+  });
+
+  // R2-1: the guard is derived from what the migration ladder actually
+  // consumes, so the two cannot drift. A bearing key whose value the ladder
+  // rejects (a string under an array key) is refused, not admitted-and-erased;
+  // a legacy marker alongside the resting empty list still blocks and survives.
+  it('derives the shape guard from the migration ladder consumption', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    // A string under an array key is not consumable -> refused (cases A/C).
+    for (const body of [
+      JSON.stringify({ pr: 1, inFlightHeads: HEAD }),
+      JSON.stringify({ pr: 1, verifiedHeads: HEAD }),
+    ]) {
+      writeFileSync(statePath(root, 1), body);
+      expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
+    }
+    // A bare inFlightHead alongside the resting empty list (case B) blocks a
+    // second round on that head and the marker survives the refused start.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlightHeads: [], inFlightHead: HEAD }),
+    );
+    expect(() => readState(root, 1)).not.toThrow();
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 12, artifactDir: 'r12' })
+        .duplicate,
+    ).toBe('in-flight');
+    expect(readState(root, 1).inFlightHead).toBe(HEAD);
+  });
+
+  // R6-1: a present *Heads key holding a non-array value is refused even when
+  // an integer seqCounter (which every written file carries) admits the file
+  // via the bearing disjunction — otherwise --start reads the unusable marker
+  // as empty and erases it, breaking the one-round-per-PR serialisation.
+  it('refuses a non-array *Heads value even alongside a bearing seqCounter', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    for (const key of [
+      'inFlightHeads',
+      'verifiedHeads',
+      'deferredHeads',
+      'releasedHeads',
+    ]) {
+      writeFileSync(
+        statePath(root, 1),
+        JSON.stringify({ pr: 1, repo: 'o/r', [key]: HEAD, seqCounter: 7 }),
+      );
+      expect(() => readState(root, 1)).toThrow(
+        new RegExp(`${key} value the migration ladder cannot consume`),
+      );
+      // The refused start leaves the marker untouched (no rewrite from empty).
+      expect(() =>
+        startRound(root, { pr: 1, head: HEAD, round: 13, artifactDir: 'r13' }),
+      ).toThrow(new RegExp(`${key} value the migration ladder cannot consume`));
+      expect(JSON.parse(readFileSync(statePath(root, 1), 'utf8'))[key]).toBe(
+        HEAD,
+      );
+    }
+    // A legitimate resting file (empty arrays + integer seqCounter + the
+    // derived inFlight:false / inFlightHead:null view) is still admitted.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        repo: 'o/r',
+        inFlightHeads: [],
+        verifiedHeads: [],
+        deferredHeads: [],
+        releasedHeads: [],
+        seqCounter: 7,
+        retiredSeqs: {},
+        inFlight: false,
+        inFlightHead: null,
+        verifiedHead: null,
+        previousHead: null,
+      }),
+    );
+    expect(() => readState(root, 1)).not.toThrow();
+    // A bare legacy marker alongside the resting empty list AND a seqCounter
+    // still blocks a second round and survives the refused start.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        inFlightHeads: [],
+        inFlightHead: HEAD,
+        seqCounter: 7,
+      }),
+    );
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 14, artifactDir: 'r14' })
+        .duplicate,
+    ).toBe('in-flight');
+    expect(readState(root, 1).inFlightHead).toBe(HEAD);
+  });
+
+  // R16-2 (residual): an identity key alone must not satisfy the guard. One
+  // identity key plus a misspelled head marker reads as "no state" under the
+  // old STATE_KEYS set and lets --start erase the operator's intended marker.
+  it('refuses an identity-only body even alongside an unknown head spelling', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    // The exact reported shape: pr + startedAt + a misspelled inFlightHead.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        startedAt: '2026-11-16T00:00:00.000Z',
+        inflightHead: HEAD,
+      }),
+    );
+    expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
+    // Each identity key on its own (plus an unknown key) is still refused.
+    for (const key of [
+      'pr',
+      'repo',
+      'round',
+      'artifactDir',
+      'startedAt',
+      'completedAt',
+      'verdict',
+      'commentId',
+    ]) {
+      writeFileSync(
+        statePath(root, 1),
+        JSON.stringify({ [key]: 'x', weirdHead: HEAD }),
+      );
+      expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
+    }
+  });
+
+  // A body the migration ladder can consume is admitted; an empty list with
+  // no legacy marker and no seqCounter is not consumable and is refused.
+  it('admits a body the migration ladder can consume', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    const bearing = [
+      { inFlightHeads: [{ head: HEAD }] },
+      { verifiedHeads: [{ head: HEAD }] },
+      { deferredHeads: [{ head: HEAD }] },
+      { releasedHeads: [{ head: HEAD }] },
+      { inFlightHead: HEAD },
+      { inFlight: HEAD },
+      { verifiedHead: HEAD },
+      { previousHead: HEAD },
+      { seqCounter: 3 },
+      { retiredSeqs: { [HEAD]: { seq: 1, retries: 0 } } },
+    ];
+    for (const shape of bearing) {
+      writeFileSync(statePath(root, 1), JSON.stringify({ pr: 1, ...shape }));
+      expect(() => readState(root, 1)).not.toThrow();
+    }
+    // Empty lists alone (no marker, no seqCounter) are not consumable.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlightHeads: [], verifiedHeads: [] }),
+    );
+    expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
+    // A legitimate written state always reads back.
+    const root2 = makeRoot();
+    startRound(root2, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' });
+    expect(() => readState(root2, 1)).not.toThrow();
+  });
+
+  // D17-3: the widened legacy migration is bounded. A non-empty string
+  // inFlight/inFlightHead migrates and blocks; the old boolean flag or an
+  // object alone is not a migratable marker and fails closed. An empty string
+  // is a resting marker (no head, no dedup history): R7-1 admits it as
+  // no-state, but it still must not migrate to block every head.
+  it('bounds the legacy inFlight migration to a non-empty string head', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    for (const body of [
+      JSON.stringify({ pr: 1, inFlight: true }),
+      JSON.stringify({ pr: 1, inFlight: { head: HEAD } }),
+    ]) {
+      writeFileSync(statePath(root, 1), body);
+      expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
+    }
+    // An empty-string inFlight is resting (R7-1): admitted as no-state, but it
+    // carries no head, so it neither migrates nor blocks a new round.
+    writeFileSync(statePath(root, 1), JSON.stringify({ pr: 1, inFlight: '' }));
+    expect(() => readState(root, 1)).not.toThrow();
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' })
+        .duplicate,
+    ).toBeUndefined();
+    // A string inFlight head migrates and blocks a second round on that head.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlight: HEAD }),
+    );
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' })
+        .duplicate,
+    ).toBe('in-flight');
+    // R1-1: a bare inFlightHead (no inFlight companion) is state-bearing, so
+    // the ladder must consume it too — the marker blocks a second round on
+    // that head and survives the refused start, not read as empty and erased.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlightHead: HEAD }),
+    );
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 12, artifactDir: 'r12' })
+        .duplicate,
+    ).toBe('in-flight');
+    expect(readState(root, 1).inFlightHead).toBe(HEAD);
+    // The pre-list shape with both keys still migrates and blocks.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlight: true, inFlightHead: HEAD }),
+    );
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 13, artifactDir: 'r13' })
+        .duplicate,
+    ).toBe('in-flight');
   });
 
   it('--start refuses an unknown-key body exit 1 and leaves it byte-identical', () => {
@@ -1177,8 +1789,43 @@ describe('readState', () => {
     writeFileSync(statePath(root, 16866), body);
     const res = run(root, [...START, '--artifact-dir', 'r11']);
     expect(res.status).toBe(1);
-    expect(res.stderr).toMatch(/no recognised state key/);
+    expect(res.stderr).toMatch(/no state-bearing entry/);
     expect(readFileSync(statePath(root, 16866), 'utf8')).toBe(body);
+  });
+});
+
+describe('inFlightRegistration approval normalization', () => {
+  it('returns the one legacy/prefixed registration and reuses it for its nonce', () => {
+    const prefixed = {
+      head: HEAD.slice(0, 12),
+      round: 2,
+      registrationNonce: 'registration-nonce',
+    };
+    expect(
+      inFlightRegistration({ inFlightHeads: [prefixed] }, HEAD, 2),
+    ).toEqual(prefixed);
+    const legacy = inFlightRegistration(
+      { inFlightHead: HEAD, round: 2 },
+      HEAD,
+      2,
+    );
+    expect(legacy).toMatchObject({ head: HEAD, round: null });
+    expect(legacy.registrationNonce).toBeUndefined();
+  });
+
+  it('rejects another round or head and more than one registration', () => {
+    for (const state of [
+      { inFlightHeads: [{ head: HEAD, round: 1 }] },
+      { inFlightHeads: [{ head: PREV, round: 2 }] },
+      {
+        inFlightHeads: [
+          { head: HEAD, round: 2 },
+          { head: PREV, round: 2 },
+        ],
+      },
+    ]) {
+      expect(inFlightRegistration(state, HEAD, 2)).toBeNull();
+    }
   });
 });
 
@@ -1193,7 +1840,8 @@ describe('duplicateHead', () => {
     expect(duplicateHead({ inFlight: true, inFlightHead: HEAD }, HEAD)).toBe(
       'in-flight',
     );
-    expect(duplicateHead({ inFlightHead: HEAD }, HEAD)).toBeNull();
+    // R1-1: a bare inFlightHead is a migratable in-flight marker, not empty.
+    expect(duplicateHead({ inFlightHead: HEAD }, HEAD)).toBe('in-flight');
     expect(duplicateHead(null, HEAD)).toBeNull();
     expect(duplicateHead({ verifiedHead: PREV }, HEAD)).toBeNull();
     // One round per PR: any in-flight entry blocks a different head too.
@@ -1214,14 +1862,71 @@ describe('duplicateHead', () => {
     expect(duplicateHead({ verifiedHeads: [{ head: '' }] }, HEAD)).toBeNull();
     const root = makeRoot();
     mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    // R7-1: a legacy resting body (no list/seqCounter) is admitted by the
+    // resting-view clause on its own — no seqCounter is injected to mask the
+    // guard. The empty legacy heads still must not dedup every head.
     writeFileSync(
       statePath(root, 1),
-      JSON.stringify({ pr: 1, verifiedHead: '', previousHead: '' }),
+      JSON.stringify({
+        pr: 1,
+        verifiedHead: '',
+        previousHead: '',
+      }),
     );
     expect(
       startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' })
         .duplicate,
     ).toBeUndefined();
+  });
+
+  // R7-1: the resting-view clause admits a legacy resting body the ladder
+  // consumes as resting, without loosening the R16-2 unknown-key refusal or
+  // the bearing-less empty-list refusal. Removing the clause must red the
+  // legacy-resting admissions below.
+  it('admits a legacy resting body but still refuses unknown keys and bearing-less lists', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    // The pre-list resting view (no lists, no seqCounter) reads back and a
+    // round can start, complete and release against it.
+    const restingBodies = [
+      { pr: 1, verifiedHead: '', previousHead: '' },
+      {
+        pr: 1,
+        inFlight: false,
+        inFlightHead: null,
+        verifiedHead: null,
+        previousHead: null,
+      },
+    ];
+    for (const body of restingBodies) {
+      writeFileSync(statePath(root, 1), JSON.stringify(body));
+      expect(() => readState(root, 1)).not.toThrow();
+      expect(
+        startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' })
+          .duplicate,
+      ).toBeUndefined();
+    }
+    // R16-2 intact: an identity key plus an UNKNOWN head spelling is refused.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, weirdHead: HEAD }),
+    );
+    expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
+    // A *Heads LIST key (even empty) with no bearing entry is the new format
+    // missing seqCounter — still refused, not admitted as resting.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlightHeads: [], verifiedHeads: [] }),
+    );
+    expect(() => readState(root, 1)).toThrow(/no state-bearing entry/);
+    // R6-1 intact: a non-array list key alongside a bearing seqCounter refuses.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlightHeads: HEAD, seqCounter: 7 }),
+    );
+    expect(() => readState(root, 1)).toThrow(
+      /inFlightHeads value the migration ladder cannot consume/,
+    );
   });
 });
 
@@ -1473,7 +2178,6 @@ describe('CLI', () => {
         '--artifact-dir',
         'r',
       ],
-      ['16866', '--start', '--head', HEAD, '--round', '1'],
       [
         '16866',
         '--complete',
@@ -2916,5 +3620,330 @@ describe('round-12 witnesses', () => {
     expect(re.duplicate).toBe('in-flight');
     const entry = readState(root, 1).deferredHeads.find((e) => e.head === HEAD);
     expect(entry.seq).toBeNull();
+  });
+});
+
+// R17-2: registration runs ahead of prepare, so --start no longer requires
+// --artifact-dir (prepare has not printed the directory yet). A round killed
+// in the prepare window leaves a recoverable in-flight marker, not a silently
+// dropped head; the directory prepare printed is recorded at --complete.
+describe('R17-2 register ahead of prepare', () => {
+  it('--start without --artifact-dir registers in flight with a null dir', () => {
+    const root = makeRoot();
+    const res = run(root, START);
+    expect(res.status).toBe(0);
+    const st = readState(root, 16866);
+    expect(st.inFlightHeads[0]).toMatchObject({ head: HEAD, round: 11 });
+    expect(st.inFlightHeads[0].artifactDir).toBeNull();
+  });
+
+  it('--start with --artifact-dir still records it (backward compatible)', () => {
+    const root = makeRoot();
+    const res = run(root, [...START, '--artifact-dir', 'r11']);
+    expect(res.status).toBe(0);
+    expect(readState(root, 16866).inFlightHeads[0].artifactDir).toBe('r11');
+  });
+
+  it('--start still rejects an empty --artifact-dir', () => {
+    const root = makeRoot();
+    const res = run(root, [...START, '--artifact-dir', '']);
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/--artifact-dir must not be empty/);
+  });
+
+  it('--complete records the directory prepare printed', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+      '--artifact-dir',
+      'r11',
+    ]);
+    expect(res.status).toBe(0);
+    // R2-3: a resolved directory must NOT trigger the no-evidence warning.
+    expect(res.stderr).not.toMatch(/no artifact directory/);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('r11');
+  });
+
+  it('--complete without a dir inherits the start directory', () => {
+    const root = makeRoot();
+    expect(run(root, [...START, '--artifact-dir', 'r11']).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+    ]);
+    expect(res.status).toBe(0);
+    // R2-3: inheriting the marker's directory is not a null resolution, so no
+    // warning — dropping the warning's directory conjunct reds this.
+    expect(res.stderr).not.toMatch(/no artifact directory/);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('r11');
+  });
+
+  // Deferred (round 7): the explicit completion directory wins over the start
+  // directory. Without a case supplying BOTH, a reorder of the chain to
+  // ownFlight?.artifactDir first would file the stale start directory and every
+  // other dir case would stay green.
+  it('--complete with a dir overrides a different start directory', () => {
+    const root = makeRoot();
+    expect(run(root, [...START, '--artifact-dir', 'dirA']).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+      '--artifact-dir',
+      'dirB',
+    ]);
+    expect(res.status).toBe(0);
+    expect(res.stderr).not.toMatch(/no artifact directory/);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('dirB');
+  });
+
+  // Deferred (round 8): the prior arm's precedence is pinned — a replayed
+  // completion that supplies an explicit dir must override the prior verdict's
+  // dir. A prior-first reorder would file the stale prior dir and keep every
+  // other dir case green.
+  it('a replayed completion with an explicit dir overrides the prior directory', () => {
+    const root = makeRoot();
+    expect(run(root, [...START, '--artifact-dir', 'r11']).status).toBe(0);
+    expect(
+      run(root, [
+        '16866',
+        '--complete',
+        '--head',
+        HEAD,
+        '--round',
+        '11',
+        '--verdict',
+        'merge-ready',
+      ]).status,
+    ).toBe(0);
+    const replay = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+      '--artifact-dir',
+      'r99',
+    ]);
+    expect(replay.status).toBe(0);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('r99');
+  });
+
+  // R8-1: completeRound matches the marker by head+round alone and files whatever
+  // directory it is given — it cannot see that the tree moved to another head. So
+  // completing the live head with a DIFFERENT head's evidence directory is
+  // accepted and files it verified with that evidence; a re-start is then refused
+  // forever. The contract's checkout remedy (never check out under a live marker)
+  // is the only guard — this witnesses the harm it prevents, not a tool guarantee.
+  it('a completion files the live head with whatever directory it is given', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+      '--artifact-dir',
+      'tmp/pr16866-verify-otherhead',
+    ]);
+    expect(res.status).toBe(0);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('tmp/pr16866-verify-otherhead');
+    expect(
+      run(root, ['16866', '--start', '--head', HEAD, '--round', '12']).status,
+    ).toBe(3);
+  });
+
+  // P1 (maintainer, round 14): prepare checks the tree against the LIVE PR head,
+  // not the registered one, so a force-push back to a head the tree already sits
+  // at prepares SUCCESSFULLY while the round registered a different head — the
+  // refusal-handler comparison never runs. The contract's post-success
+  // comparison routes that to the moved-head recovery: release this round's
+  // marker, never complete. This witnesses the recovery's effect — the
+  // registered head receives no verdict, and completing it with the other
+  // head's evidence directory is refused (contrast the witness above, where
+  // completing under the live marker files the wrong evidence).
+  it('a prepare-success head mismatch releases the round without a verdict', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    // Prepare succeeded for another head; the recovery releases this round's
+    // marker instead of completing it.
+    expect(
+      run(root, ['16866', '--release', '--head', HEAD, '--round', '11']).status,
+    ).toBe(0);
+    // The registered head received no verdict.
+    expect(
+      readState(root, 16866).verifiedHeads.find((e) =>
+        sameCommit(e.head, HEAD),
+      ),
+    ).toBeUndefined();
+    // Completing it with the other head's evidence directory is now refused
+    // (no marker, no prior verdict), so the wrong evidence cannot be filed.
+    expect(
+      run(root, [
+        '16866',
+        '--complete',
+        '--head',
+        HEAD,
+        '--round',
+        '11',
+        '--verdict',
+        'merge-ready',
+        '--artifact-dir',
+        'tmp/pr16866-verify-otherhead',
+      ]).status,
+    ).toBe(3);
+    // The head is not deduped away: a later genuine round can still start it.
+    expect(
+      run(root, ['16866', '--start', '--head', HEAD, '--round', '12']).status,
+    ).toBe(0);
+  });
+
+  // R2-3: a replayed completion (no in-flight marker) inherits the prior
+  // verdict's directory and prints no warning.
+  it('a replayed completion inherits the prior verdict directory', () => {
+    const root = makeRoot();
+    expect(run(root, [...START, '--artifact-dir', 'r11']).status).toBe(0);
+    expect(
+      run(root, [
+        '16866',
+        '--complete',
+        '--head',
+        HEAD,
+        '--round',
+        '11',
+        '--verdict',
+        'merge-ready',
+      ]).status,
+    ).toBe(0);
+    // The marker is gone; a second completion for the same head/round replays
+    // against the prior verdict and inherits its directory.
+    const replay = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+    ]);
+    expect(replay.status).toBe(0);
+    expect(replay.stderr).not.toMatch(/no artifact directory/);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('r11');
+  });
+
+  // R1-2: driven through the CLI so it exercises parseArgs (the only helper
+  // code this PR changes); restoring the --artifact-dir requirement reds it.
+  it('a prepare-window kill leaves a recoverable marker, not a dropped head', () => {
+    const root = makeRoot();
+    // Register first through the CLI (no dir, with --repo as the contract
+    // documents), then the round dies during prepare: no --complete runs.
+    expect(run(root, [...START, '--repo', 'o/r']).status).toBe(0);
+    expect(
+      readState(root, 16866).inFlightHeads[0].artifactDir ?? null,
+    ).toBeNull();
+    // Recovery releases the dead round's marker with the documented --repo
+    // form (a repo-less release is refused against the recorded repo)...
+    expect(
+      run(root, ['16866', '--release', '--head', HEAD, '--repo', 'o/r']).status,
+    ).toBe(0);
+    // ...and the head is startable again, not silently deduped away.
+    expect(
+      run(root, [
+        '16866',
+        '--start',
+        '--head',
+        HEAD,
+        '--round',
+        '12',
+        '--repo',
+        'o/r',
+      ]).status,
+    ).toBe(0);
+    expect(readState(root, 16866).inFlightHeads[0].round).toBe(12);
+  });
+
+  // R1-3: the register-ahead marker carries no directory, so a non-inconclusive
+  // completion that resolves to none warns (the verdict has no evidence link).
+  it('a non-inconclusive completion with no directory warns', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'findings',
+    ]);
+    expect(res.status).toBe(0);
+    expect(res.stderr).toMatch(/no artifact directory/);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir ?? null).toBeNull();
+  });
+
+  it('an inconclusive completion with no directory does not warn', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'inconclusive',
+    ]);
+    expect(res.status).toBe(0);
+    expect(res.stderr).not.toMatch(/no artifact directory/);
   });
 });

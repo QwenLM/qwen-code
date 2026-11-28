@@ -80,7 +80,9 @@ export const MOD_EVENTS = [
   'ui.render',
 ] as const;
 // Events only some hosts raise: the load request names the sites a host
-// draws, whether it raises `prompt.submit`, and whether it keeps a store.
+// draws, whether it raises `prompt.submit` and the tool events, and whether it
+// keeps a store.
+export const MOD_TOOL_EVENTS: readonly ModEvent[] = ['tool.call', 'tool.check'];
 export const MOD_STORE_EVENTS: readonly ModEvent[] = [
   'store.delete',
   'store.get',
@@ -90,6 +92,7 @@ export const MOD_STORE_EVENTS: readonly ModEvent[] = [
 export const MOD_HOST_EVENTS: readonly ModEvent[] = [
   'prompt.submit',
   'ui.render',
+  ...MOD_TOOL_EVENTS,
   ...MOD_STORE_EVENTS,
 ];
 // `$` methods that read rather than dispatch, so no hook hears them.
@@ -113,6 +116,14 @@ export const record = (value: unknown): value is ModInput =>
 const only = (value: ModInput, keys: readonly string[]) =>
   Object.keys(value).every((key) => keys.includes(key));
 const text = (value: unknown) => typeof value === 'string';
+const commandName = (value: unknown) =>
+  typeof value === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(value);
+const COMMAND_FLAGS = [
+  'immediate',
+  'isHidden',
+  'isTerminalOnly',
+  'isWorkspaceFree',
+] as const;
 const amount = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0;
 const count = (value: unknown): value is number =>
@@ -369,17 +380,30 @@ export function validateInput(
         'Mod prompt.submit takes { text, context } as a list of texts; origin, wait and turnId are pinned.',
       );
   } else if (event === 'command.register') {
+    const aliases = value['aliases'];
     if (
-      Object.keys(value).some(
-        (key) => !['name', 'description', 'argumentHint'].includes(key),
-      ) ||
-      typeof value['name'] !== 'string' ||
-      !/^[a-zA-Z0-9_-]{1,64}$/.test(value['name']) ||
+      !only(value, [
+        'name',
+        'description',
+        'argumentHint',
+        'aliases',
+        ...COMMAND_FLAGS,
+      ]) ||
+      !commandName(value['name']) ||
       typeof value['description'] !== 'string' ||
       !value['description'].trim() ||
       value['description'].length > 2000 ||
       (value['argumentHint'] !== undefined &&
-        typeof value['argumentHint'] !== 'string')
+        typeof value['argumentHint'] !== 'string') ||
+      (aliases !== undefined &&
+        !(
+          Array.isArray(aliases) &&
+          aliases.length <= 8 &&
+          aliases.every(commandName)
+        )) ||
+      COMMAND_FLAGS.some(
+        (flag) => value[flag] !== undefined && value[flag] !== true,
+      )
     )
       throw new Error('Invalid Mod command specification.');
   } else if (event === 'ui.log') {
@@ -531,8 +555,10 @@ export function validateResult(
   else if (event === 'tool.check') valid = validToolCheck(value);
   else if (event === 'command.run')
     valid =
-      Object.keys(value).every((key) => key === 'text') &&
-      (value['text'] === undefined || typeof value['text'] === 'string');
+      only(value, ['text', 'isTextDisplayOnly']) &&
+      (value['text'] === undefined || typeof value['text'] === 'string') &&
+      (value['isTextDisplayOnly'] === undefined ||
+        value['isTextDisplayOnly'] === true);
   else if (echoed)
     valid =
       Object.keys(value).every((key) => key === echoed) &&
@@ -549,8 +575,10 @@ export function validateResult(
             isDeepStrictEqual(value['origin'], input?.['origin']));
   else if (event === 'turn.complete')
     valid =
-      only(value, ['text', 'usage']) &&
+      only(value, ['text', 'usage', 'by']) &&
       text(value['text']) &&
+      (value['by'] === undefined ||
+        (Array.isArray(value['by']) && value['by'].every(text))) &&
       (value['usage'] === undefined || validTurnUsage(value['usage']));
   else {
     valid =
@@ -607,11 +635,21 @@ const TURN_TOKENS = [
   'cache_creation_input_tokens',
 ] as const;
 
+// Cache writes by lifetime, which Anthropic's API reports and Qwen Code does
+// not, may still ride on a hook's answer.
+const TURN_CACHE_WRITES = [
+  'ephemeral_5m_input_tokens',
+  'ephemeral_1h_input_tokens',
+] as const;
+
 function validTurnUsage(value: unknown): boolean {
   return (
     record(value) &&
-    only(value, [...TURN_TOKENS, 'model']) &&
+    only(value, [...TURN_TOKENS, ...TURN_CACHE_WRITES, 'model']) &&
     TURN_TOKENS.every((key) => count(value[key])) &&
+    TURN_CACHE_WRITES.every(
+      (key) => value[key] === undefined || count(value[key]),
+    ) &&
     text(value['model'])
   );
 }

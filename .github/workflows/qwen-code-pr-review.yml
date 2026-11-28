@@ -103,7 +103,7 @@ jobs:
       github.event.action != 'closed' &&
       github.event.pull_request.head.repo.full_name != github.repository &&
       (github.event.action != 'review_requested' ||
-       github.event.requested_reviewer.login == 'qwen-code-ci-bot')
+       github.event.requested_reviewer.login == (vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot'))
     permissions:
       contents: 'read'
       pull-requests: 'read'
@@ -229,11 +229,11 @@ jobs:
     # the requested reviewer can reach review-pr, so the human-requested
     # siblings must skip here instead of each spending a runner. KEEP IN
     # SYNC with the review_requested clauses in precheck-pr.if and
-    # authorize.if, and with the bot_login constant below.
+    # authorize.if, and with the bot_login expression below.
     if: |-
       github.event_name == 'pull_request_target' &&
       github.event.action == 'review_requested' &&
-      github.event.requested_reviewer.login == 'qwen-code-ci-bot'
+      github.event.requested_reviewer.login == (vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot')
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions: {}
     outputs:
@@ -242,7 +242,7 @@ jobs:
       - name: 'Set review constants'
         id: 'values'
         run: |-
-          echo "bot_login=qwen-code-ci-bot" >> "$GITHUB_OUTPUT"
+          echo "bot_login=${{ vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot' }}" >> "$GITHUB_OUTPUT"
 
   delay-automatic-review:
     needs: ['authorize']
@@ -339,7 +339,7 @@ jobs:
        needs.precheck-pr.outputs.decision == 'allow_triage') &&
       (github.event_name != 'pull_request_target' ||
        github.event.action != 'review_requested' ||
-       github.event.requested_reviewer.login == 'qwen-code-ci-bot') &&
+       github.event.requested_reviewer.login == (vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot')) &&
       (github.event_name == 'pull_request_target' ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.command == 'resolve') ||
@@ -535,8 +535,12 @@ jobs:
     timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'
     # The schedule switches the managed fleet to `ecs-review` at 17:00
     # Asia/Shanghai and back to CI at 05:00. Reviews queue while the pool
-    # is closed.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # is closed. Fork pull_request_target payloads route to the disposable
+    # hosted runner: `off` containment on the shared pool hands PR-controlled
+    # install/build scripts CI_BOT_PAT + the model key and persists plants
+    # for the next run. Comment/dispatch triggers keep the pool; the sandbox
+    # preflight below is their fail-closed backstop.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request_target'' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
       pull-requests: 'write'
@@ -938,7 +942,8 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: 'Setup Node.js for hosted review'
-        if: "steps.context.outputs.should_run == 'true' && (github.repository != 'QwenLM/qwen-code' || vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true')"
+        # KEEP IN SYNC with review-pr.runs-on: every hosted shape needs this.
+        if: "steps.context.outputs.should_run == 'true' && (github.repository != 'QwenLM/qwen-code' || vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true' || (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository))"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
@@ -1158,6 +1163,78 @@ jobs:
           scratch=$(mktemp -d "${RUNNER_TEMP:?}/qwen-review-scratch.XXXXXXXX")
           echo "dir=$scratch" >> "$GITHUB_OUTPUT"
 
+      # Decide the execution-sandbox policy from what this runner can actually
+      # do, and say so. `required` is the point — a review that cannot contain
+      # the PR's own install/build/test reports no evidence rather than running
+      # it with this step's GH_TOKEN and OPENAI_API_KEY — but `required` on a
+      # host that cannot satisfy it is not a security win, it is a review that
+      # fails its own install (a contained command that fails is a
+      # PR-attributed failure, and a refused prebuild leaves the tree bare for
+      # every agent, #10108). Measured on the `ecs-review` pool 2026-11-16: the
+      # daemon answers, and `ghcr.io/qwenlm/qwen-code:<version>` does not pull
+      # (TLS handshake timeout to the blob CDN). So: `required` when both halves
+      # hold, `off` — today's behaviour — with a warning and a summary line
+      # when they do not, and containment turns on by itself once the pool can
+      # pull the image. On the persistent pool that fail-open fallback is for
+      # SAME-REPO heads only: a fork head that still reaches the pool is
+      # refused when containment cannot be `required` (see the guard below).
+      # The image resolves through the repo's resolver first, so an
+      # unpublished tag cannot be charged to the PR under review.
+      - name: 'Resolve review sandbox'
+        id: 'review_sandbox'
+        if: "steps.context.outputs.should_run == 'true'"
+        # Absolute and step-scoped: the resolver's export is derived from this
+        # binary's stdout, and an appended $GITHUB_ENV value or a $GITHUB_PATH
+        # shadow in the runner-writable qwen-bin dir would otherwise steer it
+        # (#9527). The same pin the other sandboxed jobs use.
+        env:
+          SANDBOX_COMMAND: '/usr/bin/docker'
+          HEAD_REPO: '${{ github.event.pull_request.head.repo.full_name }}'
+          PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
+          GH_TOKEN: '${{ github.token }}'
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+        shell: '/bin/bash --noprofile --norc -e -o pipefail {0}'
+        run: |-
+          # Payload-less triggers read the head repo via the read-only job
+          # token, before any PR code runs. Unreadable => treated as a fork.
+          if [ -z "${HEAD_REPO:-}" ] && [ -n "${PR_NUMBER:-}" ]; then
+            HEAD_REPO="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.repo.full_name // ""' 2>/dev/null || true)"
+          fi
+          policy='off'
+          # A daemon round trip, not presence on PATH: a client with no
+          # reachable daemon is the shape that then refuses every reviewed
+          # command deep inside the prebuild (cli lib/sandboxed-exec.ts).
+          if ! "${SANDBOX_COMMAND}" info > /dev/null 2>&1; then
+            echo "::warning::no container daemon answered '${SANDBOX_COMMAND} info' on this review runner; the PR's own install/build/test run unsandboxed for this review."
+          elif ! node .github/scripts/resolve-sandbox-image.mjs \
+            "$(node -p "require('./package.json').config.sandboxImageUri")"; then
+            echo "::warning::the review sandbox image is not available on this runner; the PR's own install/build/test run unsandboxed for this review."
+          else
+            policy='required'
+          fi
+          # Fail closed for fork heads on the persistent pool (comment/
+          # dispatch shapes the runs-on routing cannot see): `off` there
+          # exposes this step's credentials AND the shared host — disabling
+          # only the prebuild would not contain the yolo agent's own shell
+          # probes. Hosted keeps fail-open: the disposable VM bounds it.
+          # Same-repo heads keep fail-open everywhere (authors hold write).
+          if [ "$policy" != 'required' ] && [ "${RUNNER_ENVIRONMENT:-}" = 'self-hosted' ] && [ "${HEAD_REPO:-}" != "$GITHUB_REPOSITORY" ]; then
+            echo "::error::fork PR review refused: the execution sandbox is '$policy' on this runner, and an uncontained review would expose CI credentials to PR-controlled install/build scripts (the agent's own shell probes included). Re-run with MAINTAINER_ECS_RUNNER_DISABLED=true to review on the hosted lane."
+            {
+              echo "### Review sandbox"
+              echo "runtime: ${SANDBOX_COMMAND}"
+              echo "policy: $policy (fork head ${HEAD_REPO:-unknown}; review refused)"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "sandbox_policy=$policy"
+          {
+            echo "### Review sandbox"
+            echo "runtime: ${SANDBOX_COMMAND}"
+            echo "policy: $policy"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "policy=$policy" >> "$GITHUB_OUTPUT"
+
       - name: 'Run review'
         id: 'review'
         if: "steps.context.outputs.should_run == 'true'"
@@ -1180,6 +1257,11 @@ jobs:
           # override below refuses that shape and keeps the default cohort.
           REVIEW_BASE_URL_CANARY: '${{ vars.QWEN_PR_REVIEW_BASE_URL_CANARY }}'
           REVIEW_API_KEY_CANARY: '${{ secrets.REVIEW_OPENAI_API_KEY_CANARY }}'
+          # Runner class gates the canary endpoint override below: the canary
+          # gateway is reachable only from the self-hosted pool, so a
+          # GitHub-hosted runner keeps the default cohort. Passed as env (not
+          # templated in the run body) per the no-${{ }} rule above.
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           QWEN_PR_REVIEW_EFFORT: '${{ vars.QWEN_PR_REVIEW_EFFORT }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
@@ -1252,6 +1334,34 @@ jobs:
           # through Agent 7's own build-test (issue #10108). Opt-in here only;
           # rationale, budget and fail-open contract: cli lib/prebuild.ts.
           QWEN_REVIEW_PREBUILD: '1'
+          # The #9556 execution sandbox around the PR's own install/build/test.
+          # Without it those commands inherit this step's GH_TOKEN and
+          # OPENAI_API_KEY, and a `postinstall` reads both in one line.
+          # `required` only when the 'Resolve review sandbox' step above found a
+          # runtime AND an image; `off` (today's behaviour) with a warning and a
+          # summary line otherwise — and on the persistent pool that fallback
+          # only ever reaches a SAME-REPO head (fork payloads route hosted,
+          # see runs-on; the preflight refuses the rest). `required` on a host that cannot
+          # satisfy it would fail the PR's own install instead of containing
+          # it, and a silently refused prebuild leaves the tree bare for every
+          # agent (#10108) — so the policy follows what the runner can do,
+          # visibly, within that boundary.
+          # A contained command that fails for environmental reasons (no git in
+          # the mount, image toolchain gaps, egress) is a PR-attributed
+          # failure, not "unavailable". It does NOT contain the agent's own
+          # shell probes, so #9556 stays open. Mechanism: cli
+          # lib/sandboxed-exec.ts; the CI row of the design.
+          QWEN_REVIEW_SANDBOX: '${{ steps.review_sandbox.outputs.policy }}'
+          # The digest-bound image the resolver pulled, through its step
+          # OUTPUT: later steps can append $GITHUB_ENV, so only the expression
+          # context is unsteerable (#9527). Empty when the resolver did not
+          # run; `policy` is `off` then, so it is not read.
+          QWEN_SANDBOX_IMAGE: '${{ steps.review_sandbox.outputs.image }}'
+          # Step env outranks an appended value, and the docker CLI skips an
+          # empty one; DOCKER_CONTEXT pins the pool-shared context so neither
+          # can steer the endpoint the sandbox runs against (#9527).
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: 'default'
           TMPDIR: '${{ steps.review_scratch.outputs.dir }}'
         run: |-
           set -euo pipefail
@@ -1863,18 +1973,38 @@ jobs:
           # provider — and an unparseable URL routes nowhere, so both shapes
           # degrade to the default cohort, the same direction every canary
           # misconfiguration takes.
+          #
+          # The endpoint override is also gated to the self-hosted pool. The
+          # canary gateway is the CN MaaS endpoint, which only the CN
+          # self-hosted runners can reach: a GitHub-hosted runner (the lane
+          # fork-PR reviews are routed to, see runs-on) times out on TCP
+          # connect to it — measured 2026-11-28 on runs 46091896299 /
+          # 46091914221, `connect ETIMEDOUT` to every A record while the same
+          # endpoint served a self-hosted review green. Applying the override
+          # there spends the whole transport-retry budget on a gateway that
+          # can never answer, so a non-self-hosted runner keeps the default
+          # cohort instead. The gate is fail-closed (an unknown runner class
+          # also keeps the default), and a model-only canary — no canary URL —
+          # is untouched, since the default gateway is reachable everywhere.
+          # Key/URL validity is checked FIRST so a misconfigured pair reports
+          # the specific "unusable" reason on every runner, hosted included;
+          # the pool warning then records the runner.environment it resolved.
           REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY:-}"
           REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY#"${REVIEW_BASE_URL_CANARY%%[![:space:]]*}"}"
           REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY%"${REVIEW_BASE_URL_CANARY##*[![:space:]]}"}"
           if [ "$REVIEW_COHORT" = canary ] && [ -n "$REVIEW_BASE_URL_CANARY" ]; then
-            if [ -n "${REVIEW_API_KEY_CANARY:-}" ] &&
-              node -e 'try{if(!new URL(process.env.REVIEW_BASE_URL_CANARY).host)process.exit(1)}catch{process.exit(1)}' 2>/dev/null; then
-              OPENAI_BASE_URL="$REVIEW_BASE_URL_CANARY"
-              OPENAI_API_KEY="$REVIEW_API_KEY_CANARY"
-            else
+            if [ -z "${REVIEW_API_KEY_CANARY:-}" ] ||
+              ! node -e 'try{if(!new URL(process.env.REVIEW_BASE_URL_CANARY).host)process.exit(1)}catch{process.exit(1)}' 2>/dev/null; then
               echo "::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort."
               OPENAI_MODEL="${REVIEW_MODEL_DEFAULT:-}"
               REVIEW_COHORT=default
+            elif [ "${RUNNER_ENVIRONMENT:-}" != "self-hosted" ]; then
+              echo "::warning::canary endpoint is served only to the self-hosted pool; runner.environment='${RUNNER_ENVIRONMENT:-<unset>}' cannot reach it, falling back to the default cohort."
+              OPENAI_MODEL="${REVIEW_MODEL_DEFAULT:-}"
+              REVIEW_COHORT=default
+            else
+              OPENAI_BASE_URL="$REVIEW_BASE_URL_CANARY"
+              OPENAI_API_KEY="$REVIEW_API_KEY_CANARY"
             fi
           fi
           export OPENAI_MODEL OPENAI_BASE_URL OPENAI_API_KEY

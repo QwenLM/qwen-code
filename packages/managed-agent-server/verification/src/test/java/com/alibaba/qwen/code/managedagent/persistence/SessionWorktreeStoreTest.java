@@ -133,11 +133,11 @@ class SessionWorktreeStoreTest {
             }
             assertThat(claim).isNotNull();
             String physical = JdbcWorkspaceExecutionStore.storageKey(jdbc, SessionWorktreeStore.storageBinding(plan));
-            jdbc.update("UPDATE ma_storage_owner SET holder_key = ?, maintenance_id = ?, maintenance_generation = ? WHERE storage_key = ?",
+            jdbc.update("UPDATE ma_storage_owner SET holder_id = ?, maintenance_id = ?, maintenance_generation = ? WHERE physical_id = ?",
                     "live-step", claim.operationId(), claim.generation(), physical);
             assertThat(store.claim(claim, "other", 120000)).isNull();
             assertThat(store.describe("tenant", "session").state()).isEqualTo("preparing");
-            jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL, maintenance_id = NULL, maintenance_generation = NULL WHERE storage_key = ?", physical);
+            jdbc.update("UPDATE ma_storage_owner SET holder_id = NULL, maintenance_id = NULL, maintenance_generation = NULL WHERE physical_id = ?", physical);
             String identity = git.prepare(plan);
             assertThat(store.complete(claim, "foreign", "READY", identity, null)).isFalse();
             assertThat(store.complete(claim, claim.claimedBy(), "READY", identity, null)).isTrue();
@@ -160,13 +160,66 @@ class SessionWorktreeStoreTest {
             assertThatThrownBy(() -> JdbcSessionWorktreeStore.requireReady(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session"))
                     .hasMessageContaining("worktree_identity_conflict");
             jdbc.update("UPDATE ma_session SET owner_actor_key=?,owner_only=1 WHERE tenant_id=? AND session_id=?",
-                    ManagedWorkspaceRegistry.actorKey("tenant", "actor"), "tenant", "session");
+                    "actor", "tenant", "session");
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id,workspace_id,actor_id,role) VALUES (?,?,?,'READER')",
                     "tenant", workspace, ManagedWorkspaceRegistry.actorKey("tenant", "other"));
             assertThat(store.list("tenant", "other", workspace)).isEmpty();
             assertThatThrownBy(() -> store.get("tenant", "other", workspace, id, false)).hasMessageContaining("not found");
             assertThat(store.list("tenant", "actor", workspace)).hasSize(1);
         }
+    }
+
+    @Test
+    void listReusesAuthorizedRowsAndStillVerifiesBranchesAndBlocksBadIdentity() throws Exception {
+        var files = org.mockito.Mockito.mock(WorktreeFiles.class);
+        var json = new ObjectMapper();
+        for (int index = 0; index < 6; index++) {
+            String tenant = index == 5 ? "other-tenant" : "tenant";
+            String selectedWorkspace = index == 4 ? "other-workspace" : workspace;
+            String session = "listed-" + index;
+            String state = index == 1 ? "PREPARING" : index == 3 ? "REMOVED" : "READY";
+            var plan = new Plan(tenant, selectedWorkspace, 1, "storage", ".", "config", 1,
+                    temp.toString(), "root", ".", ".", ".git", "common", null, "commit",
+                    session, session, session, "planned-branch");
+            jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, gmt_create, gmt_modified)"
+                    + " VALUES (?, ?, 'agent', 1, 1)", tenant, session);
+            jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id,"
+                    + " physical_id, worktree_id, owner_actor_key, state, revision, plan_json, identity_json,"
+                    + " operation_id, gmt_create, gmt_modified) VALUES (?, ?, ?, 'storage', 'physical', ?, ?, ?, 1, ?, '{}', ?, ?, 1)",
+                    tenant, session, selectedWorkspace, session, "actor",
+                    state, json.writeValueAsString(plan), session, index);
+            new WorkspaceOperations(jdbc, tenant).create(WorkspaceOperations.Kind.SESSION_WORKTREE, session,
+                    WorkspaceOperations.values("session_id", session, "state", state, "phase", state));
+            if (index == 0) {
+                org.mockito.Mockito.when(files.verify(plan, "{}")).thenReturn("verified-identity");
+                org.mockito.Mockito.when(files.currentBranch("verified-identity")).thenReturn("current-branch");
+            } else if (index == 2) {
+                org.mockito.Mockito.when(files.verify(plan, "{}"))
+                        .thenThrow(SessionWorktreeStore.error("worktree_identity_conflict"));
+            }
+        }
+        var trace = new StoreLockTrace(jdbc.getDataSource());
+        var listing = new JdbcSessionWorktreeStore(new ManagedSchemaJdbcTemplate(trace),
+                new JdbcManagedWorkspaceRegistry(jdbc), org.mockito.Mockito.mock(WorkspaceStorageGuard.class));
+        listing.configureWorktreeFiles(files);
+        var descriptors = listing.list("tenant", "actor", workspace);
+        assertThat(descriptors).extracting(SessionWorktreeStore.Descriptor::sessionId)
+                .containsExactly("listed-2", "listed-1", "listed-0");
+        assertThat(descriptors).extracting(SessionWorktreeStore.Descriptor::state)
+                .containsExactly("blocked", "preparing", "ready");
+        assertThat(descriptors.getLast().branch()).isEqualTo("current-branch");
+        assertThat(descriptors.getFirst().errorCode()).isEqualTo("worktree_identity_conflict");
+        assertThat(descriptors.getFirst().revision()).isEqualTo(2);
+        assertThat(JdbcSessionWorktreeStore.find(jdbc, "tenant", "listed-2").state()).isEqualTo("BLOCKED");
+        assertThat(trace.events().stream().filter(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED)
+                .map(StoreLockTrace.Event::sql).filter(sql -> sql.contains(" from ma_session_worktree w ")))
+                .hasSize(1).allMatch(sql -> !sql.contains("w.session_id in"));
+        org.mockito.Mockito.verify(files, org.mockito.Mockito.times(2)).verify(
+                org.mockito.ArgumentMatchers.any(Plan.class), org.mockito.ArgumentMatchers.eq("{}"));
+        jdbc.update("UPDATE ma_session_worktree SET plan_json = 'not-json' WHERE tenant_id = ? AND session_id = ?",
+                "tenant", "listed-1");
+        assertThatThrownBy(() -> listing.list("tenant", "actor", workspace))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("Invalid Session worktree record");
     }
 
     @Test

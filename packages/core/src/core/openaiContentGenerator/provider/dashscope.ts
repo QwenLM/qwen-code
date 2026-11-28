@@ -58,6 +58,18 @@ const DASHSCOPE_OUTPUT_TOKEN_CAPS: ReadonlyMap<string, number> = new Map([
   ['minimax-m2.5', 32_768],
 ]);
 
+// These families switched from buffered to incremental arguments in the
+// Model Studio streaming tests. Support for the extension varies by backend.
+const TOOL_STREAM_MODEL_FAMILIES = [
+  'qwen4-max',
+  'qwen3.8-max',
+  'qwen3.8-flash',
+  'qwen3.7-plus',
+] as const;
+
+/** DashScope cache breakpoint marker; qwen4 accepts an explicit `ttl`. */
+type DashScopeCacheControl = { type: 'ephemeral'; ttl?: '5m' | '1h' };
+
 export type DashScopeThinkingKnobSelection = {
   source: 'extra_body' | 'samplingParams' | 'reasoning';
   field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
@@ -189,6 +201,7 @@ export const DASHSCOPE_REGIONAL_HOSTS: readonly string[] = [
   'dashscope.aliyuncs.com',
   'dashscope-intl.aliyuncs.com',
   'dashscope-us.aliyuncs.com',
+  'cn-hongkong.dashscope.aliyuncs.com',
 ];
 
 export { QWENCLOUD_MAAS_HOSTS };
@@ -551,6 +564,17 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ...result,
       ...(extraBody ? extraBody : {}),
     };
+    const { tool_stream: toolStream, stream, tools, model: wireModel } = merged;
+    if (
+      toolStream === undefined &&
+      stream === true &&
+      Array.isArray(tools) &&
+      tools.length > 0 &&
+      typeof wireModel === 'string' &&
+      this.supportsToolStreaming(wireModel)
+    ) {
+      merged['tool_stream'] = true;
+    }
     this.capHostedOutputTokens(merged, model);
     const reasoningEffort = merged['reasoning_effort'];
     const dropped = new Set<string>();
@@ -583,6 +607,31 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     return this.flattenDeepSeekReasoningEffort(
       merged,
     ) as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+  }
+
+  private supportsToolStreaming(model: string): boolean {
+    const modelId = this.resolveWireModel(model);
+    if (
+      this.contentGeneratorConfig.authType === AuthType.QWEN_OAUTH ||
+      !TOOL_STREAM_MODEL_FAMILIES.some(
+        (family) => modelId === family || modelId.startsWith(`${family}-`),
+      )
+    ) {
+      return false;
+    }
+    try {
+      const url = new URL(
+        this.contentGeneratorConfig.baseUrl ?? DEFAULT_DASHSCOPE_BASE_URL,
+      );
+      return (
+        url.protocol === 'https:' &&
+        url.pathname.replace(/\/$/, '') === '/compatible-mode/v1' &&
+        (DASHSCOPE_REGIONAL_HOSTS.includes(url.hostname) ||
+          url.hostname.endsWith('.maas.aliyuncs.com'))
+      );
+    } catch {
+      return false;
+    }
   }
 
   private getConfiguredReasoning(model: string | undefined) {
@@ -842,6 +891,24 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   /**
+   * Resolve the cache breakpoint marker for a wire model. The qwen4 generation
+   * accepts an explicit cache TTL; `cacheRetention:'1h'` requests the extended
+   * tier (`ttl:'1h'`, 2x input write cost), while the default omits `ttl` (the
+   * 5m spec default). Other models keep the plain ephemeral marker.
+   */
+  private resolveCacheControl(
+    model: string | undefined,
+  ): DashScopeCacheControl {
+    if (
+      this.resolveWireModel(model).startsWith('qwen4') &&
+      this.contentGeneratorConfig.cacheRetention === '1h'
+    ) {
+      return { type: 'ephemeral', ttl: '1h' };
+    }
+    return { type: 'ephemeral' };
+  }
+
+  /**
    * Add cache control flag to specified message(s) for DashScope providers.
    * Tool definitions get no marker: DashScope ignores `cache_control` on
    * tools, and the system marker already covers them (they render first).
@@ -852,6 +919,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     reattachBlockCount = 0,
   ): OpenAI.Chat.ChatCompletionMessageParam[] {
     const messages = request.messages;
+    const cacheMarker = this.resolveCacheControl(request.model);
 
     const systemIndex = messages.findIndex((msg) => msg.role === 'system');
     const lastIndex = messages.length - 1;
@@ -893,6 +961,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
                 isConversationAnchor && stableBlock
                   ? stableBlock.excludeTail
                   : 0,
+                cacheMarker,
               ),
             } as OpenAI.Chat.ChatCompletionMessageParam;
           });
@@ -948,12 +1017,17 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   private addCacheControlToContent(
     content: NonNullable<OpenAI.Chat.ChatCompletionMessageParam['content']>,
     excludeTail = 0,
+    cacheMarker: DashScopeCacheControl = { type: 'ephemeral' },
   ): ChatCompletionContentPartWithCache[] {
     // Convert content to array format if it's a string
     const contentArray = this.normalizeContentToArray(content);
 
     // Add cache control to the last text item or create one if needed
-    return this.addCacheControlToContentArray(contentArray, excludeTail);
+    return this.addCacheControlToContentArray(
+      contentArray,
+      excludeTail,
+      cacheMarker,
+    );
   }
 
   /**
@@ -981,6 +1055,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   private addCacheControlToContentArray(
     contentArray: ChatCompletionContentPartWithCache[],
     excludeTail = 0,
+    cacheMarker: DashScopeCacheControl = { type: 'ephemeral' },
   ): ChatCompletionContentPartWithCache[] {
     if (contentArray.length === 0) {
       return contentArray;
@@ -1004,7 +1079,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const lastItem = contentArray[targetIndex];
     contentArray[targetIndex] = {
       ...lastItem,
-      cache_control: { type: 'ephemeral' },
+      cache_control: cacheMarker,
     } as ChatCompletionContentPartTextWithCache;
 
     return contentArray;

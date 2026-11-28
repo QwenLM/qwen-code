@@ -6,7 +6,6 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
-import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
@@ -1179,10 +1178,9 @@ class HostedSessionRelayFaultGatesIT {
     /** The receipt's reply document on the lead, via its replyRef. */
     private JsonNode receiptReply(String lead, String member) {
         List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT CAST(res.inline_bytes AS CHAR) AS body,"
-                        + " r.session_scope_key AS scope FROM"
+                "SELECT CAST(res.inline_bytes AS CHAR) AS body FROM"
                         + " ma_session_record r JOIN ma_resource res ON"
-                        + " res.session_scope_key = r.session_scope_key"
+                        + " res.tenant_id = r.tenant_id AND res.session_id = r.session_id"
                         + " AND res.resource_id = r.record_resource_id"
                         + " WHERE r.tenant_id = ? AND r.session_id = ?"
                         + " AND r.domain = 'session_command'"
@@ -1194,12 +1192,11 @@ class HostedSessionRelayFaultGatesIT {
         JsonNode receipt = body(rows.get(0));
         String replyRef = receipt.required("replyRef")
                 .required("resourceId").asText();
-        String scope = rows.get(0).get("scope").toString();
         List<Map<String, Object>> resources = jdbc.queryForList(
                 "SELECT CAST(inline_bytes AS CHAR) AS body"
                         + " FROM ma_resource WHERE tenant_id = ? AND"
-                        + " session_scope_key = ? AND resource_id = ?",
-                tenant, scope, replyRef);
+                        + " session_id = ? AND resource_id = ?",
+                tenant, lead, replyRef);
         assertThat(resources).as("replyRef resource").hasSize(1);
         return body(resources.get(0));
     }
@@ -1245,7 +1242,7 @@ class HostedSessionRelayFaultGatesIT {
         List<Map<String, Object>> records = jdbc.queryForList(
                 "SELECT CAST(res.inline_bytes AS CHAR) AS body FROM"
                         + " ma_session_record r JOIN ma_resource res ON"
-                        + " res.session_scope_key = r.session_scope_key"
+                        + " res.tenant_id = r.tenant_id AND res.session_id = r.session_id"
                         + " AND res.resource_id = r.record_resource_id"
                         + " WHERE r.tenant_id = ? AND r.session_id = ?"
                         + " AND r.domain = ? ORDER BY r.record_id,"
@@ -1290,7 +1287,7 @@ class HostedSessionRelayFaultGatesIT {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "SELECT CAST(res.inline_bytes AS CHAR) AS body FROM"
                         + " ma_session_record r JOIN ma_resource res ON"
-                        + " res.session_scope_key = r.session_scope_key"
+                        + " res.tenant_id = r.tenant_id AND res.session_id = r.session_id"
                         + " AND res.resource_id = r.record_resource_id"
                         + " WHERE r.tenant_id = ? AND r.session_id = ?"
                         + " AND r.domain = 'child_run' AND r.record_id = ?"
@@ -1338,7 +1335,7 @@ class HostedSessionRelayFaultGatesIT {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "SELECT CAST(res.inline_bytes AS CHAR) AS body FROM"
                         + " ma_session_record r JOIN ma_resource res ON"
-                        + " res.session_scope_key = r.session_scope_key"
+                        + " res.tenant_id = r.tenant_id AND res.session_id = r.session_id"
                         + " AND res.resource_id = r.record_resource_id"
                         + " WHERE r.tenant_id = ? AND r.session_id = ?"
                         + " AND r.domain = 'child_run' AND r.record_id = ?"
@@ -1494,7 +1491,7 @@ class HostedSessionRelayFaultGatesIT {
                         + " event_type, gmt_create, data_json, is_terminal"
                         + " FROM ma_public_event WHERE tenant_id = ? AND"
                         + " session_id = ? AND stream_kind = 'SESSION' AND"
-                        + " stream_id = X'' ORDER BY sequence_id",
+                        + " stream_id = '' ORDER BY sequence_id",
                 tenant, session);
     }
 
@@ -1985,8 +1982,7 @@ class HostedSessionRelayFaultGatesIT {
             harnessPort = reservation.getLocalPort();
             startSpring(cli, node, caseCount, letter);
             port = spring.getWebServer().getPort();
-            brokerPort = spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri()
-                    .getPort();
+            brokerPort = port;
             storeProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
             publicProxy.forwardTo(URI.create("http://127.0.0.1:" + port));
         }
@@ -2059,7 +2055,6 @@ class HostedSessionRelayFaultGatesIT {
                 "--qwen.managed-agent.harness.token=" + TOKEN,
                 "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",

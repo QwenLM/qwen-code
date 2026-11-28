@@ -13,7 +13,12 @@ async function openPicker(page: Page, pane = 'left', reasoning = false) {
   await page
     .locator(`[data-demo-composer="${pane}"] [data-web-shell-model-button]`)
     .click();
-  if (reasoning) {
+  if (await page.locator('[data-web-shell-model-sheet]').isVisible()) {
+    const submenuTrigger = page.locator(
+      '[data-web-shell-model-submenu-trigger]',
+    );
+    if (await submenuTrigger.count()) await submenuTrigger.click();
+  } else if (reasoning) {
     await expect(page.locator('[data-demo-header]')).toHaveCount(0);
     await page.locator('[data-web-shell-model-submenu-trigger]').click();
     await expect(
@@ -25,7 +30,7 @@ async function openPicker(page: Page, pane = 'left', reasoning = false) {
 
 function row(page: Page, id: string) {
   return page.locator(
-    `[data-web-shell-toolbar-popover][data-state="open"] [data-model-id="${id}"]`,
+    `[data-web-shell-toolbar-popover][data-state="open"] [data-model-id="${id}"], [data-web-shell-model-sheet] [data-model-id="${id}"]`,
   );
 }
 
@@ -167,6 +172,63 @@ for (const failure of ['decline', 'throw']) {
   });
 }
 
+for (const { height, tallHeader, direct } of [
+  { height: 813 },
+  { height: 420 },
+  { height: 420, tallHeader: true },
+  { height: 420, tallHeader: true, direct: true },
+]) {
+  test(`scrolls inside the 506 × ${height} model ${direct ? 'sheet' : 'card'}${tallHeader ? ' with a tall host header' : ''}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 506, height });
+    await openDemo(
+      page,
+      `?reasoning=${direct ? '0' : '1'}&manyModels=1${tallHeader ? '&tallHeader=1' : ''}`,
+    );
+    await openPicker(page);
+
+    const panel = page.locator(
+      direct
+        ? '[data-web-shell-model-sheet] > [data-vaul-no-drag]'
+        : '[data-web-shell-model-sheet-list]',
+    );
+    const last = row(page, gamma);
+    await expect(row(page, beta)).toHaveAccessibleDescription(
+      'Special rate of 0.5×.',
+    );
+    expect(
+      await panel.evaluate(
+        (element) => element.scrollHeight - element.clientHeight,
+      ),
+    ).toBe(0);
+    await expect(last).not.toBeInViewport();
+    await last.scrollIntoViewIfNeeded();
+    await expect(last).toBeInViewport({ ratio: 1 });
+    await expect(panel.getByRole('searchbox')).toBeInViewport({ ratio: 1 });
+    await expect(panel.locator('[data-demo-header]')).not.toBeInViewport();
+  });
+}
+
+test.describe('short touch viewport', () => {
+  test.use({
+    hasTouch: true,
+    isMobile: true,
+    viewport: { width: 506, height: 420 },
+  });
+
+  test('keeps the model search touch target at least 44 px', async ({
+    page,
+  }) => {
+    await openDemo(page, '?reasoning=1&manyModels=1');
+    await openPicker(page);
+
+    expect(
+      (await page.getByRole('searchbox').boundingBox())!.height,
+    ).toBeGreaterThanOrEqual(44);
+  });
+});
+
 test('lets a touch host consume a row click before selection', async ({
   browser,
   baseURL,
@@ -185,7 +247,9 @@ test('lets a touch host consume a row click before selection', async ({
   await expect(overlay).toBeVisible();
   await expect(page.locator('[data-demo-header="left"]')).toBeVisible();
   expect((await stats(page)).leftSelections).toBe(0);
-  await overlay.getByRole('button', { name: 'Read model details' }).tap();
+  // The modal sheet hides host overlays from the accessibility tree; this
+  // touch case intentionally verifies their pointer interaction only.
+  await overlay.locator('button').tap();
   await expect.poll(async () => (await stats(page)).actions).toBe(1);
   expect((await stats(page)).leftSelections).toBe(0);
   await expect(page.locator('[data-demo-header="left"]')).toBeVisible();

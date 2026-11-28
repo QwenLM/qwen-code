@@ -371,6 +371,10 @@ describe('AgentTool', () => {
     };
     config = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+      getProjectMemoryOwner: () => ({
+        cwd: '/test/project',
+        memoryBaseDir: '/test/runtime',
+      }),
       getTargetDir: vi.fn().mockReturnValue('/test/project'),
       getCwd: vi.fn().mockReturnValue('/test/project'),
       getWorkingDir: vi.fn().mockReturnValue('/test/project'),
@@ -4528,18 +4532,42 @@ describe('AgentTool', () => {
       );
     });
 
-    it('should re-execute subagent when stop hook returns shouldStopExecution', async () => {
-      vi.mocked(mockHookSystem.fireSubagentStopEvent)
-        .mockResolvedValueOnce(
-          stopOutput(
-            'Output is incomplete',
-            vi.fn().mockReturnValue(false),
-            vi.fn().mockReturnValueOnce(true),
-          ),
-        )
-        .mockResolvedValueOnce(undefined as never);
+    it('lets the subagent stop when the stop hook returns continue: false without a block', async () => {
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockResolvedValueOnce(
+        stopOutput(
+          'Output is incomplete',
+          vi.fn().mockReturnValue(false),
+          vi.fn().mockReturnValue(true),
+        ),
+      );
       await runFg();
-      expect(mockAgent.execute).toHaveBeenCalledTimes(2);
+      expect(mockAgent.execute).toHaveBeenCalledTimes(1);
+      expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not restart a subagent stopped by a tool hook', async () => {
+      vi.mocked(mockAgent.getTerminateMode).mockImplementation(() =>
+        vi.mocked(mockAgent.execute).mock.calls.length === 1
+          ? AgentTerminateMode.HOOK_STOPPED
+          : AgentTerminateMode.GOAL,
+      );
+      vi.mocked(mockAgent.getFinalText).mockImplementation(() =>
+        vi.mocked(mockAgent.execute).mock.calls.length === 1
+          ? 'A hook stopped the agent: budget spent'
+          : 'Task completed after continuation',
+      );
+      vi.mocked(mockHookSystem.fireSubagentStopEvent)
+        .mockResolvedValueOnce(stopOutput('Keep going'))
+        .mockResolvedValueOnce(undefined as never);
+
+      const result = await runFg();
+
+      expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledTimes(1);
+      expect(mockAgent.execute).toHaveBeenCalledTimes(1);
+      expect(textOf(result)).toContain('terminate mode: HOOK_STOPPED');
+      expect(textOf(result)).toContain(
+        'A hook stopped the agent: budget spent',
+      );
     });
 
     it('uses the configured SubagentStop blocking cap', async () => {

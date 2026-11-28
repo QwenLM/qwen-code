@@ -68,6 +68,14 @@ describe('interactive Mod owner', () => {
       ),
     ).toBeUndefined();
     expect(mocks.create).not.toHaveBeenCalled();
+    // The display translation alone starts them.
+    mocks.create.mockReturnValueOnce({ close: vi.fn() });
+    const translated = createInteractiveModSession(
+      { isInteractive: () => true } as Config,
+      { merged: { general: { displayLanguage: 'zh-CN' } } } as LoadedSettings,
+    );
+    expect(translated).toBeDefined();
+    await translated!.close();
     const first = setup();
     expect(createInteractiveModSession(first.config, settings)).toBe(
       first.owner,

@@ -5,6 +5,7 @@
  */
 import {
   QWEN_CODE_DESKTOP_ENV,
+  QWEN_CODE_MANAGED_RUNTIME_ENV,
   QWEN_CODE_SERVE_ENV,
 } from './acp-channel-fallback.js';
 import { PRIVATE_CONVERSATIONS_RUNTIME_ENV } from '@qwen-code/qwen-code-core/conversationsRuntimeMarker';
@@ -23,8 +24,6 @@ export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 
 export const ENV_CORRUPTED_PATH = 'QWEN_CODE_SETTINGS_CORRUPTED_PATH';
 export const ENV_WAS_RECOVERED = 'QWEN_CODE_SETTINGS_WAS_RECOVERED';
-export const ENV_ACP_REPEATED_TOOL_FAILURE_GUARD =
-  'QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD';
 
 // QWEN_HOME and QWEN_RUNTIME_DIR control where global state (settings, OAuth
 // credentials, installation IDs, etc.) is written. A project `.env` must never
@@ -71,11 +70,9 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // `.env` must not spoof client channel telemetry.
   QWEN_CODE_SERVE_ENV,
   QWEN_CODE_DESKTOP_ENV,
+  QWEN_CODE_MANAGED_RUNTIME_ENV,
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
-  // This is an operator rollout policy. A project must not be able to promote
-  // itself from the default shadow cohort into warning or enforcement.
-  ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   // Project memory routing is frozen daemon-wide before workspace env files
   // load, so only the operator's launch environment or CLI flag may set it.
   'QWEN_CODE_MEMORY_PROJECT_SCOPE',
@@ -118,6 +115,24 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // review of its own change to one reviewer with no reverse audit. CI
   // welds it as a real step env, never a file.
   'QWEN_REVIEW_AUTOMATIC',
+  // The execution sandbox policy (commands/review/lib/sandboxed-exec.ts
+  // `sandboxPolicy`) is an operator decision: it decides whether the reviewed
+  // repository's install/build/test run contained, with the review's
+  // credentials outside the boundary. Same class as the prebuild switch, and
+  // for the same reason — the read-time check cannot see file-sourcing across
+  // a process boundary, so a repository must not be able to write the key into
+  // the environment at all, not merely be ignored when it does.
+  'QWEN_REVIEW_SANDBOX',
+  'QWEN_REVIEW_SANDBOX_IMAGE',
+  'QWEN_REVIEW_SANDBOX_BACKEND',
+  'QWEN_REVIEW_FORCE_HARDWARE',
+  'QWEN_REVIEW_VM_KERNEL',
+  'QWEN_REVIEW_VM_ROOTFS',
+  'QWEN_REVIEW_VM_BRIDGE_SOCKET',
+  'QWEN_REVIEW_VM_PID_FILE',
+  'QWEN_REVIEW_PROVIDER_VM_DRIVER',
+  'QWEN_REVIEW_PROVIDER_VM_ENDPOINT',
+  'QWEN_REVIEW_FCSANDBOX_TEMPLATE',
   // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
   // disable TLS certificate verification for all outbound API connections. A
   // project `.env` must never enable either — that would let an untrusted repo
@@ -550,12 +565,14 @@ export function scrubInheritedLoaderEnv(
 // and tuning flags are legitimate cross-process state, and a bare `-e` probe
 // child still needs them. When a child must not inherit a broken module hook,
 // drop only the hook flags and keep the rest of the value intact.
+// Keep loader spellings in sync with utils/bundled-chunk-resolver.ts.
 const NODE_OPTIONS_LOADER_FLAGS = new Set([
   '--require',
   '-r',
   '--import',
   '--loader',
   '--experimental-loader',
+  '--experimental_loader',
 ]);
 
 export function scrubNodeOptionsLoaderFlags(value: string): string {

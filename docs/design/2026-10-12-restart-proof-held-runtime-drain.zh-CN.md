@@ -43,7 +43,7 @@ close 用 `release({ drain: true })` drain `heldRuntimeTurns`，容忍精确的 
 
 ## 4. 验收
 
-在 `hosted-harness-session.test.ts` 的 `drains a turn-held Runtime at close through the drain arm (#13856)` 旁加一个 takeover 用例：一个被预写并关闭、从未经历过 close 排空的 Session（死去的进程），其被持有的 Runtime Session 仍被 Broker 列出；全新进程加载它并在那里 DELETE；替换进程的 `release` 必须对该被持有 Runtime Session id 带 `[{ drain: true }]` 被调用。不做加载时恢复，这条断言是红的。
+在 `hosted-harness-session.runtime-cleanup.test.ts` 的 `drains a turn-held Runtime at close through the drain arm (#13856)` 旁加一个 takeover 用例：一个被预写并关闭、从未经历过 close 排空的 Session（死去的进程），其被持有的 Runtime Session 仍被 Broker 列出；全新进程加载它并在那里 DELETE；替换进程的 `release` 必须对该被持有 Runtime Session id 带 `[{ drain: true }]` 被调用。不做加载时恢复，这条断言是红的。
 
 测试预写 journal，而不是先在存活的原进程上跑出那个被持有的 turn：writer 租约会拒绝同一进程内对一个存活 Session 的第二次打开，单测试进程内摆不出双进程形态——也不需要，因为恢复信任的是 Broker 的持久 hold 行，而非 journal 的 turn 记录。routine 拒绝 → 持有 → close 排空那一半，由旁边的 #13856 用例覆盖。
 

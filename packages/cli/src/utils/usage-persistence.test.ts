@@ -1,0 +1,239 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { EVENT_API_RESPONSE } from '@qwen-code/qwen-code-core/telemetry/constants.js';
+import {
+  uiTelemetryService,
+  type UiEvent,
+} from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
+import { persistSessionUsageOnClose } from './usage-persistence.js';
+
+function apiResponseEvent(
+  model: string,
+  input: number,
+  output: number,
+  executionId: string,
+): UiEvent {
+  return {
+    'event.name': EVENT_API_RESPONSE,
+    'event.timestamp': new Date().toISOString(),
+    model,
+    duration_ms: 42,
+    input_token_count: input,
+    output_token_count: output,
+    cached_content_token_count: 0,
+    thoughts_token_count: 0,
+    tool_token_count: 0,
+    total_token_count: input + output,
+    execution_id: executionId,
+  } as UiEvent;
+}
+
+describe('persistSessionUsageOnClose', () => {
+  let tmpHome: string;
+  let prevHome: string | undefined;
+  let prevQwenHome: string | undefined;
+  let prevRuntime: string | undefined;
+
+  beforeEach(() => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-persist-close-'));
+    prevHome = process.env['HOME'];
+    prevQwenHome = process.env['QWEN_HOME'];
+    prevRuntime = process.env['QWEN_RUNTIME_DIR'];
+    process.env['HOME'] = tmpHome;
+    process.env['QWEN_HOME'] = tmpHome;
+    process.env['QWEN_RUNTIME_DIR'] = tmpHome;
+    uiTelemetryService.reset();
+  });
+
+  afterEach(() => {
+    uiTelemetryService.reset();
+    if (prevHome === undefined) delete process.env['HOME'];
+    else process.env['HOME'] = prevHome;
+    if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
+    else process.env['QWEN_HOME'] = prevQwenHome;
+    if (prevRuntime === undefined) delete process.env['QWEN_RUNTIME_DIR'];
+    else process.env['QWEN_RUNTIME_DIR'] = prevRuntime;
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  const makeConfig = (projectRoot: string): Config =>
+    ({
+      getProjectRoot: () => projectRoot,
+    }) as unknown as Config;
+
+  const readRecords = () => {
+    const file = path.join(tmpHome, 'usage_record.jsonl');
+    if (!fs.existsSync(file)) return [];
+    return fs
+      .readFileSync(file, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  };
+
+  it('writes zero records when a resumed daemon session closes without new live activity', () => {
+    uiTelemetryService.addReplayedEvent(
+      apiResponseEvent('qwen-max', 1000, 200, 'replayed-exec'),
+      'resumed-only',
+    );
+    persistSessionUsageOnClose(makeConfig('/proj/a'), 'resumed-only');
+    expect(readRecords()).toHaveLength(0);
+  });
+
+  it('persists only live delta for the closing session, isolated from concurrent sessions, preserves per-session run clock, and writes at most once after removeSession', () => {
+    vi.useFakeTimers();
+    try {
+      const startA = new Date('2026-11-27T10:00:00.000Z');
+      vi.setSystemTime(startA);
+      uiTelemetryService.addReplayedEvent(
+        apiResponseEvent('qwen-max', 5000, 1000, 'replayed-1'),
+        'sess-a',
+      );
+      uiTelemetryService.addEvent(
+        apiResponseEvent('qwen-max', 80, 20, 'live-a-1'),
+        'sess-a',
+      );
+      uiTelemetryService.recordSkillInvocation('review', true, 'sess-a');
+
+      vi.advanceTimersByTime(2_000);
+      const startB = new Date('2026-11-27T10:00:02.000Z');
+      uiTelemetryService.addEvent(
+        apiResponseEvent('qwen-max', 300, 50, 'live-b-1'),
+        'sess-b',
+      );
+
+      vi.advanceTimersByTime(3_000);
+      const closeA = new Date('2026-11-27T10:00:05.000Z');
+      persistSessionUsageOnClose(makeConfig('/proj/a'), 'sess-a');
+      uiTelemetryService.removeSession('sess-a');
+      // Second close attempt must not write a duplicate record.
+      persistSessionUsageOnClose(makeConfig('/proj/a'), 'sess-a');
+
+      const records = readRecords();
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        sessionId: 'sess-a',
+        project: '/proj/a',
+        startTime: startA.getTime(),
+        timestamp: closeA.getTime(),
+        durationMs: 5_000,
+        runScoped: true,
+        requestExecutionIds: ['live-a-1'],
+        successfulRequestExecutionIds: ['live-a-1'],
+        models: {
+          'qwen-max': {
+            requests: 1,
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+          },
+        },
+        skills: {
+          totalCalls: 1,
+          totalSuccess: 1,
+          totalFail: 0,
+        },
+      });
+
+      // Concurrent session B retains its own live bucket and run start clock.
+      vi.advanceTimersByTime(4_000);
+      const closeB = new Date('2026-11-27T10:00:09.000Z');
+      persistSessionUsageOnClose(makeConfig('/proj/b'), 'sess-b');
+      uiTelemetryService.removeSession('sess-b');
+      const afterB = readRecords();
+      expect(afterB).toHaveLength(2);
+      expect(afterB[1]).toMatchObject({
+        sessionId: 'sess-b',
+        project: '/proj/b',
+        startTime: startB.getTime(),
+        timestamp: closeB.getTime(),
+        durationMs: 7_000,
+        runScoped: true,
+        requestExecutionIds: ['live-b-1'],
+        models: {
+          'qwen-max': {
+            requests: 1,
+            inputTokens: 300,
+            outputTokens: 50,
+            totalTokens: 350,
+          },
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves sibling session live buckets across ACP /clear and persists post-clear rotated session ids on close', () => {
+    uiTelemetryService.addEvent(
+      apiResponseEvent('qwen-max', 100, 20, 'exec-a-before-clear'),
+      'sess-a-orig',
+    );
+    uiTelemetryService.addEvent(
+      apiResponseEvent('qwen-max', 200, 40, 'exec-b-sibling'),
+      'sess-b',
+    );
+
+    // Simulate ACP /clear in sess-a: persist and reset only sess-a-orig, then
+    // rotate to sess-a-rotated and record post-clear activity.
+    persistSessionUsageOnClose(makeConfig('/proj/a'), 'sess-a-orig');
+    uiTelemetryService.resetSession('sess-a-orig');
+    uiTelemetryService.resetSession('sess-a-rotated');
+
+    // Sibling sess-b must still hold its pending live bucket untouched.
+    expect(
+      uiTelemetryService.getLiveMetricsForSession('sess-b')?.models['qwen-max']
+        ?.tokens.total,
+    ).toBe(240);
+
+    uiTelemetryService.addEvent(
+      apiResponseEvent('qwen-max', 50, 10, 'exec-a-after-clear'),
+      'sess-a-rotated',
+    );
+
+    // Closing the registry entry finalizes both the original and rotated ids.
+    for (const id of ['sess-a-orig', 'sess-a-rotated']) {
+      persistSessionUsageOnClose(makeConfig('/proj/a'), id);
+      uiTelemetryService.removeSession(id);
+    }
+    // Closing sibling sess-b writes its own record intact.
+    persistSessionUsageOnClose(makeConfig('/proj/b'), 'sess-b');
+    uiTelemetryService.removeSession('sess-b');
+
+    const records = readRecords();
+    expect(records).toHaveLength(3);
+    expect(
+      records.map((r) => ({
+        sessionId: r.sessionId,
+        project: r.project,
+        execIds: r.requestExecutionIds,
+      })),
+    ).toEqual([
+      {
+        sessionId: 'sess-a-orig',
+        project: '/proj/a',
+        execIds: ['exec-a-before-clear'],
+      },
+      {
+        sessionId: 'sess-a-rotated',
+        project: '/proj/a',
+        execIds: ['exec-a-after-clear'],
+      },
+      {
+        sessionId: 'sess-b',
+        project: '/proj/b',
+        execIds: ['exec-b-sibling'],
+      },
+    ]);
+  });
+});

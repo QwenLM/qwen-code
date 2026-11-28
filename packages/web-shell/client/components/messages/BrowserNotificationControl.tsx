@@ -6,7 +6,7 @@ import {
   ChevronDownIcon,
   CircleCheckIcon,
 } from 'lucide-react';
-import { useBrowserNotificationSettings } from '../../browser-turn-notifications';
+import { useBrowserNotificationSettings } from '../../browser-notification-settings-context';
 import { useI18n } from '../../i18n';
 import { getShadowAwareActiveElement } from '../../utils/dom';
 import { Button } from '../ui/button';

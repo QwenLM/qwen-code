@@ -15,8 +15,22 @@ describe('DingTalk management fields', () => {
     expect(plugin.management?.fields.map((field) => field.key)).toEqual([
       'clientId',
       'clientSecret',
+      'cardTemplateId',
       'interactiveCards',
     ]);
+  });
+
+  it('names cardTemplateId in both env-resolution lists (R2-3)', () => {
+    // The settings store accepts a $VAR reference because the management field
+    // is envResolvable; the runtime only resolves it if envResolvableConfigFields
+    // also names it. Both must agree, or a misspelled deployment variable reaches
+    // the card API as a literal template id and every reply is terminally
+    // rejected. Removing either declaration reds this.
+    const field = plugin.management?.fields.find(
+      (candidate) => candidate.key === 'cardTemplateId',
+    );
+    expect(field?.envResolvable).toBe(true);
+    expect(plugin.envResolvableConfigFields).toContain('cardTemplateId');
   });
 });
 

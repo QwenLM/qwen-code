@@ -47,6 +47,7 @@ export interface SharedLoopBatch {
   toolSignal?: AbortSignal;
   beforeToolLaunch?: AgentLoopHost['beforeToolLaunch'];
   onToolResult: NonNullable<AgentLoopHost['onToolResult']>;
+  getPendingToolSettlement?: () => Promise<void> | undefined;
 }
 
 export type SharedLoopRound = ReturnType<typeof startSharedLoopRound>;
@@ -108,6 +109,7 @@ export function startSharedLoopRound(
     keepCancelledResults: true,
     deferRecording: options.deferRecording,
     useEventBus: options.useEventBus,
+    getPendingToolSettlement: () => taken?.getPendingToolSettlement?.(),
     executor: {
       run: (requests, signal, hooks) =>
         taken?.executor.run(requests, taken.toolSignal ?? signal, hooks) ??
@@ -144,12 +146,13 @@ export function startSharedLoopRound(
             inTurn(() => batch.executor.run(requests, signal, hooks)),
         },
       });
-      return run.then(({ reason, parts, responses }) => ({
+      return run.then(({ reason, parts, responses, hookStopReason }) => ({
         parts: parts ?? [],
         ...(responses ? { responses } : {}),
         ...(reason === 'next_round' || reason === 'completed'
           ? {}
           : { stop: reason }),
+        ...(hookStopReason !== undefined ? { hookStopReason } : {}),
       }));
     },
     close: async () => {

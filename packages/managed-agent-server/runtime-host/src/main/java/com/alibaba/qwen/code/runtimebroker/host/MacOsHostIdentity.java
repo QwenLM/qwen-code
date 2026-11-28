@@ -127,7 +127,11 @@ public final class MacOsHostIdentity {
         Process process = builder.start();
         try {
             process.getOutputStream().close();
-            if (!process.waitFor(5, TimeUnit.SECONDS) || process.exitValue() != 0) {
+            if (!process.waitFor(5, TimeUnit.SECONDS)) {
+                throw new MacOsIdentityProbeTimeoutException(
+                        "macOS native identity probe timed out");
+            }
+            if (process.exitValue() != 0) {
                 throw new IOException("macOS native identity probe failed");
             }
             byte[] output = process.getInputStream().readNBytes(MAX_BYTES + 1);

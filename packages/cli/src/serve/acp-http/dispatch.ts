@@ -9,6 +9,10 @@ import {
   isSessionStartupConfigError,
 } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import {
+  isValidCronTaskRoutingId,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
+} from '@qwen-code/qwen-code-core/services/cronTasksFile.js';
+import {
   APPROVAL_MODES,
   type ApprovalMode,
   BTW_MAX_INPUT_LENGTH,
@@ -949,6 +953,23 @@ export function toRpcError(err: unknown): {
   }
   const writerError = sessionWriterRpcError(err);
   if (writerError) return writerError;
+  if (
+    isObject(err) &&
+    err['code'] === RPC.INTERNAL_ERROR &&
+    isObject(err['data']) &&
+    err['data']['errorKind'] === 'repetitive_tool_calls' &&
+    typeof err['message'] === 'string' &&
+    err['data']['details'] === err['message']
+  ) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: err['message'],
+      data: {
+        errorKind: err['data']['errorKind'],
+        details: err['message'],
+      },
+    };
+  }
   const workflowStatus =
     isObject(err) && isObject(err['data'])
       ? workflowRequestErrorStatus(err['data']['errorKind'])
@@ -1251,6 +1272,25 @@ export function toRpcError(err: unknown): {
           retryable: true,
         },
       };
+    case 'SystemOverloadedError': {
+      const loadErr = err as {
+        reason?: unknown;
+        loadRatio?: unknown;
+        eventLoopLagP99Ms?: unknown;
+      };
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: errMsg(err),
+        data: {
+          errorKind: 'system_overloaded',
+          httpStatus: 503,
+          retryable: true,
+          reason: loadErr.reason,
+          loadRatio: loadErr.loadRatio,
+          eventLoopLagP99Ms: loadErr.eventLoopLagP99Ms,
+        },
+      };
+    }
     case 'PromptQueueFullError': {
       const promptErr = err as {
         sessionId?: unknown;
@@ -1301,6 +1341,19 @@ interface AcpSessionRuntimeContext {
   readonly bridge: HttpAcpBridge;
   readonly sessionRuntimeBaseDir: string;
   readonly workspaceId?: string;
+}
+
+function parseRequestedApprovalMode(
+  value: unknown,
+): ApprovalMode | null | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== 'string' ||
+    !APPROVAL_MODES.includes(value as ApprovalMode)
+  ) {
+    return null;
+  }
+  return value as ApprovalMode;
 }
 
 /**
@@ -2033,6 +2086,34 @@ export class AcpDispatcher {
             params['startupConfig'],
             params,
           );
+          const approvalMode = parseRequestedApprovalMode(
+            params['approvalMode'],
+          );
+          if (approvalMode === null) {
+            conn.sendConn(
+              error(
+                id,
+                RPC.INVALID_PARAMS,
+                `invalid approvalMode ${JSON.stringify(params['approvalMode'])} (expected one of: ${APPROVAL_MODES.join(', ')})`,
+              ),
+            );
+            return;
+          }
+          const modelServiceId = params['modelServiceId'];
+          if (
+            modelServiceId !== undefined &&
+            (!isValidCronTaskRoutingId(modelServiceId) ||
+              !modelServiceId.trim())
+          ) {
+            conn.sendConn(
+              error(
+                id,
+                RPC.INVALID_PARAMS,
+                `invalid modelServiceId (expected a non-empty string of 1-${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters)`,
+              ),
+            );
+            return;
+          }
           const meta = isObject(params['_meta']) ? params['_meta'] : undefined;
           const parsedSessionId = parseCallerSuppliedSessionId(
             meta?.[REQUESTED_SESSION_ID_META_KEY],
@@ -2138,6 +2219,8 @@ export class AcpDispatcher {
                 clientId: conn.clientId,
                 sessionScope: 'thread',
                 ...(startupConfig ? { startupConfig } : {}),
+                ...(modelServiceId !== undefined ? { modelServiceId } : {}),
+                ...(approvalMode !== undefined ? { approvalMode } : {}),
                 ...source,
                 ...(requestedSessionId
                   ? { sessionId: requestedSessionId }
@@ -2220,6 +2303,14 @@ export class AcpDispatcher {
                 id,
                 {
                   sessionId: session.sessionId,
+                  workspaceCwd: session.workspaceCwd,
+                  attached: session.attached,
+                  ...(session.clientId !== undefined
+                    ? { clientId: session.clientId }
+                    : {}),
+                  ...(session.modelApplied !== undefined
+                    ? { modelApplied: session.modelApplied }
+                    : {}),
                   ...withGeneratedUiReceipt(session.generatedUi),
                   ...(session.startupConfigApplied
                     ? {
@@ -2256,6 +2347,19 @@ export class AcpDispatcher {
         case 'session/resume': {
           if (id === undefined) {
             writeStderrLine(`qwen serve: /acp ${method} notification rejected`);
+            return;
+          }
+          const approvalMode = parseRequestedApprovalMode(
+            params['approvalMode'],
+          );
+          if (approvalMode === null) {
+            conn.sendConn(
+              error(
+                id,
+                RPC.INVALID_PARAMS,
+                `invalid approvalMode ${JSON.stringify(params['approvalMode'])} (expected one of: ${APPROVAL_MODES.join(', ')})`,
+              ),
+            );
             return;
           }
           const sessionId = normalizeSessionIdForLookup(
@@ -2333,6 +2437,7 @@ export class AcpDispatcher {
                       sessionId,
                       {
                         ...(conn.clientId ? { clientId: conn.clientId } : {}),
+                        ...(approvalMode !== undefined ? { approvalMode } : {}),
                       },
                     );
                 } catch (error) {
@@ -2434,12 +2539,14 @@ export class AcpDispatcher {
                         workspaceCwd: cwd,
                         clientId: conn.clientId,
                         historyReplay: 'response',
+                        ...(approvalMode !== undefined ? { approvalMode } : {}),
                         ...restoreMetadata,
                       })
                     : await sessionRuntime.bridge.resumeSession({
                         sessionId,
                         workspaceCwd: cwd,
                         clientId: conn.clientId,
+                        ...(approvalMode !== undefined ? { approvalMode } : {}),
                         ...restoreMetadata,
                       });
                 // Live creation and cold restore reserve this relocation before
@@ -2589,6 +2696,26 @@ export class AcpDispatcher {
                         }
                       : {}),
                   }),
+                  sessionId: restored.sessionId,
+                  workspaceCwd: restored.workspaceCwd,
+                  attached: restored.attached,
+                  ...(restored.clientId !== undefined
+                    ? { clientId: restored.clientId }
+                    : {}),
+                  ...(restored.sourceType !== undefined
+                    ? { sourceType: restored.sourceType }
+                    : {}),
+                  ...(restored.sourceId !== undefined
+                    ? { sourceId: restored.sourceId }
+                    : {}),
+                  ...(restored.sourcePersisted !== undefined
+                    ? { sourcePersisted: restored.sourcePersisted }
+                    : {}),
+                  ...(restored.parentSessionPersisted !== undefined
+                    ? {
+                        parentSessionPersisted: restored.parentSessionPersisted,
+                      }
+                    : {}),
                   ...(loadConfigOptions
                     ? { configOptions: loadConfigOptions }
                     : {}),
@@ -2692,6 +2819,9 @@ export class AcpDispatcher {
               },
               {
                 runtimeBaseDir: this.sessionRuntimeBaseDir,
+                ...(!this.isWorkspaceTrusted()
+                  ? { allowSidecarWrite: false }
+                  : {}),
                 signal: conn.abortSignal,
               },
             );
@@ -2728,6 +2858,12 @@ export class AcpDispatcher {
               ...(s.pinnedAt !== undefined ? { pinnedAt: s.pinnedAt } : {}),
               ...(s.groupId !== undefined ? { groupId: s.groupId } : {}),
               ...(s.color !== undefined ? { color: s.color } : {}),
+              ...(s.artifactCount !== undefined
+                ? { artifactCount: s.artifactCount }
+                : {}),
+              ...(s.artifactCountPending !== undefined
+                ? { artifactCountPending: s.artifactCountPending }
+                : {}),
             })),
             ...(result.nextCursor != null
               ? { nextCursor: result.nextCursor }
@@ -4310,19 +4446,49 @@ export class AcpDispatcher {
               }
               return;
             }
-            const kind = params['kind'];
+            const source = params['source'];
             if (
-              kind !== 'agent' &&
-              kind !== 'shell' &&
-              kind !== 'monitor' &&
-              kind !== 'workflow'
+              source !== undefined &&
+              source !== 'cron' &&
+              source !== 'wakeup'
             ) {
               if (id !== undefined) {
                 conn.sendConn(
                   error(
                     id,
                     RPC.INVALID_PARAMS,
-                    '`kind` must be "agent", "shell", "monitor", or "workflow"',
+                    '`source` must be "cron" or "wakeup"',
+                  ),
+                );
+              }
+              return;
+            }
+            const kind = params['kind'];
+            if (
+              kind !== 'agent' &&
+              kind !== 'shell' &&
+              kind !== 'monitor' &&
+              kind !== 'workflow' &&
+              kind !== 'cron'
+            ) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    '`kind` must be "agent", "shell", "monitor", "workflow", or "cron"',
+                  ),
+                );
+              }
+              return;
+            }
+            if (kind !== 'cron' && source !== undefined) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INVALID_PARAMS,
+                    '`source` is valid only for kind "cron"',
                   ),
                 );
               }
@@ -4340,6 +4506,7 @@ export class AcpDispatcher {
               taskId,
               kind,
               this.sessionCtx(conn, sessionId, loopback),
+              source,
             );
             this.replyConn(conn, id, result as unknown);
           });
@@ -5459,7 +5626,9 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}sessions/delete`: {
           const ids = this.parseSessionIds(params);
           if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
-          const svc = new SessionService(this.boundWorkspace);
+          const svc = new SessionService(this.boundWorkspace, {
+            onWarning: logSessionArchiveWarning,
+          });
           const result = await this.runWithSessionListInvalidation(
             ['active', 'archived'],
             () =>
@@ -6424,6 +6593,7 @@ export class AcpDispatcher {
         abort.signal,
         {
           ...this.sessionCtx(conn, sessionId, fromLoopback),
+          userPrompt: true,
           ...(typeof submittedPrompt === 'string' &&
           metadata?.[CHANNEL_PROMPT_META_KEY] === undefined &&
           metadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] === undefined &&

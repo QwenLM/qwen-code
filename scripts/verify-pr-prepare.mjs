@@ -21,14 +21,15 @@
  * reuse; it does not checkout a worktree, build, or execute PR code. The tree
  * check exists because the round runs the head side of its A/B in the current
  * tree: prepare refuses a HEAD other than the PR head or any uncommitted
- * change, and never stashes for the maintainer. It also cannot gate on
- * isolation: resolving the coordinates needs `gh`, and `gh` and the boundary
- * are mutually exclusive, so this path always runs on the host. The gate is
- * the separate `--require-isolation` mode, meant to run inside the boundary
- * before the round executes anything.
+ * change, and never stashes for the maintainer. It cannot infer containment
+ * from this host process: resolving the coordinates needs `gh`, and `gh` and
+ * the boundary are mutually exclusive. The caller explicitly selects an
+ * execution mode. A host or VM selection needs a preflight approval recorded
+ * in the host-held snapshot; a container still uses the separate
+ * `--require-isolation` mode inside the boundary before executing anything.
  *
  * Usage:
- *   node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
+ *   node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo> --execution container|vm|host [--trust-pr-head | --approval <permalink>]
  *   node scripts/verify-pr-prepare.mjs --require-isolation [--artifact-dir <round-dir>]
  *
  * Options:
@@ -51,21 +52,39 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readdirSync,
+  readSync,
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
+import { checkBoundary } from './verify-pr-check.mjs';
+import {
+  inFlightRegistration,
+  readState as readWatchState,
+  statePath as watchStatePath,
+  withStateLock,
+} from './verify-pr-watch-state.mjs';
 
 const OID = /^[0-9a-f]{40}$/;
 const REPO = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/;
+const EXECUTION_MODES = ['container', 'vm', 'host'];
+const PERMISSIONS = ['admin', 'maintain', 'write'];
+const APPROVAL_PERMALINK =
+  /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:issues|pull)\/(\d+)#issuecomment-(\d+)$/;
+const APPROVAL_PREFIX = '<!-- verify-pr-boundary-approval:';
 const FIELDS = [
   'number',
   'title',
@@ -74,10 +93,12 @@ const FIELDS = [
   'baseRefName',
   'baseRefOid',
   'headRefOid',
+  'isCrossRepository',
   'commits',
 ].join(',');
 
-const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
+const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo> [--execution container] [--context-out <path>] [--local-owner] [--sponsored]
+       node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo> --execution vm|host --round <n> --reason <text> --context-out <path> (--trust-pr-head | --approval <permalink> --state-root <trusted-dir>) [--attestation <text>] [--local-owner] [--sponsored]
        node scripts/verify-pr-prepare.mjs --require-isolation [--artifact-dir <round-dir>]
 
 Resolves the coordinates a local /verify-pr round needs and writes the
@@ -95,9 +116,21 @@ metadata snapshot the round reads as $QWEN_VERIFY_CONTEXT:
     no file and the round lists that review state as not covered
   - reports the isolation signals this process can observe
 
+The coordinate path defaults to --execution container for compatibility with
+old watch prompts; an omission never mints a host/VM approval. VM and host
+must be selected explicitly with --round, --reason, --context-out and one of:
+  --trust-pr-head   current maintainer trusts their own or same-repository PR
+  --approval <url>  maintainer's marked issue-comment approval for another fork
+The approval form also needs --state-root <absolute-trusted-dir> holding the
+same in-flight head and round. VM additionally requires --attestation.
+Approval verification runs before artifacts are created and writes
+executionApproval into the host context; publish checks require its sha256.
+
 The coordinate path runs on the host by construction: it needs gh, and gh and
-the boundary are mutually exclusive. Run --require-isolation inside the
-boundary, as the round's first command; exit 4 means this process is not
+the boundary are mutually exclusive. For container execution, run
+--require-isolation inside the container as the round's first command. VM and
+host never run that gate and have no boundary-gate.json.
+Exit 4 means this process is not
 isolated and must not execute PR code. A container marker alone does not pass:
 the CLI's own Docker/Podman launcher mounts ~/.config/gcloud and the ADC file
 and copies model API keys, so the check also requires the credential-free
@@ -141,6 +174,254 @@ export function artifactDirName(pr, now = new Date()) {
  * it is not the credential-free boundary the round needs.
  */
 export const SEATBELT = 'sandbox-exec';
+
+/**
+ * Host-side emergency switch (outside PR-controlled input). When set to `1`,
+ * every round is forced into `hardware-isolated`, disabling lightweight
+ * trusted exceptions during incident response (§4.4).
+ */
+export const FORCE_HARDWARE_ENV = 'QWEN_VERIFY_FORCE_HARDWARE';
+
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+const WRITE_PERMISSIONS = new Set(['write', 'maintain', 'admin']);
+const NON_WRITE_PERMISSIONS = new Set(['read', 'triage', 'none']);
+
+const ESCALATION_RULES = [
+  {
+    reason: 'dependency-manifest',
+    test: (p) =>
+      /(?:^|\/)(?:package\.json|pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb?|npm-shrinkwrap\.json|pnpm-workspace\.yaml|\.npmrc|\.pnpmfile\.[cm]?js|\.yarnrc(?:\.yml)?)$/i.test(
+        p,
+      ) || /^patches\//i.test(p),
+  },
+  {
+    reason: 'maven-build',
+    test: (p) =>
+      /(?:^|\/)(?:pom\.xml|mvnw(?:\.cmd)?)$/i.test(p) ||
+      /(?:^|\/)\.mvn\//i.test(p),
+  },
+  {
+    reason: 'ci-workflow',
+    test: (p) => /^\.github\/(?:workflows|actions)\//i.test(p),
+  },
+  {
+    reason: 'verify-or-sandbox-script',
+    test: (p) =>
+      /^scripts\/(?:verify-pr-|sandbox|lib\/)/i.test(p) ||
+      /^\.husky\//i.test(p) ||
+      /(?:^|\/)(?:\.gitmodules|\.gitattributes|Dockerfile(?:\.[^/]+)?|docker-compose(?:\.[^/]+)?\.ya?ml|Makefile|esbuild\.config\.[cm]?js|eslint\.config\.[cm]?js|vitest\.config\.[cm]?[jt]s)$/i.test(
+        p,
+      ),
+  },
+  {
+    reason: 'agent-control-config',
+    test: (p) => /(?:^|\/)\.(?:qwen|claude)\//i.test(p),
+  },
+  {
+    reason: 'executable-or-binary',
+    test: (p) =>
+      /\.(?:node|wasm|so|dylib|dll|exe|bin|sh|bash|zsh|ps1|bat|cmd)$/i.test(p),
+  },
+];
+
+/**
+ * Parses `git diff --raw --no-renames -z` output into changed paths plus
+ * git-mode escalation sets (100755 executables, 120000 symlinks, 160000
+ * submodules) and extensionless live files eligible for magic-byte sniffing.
+ */
+export function parseRawDiffEntries(rawStdout) {
+  const changedPaths = [];
+  const executablePaths = [];
+  const specialModePaths = [];
+  const extensionlessLivePaths = [];
+  if (typeof rawStdout !== 'string' || rawStdout.length === 0) {
+    return {
+      changedPaths,
+      executablePaths,
+      specialModePaths,
+      extensionlessLivePaths,
+    };
+  }
+  const tokens = rawStdout.split('\0');
+  for (let i = 0; i + 1 < tokens.length; i += 2) {
+    const header = tokens[i];
+    const filePath = tokens[i + 1];
+    if (!header.startsWith(':') || !filePath) continue;
+    const parts = header.slice(1).split(' ');
+    const newMode = parts[1] ?? '';
+    const status = (parts[4] ?? '').charAt(0);
+    changedPaths.push(filePath);
+    if (status === 'D') continue;
+    if (newMode === '100755') {
+      executablePaths.push(filePath);
+    } else if (newMode === '120000' || newMode === '160000') {
+      specialModePaths.push(filePath);
+    } else if (!/\.[^/]+$/.test(basename(filePath))) {
+      extensionlessLivePaths.push(filePath);
+    }
+  }
+  return {
+    changedPaths,
+    executablePaths,
+    specialModePaths,
+    extensionlessLivePaths,
+  };
+}
+
+/**
+ * Checks the first 4 bytes of a regular file without following symlinks for
+ * shebang (`#!`), ELF (`\x7fELF`), Mach-O, or PE (`MZ`) executable headers.
+ */
+export function hasExecutableMagic(filePath) {
+  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+  let fd;
+  try {
+    fd = openSync(filePath, flags);
+  } catch {
+    return false;
+  }
+  try {
+    const buf = Buffer.alloc(4);
+    const n = readSync(fd, buf, 0, 4, 0);
+    if (n >= 2 && buf[0] === 0x23 && buf[1] === 0x21) return true; // #!
+    if (n >= 2 && buf[0] === 0x4d && buf[1] === 0x5a) return true; // MZ (PE)
+    if (
+      n >= 4 &&
+      buf[0] === 0x7f &&
+      buf[1] === 0x45 &&
+      buf[2] === 0x4c &&
+      buf[3] === 0x46
+    ) {
+      return true; // ELF
+    }
+    if (n >= 4) {
+      const hex = buf.toString('hex');
+      if (
+        hex === 'feedface' ||
+        hex === 'cefaedfe' ||
+        hex === 'feedfacf' ||
+        hex === 'cffaedfe' ||
+        hex === 'cafebabe'
+      ) {
+        return true; // Mach-O / fat binary
+      }
+    }
+    return false;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Returns every mandatory high-assurance escalation trigger matched by the
+ * changed file paths in `base..head` (§4.3). These triggers force
+ * `hardware-isolated` regardless of author trust; their absence is NOT proof
+ * that other changes are benign.
+ */
+export function detectMandatoryEscalations(
+  changedPaths = [],
+  { executablePaths = [], specialModePaths = [] } = {},
+) {
+  const normalizePath = (p) =>
+    p.replace(/\\/g, '/').replace(/^\.\//, '').trim();
+  const execSet = new Set(
+    executablePaths
+      .filter((p) => typeof p === 'string')
+      .map(normalizePath)
+      .filter(Boolean),
+  );
+  const specialSet = new Set(
+    specialModePaths
+      .filter((p) => typeof p === 'string')
+      .map(normalizePath)
+      .filter(Boolean),
+  );
+  const hits = [];
+  for (const raw of changedPaths) {
+    if (typeof raw !== 'string') continue;
+    const normalized = normalizePath(raw);
+    if (!normalized) continue;
+    let matched = false;
+    for (const rule of ESCALATION_RULES) {
+      if (rule.test(normalized)) {
+        hits.push({ path: normalized, reason: rule.reason });
+        matched = true;
+        break;
+      }
+    }
+    if (!matched && specialSet.has(normalized)) {
+      hits.push({ path: normalized, reason: 'symlink-or-submodule' });
+    } else if (!matched && execSet.has(normalized)) {
+      hits.push({ path: normalized, reason: 'executable-or-binary' });
+    }
+  }
+  return hits;
+}
+
+/**
+ * Classifies a round into `(prTrust, executionClass)` per §4.1–§4.4.
+ * Fails closed to `hardware-isolated` on external/fork/unknown identity,
+ * missing changed-file data, mandatory escalation paths, or the host-side
+ * global hardware switch. `sponsored` authorizes execution budget only and
+ * never lowers `executionClass`.
+ */
+export function classifyPrTrust({
+  permission = null,
+  isLocalOwner = false,
+  isFork = null,
+  changedPaths = null,
+  executablePaths = [],
+  specialModePaths = [],
+  forceHardware = false,
+  sponsored = false,
+} = {}) {
+  let prTrust;
+  if (isFork === true) {
+    prTrust = 'external';
+  } else if (isLocalOwner === true) {
+    prTrust = 'local-owner';
+  } else if (typeof permission === 'string') {
+    const perm = permission.trim().toLowerCase();
+    if (WRITE_PERMISSIONS.has(perm)) {
+      prTrust = 'collaborator';
+    } else if (NON_WRITE_PERMISSIONS.has(perm)) {
+      prTrust = 'external';
+    } else {
+      prTrust = 'unknown';
+    }
+  } else {
+    prTrust = 'unknown';
+  }
+
+  const escalationReasons = [];
+  if (forceHardware === true) {
+    escalationReasons.push('global-hardware-only-switch');
+  }
+  if (!Array.isArray(changedPaths)) {
+    escalationReasons.push('changed-files-unavailable');
+  } else {
+    for (const hit of detectMandatoryEscalations(changedPaths, {
+      executablePaths,
+      specialModePaths,
+    })) {
+      escalationReasons.push(`${hit.reason}:${hit.path}`);
+    }
+  }
+
+  const eligibleForSharedKernel =
+    (prTrust === 'local-owner' || prTrust === 'collaborator') &&
+    escalationReasons.length === 0;
+  const executionClass = eligibleForSharedKernel
+    ? 'trusted-shared-kernel'
+    : 'hardware-isolated';
+
+  return {
+    prTrust,
+    executionClass,
+    escalationReasons,
+    sponsored: Boolean(sponsored),
+  };
+}
 
 /**
  * Set this only after confirming the boundary mounts no host credentials. A
@@ -195,8 +476,13 @@ export function detectCredentialSignals(
   for (const name of CREDENTIAL_ENV) {
     if (env[name]) signals.push(name);
   }
-  for (const [relative, label] of CREDENTIAL_PATHS) {
-    if (exists(join(home, relative))) signals.push(label);
+  // An unresolvable home (null/empty) has no credential paths to scan; the
+  // gate fails on it at the nonce write below. join(home, …) on a non-string
+  // would throw, and on '' would scan the PR-writable CWD instead (R5-1).
+  if (typeof home === 'string' && home !== '') {
+    for (const [relative, label] of CREDENTIAL_PATHS) {
+      if (exists(join(home, relative))) signals.push(label);
+    }
   }
   return signals;
 }
@@ -258,33 +544,55 @@ export function validateContext(json) {
   };
 }
 
+const MAINTAINER_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+
 // The CI lane's verify job runs this query and reshapes it with jq into the
 // same review-threads.json; a test runs both over the same pages.
 export const REVIEW_STATE_QUERY =
-  'query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { latestOpinionatedReviews(first: 100) { nodes { state submittedAt url body author { login } authorAssociation commit { oid } } } reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line originalLine comments(first: 50) { totalCount nodes { createdAt url body author { login } authorAssociation originalCommit { oid } pullRequestReview { url } } } } } } } }';
+  'query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { latestOpinionatedReviews(first: 100) { nodes { state submittedAt url body author { login } authorAssociation commit { oid } } } comments(last: 100) { totalCount nodes { createdAt updatedAt url body author { login } authorAssociation isMinimized } } reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line originalLine comments(first: 50) { totalCount nodes { createdAt url body author { login } authorAssociation originalCommit { oid } pullRequestReview { url } } } } } } } }';
 
 /**
  * Reshapes `gh api graphql --paginate --slurp` pages of REVIEW_STATE_QUERY into
  * the review state a round reads: every review thread, resolved ones included
- * (resolving is the author's claim, not a measurement), and each reviewer's
- * standing CHANGES_REQUESTED review. Null when the pages are not that query's
- * answer.
+ * (resolving is the author's claim, not a measurement), each reviewer's
+ * standing CHANGES_REQUESTED review, and non-minimized top-level PR comments
+ * from OWNER/MEMBER/COLLABORATOR reviewers (so top-level `[P1]` / `Critical`
+ * reviews are visible without exposing untrusted commenter prose). Null when
+ * the pages are not that query's answer.
  */
 export function reviewState(pages) {
   if (!Array.isArray(pages) || pages.length === 0) return null;
-  const isObject = (value) => value !== null && typeof value === 'object';
+  const isObject = (value) =>
+    value !== null && typeof value === 'object' && !Array.isArray(value);
+  const isObjectOrNull = (value) => value == null || isObject(value);
   const pulls = pages.map((page) => page?.data?.repository?.pullRequest);
   if (
     pulls.some(
       (pull) =>
+        !isObject(pull) ||
         !Array.isArray(pull?.reviewThreads?.nodes) ||
         !Array.isArray(pull?.latestOpinionatedReviews?.nodes) ||
-        !pull.latestOpinionatedReviews.nodes.every(isObject) ||
+        !Array.isArray(pull?.comments?.nodes) ||
+        !pull.latestOpinionatedReviews.nodes.every(
+          (review) =>
+            isObject(review) &&
+            isObjectOrNull(review.author) &&
+            isObjectOrNull(review.commit),
+        ) ||
+        !pull.comments.nodes.every(
+          (comment) => isObject(comment) && isObjectOrNull(comment.author),
+        ) ||
         !pull.reviewThreads.nodes.every(
           (thread) =>
             isObject(thread) &&
             Array.isArray(thread.comments?.nodes) &&
-            thread.comments.nodes.every(isObject),
+            thread.comments.nodes.every(
+              (comment) =>
+                isObject(comment) &&
+                isObjectOrNull(comment.author) &&
+                isObjectOrNull(comment.originalCommit) &&
+                isObjectOrNull(comment.pullRequestReview),
+            ),
         ),
     )
   ) {
@@ -322,6 +630,20 @@ export function reviewState(pages) {
         url: review.url ?? null,
         body: review.body ?? null,
       })),
+    issueCommentCount: pulls[0].comments.totalCount ?? null,
+    issueComments: pulls[0].comments.nodes
+      .filter(
+        (comment) =>
+          !comment.isMinimized &&
+          MAINTAINER_ASSOCIATIONS.has(comment.authorAssociation),
+      )
+      .map((comment) => ({
+        ...who(comment),
+        createdAt: comment.createdAt ?? null,
+        updatedAt: comment.updatedAt ?? null,
+        url: comment.url ?? null,
+        body: comment.body ?? null,
+      })),
   };
 }
 
@@ -343,6 +665,15 @@ export function parseArgs(argv) {
     requireIsolation: false,
     artifactDir: null,
     contextOut: null,
+    execution: null,
+    trustPrHead: false,
+    approval: null,
+    stateRoot: null,
+    round: null,
+    reason: null,
+    attestation: null,
+    localOwner: false,
+    sponsored: false,
     help: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -351,6 +682,10 @@ export function parseArgs(argv) {
       options.help = true;
     } else if (arg === '--require-isolation') {
       options.requireIsolation = true;
+    } else if (arg === '--local-owner') {
+      options.localOwner = true;
+    } else if (arg === '--sponsored') {
+      options.sponsored = true;
     } else if (arg === '--artifact-dir') {
       options.artifactDir = argv[(index += 1)] ?? null;
       if (!options.artifactDir) {
@@ -360,6 +695,35 @@ export function parseArgs(argv) {
       options.contextOut = argv[(index += 1)] ?? null;
       if (!options.contextOut) {
         return { error: '--context-out needs <host-snapshot-path>' };
+      }
+    } else if (arg === '--execution') {
+      options.execution = argv[(index += 1)] ?? null;
+      if (!options.execution) {
+        return { error: '--execution needs container | vm | host' };
+      }
+    } else if (arg === '--trust-pr-head') {
+      options.trustPrHead = true;
+    } else if (arg === '--approval') {
+      options.approval = argv[(index += 1)] ?? null;
+      if (!options.approval) return { error: '--approval needs <permalink>' };
+    } else if (arg === '--state-root') {
+      options.stateRoot = argv[(index += 1)] ?? null;
+      if (!options.stateRoot || !isAbsolute(options.stateRoot)) {
+        return { error: '--state-root needs an absolute trusted directory' };
+      }
+    } else if (arg === '--round') {
+      const value = argv[(index += 1)] ?? '';
+      options.round = /^[1-9]\d*$/.test(value) ? Number(value) : null;
+      if (!Number.isSafeInteger(options.round)) {
+        return { error: '--round needs a positive integer' };
+      }
+    } else if (arg === '--reason') {
+      options.reason = argv[(index += 1)] ?? null;
+      if (!options.reason) return { error: '--reason needs non-empty text' };
+    } else if (arg === '--attestation') {
+      options.attestation = argv[(index += 1)] ?? null;
+      if (!options.attestation) {
+        return { error: '--attestation needs non-empty text' };
       }
     } else if (arg === '--repo') {
       options.repo = argv[(index += 1)] ?? null;
@@ -372,9 +736,78 @@ export function parseArgs(argv) {
       return { error: `unexpected argument: ${arg}` };
     }
   }
-  if (options.help || options.requireIsolation) return options;
+  if (options.help || options.requireIsolation) {
+    const coordinateOnly = [
+      options.execution,
+      options.approval,
+      options.round,
+      options.reason,
+      options.attestation,
+      options.contextOut,
+      options.stateRoot,
+    ].some((value) => value !== null);
+    if (
+      options.requireIsolation &&
+      (coordinateOnly ||
+        options.trustPrHead ||
+        options.localOwner ||
+        options.sponsored)
+    ) {
+      return {
+        error:
+          '--execution and approval options apply only to coordinate prepare, not --require-isolation',
+      };
+    }
+    return options;
+  }
   if (options.artifactDir !== null) {
     return { error: '--artifact-dir only applies with --require-isolation' };
+  }
+  options.execution ??= 'container';
+  if (!EXECUTION_MODES.includes(options.execution)) {
+    return { error: '--execution must be container | vm | host' };
+  }
+  const approvalOptions =
+    options.trustPrHead ||
+    options.approval !== null ||
+    options.stateRoot !== null ||
+    options.round !== null ||
+    options.reason !== null ||
+    options.attestation !== null;
+  if (options.execution === 'container') {
+    if (approvalOptions) {
+      return {
+        error: '--execution container does not take approval options',
+      };
+    }
+  } else {
+    if (options.trustPrHead === (options.approval !== null)) {
+      return {
+        error:
+          '--execution vm | host needs exactly one of --trust-pr-head and --approval',
+      };
+    }
+    if (options.trustPrHead && options.stateRoot !== null) {
+      return { error: '--state-root applies only to --approval' };
+    }
+    if (options.approval !== null && options.stateRoot === null) {
+      return {
+        error:
+          '--approval needs --state-root with a matching in-flight head and round',
+      };
+    }
+    if (options.round === null || options.reason === null) {
+      return { error: '--execution vm | host needs --round and --reason' };
+    }
+    if (!options.contextOut) {
+      return { error: '--execution vm | host needs --context-out' };
+    }
+    if (options.execution === 'vm' && options.attestation === null) {
+      return { error: '--execution vm needs --attestation' };
+    }
+    if (options.execution === 'host' && options.attestation !== null) {
+      return { error: '--attestation applies only to --execution vm' };
+    }
   }
   if (!Number.isInteger(options.pr) || options.pr <= 0) {
     return { error: 'a PR number is required' };
@@ -385,8 +818,67 @@ export function parseArgs(argv) {
   return options;
 }
 
+const GIT_SAFE_ENV_OVERRIDES = {
+  // Never trigger partial-clone promisor lazy-fetch (which can execute
+  // remote.*.uploadpack on the host) or honor PR-writable refs/replace/*.
+  GIT_NO_LAZY_FETCH: '1',
+  GIT_NO_REPLACE_OBJECTS: '1',
+};
+
 function run(command, args, options = {}) {
-  return spawnSync(command, args, { encoding: 'utf8', ...options });
+  const env =
+    command === 'git'
+      ? { ...(options.env ?? process.env), ...GIT_SAFE_ENV_OVERRIDES }
+      : options.env;
+  return spawnSync(command, args, {
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+    ...options,
+    ...(env ? { env } : {}),
+  });
+}
+
+/**
+ * Best-effort collaborator permission lookup for trust classification (§4.2).
+ * Never throws and never fails open: any lookup error returns permission: null,
+ * which classifyPrTrust maps to prTrust="unknown" -> hardware-isolated.
+ */
+function fetchAuthorPermission(owner, name, login) {
+  if (typeof login !== 'string' || !GITHUB_LOGIN.test(login)) {
+    return { permission: null, error: 'missing or invalid author login' };
+  }
+  const view = run('gh', [
+    'api',
+    `repos/${owner}/${name}/collaborators/${login}/permission`,
+  ]);
+  if (view.status !== 0) {
+    const detail =
+      (view.stderr || '').trim().split('\n')[0] ||
+      view.error?.message ||
+      `exit ${view.status}`;
+    return { permission: null, error: `gh api permission failed: ${detail}` };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(view.stdout);
+  } catch {
+    return {
+      permission: null,
+      error: 'gh api permission returned non-JSON output',
+    };
+  }
+  if (
+    parsed &&
+    typeof parsed === 'object' &&
+    !Array.isArray(parsed) &&
+    typeof parsed.permission === 'string'
+  ) {
+    return { permission: parsed.permission, error: null };
+  }
+  return {
+    permission: null,
+    error: 'gh api permission returned no permission field',
+  };
 }
 
 /** `{state}` on success, `{error}` naming why the review state is unknown. */
@@ -449,73 +941,270 @@ export const GIT_HARDENING = [
   'core.excludesFile=/dev/null',
 ];
 
-const FILTER_NAME = /^filter\..+\.(clean|smudge|process)$/;
+const FILTER_NAME = /^filter\..*\.(clean|smudge|process)$/s;
+const FILTER_PREFIX_BYTES = Buffer.from('filter.', 'ascii');
+const FILTER_SUFFIX_BYTES = ['.clean', '.smudge', '.process'].map((suffix) =>
+  Buffer.from(suffix, 'ascii'),
+);
+const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true });
+
+function isRawFilterKey(rawKey) {
+  if (
+    rawKey.length < FILTER_PREFIX_BYTES.length + 6 ||
+    !rawKey.subarray(0, FILTER_PREFIX_BYTES.length).equals(FILTER_PREFIX_BYTES)
+  ) {
+    return false;
+  }
+  return FILTER_SUFFIX_BYTES.some(
+    (suffix) =>
+      rawKey.length >= FILTER_PREFIX_BYTES.length + suffix.length &&
+      rawKey.subarray(rawKey.length - suffix.length).equals(suffix),
+  );
+}
 
 /**
- * A filter name git allows (e.g. `filter.a=b.clean`) but `-c key=value`
- * cannot represent: git splits the argument at the FIRST `=`, so emitting an
- * override would set a different key and leave the real filter armed. The
- * gate refuses such names instead, with their own remedy.
+ * A filter name git allows (e.g. `filter.a=b.clean` or raw non-UTF-8 bytes)
+ * that `-c key=value` cannot safely represent: git splits `-c` at the FIRST
+ * `=`, and Node argv cannot pass invalid UTF-8 bytes verbatim, leaving the
+ * real filter armed. The gate refuses such names instead, with their own remedy.
  */
 export class UnsafeFilterNameError extends Error {
-  constructor(name) {
+  constructor(name, detail = "contains '='") {
     super(
-      `filter name ${name} contains '=' and cannot be safely disabled with -c — remove the filter from the tree's git config, or re-clone, then re-run prepare`,
+      `filter name ${printable(name)} ${detail} and cannot be safely disabled with -c — remove the filter from the tree's git config, or re-clone, then re-run prepare`,
     );
     this.name = 'UnsafeFilterNameError';
   }
 }
 
+const CORE_WORKTREE_BYTES = Buffer.from('core.worktree', 'ascii');
+
+/**
+ * Read raw config key bytes from Git's own merged view (`--includes --list
+ * --show-scope`), keeping only `local` and `worktree` scopes. Using Git's
+ * merged evaluation prevents two split-scope bypasses: (1) an `[include]`
+ * overriding `extensions.worktreeConfig = false` to hide `config.worktree`,
+ * and (2) cross-scope `[includeIf "hasconfig:remote.*.url:..."]` conditions
+ * that only fire when local and worktree scopes are loaded together.
+ */
+function readLocalAndWorktreeConfigKeys(root) {
+  const prefix = root ? ['-C', root] : [];
+  const spawnOpts = {
+    encoding: 'buffer',
+    maxBuffer: 64 * 1024 * 1024,
+    env: { ...process.env, ...GIT_SAFE_ENV_OVERRIDES },
+  };
+  const scoped = spawnSync(
+    'git',
+    [...prefix, 'config', '--includes', '--null', '--list', '--show-scope'],
+    spawnOpts,
+  );
+  const keys = [];
+  if (scoped.status === 0 && Buffer.isBuffer(scoped.stdout)) {
+    const raw = scoped.stdout;
+    let start = 0;
+    while (start < raw.length) {
+      const scopeEnd = raw.indexOf(0, start);
+      if (scopeEnd === -1) break;
+      const scope = raw.subarray(start, scopeEnd).toString('ascii');
+      const entryStart = scopeEnd + 1;
+      let entryEnd = raw.indexOf(0, entryStart);
+      if (entryEnd === -1) entryEnd = raw.length;
+      const entry = raw.subarray(entryStart, entryEnd);
+      start = entryEnd + 1;
+      if (entry.length === 0) continue;
+      if (scope !== 'local' && scope !== 'worktree') continue;
+      const nl = entry.indexOf(0x0a);
+      keys.push(nl === -1 ? entry : entry.subarray(0, nl));
+    }
+    return keys;
+  }
+  if (scoped.status === 129) {
+    // Older Git (< 2.26) lacks --show-scope: fall back to merged --list so
+    // cross-scope includes remain visible (fail-closed over all visible keys).
+    const fallback = spawnSync(
+      'git',
+      [...prefix, 'config', '--includes', '--null', '--list'],
+      spawnOpts,
+    );
+    if (fallback.status === 1) return keys;
+    if (fallback.status !== 0 || !Buffer.isBuffer(fallback.stdout)) {
+      throw new Error('could not enumerate local git config');
+    }
+    const raw = fallback.stdout;
+    let start = 0;
+    while (start < raw.length) {
+      let end = raw.indexOf(0, start);
+      if (end === -1) end = raw.length;
+      const entry = raw.subarray(start, end);
+      start = end + 1;
+      if (entry.length === 0) continue;
+      const nl = entry.indexOf(0x0a);
+      keys.push(nl === -1 ? entry : entry.subarray(0, nl));
+    }
+    return keys;
+  }
+  if (scoped.status === 1) return keys;
+  throw new Error('could not enumerate local git filters');
+}
+
 /**
  * Empty `-c` overrides for every locally defined filter command. The filter
- * name is attacker-chosen, so the override set has to be enumerated from the
- * tree's own config instead of hardcoded. Three properties are load-bearing:
- * `--includes` follows `include.path` the way the config parsing `git status`
- * uses does; `--null --name-only` frames KEY NAMES only, because a filter
- * VALUE may contain newlines that would forge extra entries if the rendered
- * `key value` output were parsed; and each name is re-validated before it
- * becomes a `-c` argument. When `extensions.worktreeConfig` is set,
- * `git status` also reads `.git/config.worktree`, so that scope is enumerated
- * too. Names containing `=` throw UnsafeFilterNameError — no override can
- * represent them.
+ * name is attacker-chosen, so the override set has to be enumerated from Git's
+ * own merged config view instead of hardcoded or split by scope. Raw-byte
+ * framing avoids both UTF-8 locale regex skips on non-UTF-8 bytes and lossy
+ * UTF-8 replacement to U+FFFD. Names with `=`, CR/LF, or non-UTF-8 bytes throw
+ * UnsafeFilterNameError — no `-c` override can represent them.
  */
 export function localFilterOverrides(root) {
-  const prefix = root ? ['-C', root] : [];
-  const scopes = ['--local'];
-  const worktreeConfig = run('git', [
-    ...prefix,
-    'config',
-    '--local',
-    '--includes',
-    '--bool',
-    'extensions.worktreeConfig',
-  ]);
-  if (worktreeConfig.status === 0 && worktreeConfig.stdout.trim() === 'true') {
-    scopes.push('--worktree');
-  }
+  const seen = new Set();
   const overrides = [];
-  for (const scope of scopes) {
-    const result = run('git', [
-      ...prefix,
-      'config',
-      scope,
-      '--includes',
-      '--null',
-      '--name-only',
-      '--get-regexp',
-      '^filter\\..*\\.(clean|smudge|process)$',
-    ]);
-    if (result.status === 1) continue;
-    if (result.status !== 0) {
-      throw new Error('could not enumerate local git filters');
+  for (const rawKey of readLocalAndWorktreeConfigKeys(root)) {
+    if (!isRawFilterKey(rawKey)) continue;
+    let name;
+    try {
+      name = STRICT_UTF8.decode(rawKey);
+    } catch {
+      throw new UnsafeFilterNameError(
+        rawKey.toString('utf8'),
+        'contains non-UTF-8 bytes',
+      );
     }
-    for (const name of result.stdout.split('\0')) {
-      if (!name || !FILTER_NAME.test(name)) continue;
-      if (name.includes('=')) throw new UnsafeFilterNameError(name);
+    if (name.includes('=')) throw new UnsafeFilterNameError(name);
+    if (!FILTER_NAME.test(name) || /[\r\n]/.test(name)) {
+      throw new UnsafeFilterNameError(name, 'contains unsupported characters');
+    }
+    if (!seen.has(name)) {
+      seen.add(name);
       overrides.push('-c', `${name}=`);
     }
   }
   return overrides;
+}
+
+function hasCustomWorktreeConfig(root = null) {
+  return readLocalAndWorktreeConfigKeys(root).some((rawKey) =>
+    rawKey.equals(CORE_WORKTREE_BYTES),
+  );
+}
+
+/**
+ * Probes whether the active `git` binary honours `--no-lazy-fetch` /
+ * `GIT_NO_LAZY_FETCH=1` (introduced in git 2.45.0). Invokes `--version` so no
+ * repository config or object database is touched.
+ */
+export function gitSupportsNoLazyFetch() {
+  return run('git', ['--no-lazy-fetch', '--version']).status === 0;
+}
+
+const EXTENSIONS_PARTIALCLONE_BYTES = Buffer.from(
+  'extensions.partialclone',
+  'ascii',
+);
+const REMOTE_PREFIX_BYTES = Buffer.from('remote.', 'ascii');
+const PROMISOR_SUFFIX_BYTES = Buffer.from('.promisor', 'ascii');
+const PARTIALCLONEFILTER_SUFFIX_BYTES = Buffer.from(
+  '.partialclonefilter',
+  'ascii',
+);
+
+function asciiEqualsIgnoreCase(buf, expectedLower) {
+  if (buf.length !== expectedLower.length) return false;
+  for (let i = 0; i < buf.length; i += 1) {
+    const b = buf[i];
+    const low = b >= 0x41 && b <= 0x5a ? b + 32 : b;
+    if (low !== expectedLower[i]) return false;
+  }
+  return true;
+}
+
+function isRawPromisorConfigKey(rawKey) {
+  if (asciiEqualsIgnoreCase(rawKey, EXTENSIONS_PARTIALCLONE_BYTES)) {
+    return true;
+  }
+  if (
+    rawKey.length < REMOTE_PREFIX_BYTES.length + PROMISOR_SUFFIX_BYTES.length ||
+    !asciiEqualsIgnoreCase(
+      rawKey.subarray(0, REMOTE_PREFIX_BYTES.length),
+      REMOTE_PREFIX_BYTES,
+    )
+  ) {
+    return false;
+  }
+  const matchSuffix = (suffix) =>
+    rawKey.length >= REMOTE_PREFIX_BYTES.length + suffix.length &&
+    asciiEqualsIgnoreCase(
+      rawKey.subarray(rawKey.length - suffix.length),
+      suffix,
+    );
+  return (
+    matchSuffix(PROMISOR_SUFFIX_BYTES) ||
+    matchSuffix(PARTIALCLONEFILTER_SUFFIX_BYTES)
+  );
+}
+
+/**
+ * Checks whether the clone declares promisor / partial-clone state (config
+ * keys across all included scopes or `.promisor` pack markers) without reading
+ * git objects. Fails closed (returns true) when config enumeration fails.
+ */
+export function hasPromisorCloneConfig(root = null) {
+  const prefix = [...GIT_HARDENING, ...(root ? ['-C', root] : [])];
+  const listed = run(
+    'git',
+    [...prefix, 'config', '--includes', '--null', '--list'],
+    {
+      encoding: null,
+    },
+  );
+  if (listed.status !== 0 && listed.status !== 1) return true;
+  if (listed.status === 0 && Buffer.isBuffer(listed.stdout)) {
+    const raw = listed.stdout;
+    let start = 0;
+    while (start < raw.length) {
+      let end = raw.indexOf(0, start);
+      if (end === -1) end = raw.length;
+      const entry = raw.subarray(start, end);
+      start = end + 1;
+      if (entry.length === 0) continue;
+      const nl = entry.indexOf(0x0a);
+      const rawKey = nl === -1 ? entry : entry.subarray(0, nl);
+      if (isRawPromisorConfigKey(rawKey)) return true;
+    }
+  }
+  const common = run('git', [...prefix, 'rev-parse', '--git-common-dir']);
+  const commonDir = singleLineOutput(common);
+  if (!commonDir) return true;
+  const resolvedCommon = isAbsolute(commonDir)
+    ? commonDir
+    : resolve(root ?? process.cwd(), commonDir);
+  const packDir = join(resolvedCommon, 'objects', 'pack');
+  try {
+    if (
+      existsSync(packDir) &&
+      readdirSync(packDir).some((entry) => entry.endsWith('.promisor'))
+    ) {
+      return true;
+    }
+  } catch {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * On git < 2.45 (where `GIT_NO_LAZY_FETCH=1` is ignored), refuses partial /
+ * promisor clones before any object-reading git call can trigger
+ * `remote.*.uploadpack`. Ordinary non-promisor clones on Debian 12 (git 2.39)
+ * continue to work.
+ */
+export function promisorLazyFetchHardeningError(root = null) {
+  if (gitSupportsNoLazyFetch()) return null;
+  if (!hasPromisorCloneConfig(root)) return null;
+  const verRes = run('git', ['--version']);
+  const verLabel =
+    singleLineOutput(verRes)?.replace(/^git version\s+/i, '') || 'unknown';
+  return `git (${verLabel}) does not support --no-lazy-fetch (requires git >= 2.45), so promisor lazy-fetch cannot be disabled on this partial/promisor clone — upgrade to git >= 2.45 or re-clone as a full non-promisor repository, then re-run prepare`;
 }
 
 export function gitStatusArgs(root) {
@@ -527,28 +1216,364 @@ export function gitStatusArgs(root) {
     'status',
     '--porcelain',
     '--untracked-files=normal',
+    '--ignore-submodules=dirty',
   ];
 }
 
-function runGit(args) {
-  return run('git', [...localFilterOverrides(), ...GIT_HARDENING, ...args]);
+function runGit(args, root = null, options = {}) {
+  const overrides = root ? localFilterOverrides(root) : localFilterOverrides();
+  return run('git', [...overrides, ...GIT_HARDENING, ...args], options);
+}
+
+const MAX_INFO_EXCLUDE_BYTES = 1024 * 1024;
+
+function singleLineOutput(result) {
+  if (result.status !== 0) return null;
+  const trimmed = (result.stdout ?? '').replace(/\r?\n$/, '');
+  if (!trimmed || /[\r\n]/.test(trimmed)) return null;
+  return trimmed;
 }
 
 /**
- * True when `.git/info/exclude` carries active patterns. A fresh clone has
- * only git's commented default there; patterns hide untracked files from the
- * clean-tree check, and unlike core.excludesFile no `-c` can neutralize this
- * file, so the gate refuses it instead of reading a steered status.
+ * Inspects git's info/exclude for active patterns and returns `{ path, hostile }`.
+ * A fresh clone has only the commented default there; active patterns hide
+ * untracked files from the clean-tree check, and unlike core.excludesFile no
+ * `-c` can neutralize this file, so the gate refuses it instead of reading a
+ * steered status.
  */
-export function hasHostileInfoExclude(root) {
-  const path = join(root, '.git', 'info', 'exclude');
-  if (!existsSync(path)) return false;
-  return readFileSync(path, 'utf8')
+export function inspectInfoExclude(root) {
+  const resolved = runGit(
+    ['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+    root,
+  );
+  let commonDir = singleLineOutput(resolved);
+  if (!commonDir || !isAbsolute(commonDir)) {
+    // Older git (< 2.31) either exits non-zero or prints two lines
+    // ("--path-format=absolute\n.git") with exit 0; retry without
+    // --path-format and resolve relative output against root.
+    const fallback = runGit(
+      ['-C', root, 'rev-parse', '--git-common-dir'],
+      root,
+    );
+    const raw = singleLineOutput(fallback);
+    if (!raw) {
+      throw new Error(
+        (fallback.stderr || resolved.stderr || '').trim() ||
+          'could not resolve git common dir for info/exclude',
+      );
+    }
+    commonDir = isAbsolute(raw) ? raw : resolve(root, raw);
+  }
+  const infoDir = join(commonDir, 'info');
+  const path = join(infoDir, 'exclude');
+  try {
+    const dirStat = lstatSync(infoDir);
+    if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+      throw new Error(`${infoDir} must be a real directory`);
+    }
+  } catch (error) {
+    if (error.code === 'ENOENT') return { path, hostile: false };
+    throw error;
+  }
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch (error) {
+    if (error.code === 'ENOENT') return { path, hostile: false };
+    throw error;
+  }
+  if (st.isSymbolicLink() || !st.isFile()) {
+    throw new Error(`${path} must be a regular file`);
+  }
+  if (st.size > MAX_INFO_EXCLUDE_BYTES) {
+    throw new Error(`${path} exceeds ${MAX_INFO_EXCLUDE_BYTES} bytes`);
+  }
+  const hostile = readFileSync(path, 'utf8')
     .split('\n')
-    .some((line) => {
-      const trimmed = line.trim();
-      return trimmed !== '' && !trimmed.startsWith('#');
+    .some((rawLine) => {
+      const line = rawLine.replace(/\r$/, '');
+      if (line.startsWith('#')) return false;
+      // gitignore(5) treats only empty / trailing-ASCII-space-only lines as
+      // blank and '#' only at column 0 as a comment; leading spaces, tabs or
+      // non-ASCII whitespace before '#' (or a lone tab) are active patterns.
+      return line.replace(/ +$/, '') !== '';
     });
+  return { path, hostile };
+}
+
+export function hasHostileInfoExclude(root) {
+  return inspectInfoExclude(root).hostile;
+}
+
+const HUSKY_V9_HOOK_SHIMS = new Set([
+  'applypatch-msg',
+  'commit-msg',
+  'post-applypatch',
+  'post-checkout',
+  'post-commit',
+  'post-merge',
+  'post-rewrite',
+  'pre-applypatch',
+  'pre-auto-gc',
+  'pre-commit',
+  'pre-merge-commit',
+  'pre-push',
+  'pre-rebase',
+  'prepare-commit-msg',
+]);
+const HUSKY_V9_GENERATED_FILES = new Set([
+  '.gitignore',
+  'h',
+  'husky.sh',
+  ...HUSKY_V9_HOOK_SHIMS,
+]);
+const HUSKY_V9_SHIM_RE =
+  /^#!\/usr\/bin\/env sh\r?\n\. "\$\(dirname "\$0"\)\/h"\r?\n?$/;
+const HUSKY_V9_STATIC_SHA256 = {
+  h: new Set([
+    '70200b200ca709b0622784f93839a5b2872333a917a09afddefd7dc2d8cdc680',
+  ]),
+  'husky.sh': new Set([
+    '21122903fca7209a13c991e5be68780636e28f1b8f0ae7ea07ed0065dfe37268',
+  ]),
+};
+
+function splitNulBuffers(buf) {
+  const parts = [];
+  let start = 0;
+  for (let i = 0; i < buf.length; i += 1) {
+    if (buf[i] === 0) {
+      parts.push(buf.subarray(start, i));
+      start = i + 1;
+    }
+  }
+  if (start < buf.length) parts.push(buf.subarray(start));
+  return parts;
+}
+
+function isBenignHuskyV9IgnoreDir(root) {
+  const trackedHusky = runGit(
+    ['-C', root, 'ls-files', '-z', '--', '.husky'],
+    root,
+  );
+  if (trackedHusky.status !== 0 || !(trackedHusky.stdout ?? '').trim()) {
+    return false;
+  }
+  const huskyDir = join(root, '.husky');
+  const underscoreDir = join(huskyDir, '_');
+  try {
+    if (!lstatSync(huskyDir).isDirectory()) return false;
+    if (!lstatSync(underscoreDir).isDirectory()) return false;
+    const entries = readdirSync(underscoreDir);
+    if (!entries.includes('.gitignore')) return false;
+    for (const name of entries) {
+      if (!HUSKY_V9_GENERATED_FILES.has(name)) return false;
+      const entryPath = join(underscoreDir, name);
+      const st = lstatSync(entryPath);
+      if (!st.isFile() || st.size > 2048) return false;
+      if (name === '.gitignore') {
+        if (readFileSync(entryPath, 'utf8').trim() !== '*') return false;
+      } else if (HUSKY_V9_HOOK_SHIMS.has(name)) {
+        if (!HUSKY_V9_SHIM_RE.test(readFileSync(entryPath, 'utf8'))) {
+          return false;
+        }
+      } else if (Object.hasOwn(HUSKY_V9_STATIC_SHA256, name)) {
+        const normalized = readFileSync(entryPath, 'utf8').replace(
+          /\r\n/g,
+          '\n',
+        );
+        const digest = createHash('sha256')
+          .update(normalized, 'utf8')
+          .digest('hex');
+        if (!HUSKY_V9_STATIC_SHA256[name].has(digest)) return false;
+      } else {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Refuses untracked worktree ignore files (such as a self-hiding `.gitignore`
+ * containing `*`) that hide untracked entries from `git status` while still
+ * allowing directories ignored by tracked `.gitignore` files (e.g. `node_modules/`,
+ * `dist/`, `tmp/`) and Husky v9's exact generated `.husky/_/` shim directory.
+ */
+export function untrackedIgnoreSourceError(root) {
+  const ignoredStatus = runGit(
+    [
+      '-C',
+      root,
+      'status',
+      '--porcelain',
+      '--ignored=matching',
+      '--untracked-files=normal',
+      '--ignore-submodules=dirty',
+      '-z',
+    ],
+    root,
+    { encoding: null },
+  );
+  if (ignoredStatus.status !== 0) {
+    const detail =
+      (ignoredStatus.stderr?.toString('utf8') || '').trim() ||
+      `exit ${ignoredStatus.status}`;
+    return `could not inspect ignored worktree entries: ${detail}`;
+  }
+  const rawRecords = splitNulBuffers(ignoredStatus.stdout ?? Buffer.alloc(0));
+  const ignoredPathBuffers = [];
+  const utf8 = new TextDecoder('utf-8', { fatal: true });
+  for (const recordBuf of rawRecords) {
+    if (recordBuf.length === 0) continue;
+    if (
+      recordBuf.length < 4 ||
+      recordBuf[0] !== 0x21 ||
+      recordBuf[1] !== 0x21 ||
+      recordBuf[2] !== 0x20
+    ) {
+      let label;
+      try {
+        label = printable(utf8.decode(recordBuf));
+      } catch {
+        label = '<non-utf8>';
+      }
+      return `working tree has uncommitted changes (${label}) — re-clone or run \`git clean -xfd\`, then re-run prepare`;
+    }
+    ignoredPathBuffers.push(recordBuf.subarray(3));
+  }
+  if (ignoredPathBuffers.length === 0) return null;
+
+  // Prefix every path with `./` so leading `:` (e.g. `:tmp/.gitignore` or
+  // `:(top)foo/`) cannot trigger git check-ignore pathspec magic, and pass
+  // `-n` so every input path produces a 4-field record.
+  const dotSlash = Buffer.from('./');
+  const nulByte = Buffer.from([0]);
+  const checkInput = Buffer.concat(
+    ignoredPathBuffers.flatMap((p) => [dotSlash, p, nulByte]),
+  );
+  const attribution = runGit(
+    ['-C', root, 'check-ignore', '-v', '-n', '-z', '--stdin'],
+    root,
+    { encoding: null, input: checkInput },
+  );
+  if (attribution.status !== 0) {
+    const detail =
+      (attribution.stderr?.toString('utf8') || '').trim() ||
+      `exit ${attribution.status}`;
+    return `could not attribute ignored worktree entries to tracked ignore files: ${detail}`;
+  }
+  const rawFields = splitNulBuffers(attribution.stdout ?? Buffer.alloc(0));
+  if (rawFields.length !== ignoredPathBuffers.length * 4) {
+    return 'could not parse git check-ignore attribution for ignored worktree entries';
+  }
+  const sources = [];
+  const seenSources = new Set();
+  for (let i = 0; i < rawFields.length; i += 4) {
+    if (rawFields[i].length === 0) {
+      return 'ignored worktree entries have no tracked ignore source — re-clone or run `git clean -xfd`, then re-run prepare';
+    }
+    let source;
+    try {
+      source = utf8.decode(rawFields[i]);
+    } catch {
+      return 'untracked or non-UTF-8 ignore source hides worktree entries — re-clone or run `git clean -xfd`, then re-run prepare';
+    }
+    if (!seenSources.has(source)) {
+      seenSources.add(source);
+      sources.push(source);
+    }
+  }
+  const trackedRes = runGit(
+    ['--literal-pathspecs', '-C', root, 'ls-files', '-z', '--', ...sources],
+    root,
+  );
+  if (trackedRes.status !== 0) {
+    const detail =
+      (trackedRes.stderr || '').trim() || `exit ${trackedRes.status}`;
+    return `could not verify tracked status of ignore files: ${detail}`;
+  }
+  const trackedSet = new Set(
+    (trackedRes.stdout ?? '').split('\0').filter(Boolean),
+  );
+  const untracked = sources.filter((src) => {
+    if (trackedSet.has(src)) return false;
+    if (src === '.husky/_/.gitignore' && isBenignHuskyV9IgnoreDir(root)) {
+      return false;
+    }
+    return true;
+  });
+  if (untracked.length > 0) {
+    const shown = untracked.slice(0, 5).map(printable).join(', ');
+    return `untracked ignore files hide worktree entries (${shown}${untracked.length > 5 ? ', …' : ''}) — re-clone or run \`git clean -xfd\`, then re-run prepare`;
+  }
+  return null;
+}
+
+function exactCheckoutError(root, context) {
+  const treeHead = runGit(['-C', root, 'rev-parse', 'HEAD'], root);
+  if (treeHead.status !== 0) return 'could not read HEAD in this clone';
+  if (treeHead.stdout.trim() !== context.head) {
+    return `current tree is at ${treeHead.stdout.trim()}, not PR head ${context.head} — run: git checkout ${context.head}, then re-run prepare`;
+  }
+  const replaceRefs = runGit(
+    ['-C', root, 'for-each-ref', '--count=1', 'refs/replace/'],
+    root,
+  );
+  if (replaceRefs.status !== 0) {
+    return 'could not inspect refs/replace/ in this clone';
+  }
+  if (replaceRefs.stdout.trim() !== '') {
+    return 'refs/replace/ entries are present in this clone and can forge commits or diffs — re-clone or clear refs/replace/, then re-run prepare';
+  }
+  // The ignore channel is steerable from the same PR-controlled .git:
+  // core.excludesFile is neutralized by GIT_HARDENING, but .git/info/exclude
+  // has no `-c` override, so active patterns there are refused outright
+  // rather than read through.
+  try {
+    const exclude = inspectInfoExclude(root);
+    if (exclude.hostile) {
+      return `${exclude.path} carries local exclude patterns, which can hide untracked files from the clean-tree check — re-clone (a fresh clone has only the commented default), or clear the file, then re-run prepare`;
+    }
+  } catch (error) {
+    return `could not inspect git info/exclude: ${error.message}`;
+  }
+  // Explicit mode: a maintainer's status.showUntrackedFiles=no would otherwise
+  // hide the untracked files this check exists to refuse.
+  const dirty = run('git', gitStatusArgs(root));
+  if (dirty.status !== 0) {
+    const detail = (dirty.stderr || '').trim() || `exit ${dirty.status}`;
+    return `could not read the working tree status: ${detail}`;
+  }
+  if (dirty.stdout.trim() !== '') {
+    // Name the entries and a remedy that actually clears them: a plain
+    // `git stash` leaves untracked files behind, so the advice would loop.
+    const entries = dirty.stdout.trim().split('\n');
+    const shown = entries.slice(0, 5).map(printable).join(', ');
+    return `working tree has uncommitted changes (${shown}${entries.length > 5 ? ', …' : ''}) — commit them, or run \`git stash push --include-untracked\` (a plain \`git stash\` leaves untracked files behind), or remove them, then re-run prepare; this script never stashes for you`;
+  }
+  // An untracked worktree `.gitignore` (e.g. containing `*`) hides every
+  // untracked file including itself from `git status` and `info/exclude`.
+  const untrackedIgnore = untrackedIgnoreSourceError(root);
+  if (untrackedIgnore) return untrackedIgnore;
+  // git status trusts the index: skip-worktree / assume-unchanged entries
+  // (a sparse checkout sets them en masse) hide tracked divergence from it,
+  // so refuse anything that is not a plain cached 'H' entry.
+  const flagged = runGit(['-C', root, 'ls-files', '-v'], root);
+  if (flagged.status !== 0) {
+    const detail = (flagged.stderr || '').trim() || `exit ${flagged.status}`;
+    return `could not read the index flags: ${detail}`;
+  }
+  const opaque = flagged.stdout
+    .split('\n')
+    .filter((line) => line && !line.startsWith('H '));
+  if (opaque.length > 0) {
+    const shown = opaque.slice(0, 5).map(printable).join(', ');
+    return `tracked entries hide their worktree state (${shown}${opaque.length > 5 ? ', …' : ''}) — re-clone without a sparse checkout, or clear the index flags, then re-run prepare`;
+  }
+  return null;
 }
 
 function report(lines) {
@@ -558,6 +1583,428 @@ function report(lines) {
 function fail(code, message) {
   process.stderr.write(`verify-pr prepare: ${message}\n`);
   return code;
+}
+
+function ghJson(args, label) {
+  const result = run('gh', args);
+  if (result.status !== 0) {
+    const detail =
+      (result.stderr || '').trim().split('\n')[0] ||
+      result.error?.message ||
+      `exit ${result.status}`;
+    return { error: `${label} failed: ${detail}` };
+  }
+  try {
+    return { value: JSON.parse(result.stdout) };
+  } catch {
+    return { error: `${label} returned output that is not JSON` };
+  }
+}
+
+function maintainerPermission(owner, name, login) {
+  if (typeof login !== 'string' || login === '') {
+    return { error: 'the GitHub response has no user login' };
+  }
+  const result = ghJson(
+    [
+      'api',
+      `repos/${owner}/${name}/collaborators/${encodeURIComponent(login)}/permission`,
+    ],
+    `permission lookup for ${login}`,
+  );
+  if (result.error) return result;
+  const permission = result.value?.permission;
+  if (!PERMISSIONS.includes(permission)) {
+    return {
+      error: `${login} has ${JSON.stringify(permission)} on ${owner}/${name}, not admin | maintain | write`,
+    };
+  }
+  return { permission };
+}
+
+const CASE_INSENSITIVE_FS =
+  process.platform === 'darwin' || process.platform === 'win32';
+const normalizeFsPath = (p) => (CASE_INSENSITIVE_FS ? p.toLowerCase() : p);
+const realPath = (p) => realpathSync.native(p);
+function isSameOrWithin(root, candidate) {
+  const normRoot = normalizeFsPath(root);
+  const normCandidate = normalizeFsPath(candidate);
+  return (
+    normCandidate === normRoot ||
+    normCandidate.startsWith(normRoot.endsWith(sep) ? normRoot : normRoot + sep)
+  );
+}
+
+function registeredRoundApproval(options, snapshot, owner, name, cloneRoot) {
+  let stateRoot;
+  try {
+    stateRoot = realPath(options.stateRoot);
+    const realClone = realPath(cloneRoot);
+    if (isSameOrWithin(realClone, stateRoot)) {
+      return {
+        error: '--state-root must be a trusted directory outside the PR clone',
+      };
+    }
+    const path = watchStatePath(stateRoot, snapshot.number);
+    // A trusted root can hold a nested .qwen/tmp symlink back into the PR
+    // clone; canonicalize the leaf's whole route before accepting the file.
+    const resolvedPath = realPath(path);
+    if (isSameOrWithin(realClone, resolvedPath)) {
+      return {
+        error: '--state-root must be a trusted directory outside the PR clone',
+      };
+    }
+    const st = lstatSync(path);
+    if (st.isSymbolicLink() || !st.isFile() || st.nlink !== 1) {
+      return {
+        error: `the watch registration must be a single-link regular file: ${path}`,
+      };
+    }
+  } catch (error) {
+    return {
+      error: `could not read the watch registration: ${error.message}; a comment approval needs an actual head/round registration, not unregistered repeated execution`,
+    };
+  }
+  let state;
+  try {
+    state = readWatchState(stateRoot, snapshot.number);
+  } catch (error) {
+    return { error: `could not read the watch registration: ${error.message}` };
+  }
+  const registration = inFlightRegistration(
+    state,
+    snapshot.headRefOid,
+    options.round,
+  );
+  if (
+    state?.pr !== snapshot.number ||
+    typeof state?.repo !== 'string' ||
+    state.repo.toLowerCase() !== `${owner}/${name}`.toLowerCase() ||
+    !registration
+  ) {
+    return {
+      error: `--approval needs one in-flight registration for ${owner}/${name}#${snapshot.number} at head ${snapshot.headRefOid}, round ${options.round}; register before waiting, then use the matching fresh round instead of reusing a completed approval`,
+    };
+  }
+  return {
+    registrationNonce:
+      typeof registration.registrationNonce === 'string'
+        ? registration.registrationNonce
+        : null,
+  };
+}
+
+// Extract column-0 approval markers using a fail-closed rule rather than
+// replicating CommonMark's full block/container grammar: an approval comment
+// must not be preceded by any code-fence delimiter (``` / ~~~), GFM display
+// math delimiter ($$), or raw HTML block/tag opener (including inside list
+// items or blockquotes). Without preceding fences, math blocks, or HTML
+// blocks, a column-0 single-line HTML comment is guaranteed by CommonMark
+// 0.31.2 to be a top-level HTML comment, never text inside a fenced code
+// block, indented code block, blockquote, list item, math block, or HTML block
+// (types 1–7).
+function directApprovalMarkers(body) {
+  const markers = [];
+  for (const line of body.replace(/\r\n?/g, '\n').split('\n')) {
+    const match = /^<!-- verify-pr-boundary-approval: (\{[^\n]*\}) -->$/.exec(
+      line,
+    );
+    if (match && !match[1].includes('-->')) {
+      markers.push(match[1]);
+      continue;
+    }
+    if (
+      /`{3,}|~{3,}|\$\$/.test(line) ||
+      /^(?:[ \t>*+-]|\d+[.)])*<(?:!|\?|[A-Za-z/])/.test(line)
+    ) {
+      break;
+    }
+  }
+  return markers;
+}
+
+function commentApproval(options, snapshot, owner, name, cloneRoot) {
+  const match = APPROVAL_PERMALINK.exec(options.approval);
+  if (
+    !match ||
+    match[1].toLowerCase() !== owner.toLowerCase() ||
+    match[2].toLowerCase() !== name.toLowerCase() ||
+    match[3] !== String(snapshot.number)
+  ) {
+    return {
+      error: '--approval must be an issue-comment permalink on this PR',
+    };
+  }
+  const commentId = Number(match[4]);
+  if (!Number.isSafeInteger(commentId) || commentId <= 0) {
+    return { error: '--approval has no valid numeric issue-comment id' };
+  }
+  const registered = registeredRoundApproval(
+    options,
+    snapshot,
+    owner,
+    name,
+    cloneRoot,
+  );
+  if (registered.error) return registered;
+  const response = ghJson(
+    ['api', `repos/${owner}/${name}/issues/comments/${commentId}`],
+    'approval comment lookup',
+  );
+  if (response.error) return response;
+  const comment = response.value;
+  if (comment?.id !== commentId) {
+    return { error: 'the approval API returned a different issue-comment id' };
+  }
+  const issue =
+    /^https:\/\/api\.github\.com\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/.exec(
+      comment?.issue_url ?? '',
+    );
+  if (
+    !issue ||
+    issue[1].toLowerCase() !== owner.toLowerCase() ||
+    issue[2].toLowerCase() !== name.toLowerCase() ||
+    issue[3] !== String(snapshot.number)
+  ) {
+    return { error: 'the approval comment does not belong to this PR' };
+  }
+  const body = comment?.body;
+  const login = comment?.user?.login;
+  if (typeof body !== 'string' || typeof login !== 'string' || !login) {
+    return { error: 'the approval comment has no body or author login' };
+  }
+  const prefixCount = body.split(APPROVAL_PREFIX).length - 1;
+  const markers = directApprovalMarkers(body);
+  if (prefixCount !== 1 || markers.length !== 1) {
+    return {
+      error:
+        'the approval comment needs exactly one well-formed verify-pr-boundary-approval marker as a direct full line outside quotes and code examples',
+    };
+  }
+  let marker;
+  try {
+    marker = JSON.parse(markers[0]);
+  } catch {
+    return { error: 'the approval marker is not valid JSON' };
+  }
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+      registered.registrationNonce ?? '',
+    )
+  ) {
+    return {
+      error:
+        'this legacy in-flight registration has no registrationNonce; release and restart it with the current watch-state helper, then obtain a fresh marked approval for that new registration instead of reusing an old approval marker',
+    };
+  }
+  const markerKeys = Object.keys(marker ?? {}).sort();
+  if (
+    markerKeys.join(',') !== 'head,mode,registrationNonce,round' ||
+    marker.mode !== options.execution ||
+    marker.head !== snapshot.headRefOid ||
+    marker.round !== options.round ||
+    marker.registrationNonce !== registered.registrationNonce
+  ) {
+    return {
+      error:
+        'the approval marker must contain only mode, head, round and registrationNonce matching this execution, trusted head, round and current in-flight registration; a released, completed or other-state-root registration needs a fresh marked approval',
+    };
+  }
+  const allowed = maintainerPermission(owner, name, login);
+  if (allowed.error) return allowed;
+  return {
+    approval: {
+      mode: options.execution === 'host' ? 'waived' : 'vm',
+      source: 'comment',
+      by: login,
+      basis: 'maintainer-comment',
+      permission: allowed.permission,
+      approval: options.approval,
+      comment: {
+        id: commentId,
+        bodySha256: createHash('sha256').update(body, 'utf8').digest('hex'),
+      },
+      head: snapshot.headRefOid,
+      round: options.round,
+      registrationNonce: registered.registrationNonce,
+      reason: options.reason,
+      ...(options.execution === 'vm'
+        ? { attestation: options.attestation }
+        : {}),
+    },
+  };
+}
+
+function singleLinkFileError(path, label) {
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    return `could not inspect the ${label} path ${path}: ${error.message}`;
+  }
+  if (st.isSymbolicLink()) {
+    return `refusing to write the ${label} through a symlink: ${path}`;
+  }
+  if (!st.isFile() || st.nlink !== 1) {
+    return `refusing to write the ${label} through a non-single-link file: ${path}`;
+  }
+  return null;
+}
+
+function captureWriteRecord(path, label, next, expectedParent = null) {
+  const record = {
+    path,
+    label,
+    next,
+    expectedParent,
+    previous: null,
+    touched: false,
+  };
+  const leafError = singleLinkFileError(path, label);
+  if (leafError) return { error: leafError };
+  try {
+    record.parentReal = realPath(dirname(path));
+  } catch (error) {
+    return { error: `could not inspect the ${label} parent: ${error.message}` };
+  }
+  if (
+    record.expectedParent !== null &&
+    normalizeFsPath(record.parentReal) !==
+      normalizeFsPath(record.expectedParent)
+  ) {
+    return {
+      error: `refusing to write the ${label} through a redirected parent directory: ${path}`,
+    };
+  }
+  try {
+    const existing = lstatSync(path);
+    if (existing.size > 16 * 1024 * 1024) {
+      return {
+        error: `could not preserve the ${label} at ${path}: file exceeds 16 MiB`,
+      };
+    }
+    record.previous = readFileSync(path);
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      return {
+        error: `could not preserve the ${label} at ${path}: ${error.message}`,
+      };
+    }
+  }
+  return { record };
+}
+
+function writeRecordError(record) {
+  const leafError = singleLinkFileError(record.path, record.label);
+  if (leafError) return leafError;
+  try {
+    const parentReal = realPath(dirname(record.path));
+    if (
+      normalizeFsPath(parentReal) !== normalizeFsPath(record.parentReal) ||
+      (record.expectedParent !== null &&
+        normalizeFsPath(parentReal) !== normalizeFsPath(record.expectedParent))
+    ) {
+      return `refusing to write the ${record.label} through a redirected parent directory: ${record.path}`;
+    }
+  } catch (error) {
+    return `could not inspect the ${record.label} parent: ${error.message}`;
+  }
+  return null;
+}
+
+function commitWriteRecords(records) {
+  const rollback = (cause) => {
+    const failures = [];
+    for (const record of records.toReversed()) {
+      if (!record.touched) continue;
+      try {
+        const pathError = writeRecordError(record);
+        if (pathError) throw new Error(pathError);
+        let current = null;
+        try {
+          current = readFileSync(record.path);
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+        }
+        if (current === null && record.previous === null) continue;
+        if (
+          current !== null &&
+          record.previous !== null &&
+          current.equals(record.previous)
+        ) {
+          continue;
+        }
+        if (record.previous === null) rmSync(record.path, { force: true });
+        else writeFileSync(record.path, record.previous);
+      } catch (error) {
+        failures.push(`${record.label} ${record.path}: ${error.message}`);
+      }
+    }
+    return {
+      error: `${cause}${failures.length > 0 ? `; restore failed for ${failures.join('; ')}` : ''}`,
+    };
+  };
+  for (const record of records) {
+    const pathError = writeRecordError(record);
+    if (pathError) return rollback(pathError);
+    record.touched = true;
+    try {
+      if (record.next === null) rmSync(record.path, { force: true });
+      else writeFileSync(record.path, record.next);
+    } catch (error) {
+      return rollback(
+        `could not write the ${record.label} to ${record.path}: ${error.message}`,
+      );
+    }
+  }
+  return {};
+}
+
+function localTrustApproval(options, snapshot, owner, name) {
+  const current = ghJson(['api', 'user'], 'current-user lookup');
+  if (current.error) return current;
+  const login = current.value?.login;
+  if (typeof login !== 'string' || !login) {
+    return { error: 'current-user lookup returned no login' };
+  }
+  const own = snapshot.author?.login === login;
+  const sameRepository = snapshot.isCrossRepository === false;
+  if (!own && !sameRepository) {
+    return {
+      error:
+        "--trust-pr-head is limited to the current user's own PR or a same-repository PR; another fork needs --approval",
+    };
+  }
+  const allowed = maintainerPermission(owner, name, login);
+  if (allowed.error) return allowed;
+  return {
+    approval: {
+      mode: options.execution === 'host' ? 'waived' : 'vm',
+      source: 'local-trust',
+      by: login,
+      basis: own ? 'own-pr' : 'same-repository',
+      permission: allowed.permission,
+      head: snapshot.headRefOid,
+      round: options.round,
+      reason: options.reason,
+      ...(options.execution === 'vm'
+        ? { attestation: options.attestation }
+        : {}),
+    },
+  };
+}
+
+function resolveExecutionApproval(options, snapshot, owner, name, cloneRoot) {
+  const result = options.trustPrHead
+    ? localTrustApproval(options, snapshot, owner, name)
+    : commentApproval(options, snapshot, owner, name, cloneRoot);
+  if (result.error) return result;
+  const { errors } = checkBoundary(JSON.stringify(result.approval), null, {
+    coordinates: { owner, repo: name, number: snapshot.number },
+  });
+  if (errors.length > 0) return { error: errors.join('; ') };
+  return result;
 }
 
 function main(argv) {
@@ -575,21 +2022,64 @@ function main(argv) {
   const { owner, name } = parseRepo(options.repo);
   const slug = `${owner}/${name}`;
 
+  // Check inside-worktree + core.worktree BEFORE resolving --show-toplevel so
+  // a hostile core.worktree pointing to a clean nested decoy repository cannot
+  // redirect `root` away from the actual PR clone before inspection.
+  const probeGitDir = run('git', [...GIT_HARDENING, 'rev-parse', '--git-dir']);
+  if (probeGitDir.status !== 0) {
+    return fail(3, 'not inside a git worktree — run this from the clone');
+  }
+  try {
+    if (hasCustomWorktreeConfig(null)) {
+      return fail(
+        3,
+        'git config sets core.worktree, which redirects the working tree root — re-clone or clear core.worktree, then re-run prepare',
+      );
+    }
+    const prePromisorError = promisorLazyFetchHardeningError(null);
+    if (prePromisorError) return fail(3, prePromisorError);
+  } catch (error) {
+    return fail(3, error.message);
+  }
   let toplevel;
   try {
     toplevel = runGit(['rev-parse', '--show-toplevel']);
   } catch (error) {
-    // A hostile filter name is a refusal with its own remedy, not a missing
-    // worktree; it must surface before any guarded status could run it.
-    if (error instanceof UnsafeFilterNameError) {
-      return fail(3, error.message);
+    return fail(3, error.message);
+  }
+  const root = singleLineOutput(toplevel);
+  if (!root) {
+    return fail(3, 'not inside a git worktree — run this from the clone');
+  }
+  try {
+    if (!isSameOrWithin(realPath(root), realPath(process.cwd()))) {
+      return fail(
+        3,
+        `git working tree root ${root} does not contain the current directory — re-clone or clear core.worktree, then re-run prepare`,
+      );
     }
-    return fail(3, 'not inside a git worktree — run this from the clone');
+  } catch (error) {
+    return fail(
+      3,
+      `could not validate git working tree root ${root}: ${error.message}`,
+    );
   }
-  if (toplevel.status !== 0) {
-    return fail(3, 'not inside a git worktree — run this from the clone');
+  let rootFilterOverrides;
+  try {
+    if (hasCustomWorktreeConfig(root)) {
+      return fail(
+        3,
+        'git config sets core.worktree, which redirects the working tree root — re-clone or clear core.worktree, then re-run prepare',
+      );
+    }
+    const rootPromisorError = promisorLazyFetchHardeningError(root);
+    if (rootPromisorError) return fail(3, rootPromisorError);
+    rootFilterOverrides = localFilterOverrides(root);
+  } catch (error) {
+    return fail(3, error.message);
   }
-  const root = toplevel.stdout.trim();
+  const runGitRoot = (args) =>
+    run('git', [...rootFilterOverrides, ...GIT_HARDENING, '-C', root, ...args]);
 
   const view = run('gh', [
     'pr',
@@ -626,9 +2116,7 @@ function main(argv) {
     ['head', context.head, `pull/${context.pr}/head`],
   ];
   for (const [label, oid, ref] of probes) {
-    if (
-      runGit(['-C', root, 'cat-file', '-e', `${oid}^{commit}`]).status !== 0
-    ) {
+    if (runGitRoot(['cat-file', '-e', `${oid}^{commit}`]).status !== 0) {
       return fail(
         3,
         `${label} ${oid} is not in this clone — run: git fetch https://github.com/${slug}.git ${ref}`,
@@ -639,66 +2127,35 @@ function main(argv) {
   // The round runs the head side of its A/B in this tree, so a HEAD other
   // than the PR head or an uncommitted change would measure code the report
   // does not name. Checked before the artifact directory exists, so a refusal
-  // leaves nothing behind.
-  const treeHead = runGit(['-C', root, 'rev-parse', 'HEAD']);
-  if (treeHead.status !== 0) {
-    return fail(3, 'could not read HEAD in this clone');
+  // leaves nothing behind. The same hardened check runs again after the last
+  // network response, immediately before authority writes.
+  let initialTreeError;
+  try {
+    initialTreeError = exactCheckoutError(root, context);
+  } catch (error) {
+    return fail(3, error.message);
   }
-  if (treeHead.stdout.trim() !== context.head) {
-    return fail(
-      3,
-      `current tree is at ${treeHead.stdout.trim()}, not PR head ${context.head} — run: git checkout ${context.head}, then re-run prepare`,
+  if (initialTreeError) return fail(3, initialTreeError);
+
+  let executionApproval = null;
+  if (options.execution !== 'container') {
+    const approved = resolveExecutionApproval(
+      options,
+      snapshot,
+      owner,
+      name,
+      root,
     );
-  }
-  // The ignore channel is steerable from the same PR-controlled .git:
-  // core.excludesFile is neutralized by GIT_HARDENING, but .git/info/exclude
-  // has no `-c` override, so active patterns there are refused outright
-  // rather than read through.
-  if (hasHostileInfoExclude(root)) {
-    return fail(
-      3,
-      '.git/info/exclude carries local exclude patterns, which can hide untracked files from the clean-tree check — re-clone (a fresh clone has only the commented default), or clear the file, then re-run prepare',
-    );
-  }
-  // Explicit mode: a maintainer's status.showUntrackedFiles=no would otherwise
-  // hide the untracked files this check exists to refuse.
-  const dirty = run('git', gitStatusArgs(root));
-  if (dirty.status !== 0) {
-    const detail = (dirty.stderr || '').trim() || `exit ${dirty.status}`;
-    return fail(3, `could not read the working tree status: ${detail}`);
-  }
-  if (dirty.stdout.trim() !== '') {
-    // Name the entries and a remedy that actually clears them: a plain
-    // `git stash` leaves untracked files behind, so the advice would loop.
-    const entries = dirty.stdout.trim().split('\n');
-    const shown = entries.slice(0, 5).map(printable).join(', ');
-    return fail(
-      3,
-      `working tree has uncommitted changes (${shown}${entries.length > 5 ? ', …' : ''}) — commit them, or run \`git stash push --include-untracked\` (a plain \`git stash\` leaves untracked files behind), or remove them, then re-run prepare; this script never stashes for you`,
-    );
-  }
-  // git status trusts the index: skip-worktree / assume-unchanged entries
-  // (a sparse checkout sets them en masse) hide tracked divergence from it,
-  // so refuse anything that is not a plain cached 'H' entry.
-  const flagged = runGit(['-C', root, 'ls-files', '-v']);
-  if (flagged.status !== 0) {
-    const detail = (flagged.stderr || '').trim() || `exit ${flagged.status}`;
-    return fail(3, `could not read the index flags: ${detail}`);
-  }
-  const opaque = flagged.stdout
-    .split('\n')
-    .filter((line) => line && !line.startsWith('H '));
-  if (opaque.length > 0) {
-    const shown = opaque.slice(0, 5).map(printable).join(', ');
-    return fail(
-      3,
-      `tracked entries hide their worktree state (${shown}${opaque.length > 5 ? ', …' : ''}) — re-clone without a sparse checkout, or clear the index flags, then re-run prepare`,
-    );
+    if (approved.error) {
+      return fail(3, `execution approval: ${approved.error}`);
+    }
+    executionApproval = approved.approval;
   }
 
   const contextDir = join(root, 'tmp', 'verify-context');
   const contextPath = join(contextDir, `pr${context.pr}.json`);
   const artifacts = join(root, 'tmp', artifactDirName(context.pr));
+  let artifactCanonical = null;
   // The tmp/ container is PR-controlled: a PR-committed symlink there would
   // redirect every mkdir/write below before any leaf guard runs (R5-1). Refuse
   // it before anything is created. A fresh clone has no tmp/ — that is fine.
@@ -720,121 +2177,362 @@ function main(argv) {
     // Recursive, so a retry within the same second lands in the directory this
     // script just made instead of failing on it.
     mkdirSync(artifacts, { recursive: true });
+  } catch (error) {
+    return fail(3, `could not create the artifact directory: ${error.message}`);
+  }
+  try {
+    artifactCanonical = realPath(artifacts);
+    if (
+      !lstatSync(artifacts).isDirectory() ||
+      lstatSync(artifacts).isSymbolicLink() ||
+      normalizeFsPath(artifactCanonical) !==
+        normalizeFsPath(join(realPath(tmpDir), basename(artifacts)))
+    ) {
+      return fail(
+        3,
+        `refusing to write through a non-directory or redirected artifact directory: ${artifacts}`,
+      );
+    }
+  } catch (error) {
+    return fail(
+      3,
+      `could not validate the artifact directory: ${error.message}`,
+    );
+  }
+  try {
     mkdirSync(join(artifacts, 'evidence'), { recursive: true });
   } catch (error) {
     return fail(3, `could not create the artifact directory: ${error.message}`);
   }
-  // The snapshot dir/file live in the PR-controlled tree: a symlink at either
-  // path redirects the host-side write, and a hard link at the snapshot path
-  // would make writeFileSync truncate a file the round does not own (R5-4).
-  // Refuse both rather than follow them.
-  for (const p of [contextDir, contextPath]) {
-    let st;
-    try {
-      st = lstatSync(p);
-    } catch (error) {
-      if (error.code !== 'ENOENT') {
-        return fail(
-          3,
-          `could not inspect the snapshot path ${p}: ${error.message}`,
-        );
+  // Classify PR trust and mandatory hardware-isolation escalations host-side
+  // before writing the digest-bound snapshot (§4.1–§4.4). Failure to read
+  // permission or changed files fails closed to hardware-isolated.
+  // Use `--raw --no-renames -z` (NUL-delimited, never C-quoted) so non-ASCII
+  // filenames cannot bypass prefix rules via core.quotePath=true AND git file
+  // modes (100755 executables, 120000 symlinks, 160000 submodules) are captured
+  // in the same command. Extensionless 100644 files are also magic-sniffed
+  // (4 bytes, O_NOFOLLOW) for shebang/ELF/Mach-O/PE headers.
+  const diffRes = runGitRoot([
+    'diff',
+    '--raw',
+    '--no-renames',
+    '--ignore-submodules=none',
+    '-z',
+    `${context.base}..${context.head}`,
+  ]);
+  let changedPaths = null;
+  let executablePaths = [];
+  let specialModePaths = [];
+  if (diffRes.status === 0) {
+    const parsedDiff = parseRawDiffEntries(diffRes.stdout);
+    changedPaths = parsedDiff.changedPaths;
+    executablePaths = [...parsedDiff.executablePaths];
+    specialModePaths = [...parsedDiff.specialModePaths];
+    for (const rel of parsedDiff.extensionlessLivePaths) {
+      if (hasExecutableMagic(join(root, rel))) {
+        executablePaths.push(rel);
       }
-      continue; // not created yet (first run) — nothing to redirect
-    }
-    if (st.isSymbolicLink()) {
-      return fail(
-        3,
-        `refusing to write the host snapshot through a symlink: ${p}`,
-      );
-    }
-    if (p === contextPath && (!st.isFile() || st.nlink !== 1)) {
-      return fail(
-        3,
-        `refusing to write the host snapshot through a non-single-link file: ${p}`,
-      );
     }
   }
+  const authorPerm = fetchAuthorPermission(owner, name, snapshot.author?.login);
+  const trust = classifyPrTrust({
+    permission: authorPerm.permission,
+    isLocalOwner: options.localOwner,
+    isFork: snapshot.isCrossRepository === true ? true : null,
+    changedPaths,
+    executablePaths,
+    specialModePaths,
+    forceHardware: process.env[FORCE_HARDWARE_ENV] === '1',
+    sponsored: options.sponsored,
+  });
+  const trustClassification = {
+    ...trust,
+    headRefOid: context.head,
+    permission: authorPerm.permission,
+    ...(authorPerm.error ? { permissionError: authorPerm.error } : {}),
+  };
+
   // The host-held snapshot carries the slug too: the checker compares a
   // waiver's approval permalink against these coordinates, and gh's field
   // selector has no repo member, so it is added where the snapshot is
   // written, not to FIELDS.
-  const contextBytes = `${JSON.stringify({ ...snapshot, repo: slug }, null, 2)}\n`;
-  writeFileSync(contextPath, contextBytes);
-  // Structural fix (R5-1): the authoritative snapshot also goes to a host
-  // destination outside the clone (--context-out), so the trusted source the
-  // checker reads never depends on the PR-writable in-tree copy, which stays
-  // only as the checker's untrusted no---context default.
-  let reportedContextPath = contextPath;
-  if (options.contextOut) {
-    // The host destination must be outside the PR-writable clone: step 1 runs
-    // with the clone as cwd, so a relative --context-out resolves inside it,
-    // where a PR-committed symlink would redirect this host-side write (R7-1).
-    // Apply the same containment + leaf guards the in-tree snapshot path uses.
-    const outPath = resolve(options.contextOut);
-    const realRoot = realpathSync(root);
-    if (outPath === realRoot || outPath.startsWith(realRoot + sep)) {
-      return fail(
-        3,
-        `refusing to write the host snapshot inside the PR clone: ${outPath}`,
+  const contextBytes = `${JSON.stringify(
+    {
+      ...snapshot,
+      repo: slug,
+      trustClassification,
+      ...(executionApproval ? { executionApproval } : {}),
+    },
+    null,
+    2,
+  )}\n`;
+
+  // Network access never happens under the registration lock. The write
+  // stage below rechecks the registration after these calls complete.
+  const reviewPath = join(contextDir, `pr${context.pr}-review-threads.json`);
+  const review = fetchReviewState(owner, name, context.pr);
+
+  const writeRound = () => {
+    if (executionApproval?.source === 'comment') {
+      const current = registeredRoundApproval(
+        options,
+        snapshot,
+        owner,
+        name,
+        root,
       );
+      if (
+        current.error ||
+        current.registrationNonce !== executionApproval.registrationNonce
+      ) {
+        return fail(
+          3,
+          `execution approval: ${current.error ?? 'the in-flight registration changed while approval was being resolved; obtain a fresh marked approval for the current registration'}`,
+        );
+      }
     }
-    try {
-      const st = lstatSync(outPath);
+
+    // The review-state GraphQL response was the final network activity. A
+    // checkout changed while that response was in flight must not supply an
+    // execution approval or a host snapshot under the earlier clean-tree OK.
+    const finalTreeError = exactCheckoutError(root, context);
+    if (finalTreeError) return fail(3, finalTreeError);
+
+    // The snapshot dir/file live in the PR-controlled tree: a symlink at
+    // either path redirects the host-side write, and a hard link at the
+    // snapshot path would truncate a file the round does not own.
+    for (const p of [contextDir, contextPath]) {
+      let st;
+      try {
+        st = lstatSync(p);
+      } catch (error) {
+        if (error.code !== 'ENOENT') {
+          return fail(
+            3,
+            `could not inspect the snapshot path ${p}: ${error.message}`,
+          );
+        }
+        continue;
+      }
       if (st.isSymbolicLink()) {
         return fail(
           3,
-          `refusing to write the host snapshot through a symlink: ${outPath}`,
+          `refusing to write the host snapshot through a symlink: ${p}`,
         );
       }
-      if (!st.isFile() || st.nlink !== 1) {
+      if (p === contextPath && (!st.isFile() || st.nlink !== 1)) {
         return fail(
           3,
-          `refusing to write the host snapshot through a non-single-link file: ${outPath}`,
+          `refusing to write the host snapshot through a non-single-link file: ${p}`,
+        );
+      }
+    }
+    // Structural fix (R5-1): the authoritative snapshot also goes to a host
+    // destination outside the clone (--context-out). Validate its real parent
+    // before preserving any bytes; a failed prepare must leave the prior
+    // authority files untouched or restore them exactly.
+    let reportedContextPath = contextPath;
+    let outPath = null;
+    let outParentCanonical = null;
+    if (options.contextOut) {
+      outPath = resolve(options.contextOut);
+      const realRoot = realPath(root);
+      if (isSameOrWithin(realRoot, outPath)) {
+        return fail(
+          3,
+          `refusing to write the host snapshot inside the PR clone: ${outPath}`,
+        );
+      }
+      try {
+        const parent = dirname(outPath);
+        let existingParent = parent;
+        while (!existsSync(existingParent)) {
+          const next = dirname(existingParent);
+          if (next === existingParent) break;
+          existingParent = next;
+        }
+        const realExisting = realPath(existingParent);
+        if (isSameOrWithin(realRoot, realExisting)) {
+          return fail(
+            3,
+            `refusing to write the host snapshot inside the PR clone: ${outPath}`,
+          );
+        }
+        mkdirSync(parent, { recursive: true });
+        const realParent = realPath(parent);
+        if (isSameOrWithin(realRoot, realParent)) {
+          return fail(
+            3,
+            `refusing to write the host snapshot inside the PR clone: ${outPath}`,
+          );
+        }
+        outParentCanonical = realParent;
+        if (executionApproval?.source === 'comment') {
+          const statePath = watchStatePath(options.stateRoot, context.pr);
+          const protectedPaths = [statePath, `${statePath}.lock`];
+          const canonicalOut = normalizeFsPath(
+            join(realParent, basename(outPath)),
+          );
+          for (const protectedPath of protectedPaths) {
+            const canonicalProtected = normalizeFsPath(
+              join(realPath(dirname(protectedPath)), basename(protectedPath)),
+            );
+            let sameFile = false;
+            try {
+              const outputStat = statSync(outPath);
+              const protectedStat = statSync(protectedPath);
+              sameFile =
+                outputStat.dev === protectedStat.dev &&
+                outputStat.ino === protectedStat.ino;
+            } catch (error) {
+              if (error.code !== 'ENOENT') throw error;
+            }
+            if (canonicalOut === canonicalProtected || sameFile) {
+              return fail(
+                3,
+                `--context-out must not overwrite the live watch state or its lock: ${outPath}`,
+              );
+            }
+          }
+        }
+      } catch (error) {
+        return fail(
+          3,
+          `could not write the host snapshot to ${outPath}: ${error.message}`,
+        );
+      }
+      reportedContextPath = outPath;
+    }
+    const artifactContextPath = join(artifacts, 'context.json');
+    const boundaryPath = join(artifacts, 'boundary.json');
+    let contextDirCanonical;
+    try {
+      const tmpStat = lstatSync(tmpDir);
+      if (tmpStat.isSymbolicLink() || !tmpStat.isDirectory()) {
+        return fail(
+          3,
+          `refusing to write through a redirected tmp container: ${tmpDir}`,
+        );
+      }
+      contextDirCanonical = join(realPath(root), 'tmp', 'verify-context');
+      if (
+        normalizeFsPath(realPath(contextDir)) !==
+        normalizeFsPath(contextDirCanonical)
+      ) {
+        return fail(
+          3,
+          `refusing to write through a redirected context directory: ${contextDir}`,
+        );
+      }
+    } catch (error) {
+      return fail(
+        3,
+        `could not validate the context directory ${contextDir}: ${error.message}`,
+      );
+    }
+    try {
+      const st = lstatSync(boundaryPath);
+      if (st.isSymbolicLink() || !st.isFile() || st.nlink !== 1) {
+        return fail(
+          3,
+          `refusing to write the execution approval through a non-single-link file: ${boundaryPath}`,
         );
       }
     } catch (error) {
       if (error.code !== 'ENOENT') {
         return fail(
           3,
-          `could not inspect the host snapshot path ${outPath}: ${error.message}`,
+          `could not inspect the execution approval path ${boundaryPath}: ${error.message}`,
         );
       }
     }
-    try {
-      mkdirSync(dirname(outPath), { recursive: true });
-      writeFileSync(outPath, contextBytes);
-    } catch (error) {
-      return fail(
-        3,
-        `could not write the host snapshot to ${outPath}: ${error.message}`,
-      );
+    const planned = [
+      {
+        path: contextPath,
+        label: 'host snapshot',
+        expectedParent: contextDirCanonical,
+        next: contextBytes,
+      },
+      {
+        path: artifactContextPath,
+        label: 'artifact context',
+        expectedParent: artifactCanonical,
+        next: `${JSON.stringify({
+          repo: slug,
+          pr: context.pr,
+          baseRefOid: context.base,
+          headRefOid: context.head,
+        })}\n`,
+      },
+      // A same-directory container retry must not retain an earlier host/VM
+      // approval. Deleting it stays in this rollback group on later failure.
+      {
+        path: boundaryPath,
+        label: 'execution approval',
+        expectedParent: artifactCanonical,
+        next: executionApproval
+          ? `${JSON.stringify(executionApproval, null, 2)}\n`
+          : null,
+      },
+      // Best-effort, like the lane: a missing review file means "unknown", so
+      // an earlier prepare's copy must not outlive a failed fetch. Its
+      // replacement or removal participates in the same rollback group as the
+      // authority files.
+      {
+        path: reviewPath,
+        label: 'review snapshot',
+        expectedParent: contextDirCanonical,
+        next: review.state
+          ? `${JSON.stringify(review.state, null, 2)}\n`
+          : null,
+      },
+    ];
+    if (outPath) {
+      planned.unshift({
+        path: outPath,
+        label: 'host snapshot',
+        expectedParent: outParentCanonical,
+        next: contextBytes,
+      });
     }
-    reportedContextPath = outPath;
+    const records = [];
+    for (const item of planned) {
+      const { record, error } = captureWriteRecord(
+        item.path,
+        item.label,
+        item.next,
+        item.expectedParent,
+      );
+      if (error) return fail(3, error);
+      records.push(record);
+    }
+    const { error } = commitWriteRecords(records);
+    if (error) return fail(3, error);
+    // The digest binds the snapshot's content for the checker
+    // (--context-sha256): it is computed only after every write succeeded.
+    const contextSha256 = createHash('sha256')
+      .update(contextBytes, 'utf8')
+      .digest('hex');
+    return { contextSha256, reportedContextPath };
+  };
+
+  let written;
+  try {
+    written =
+      executionApproval?.source === 'comment'
+        ? withStateLock(options.stateRoot, context.pr, writeRound)
+        : writeRound();
+  } catch (error) {
+    return fail(3, `could not finish the prepare writes: ${error.message}`);
   }
-  // The digest binds the snapshot's content for the checker (--context-sha256):
-  // it is computed here host-side, before the round runs, so a later rewrite of
-  // the clone-side file cannot produce matching bytes (R2-1).
-  const contextSha256 = createHash('sha256')
-    .update(contextBytes, 'utf8')
-    .digest('hex');
-  // Best-effort, like the lane: the round reads a missing file as "review
-  // state unknown", so an earlier prepare's copy must not outlive a failed
-  // fetch.
-  const reviewPath = join(contextDir, `pr${context.pr}-review-threads.json`);
-  rmSync(reviewPath, { force: true });
-  const review = fetchReviewState(owner, name, context.pr);
-  if (review.state) {
-    writeFileSync(reviewPath, `${JSON.stringify(review.state, null, 2)}\n`);
+  if (written.locked) {
+    return fail(
+      3,
+      'execution approval: the watch-state lock is held by another invocation; while that holder may be active, retry shortly. If the holder is confirmed killed, verify the owner token in the .lock file beside the state JSON and manually remove only that stale .lock file — never the state JSON itself; do not treat the previous approval as current',
+    );
   }
-  writeFileSync(
-    join(artifacts, 'context.json'),
-    `${JSON.stringify({
-      repo: slug,
-      pr: context.pr,
-      baseRefOid: context.base,
-      headRefOid: context.head,
-    })}\n`,
-  );
+  if (typeof written === 'number') return written;
+  const { contextSha256, reportedContextPath } = written;
 
   const isolation = detectIsolation();
   // The title comes from an untrusted fork, and a control character would reach
@@ -853,6 +2551,8 @@ function main(argv) {
       ? `  review     ${reviewPath} (${review.state.threads.filter((thread) => !thread.resolved).length} of ${review.state.threads.length} threads unresolved, ${review.state.changeRequests.length} change requests)`
       : `  review     not written — ${printable(review.error)}; the round lists review findings as not covered`,
     `  artifacts  ${artifacts}`,
+    `  execution  ${options.execution}${executionApproval ? ` (${executionApproval.source}, head ${executionApproval.head}, round ${executionApproval.round})` : ''}`,
+    `  trust      ${trust.prTrust} -> ${trust.executionClass}${trust.escalationReasons.length > 0 ? ` (${trust.escalationReasons.slice(0, 3).join(', ')}${trust.escalationReasons.length > 3 ? ', …' : ''})` : ''}`,
     `  isolation  ${isolation.isolated ? isolation.signals.join(', ') : 'none detected'}`,
   ]);
   if (isolation.seatbelt) {
@@ -861,24 +2561,45 @@ function main(argv) {
       '             not a boundary)',
     ]);
   }
-  report([
-    '',
-    `Next: build the round in ${artifacts}. This preflight ran on the host,`,
-    'because resolving the coordinates needs `gh` and `gh` is mutually',
-    'exclusive with the boundary. Before executing PR code, run inside the',
-    "boundary — the container recipe's spelling (step 5), with the clone",
-    'mounted at /work:',
-    '',
-    `  node /trusted-scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir "/work/tmp/${basename(artifacts)}"`,
-    '',
-    'The path is the in-container one: the gate runs from the read-only',
-    "/trusted-scripts mount, never the PR head's own copy of the script,",
-    'and the record lands in the mounted artifact directory so it survives',
-    'the container. A VM boundary runs the same file from its trusted copy',
-    'with its own artifact path. The gate writes boundary-gate.json into',
-    'the artifact directory; the checker requires that record alongside',
-    'the container declaration.',
-  ]);
+  if (options.execution === 'container') {
+    report([
+      '',
+      `Next: build the round in ${artifacts}. This preflight ran on the host,`,
+      'because resolving the coordinates needs `gh` and `gh` is mutually',
+      'exclusive with the boundary. Before executing PR code, run inside the',
+      "boundary — the container recipe's spelling (step 5), with the clone",
+      'mounted at /work:',
+      '',
+      `  node /trusted-scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir "/work/tmp/${basename(artifacts)}"`,
+      '',
+      'The path is the in-container one: the gate runs from the read-only',
+      "/trusted-scripts mount, never the PR head's own copy of the script,",
+      'and the record lands in the mounted artifact directory so it survives',
+      'the container. For host or VM execution, keep the current head/round',
+      'in-flight registration and re-run prepare BEFORE the battery with',
+      '--execution host|vm and its applicable approval arguments; prepare writes',
+      'boundary.json. Do not release a registration merely to change modes.',
+      'Never hand-write a host/VM declaration after the battery. The container',
+      'gate writes boundary-gate.json into the artifact directory; the checker',
+      'requires that record alongside the container declaration.',
+    ]);
+  } else if (options.execution === 'vm') {
+    report([
+      '',
+      `Next: run the round for this exact head in the attested VM. The`,
+      `${executionApproval.source} approval is recorded for round ${executionApproval.round}.`,
+      'A VM runs NO --require-isolation gate and has no boundary-gate.json;',
+      'its validated executionApproval is already in boundary.json.',
+    ]);
+  } else {
+    report([
+      '',
+      `Next: run the host round only for this exact head and round ${executionApproval.round}.`,
+      `The explicit ${executionApproval.source} decision was validated before artifacts`,
+      'were created. Keep that approval only for this round, and disclose the',
+      'host waiver in the report; this preflight is not an execution sandbox.',
+    ]);
+  }
   return 0;
 }
 
@@ -895,7 +2616,23 @@ function main(argv) {
  * operator who skipped the gate — the incident's shape — not against PR
  * code that forges it; the CI publisher writes its own lane record.)
  */
-function requireBoundary(artifactDir = null) {
+export function requireBoundary(artifactDir = null, options = {}) {
+  const env = options.env ?? process.env;
+  const exists = options.exists ?? existsSync;
+  // Resolve home lazily and defensively: os.homedir() throws SystemError when
+  // the UID has no passwd entry and HOME is unset (the arbitrary-UID container
+  // shape --user <uid>:<gid> invites), and returns '' when HOME is set but
+  // empty. Evaluating it in a default parameter let the throw escape as exit 1
+  // before invalidateRecord could run, leaving a stale pass record behind;
+  // both shapes must reach the gate's exit-3 refusal below (R5-1).
+  let home = options.home;
+  if (home === undefined) {
+    try {
+      home = homedir();
+    } catch {
+      home = null;
+    }
+  }
   const recordPath = artifactDir
     ? join(artifactDir, 'boundary-gate.json')
     : null;
@@ -910,9 +2647,9 @@ function requireBoundary(artifactDir = null) {
       // Best-effort; the refusal exit is the contract.
     }
   };
-  const isolation = detectIsolation();
-  const credentials = detectCredentialSignals();
-  const attested = process.env[CREDENTIAL_FREE_ATTESTATION] === '1';
+  const isolation = detectIsolation(env, exists);
+  const credentials = detectCredentialSignals(env, exists, home);
+  const attested = env[CREDENTIAL_FREE_ATTESTATION] === '1';
 
   // A refusal from OUTSIDE any boundary does not contradict a record minted
   // INSIDE one: a host-side sanity re-run must not destroy the in-container
@@ -934,11 +2671,11 @@ function requireBoundary(artifactDir = null) {
   // would mint a container claim with no isolation, and the checker refuses
   // every non-ci-lane record whose observed list is empty, so such a pass
   // could never be published anyway (R11-1). The gate needs an OBSERVED
-  // filesystem marker; a launcher container always carries one. An attested
-  // VM uses mode:"vm" with approval, not this path.
+  // filesystem marker; a launcher container always carries one. Host/VM
+  // execution instead needs prepare's approved declaration before the battery.
   if (isolation.observed.length === 0) {
     process.stderr.write(
-      `verify-pr boundary: only a declared marker (${isolation.signals.join(', ')}) — a self-chosen container= or SANDBOX= string is not an observed boundary; run inside a real container, or use mode:"vm" with the maintainer's approval\n`,
+      `verify-pr boundary: only a declared marker (${isolation.signals.join(', ')}) — a self-chosen container= or SANDBOX= string is not an observed boundary; run inside a real container. For host/VM execution keep the delivered head/round registration, choose --execution host|vm explicitly, and rerun prepare with its approved approval arguments BEFORE the battery; never hand-write the declaration\n`,
     );
     return 4;
   }
@@ -963,14 +2700,15 @@ function requireBoundary(artifactDir = null) {
   }
   if (artifactDir) {
     // A per-round nonce ties the declaration to execution inside THIS
-    // container (R16-1). It is written to a container-local path (the
-    // process home, NOT the shared artifact mount) so the round must read
-    // it from inside the container and echo it into its raw harness logs;
-    // step 7 refuses mode:"container" unless the logs carry it. The nonce
-    // also rides the gate record so the host check can read it after the
-    // container stops. Like the record itself, this corroborates an
-    // operator who ran the round in the container — it is not proof
-    // against a round that forges both.
+    // container (R16-1). The plaintext is written to a container-local path
+    // (the process home, NOT the shared artifact mount) so the round must
+    // read it from inside the container and echo it into its raw harness
+    // logs; the checker refuses mode:"container" unless a log line's sha256
+    // matches the record. Only the HASH rides the gate record: a host
+    // battery cannot recover the plaintext from the hash, so it cannot copy
+    // it out of the PR-writable record into a forged log line. Like the
+    // record itself, this corroborates an operator who ran the round in the
+    // container — it is not proof against a round that forges both.
     const nonce = randomBytes(16).toString('hex');
     const record = {
       gate: 'require-isolation',
@@ -981,13 +2719,35 @@ function requireBoundary(artifactDir = null) {
       // the checker requires one to back a container claim.
       observed: isolation.observed,
       credentialFree: true,
-      nonce,
+      nonceSha256: createHash('sha256').update(nonce).digest('hex'),
     };
+    // An unresolvable $HOME (no passwd entry for this UID with HOME unset, or
+    // HOME set but empty) cannot host the container-local plaintext:
+    // join('', …) would write it into the PR-writable CWD instead, and a
+    // homedir() throw would escape as exit 1. Refuse with exit 3 and
+    // invalidate any stale record before the pass line (R5-1).
+    if (typeof home !== 'string' || home === '') {
+      invalidateRecord();
+      return fail(
+        3,
+        'could not resolve a container-local $HOME (no passwd entry for this UID and HOME unset or empty): the nonce plaintext cannot be written outside the PR-writable mount, so the round cannot declare mode:"container"',
+      );
+    }
+    // The plaintext must exist somewhere the battery can read it, or the
+    // record's hash binds a nonce nobody can echo and the round is silently
+    // uncertifiable after the whole battery ran (R1-4). Fail the gate now,
+    // before the pass line, naming $HOME. This refusal is reached only inside
+    // the boundary (a host re-run exits 4 above), so invalidating the record
+    // here does not contradict a record minted inside one.
+    const noncePath = join(home, '.qwen-verify-nonce');
     try {
-      writeFileSync(join(homedir(), '.qwen-verify-nonce'), `${nonce}\n`);
-    } catch {
-      // Best-effort: the record still carries the nonce; a home that
-      // cannot be written does not fail the gate.
+      writeFileSync(noncePath, `${nonce}\n`);
+    } catch (error) {
+      invalidateRecord();
+      return fail(
+        3,
+        `could not write the container-local nonce to ${noncePath} ($HOME unwritable or absent): the round cannot declare mode:"container" without it: ${error.message}`,
+      );
     }
     const tmp = `${recordPath}.${process.pid}.tmp`;
     // A filesystem failure here is the documented exit-3 path, not an

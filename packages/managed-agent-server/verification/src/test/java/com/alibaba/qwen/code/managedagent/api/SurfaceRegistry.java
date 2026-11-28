@@ -372,6 +372,51 @@ public enum SurfaceRegistry {
             "/v1/agent-channels/{channelId}/deliveries/{deliveryId}",
             Surface.PUBLIC, RuleClass.TENANT_SCOPED,
             EnumSet.of(Capability.CHANNEL_DELIVERY_GET)),
+    // ManagedChannelAdapterController: the trusted adapter surface (H5b/H5c
+    // and the PR-watch bound-session slice), mounted on the isolated internal
+    // listener behind qwen.managed-agent.channels.enabled. The tenant header
+    // is the whole per-request admission; the deployment boundary authorizes
+    // the adapter, and the service validates the channel and its Workspace.
+    INTERNAL_CHANNEL_ADAPTER_REGISTER(Method.PUT,
+            "/internal/managed-channels/v1/channels/{channelId}",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.CHANNEL_ADAPTER_REGISTER)),
+    INTERNAL_CHANNEL_ADAPTER_DISCONNECT(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/disconnect",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.CHANNEL_ADAPTER_DISCONNECT)),
+    INTERNAL_CHANNEL_ADAPTER_INBOUND(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/inbound",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.CHANNEL_ADAPTER_INBOUND)),
+    INTERNAL_CHANNEL_ADAPTER_DELIVERY_CLAIM(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/deliveries:claim",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.CHANNEL_ADAPTER_DELIVERY_CLAIM)),
+    INTERNAL_CHANNEL_ADAPTER_DELIVERY_RECEIPT(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/deliveries/{deliveryId}:receipt",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.CHANNEL_ADAPTER_DELIVERY_RECEIPT)),
+    INTERNAL_CHANNEL_ADAPTER_DELIVERY_RESEND(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/deliveries/{deliveryId}:resend",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.CHANNEL_ADAPTER_DELIVERY_RESEND)),
+    INTERNAL_PR_WATCH_BINDING_CREATE(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/pr-watch:create",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.PR_WATCH_BINDING_CREATE)),
+    INTERNAL_PR_WATCH_BINDING_LIST(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/pr-watch:list",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.PR_WATCH_BINDING_LIST)),
+    INTERNAL_PR_WATCH_BINDING_RETIRE(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/pr-watch:retire",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.PR_WATCH_BINDING_RETIRE)),
+    INTERNAL_PR_WATCH_INJECT(Method.POST,
+            "/internal/managed-channels/v1/channels/{channelId}/pr-watch:inject",
+            Surface.INTERNAL, RuleClass.INTERNAL_CHANNEL_ADAPTER,
+            EnumSet.of(Capability.PR_WATCH_INJECT)),
     // AgentDefinitionController: tenant-scoped agent definition routes.
     PUBLIC_AGENT_DEFINITION_CREATE(Method.POST, "/v1/agents",
             Surface.PUBLIC, RuleClass.TENANT_SCOPED,
@@ -514,6 +559,10 @@ public enum SurfaceRegistry {
             "/api/agent/web-shell/v1/artifacts/query",
             Surface.WEBSHELL, RuleClass.READER_ACTOR,
             EnumSet.of(Capability.ARTIFACT_LIST)),
+    WEBSHELL_WORKSPACE_ARTIFACT_LIST(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/artifacts/query",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_ARTIFACT,
+            EnumSet.of(Capability.WORKSPACE_ARTIFACT_LIST)),
     WEBSHELL_WORKSPACE_LIST(Method.POST,
             "/api/agent/web-shell/v1/workspaces/query",
             Surface.WEBSHELL, RuleClass.WORKSPACE_DISCOVERY,
@@ -652,6 +701,11 @@ public enum SurfaceRegistry {
                     + "/recovery:block",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
             EnumSet.of(Capability.STORE_RECOVERY_BLOCK)),
+    INTERNAL_EVENT_INGEST(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}"
+                    + "/events:ingest",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_EVENT_INGEST)),
     INTERNAL_TRANSACTION_COMMIT(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
                     + "/transactions:commit",
@@ -907,6 +961,7 @@ public enum SurfaceRegistry {
         ARTIFACT_LIST,
         ARTIFACT_GET,
         ARTIFACT_CONTENT,
+        WORKSPACE_ARTIFACT_LIST,
         WORKSPACE_CREATE,
         WORKSPACE_DIRECTORIES,
         WORKSPACE_FILES_QUERY,
@@ -940,6 +995,16 @@ public enum SurfaceRegistry {
         CHANNEL_LIST,
         CHANNEL_DELIVERY_LIST,
         CHANNEL_DELIVERY_GET,
+        CHANNEL_ADAPTER_REGISTER,
+        CHANNEL_ADAPTER_DISCONNECT,
+        CHANNEL_ADAPTER_INBOUND,
+        CHANNEL_ADAPTER_DELIVERY_CLAIM,
+        CHANNEL_ADAPTER_DELIVERY_RECEIPT,
+        CHANNEL_ADAPTER_DELIVERY_RESEND,
+        PR_WATCH_BINDING_CREATE,
+        PR_WATCH_BINDING_LIST,
+        PR_WATCH_BINDING_RETIRE,
+        PR_WATCH_INJECT,
         AGENT_DEFINITION_CREATE,
         AGENT_DEFINITION_GET,
         AGENT_DEFINITION_UPDATE,
@@ -961,6 +1026,7 @@ public enum SurfaceRegistry {
         STORE_WRITER_RENEW,
         STORE_WRITER_SEAL,
         STORE_RECOVERY_BLOCK,
+        STORE_EVENT_INGEST,
         STORE_TRANSACTION_COMMIT,
         STORE_RESTORE,
         STORE_TOOL_RESULT_PUBLISH,
@@ -1071,6 +1137,16 @@ public enum SurfaceRegistry {
          * {@code 403 artifact_content_forbidden}.
          */
         READER_ACTOR_POLICY,
+        /**
+         * Workspace-wide artifact metadata: a trusted actor ({@code 401
+         * actor_required} without one) holding a READER grant on the
+         * Workspace ({@code 404 workspace_not_found} below it, including
+         * unknown Workspaces). The page filters each row by the Session's
+         * current binding and owner-only visibility, and the deployment
+         * artifact gate answers {@code 404 artifact_not_found} when reads
+         * are off. No legacy arm: unbound Sessions never list.
+         */
+        WORKSPACE_ARTIFACT,
         /**
          * The OPERATOR families. Turn submit, Turn cancel, rename and cwd
          * change admit a caller holding OPERATOR or above on the bound
@@ -1183,6 +1259,19 @@ public enum SurfaceRegistry {
          * answers a public-connector caller {@code 404}.
          */
         INTERNAL_WRITER,
+        /**
+         * The trusted channel adapter surface: no actor and no per-request
+         * credential. The tenant header is the whole request admission
+         * ({@code 400 invalid_tenant} without it, {@code 403
+         * actor_scope_mismatch} for a cross-tenant principal); the adapter
+         * deployment on the isolated internal listener behind {@code
+         * qwen.managed-agent.channels.enabled} is the trust boundary, and
+         * the channel itself is the first domain gate ({@code 404
+         * channel_not_found}). The PR-watch binding writes validate the
+         * target Session against the channel instance's Workspace inside
+         * the service; injection forces the bound Session as its target.
+         */
+        INTERNAL_CHANNEL_ADAPTER,
         INTERNAL_OPERATOR
     }
 }

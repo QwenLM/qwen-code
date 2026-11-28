@@ -1,5 +1,7 @@
 import type { DaemonWorkspaceGitStatus } from '@qwen-code/sdk/daemon';
 import {
+  useCallback,
+  useContext,
   useEffect,
   useRef,
   useState,
@@ -40,6 +42,7 @@ import {
   type WorkspaceSessionStats,
 } from './workspaceOverviewModel';
 import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
+import { SidebarHoverSuppressionContext } from './sidebar-hover-suppression';
 import sidebarStyles from './WebShellSidebar.module.css';
 
 function cx(...classes: Array<string | false | undefined>): string {
@@ -91,6 +94,17 @@ interface WorkspaceDetailsTooltipProps {
     onBranchChanged: () => void;
   };
   onOpenChange?: (open: boolean) => void;
+  /**
+   * Optional handler invoked when the user clicks a manageable overview row
+   * (MCP, skills, extensions, channels, context, hooks). Rows without a
+   * handler or excluded by `manageableItems` stay read-only.
+   */
+  onOpenOverviewItem?: (item: WorkspaceOverviewItem) => void;
+  /**
+   * Subset of overview facets that render as clickable management rows when
+   * `onOpenOverviewItem` is provided. Defaults to all items when omitted.
+   */
+  manageableItems?: ReadonlySet<WorkspaceOverviewItem>;
   children: ReactElement;
 }
 
@@ -175,15 +189,20 @@ export function WorkspaceDetailsTooltip({
   onOpenTerminalLocally,
   gitActions,
   onOpenChange,
+  onOpenOverviewItem,
+  manageableItems,
   children,
 }: WorkspaceDetailsTooltipProps) {
   const { t } = useI18n();
+  const hoverSuppressed = useContext(SidebarHoverSuppressionContext);
   const [open, setOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const openTimerRef = useRef<number | undefined>(undefined);
   const closeTimerRef = useRef<number | undefined>(undefined);
   const anchorRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const hoverSuppressedRef = useRef(hoverSuppressed);
+  hoverSuppressedRef.current = hoverSuppressed;
   // The picker's state is mirrored in a ref because Radix focuses the picker
   // as it opens: the focus/blur handlers that follow must already see it as
   // open, or they close the details out from under the picker.
@@ -241,42 +260,61 @@ export function WorkspaceDetailsTooltip({
     </>
   );
 
-  const cancelClose = () => window.clearTimeout(closeTimerRef.current);
+  const cancelClose = useCallback(
+    () => window.clearTimeout(closeTimerRef.current),
+    [],
+  );
   const openAfterDelay = () => {
     cancelClose();
-    if (open) return;
+    if (hoverSuppressedRef.current || open) return;
     window.clearTimeout(openTimerRef.current);
-    openTimerRef.current = window.setTimeout(() => setOpen(true), 300);
+    openTimerRef.current = window.setTimeout(() => {
+      if (!hoverSuppressedRef.current) setOpen(true);
+    }, 300);
   };
-  const close = () => {
-    window.clearTimeout(openTimerRef.current);
-    cancelClose();
-    // This popover is anchored, not triggered, so Radix has no triggerRef to
-    // restore to and suppresses its own fallback restore. Anything focused
-    // inside either layer — the row, or the picker's own field — is about to
-    // unmount with the content, so hand focus to the folder row rather than
-    // let it fall to <body>. Focus anywhere else (a pointer user's composer)
-    // is left alone.
-    const active = document.activeElement;
-    const focusInsideLayers =
-      active instanceof HTMLElement &&
-      (contentRef.current?.contains(active) === true ||
-        active.closest('[data-slot="popover-content"]') !== null);
-    pickerOpenRef.current = false;
-    rowHoverRef.current = false;
-    setPickerOpen(false);
-    setOpen(false);
-    if (focusInsideLayers) {
-      anchorRef.current?.querySelector<HTMLElement>('button')?.focus();
+  const close = useCallback(
+    (restoreFocus = true) => {
+      window.clearTimeout(openTimerRef.current);
+      cancelClose();
+      // This popover is anchored, not triggered, so Radix has no triggerRef to
+      // restore to and suppresses its own fallback restore. Anything focused
+      // inside either layer — the row, or the picker's own field — is about to
+      // unmount with the content, so hand focus to the folder row rather than
+      // let it fall to <body>. Focus anywhere else (a pointer user's composer)
+      // is left alone, and facet navigation to a management panel skips restore.
+      const active = document.activeElement;
+      const focusInsideLayers =
+        active instanceof HTMLElement &&
+        (contentRef.current?.contains(active) === true ||
+          active.closest('[data-slot="popover-content"]') !== null);
+      pickerOpenRef.current = false;
+      rowHoverRef.current = false;
+      setPickerOpen(false);
+      setOpen(false);
+      if (focusInsideLayers && restoreFocus) {
+        anchorRef.current?.querySelector<HTMLElement>('button')?.focus();
+      }
+    },
+    [cancelClose],
+  );
+
+  useEffect(() => {
+    if (hoverSuppressed) {
+      window.clearTimeout(openTimerRef.current);
+      cancelClose();
     }
-  };
+    if (!hoverSuppressed || !open || pickerOpenRef.current) return;
+    close(false);
+  }, [cancelClose, close, hoverSuppressed, open]);
   const closeAfterDelay = () => {
     window.clearTimeout(openTimerRef.current);
     cancelClose();
     // Pinned: the branch picker is a separate layer the pointer reaches by
     // crossing out of this popover, so leaving must not tear it down.
     if (pickerOpenRef.current) return;
-    closeTimerRef.current = window.setTimeout(close, 100);
+    closeTimerRef.current = window.setTimeout(() => {
+      if (!pickerOpenRef.current) close(!hoverSuppressedRef.current);
+    }, 100);
   };
   // Closing the picker collapses the details, with one exception: the pointer
   // is still on the row that opened it. The collapse is not deferred — Radix
@@ -287,7 +325,7 @@ export function WorkspaceDetailsTooltip({
     pickerOpenRef.current = nextOpen;
     setPickerOpen(nextOpen);
     if (nextOpen) cancelClose();
-    else if (!rowHoverRef.current) close();
+    else if (!rowHoverRef.current) close(!hoverSuppressed);
   };
   // The picker unmounts with `branch` or `gitActions` going away, which Radix
   // reports to no one: a controlled `open` has no unmount callback. The row
@@ -329,7 +367,9 @@ export function WorkspaceDetailsTooltip({
   return (
     <Popover
       open={open}
-      onOpenChange={(nextOpen) => (nextOpen ? setOpen(true) : close())}
+      onOpenChange={(nextOpen) =>
+        nextOpen ? !hoverSuppressed && setOpen(true) : close(!hoverSuppressed)
+      }
     >
       <PopoverAnchor
         ref={anchorRef}
@@ -356,7 +396,7 @@ export function WorkspaceDetailsTooltip({
             closeAfterDelay();
           }
         }}
-        onPointerDownCapture={close}
+        onPointerDownCapture={() => close()}
         onClick={() => close()}
       >
         {children}
@@ -531,6 +571,45 @@ export function WorkspaceDetailsTooltip({
             const facetLabel = t(`sidebar.overview.${item}`);
             const detail = overviewDetail(t, overview, item);
             const title = `${facetLabel}: ${detail}`;
+            const interactive =
+              Boolean(onOpenOverviewItem) &&
+              (!manageableItems || manageableItems.has(item));
+            const rowContent = (
+              <>
+                <Icon size={14} aria-hidden="true" />
+                <span>{facetLabel}</span>
+                <span className={sidebarStyles.sessionDetailsRowValue}>
+                  {value}
+                </span>
+                {interactive && <ChevronRightIcon aria-hidden="true" />}
+              </>
+            );
+            if (interactive) {
+              return (
+                <button
+                  key={item}
+                  type="button"
+                  className={cx(
+                    sidebarStyles.sessionDetailsRow,
+                    sidebarStyles.sessionDetailsRowButton,
+                    issue && sidebarStyles.sessionDetailsRowIssue,
+                  )}
+                  title={title}
+                  aria-label={t('sidebar.overview.openFacet', {
+                    facet: facetLabel,
+                    workspace: label,
+                    detail,
+                  })}
+                  data-web-shell-workspace-overview={item}
+                  onClick={() => {
+                    close(false);
+                    onOpenOverviewItem?.(item);
+                  }}
+                >
+                  {rowContent}
+                </button>
+              );
+            }
             return (
               <div
                 key={item}
@@ -542,11 +621,7 @@ export function WorkspaceDetailsTooltip({
                 aria-label={title}
                 data-web-shell-workspace-overview={item}
               >
-                <Icon size={14} aria-hidden="true" />
-                <span>{facetLabel}</span>
-                <span className={sidebarStyles.sessionDetailsRowValue}>
-                  {value}
-                </span>
+                {rowContent}
               </div>
             );
           })}
