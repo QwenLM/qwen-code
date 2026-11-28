@@ -11,6 +11,7 @@ import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { DAEMON_APPROVAL_MODES } from '../test/sidebarHarness';
 import { DAEMON_COMPOSER_INTEGRATIONS } from './composer/daemon-composer-integrations';
+import { DaemonTranscriptViewport } from './DaemonTranscriptViewport';
 import {
   DaemonHttpError,
   GOAL_PAUSE_REASON_COMMAND,
@@ -249,11 +250,13 @@ vi.mock('../monitorDetailsContext', async () => {
   };
 });
 
+let latestTranscriptViewportProps: Record<string, any> = {};
 vi.mock('./TranscriptViewport', () => ({
   TranscriptViewport: forwardRef(function MockTranscriptViewport(
     props: any,
     ref: any,
   ) {
+    latestTranscriptViewportProps = props;
     useImperativeHandle(ref, () => ({
       scrollToBottom: transcriptScrollToBottom,
     }));
@@ -2166,6 +2169,9 @@ describe('ChatPane', () => {
     });
     expect(latestChatEditorProps.composerIntegrations).toBe(
       DAEMON_COMPOSER_INTEGRATIONS,
+    );
+    expect(latestTranscriptViewportProps.sessionViewportComponent).toBe(
+      DaemonTranscriptViewport,
     );
   });
 

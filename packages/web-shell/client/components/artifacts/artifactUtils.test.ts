@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  isSessionLevelNotFound,
+  type DaemonSessionArtifact,
+} from '@qwen-code/sdk/daemon';
 import {
   artifactDisplayName,
   artifactKindLabel,
@@ -12,12 +16,15 @@ import {
   getArtifactImageMimeType,
   getArtifactTypeLabel,
   getReviewDownloadMimeType,
+  isArtifactSnapshotUnavailableError,
   isDownloadOnlyWorkspaceArtifact,
   isOfficeDocumentPath,
   isExcelFile,
   isDocxFile,
   isPdfArtifact,
+  isSessionNotFoundArtifactError,
   normalizePath,
+  readDaemonHttpErrorInfo,
   readWorkspaceFileAsBlob,
 } from './artifactUtils';
 
@@ -749,5 +756,104 @@ describe('artifactUtils', () => {
     expect(output).not.toMatch(/http-equiv=["']?refresh/i);
     expect(output).not.toMatch(/<noscript\b/i);
     expect(output).toContain('<p>Hello</p>');
+  });
+
+  it('matches DaemonHttpError and isSessionLevelNotFound semantics without importing daemon runtime classes', () => {
+    const plainWithStatus = Object.assign(new Error('not daemon'), {
+      status: 404,
+      body: { code: 'session_not_found' },
+    });
+    const cases: Array<{ label: string; error: unknown; expected: boolean }> = [
+      {
+        label: 'session-level 404',
+        error: new DaemonHttpError(404, { code: 'session_not_found' }, 'gone'),
+        expected: true,
+      },
+      {
+        label: 'session-level 404 with null toolCallId',
+        error: new DaemonHttpError(
+          404,
+          { code: 'session_not_found', toolCallId: null },
+          'gone',
+        ),
+        expected: true,
+      },
+      {
+        label: 'subagent 404 with string toolCallId',
+        error: new DaemonHttpError(
+          404,
+          { code: 'session_not_found', toolCallId: 'call-1' },
+          'subagent gone',
+        ),
+        expected: false,
+      },
+      {
+        label: 'non-404 status',
+        error: new DaemonHttpError(500, { code: 'session_not_found' }, 'boom'),
+        expected: false,
+      },
+      {
+        label: 'different 404 code',
+        error: new DaemonHttpError(
+          404,
+          { code: 'artifact_snapshot_unavailable' },
+          'missing',
+        ),
+        expected: false,
+      },
+      {
+        label: 'plain Error with status 404',
+        error: plainWithStatus,
+        expected: false,
+      },
+      {
+        label: 'non-Error string',
+        error: 'session_not_found',
+        expected: false,
+      },
+    ];
+
+    for (const entry of cases) {
+      expect({
+        label: entry.label,
+        result: isSessionNotFoundArtifactError(entry.error),
+      }).toEqual({ label: entry.label, result: entry.expected });
+      expect({
+        label: entry.label,
+        result: isSessionNotFoundArtifactError(entry.error),
+      }).toEqual({
+        label: entry.label,
+        result: isSessionLevelNotFound(entry.error),
+      });
+    }
+
+    expect(
+      readDaemonHttpErrorInfo(
+        new DaemonHttpError(
+          404,
+          {
+            code: 'artifact_snapshot_unavailable',
+            message: 'snapshot evicted',
+          },
+          'fallback',
+        ),
+      ),
+    ).toEqual({
+      status: 404,
+      code: 'artifact_snapshot_unavailable',
+      message: 'snapshot evicted',
+    });
+    expect(
+      isArtifactSnapshotUnavailableError(
+        new DaemonHttpError(
+          404,
+          { code: 'artifact_snapshot_unavailable' },
+          'missing',
+        ),
+      ),
+    ).toBe(true);
+    expect(readDaemonHttpErrorInfo(plainWithStatus)).toEqual({
+      message: 'not daemon',
+    });
   });
 });

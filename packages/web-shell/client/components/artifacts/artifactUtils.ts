@@ -1,8 +1,6 @@
-import {
-  DaemonHttpError,
-  isSessionLevelNotFound,
-  type DaemonSessionArtifact,
-  type DaemonWorkspaceFileBytes,
+import type {
+  DaemonSessionArtifact,
+  DaemonWorkspaceFileBytes,
 } from '@qwen-code/sdk/daemon';
 import type { DaemonWorkspaceActions } from '@qwen-code/web-shell/daemon-react-sdk';
 import { escapeAttribute } from '../preview/web-preview.js';
@@ -644,8 +642,18 @@ export interface DaemonHttpErrorInfo {
   message: string;
 }
 
+function isDaemonHttpErrorLike(
+  error: unknown,
+): error is Error & { status: number; body: unknown } {
+  return (
+    error instanceof Error &&
+    error.name === 'DaemonHttpError' &&
+    typeof (error as { status?: unknown }).status === 'number'
+  );
+}
+
 export function readDaemonHttpErrorInfo(error: unknown): DaemonHttpErrorInfo {
-  if (error instanceof DaemonHttpError) {
+  if (isDaemonHttpErrorLike(error)) {
     const body =
       typeof error.body === 'object' &&
       error.body !== null &&
@@ -676,7 +684,18 @@ export function readDaemonHttpErrorInfo(error: unknown): DaemonHttpErrorInfo {
 }
 
 export function isSessionNotFoundArtifactError(error: unknown): boolean {
-  return isSessionLevelNotFound(error);
+  if (!isDaemonHttpErrorLike(error) || error.status !== 404) {
+    return false;
+  }
+  const body =
+    typeof error.body === 'object' &&
+    error.body !== null &&
+    !Array.isArray(error.body)
+      ? (error.body as Record<string, unknown>)
+      : undefined;
+  if (body?.['code'] !== 'session_not_found') return false;
+  const toolCallId = body['toolCallId'];
+  return toolCallId === undefined || toolCallId === null;
 }
 
 export function isArtifactSnapshotUnavailableError(error: unknown): boolean {

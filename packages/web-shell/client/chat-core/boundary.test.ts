@@ -700,36 +700,7 @@ function collectManagedHostGraph(
   };
 }
 
-/**
- * Remaining transitive daemon value-import edges (`file => module`) reachable
- * from `client/managed-host.tsx` (burned down from 47 to 31 in Slice 6a and
- * from 31 to 16 in Slice 6b).
- *
- * Slice 6c (`TranscriptViewport` / `TurnOutputs` / `ToolApproval` /
- * `SystemMessage` decoupling + `dist-managed-host/index.js` CI grep gate) will
- * empty this list. Never add entries; remove entries as each slice lands.
- */
-const REMAINING_MANAGED_HOST_DAEMON_EDGES: readonly string[] = [
-  // Slice 6c: TranscriptViewport / TurnOutputs / ToolApproval / SystemMessage (16 edges)
-  'adapters/transcriptToMessages.ts => @qwen-code/sdk/daemon',
-  'browser-turn-notifications.tsx => ./daemon/session/turn-notification-context',
-  'components/TranscriptViewport.tsx => ../daemon/session/DaemonSessionProvider',
-  'components/artifacts/artifactUtils.ts => @qwen-code/sdk/daemon',
-  'components/artifacts/useArtifactWorkspaceTarget.ts => @qwen-code/web-shell/daemon-react-sdk',
-  'components/messages/GoalStatusMessage.tsx => @qwen-code/sdk/daemon',
-  'components/messages/HookStatistics.tsx => @qwen-code/sdk/daemon',
-  'components/messages/McpStatusMessage.tsx => @qwen-code/web-shell/daemon-react-sdk',
-  'components/messages/SystemMessage.tsx => @qwen-code/sdk/daemon',
-  'components/messages/TasksStatusMessage.tsx => ../../daemon/availability-context.js',
-  'components/messages/TasksStatusMessage.tsx => ../../daemon/availability.js',
-  'components/messages/TasksStatusMessage.tsx => @qwen-code/web-shell/daemon-react-sdk',
-  'components/messages/ToolFilePreviewButton.tsx => @qwen-code/web-shell/daemon-react-sdk',
-  'hooks/useMessageDeletion.ts => @qwen-code/sdk/daemon',
-  'hooks/useMessageDeletion.ts => @qwen-code/web-shell/daemon-react-sdk',
-  'hooks/useTranscriptViewport.ts => ../daemon/session/DaemonSessionProvider',
-].sort();
-
-describe('chat-core and managed-host boundary guards (slice 6a/6b)', () => {
+describe('chat-core and managed-host boundary guards', () => {
   it('enforces zero daemon imports (value or type, static or dynamic) recursively across chat-core/**', () => {
     const { files, violations } = findChatCoreDaemonViolations(CHAT_CORE_DIR);
     expect(files.length).toBeGreaterThan(0);
@@ -741,11 +712,11 @@ describe('chat-core and managed-host boundary guards (slice 6a/6b)', () => {
     expect(findChatCoreControllerKindViolations(CHAT_CORE_DIR)).toEqual([]);
   });
 
-  it('holds managed-host.tsx transitive daemon value-import edges to the exact ratchet allowlist with zero unresolved imports', () => {
+  it('enforces zero transitive daemon value-import edges and zero unresolved imports from managed-host.tsx', () => {
     const { daemonEdges, unresolvedSpecifiers } =
       collectManagedHostGraph(MANAGED_HOST_ENTRY);
     expect(unresolvedSpecifiers).toEqual([]);
-    expect(daemonEdges).toEqual(REMAINING_MANAGED_HOST_DAEMON_EDGES);
+    expect(daemonEdges).toEqual([]);
   });
 
   it('catches nested chat-core daemon imports, @qwen-code/sdk root, inline import() types, and computed dynamic imports', () => {

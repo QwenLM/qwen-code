@@ -202,6 +202,21 @@ describe('managed host build lane', () => {
       `grep -rqF 'data-web-shell-portal-root":' 'packages/web-shell/dist-managed-host'`,
     );
     expect(verify.run).not.toContain("grep -q 'data-managed-empty'");
+    for (const marker of [
+      'DaemonSessionProvider',
+      'DaemonWorkspaceProvider',
+      'useDaemonWorkspace must be used within',
+      'The daemon is unavailable. Automatic refresh is paused.',
+      '__qwenWebShellDaemonWorkspaceProviderCopies',
+      'DaemonUnavailableError',
+      'web-shell:mcp-status:v1:',
+      'web-shell:tasks-status:v1:',
+    ]) {
+      expect(verify.run).toContain(`'${marker}'`);
+    }
+    expect(verify.run).toContain(
+      `if grep -rqF "$marker" 'packages/web-shell/dist-managed-host'; then`,
+    );
   });
 
   it('keeps the output outside the directory the app build empties', () => {

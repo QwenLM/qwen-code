@@ -119,6 +119,7 @@ import type { ManagedAgentProvider } from './components/managed/managed-agent-pr
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
 import type { ComposerIntegrations } from './components/composer/composer-integrations';
 import { DAEMON_COMPOSER_INTEGRATIONS } from './components/composer/daemon-composer-integrations';
+import { DaemonTranscriptViewport } from './components/DaemonTranscriptViewport';
 
 vi.mock('./components/managed/ManagedSessionsPage', async () => {
   const React = await import('react');
@@ -1037,6 +1038,7 @@ const {
         | WebShellAssistantFeedbackOptions
         | undefined,
       latestMessageListProps: null as {
+        sessionViewportComponent?: unknown;
         onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
         turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
         messages?: Array<{
@@ -16819,6 +16821,9 @@ describe('App live transcript boundary', () => {
       { id: 'assistant', role: 'assistant', content: 'ab' },
     ]);
     expect(testState.latestMessageListProps?.transcriptBlockCount).toBe(2);
+    expect(testState.latestMessageListProps?.sessionViewportComponent).toBe(
+      DaemonTranscriptViewport,
+    );
     expect(testState.snapshotCallOptions).toContainEqual({
       structuralOnly: true,
     });
@@ -20859,6 +20864,9 @@ describe('App session callbacks', () => {
     });
     expect(testState.latestChatEditorProps?.composerIntegrations).toBe(
       DAEMON_COMPOSER_INTEGRATIONS,
+    );
+    expect(testState.latestMessageListProps?.sessionViewportComponent).toBe(
+      DaemonTranscriptViewport,
     );
   });
 
