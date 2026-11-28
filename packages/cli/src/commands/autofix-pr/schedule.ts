@@ -157,12 +157,23 @@ export function runSchedule(
     // A watch `cleanup` ended is started again by a start, not here.
     assertWatching(state);
     assertNoFixInFlight(paths, args.pr);
-    // Running someone else's code with the user's credentials in reach is
-    // confirmed for one round at a time (`--once`), never for a watch; a
-    // state that does not say the author can push is no permission either.
-    if (state.authorCanPush !== true) {
+    // One-shot --in-place starts never consented to scheduled rounds; require
+    // `prepare --in-place --watch` (or an already-scheduled in-place watch).
+    if (state.inPlace && state.inPlaceWatch !== true && !state.watch) {
       throw new Error(
-        `PR #${args.pr}'s author cannot push to the repository; only --once is available for it.`,
+        `PR #${args.pr} is a one-shot in-place watch; start a scheduled watch with \`/autofix-pr ${args.pr} --in-place --watch\`.`,
+      );
+    }
+    // Running someone else's code with the user's credentials in reach is
+    // confirmed for one round at a time (`--once` / one-shot `--in-place`),
+    // never for a watch; a state that does not say the author can push is no
+    // permission either.
+    if (state.authorCanPush !== true) {
+      const hint = state.inPlace
+        ? 'only --once (or a one-shot --in-place, without --watch or --every)'
+        : 'only --once';
+      throw new Error(
+        `PR #${args.pr}'s author cannot push to the repository; ${hint} is available for it.`,
       );
     }
     let options: Omit<AutofixPrWatchOptions, 'task'>;
