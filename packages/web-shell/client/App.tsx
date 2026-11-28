@@ -16432,6 +16432,14 @@ export function App({
     workspaceSettings.find(
       (setting) => setting.key === 'worktree.defaultForNewSessions',
     )?.values.effective === true;
+  const effectiveWorktreeRootRaw = workspaceSettings.find(
+    (setting) => setting.key === 'worktree.root',
+  )?.values.effective;
+  const effectiveWorktreeRoot =
+    typeof effectiveWorktreeRootRaw === 'string' &&
+    effectiveWorktreeRootRaw.trim().length > 0
+      ? effectiveWorktreeRootRaw.trim()
+      : undefined;
   const handleGitModeIntentChange = useCallback((intent: SessionGitIntent) => {
     gitModeIntentTouchedRef.current = true;
     gitModeIntentRef.current = intent;
@@ -29368,6 +29376,9 @@ export function App({
                             : undefined,
                           onGitModeIntentChange: gitModeEligible
                             ? handleGitModeIntentChange
+                            : undefined,
+                          gitWorktreeRoot: gitModeEligible
+                            ? effectiveWorktreeRoot
                             : undefined,
                           gitStatus: workspaceContextActive
                             ? selectedWorkspaceGitStatus

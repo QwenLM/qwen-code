@@ -166,7 +166,9 @@ export function useResumeCommand(
       try {
         oldWorkflowMode = await config.captureWorkflowModeState?.();
         const cwd = config.getTargetDir();
-        const sessionService = new SessionService(cwd);
+        const sessionService = new SessionService(cwd, {
+          worktreeRoot: config.getWorktreeRoot?.(),
+        });
         sessionService.assertLegacySessionExecution(sessionId);
         const sessionData = await sessionService.loadSession(sessionId);
 
@@ -297,6 +299,7 @@ export function useResumeCommand(
             try {
               prevSessionData = await new SessionService(
                 config.getTargetDir(),
+                { worktreeRoot: config.getWorktreeRoot?.() },
               ).loadSession(oldSessionId);
             } catch {
               // Best-effort — see above.

@@ -58,6 +58,7 @@ const SETTING_KEYS = {
   'setting:max-sessions': 'serve.maxSessions',
   'setting:model-proposed-goals': 'goals.modelProposed',
   'setting:arena-artifacts': 'agents.arena.preserveArtifacts',
+  'setting:worktree-root': 'worktree.root',
   'setting:worktree-retention': 'worktree.maxRetained',
   'setting:session-workflow': 'experimental.sessionWorkflow',
   'setting:generated-ui': 'experimental.generatedUi',

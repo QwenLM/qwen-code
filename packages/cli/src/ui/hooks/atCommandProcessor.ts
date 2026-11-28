@@ -997,9 +997,9 @@ export async function resolveAtCommandQuery({
     if (!sessionId && ref.title) {
       let matches: Array<{ sessionId: string }> = [];
       try {
-        matches = await new SessionService(
-          config.getProjectRoot(),
-        ).findSessionsByTitle(ref.title);
+        matches = await new SessionService(config.getProjectRoot(), {
+          worktreeRoot: config.getWorktreeRoot?.(),
+        }).findSessionsByTitle(ref.title);
       } catch (error: unknown) {
         const reason = `Could not look up sessions matching "@${originalAtPath.substring(1)}" (${getErrorMessage(error)}); try a session id instead.`;
         onDebugMessage(reason);
@@ -1074,9 +1074,9 @@ export async function resolveAtCommandQuery({
 
     let resolved;
     try {
-      resolved = await new SessionReferenceService(
-        config.getProjectRoot(),
-      ).resolve(sessionId, ref.title ? { title: ref.title } : {});
+      resolved = await new SessionReferenceService(config.getProjectRoot(), {
+        worktreeRoot: config.getWorktreeRoot?.(),
+      }).resolve(sessionId, ref.title ? { title: ref.title } : {});
     } catch (error: unknown) {
       const reason = `Failed to load session "${sessionId}" (${getErrorMessage(error)}); the transcript may be corrupted or unreadable.`;
       onDebugMessage(reason);

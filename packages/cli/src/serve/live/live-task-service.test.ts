@@ -284,15 +284,27 @@ function makeHarness() {
     workspaceCwd: '/conversations',
     sessionRuntimeBaseDir: '/runtime/conversations',
     provenance: 'live-conversation',
+    trusted: true,
+    env: {
+      mode: 'parent-process',
+      overlayKeys: [],
+      effectiveEnv: process.env,
+    },
     bridge,
-  } as WorkspaceRuntime;
+  } as unknown as WorkspaceRuntime;
   const projectBridge = { ...bridge } as AcpSessionBridge;
   const projectRuntime = {
     workspaceId: 'project-1',
     workspaceCwd: '/project',
     sessionRuntimeBaseDir: '/runtime/project',
+    trusted: true,
+    env: {
+      mode: 'parent-process',
+      overlayKeys: [],
+      effectiveEnv: process.env,
+    },
     bridge: projectBridge,
-  } as WorkspaceRuntime;
+  } as unknown as WorkspaceRuntime;
   const registry = {
     list: () => [projectRuntime],
     listAll: () => [runtime, projectRuntime],
@@ -574,14 +586,19 @@ describe('LiveTaskService', () => {
       expect.objectContaining({
         conversationKind: 'standalone-top-level',
       }),
-      { runtimeBaseDir: '/runtime/conversations' },
+      {
+        runtimeBaseDir: '/runtime/conversations',
+      },
     );
     expect(listWorkspaceSessionsForResponse).toHaveBeenNthCalledWith(
       2,
       harness.projectBridge,
       '/project',
       expect.objectContaining({ view: 'organized', group: 'all' }),
-      { runtimeBaseDir: '/runtime/project' },
+      {
+        runtimeBaseDir: '/runtime/project',
+        worktreeRoot: '.qwen/worktrees',
+      },
     );
     expect(listWorkspaceSessionsForResponse.mock.calls[1]?.[0]).toBe(
       harness.projectBridge,
@@ -607,7 +624,11 @@ describe('LiveTaskService', () => {
       harness.projectBridge,
       '/project',
       expect.objectContaining({ view: 'organized', group: 'all' }),
-      { runtimeBaseDir: '/runtime/project', allowSidecarWrite: false },
+      {
+        runtimeBaseDir: '/runtime/project',
+        allowSidecarWrite: false,
+        worktreeRoot: '.qwen/worktrees',
+      },
     );
   });
 

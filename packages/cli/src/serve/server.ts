@@ -166,6 +166,11 @@ import {
 } from './routes/workspace-trust.js';
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
+import {
+  resolveRuntimeWorktreeRootSetting,
+  resolveWorkspaceWorktreeRootSetting,
+  tryReadRuntimeWorktreeRoot,
+} from './server/worktree-root.js';
 import { registerSessionCatalogRoutes } from './routes/session-catalog.js';
 import { registerSessionPrBackfillRoutes } from './routes/session-pr-backfill.js';
 import { registerSessionPrBindingsRoutes } from './routes/session-pr-bindings.js';
@@ -1524,6 +1529,17 @@ export function createServeApp(
       executionEngines: createPairedExecutionEngines({
         legacy: channelFactory ?? defaultSpawnChannelFactory,
         runtimeBaseDir: Storage.getRuntimeBaseDir(),
+        getWorktreeRoot: () => {
+          const primaryRuntime =
+            primaryTrustRegistry?.primaryEntry.current?.runtime;
+          if (primaryRuntime) {
+            return resolveRuntimeWorktreeRootSetting(primaryRuntime);
+          }
+          return resolveWorkspaceWorktreeRootSetting(boundWorkspace, {
+            environment: daemonEnv,
+            workspaceTrusted: isPrimaryWorkspaceTrusted(),
+          });
+        },
         managed: deps.managedExecutionEngine,
       }),
     };
@@ -1549,6 +1565,18 @@ export function createServeApp(
           );
         },
         artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+        resolveWorktreeRoot: () => {
+          const primaryRuntime =
+            primaryTrustRegistry?.primaryEntry.current?.runtime;
+          if (primaryRuntime) {
+            return tryReadRuntimeWorktreeRoot(primaryRuntime)?.normalized;
+          }
+          const raw = resolveWorkspaceWorktreeRootSetting(boundWorkspace, {
+            environment: daemonEnv,
+            workspaceTrusted: isPrimaryWorkspaceTrusted(),
+          });
+          return raw.startsWith('\0') ? undefined : raw;
+        },
         sessionAttachmentsRoot: attachmentsRoots.root,
         sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
         maxSessions: opts.maxSessions,
@@ -4266,6 +4294,7 @@ export function createServeApp(
           restoreSession: (request) =>
             restoreScheduledSession(runtime, request),
           boundWorkspace: runtime.workspaceCwd,
+          getWorktreeRoot: () => resolveRuntimeWorktreeRootSetting(runtime),
           loadTimeoutMs: scheduledTaskRestoreTimeoutMs,
           onTasksRead: (tasks) =>
             registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
@@ -4333,6 +4362,7 @@ export function createServeApp(
         intervalMs: keepaliveIntervalMs,
         reviveTimeoutMs: scheduledTaskRestoreTimeoutMs,
         runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+        getWorktreeRoot: () => resolveRuntimeWorktreeRootSetting(runtime),
         cleanupSession: (sessionId) => cleanupSession(runtime, sessionId),
         onTasksRead: (tasks) =>
           registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),

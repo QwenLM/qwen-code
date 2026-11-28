@@ -7,12 +7,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const mockListSessions = vi.fn();
+const mockSessionServiceCtor = vi.fn();
 
 vi.mock('@qwen-code/qwen-code-core', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
     ...actual,
     SessionService: class {
+      constructor(...args: unknown[]) {
+        mockSessionServiceCtor(...args);
+      }
       listSessions = mockListSessions;
     },
   };
@@ -25,6 +29,7 @@ import {
 
 beforeEach(() => {
   mockListSessions.mockReset();
+  mockSessionServiceCtor.mockReset();
   __resetSessionSuggestionCacheForTest();
 });
 
@@ -179,5 +184,37 @@ describe('getSessionSuggestions', () => {
     await getSessionSuggestions('/proj-a', '', 1000);
     await getSessionSuggestions('/proj-b', '', 1000);
     expect(mockListSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it('forwards configured worktreeRoot to SessionService and separates cache entries (R2-3)', async () => {
+    mockListSessions.mockResolvedValue({
+      items: [
+        {
+          sessionId: 'wt-session-1',
+          customTitle: 'Custom WT Session',
+          prompt: 'hello',
+          mtime: 10,
+        },
+      ],
+      hasMore: false,
+    });
+    const res = await getSessionSuggestions(
+      '/proj',
+      'Custom',
+      1000,
+      '.worktrees',
+    );
+    expect(res).toHaveLength(1);
+    expect(res[0]?.value).toBe('session:wt-session-1');
+    expect(mockSessionServiceCtor).toHaveBeenCalledWith('/proj', {
+      worktreeRoot: '.worktrees',
+    });
+
+    // Different worktreeRoot on the same cwd re-lists rather than returning a stale cache entry.
+    await getSessionSuggestions('/proj', 'Custom', 1100, '.other-wt');
+    expect(mockListSessions).toHaveBeenCalledTimes(2);
+    expect(mockSessionServiceCtor).toHaveBeenLastCalledWith('/proj', {
+      worktreeRoot: '.other-wt',
+    });
   });
 });

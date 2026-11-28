@@ -5,7 +5,10 @@
  */
 
 import type { Content, Part } from '@google/genai';
-import { SessionService } from './sessionService.js';
+import {
+  SessionService,
+  type SessionServiceOptions,
+} from './sessionService.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import { estimateContentTokens } from './tokenEstimation.js';
 import { projectUserTranscriptForDisplay } from '../utils/transcript-records.js';
@@ -55,8 +58,11 @@ interface CustomTitlePayload {
 export class SessionReferenceService {
   private readonly sessionService: SessionService;
 
-  constructor(cwd: string) {
-    this.sessionService = new SessionService(cwd);
+  constructor(cwd: string, options?: SessionServiceOptions) {
+    this.sessionService =
+      options !== undefined
+        ? new SessionService(cwd, options)
+        : new SessionService(cwd);
   }
 
   // Indirection kept as an instance method so tests can stub it.

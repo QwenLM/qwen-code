@@ -299,6 +299,7 @@ export async function moveWorktreeSnapshotsWithSession(
   sessionId: string,
   destination: SessionArchiveState,
   isSessionLive?: (sessionId: string) => boolean,
+  worktreeRoot?: string,
 ): Promise<void> {
   const destinationSidecar = service.getWorktreeSessionPathForArchiveState(
     sessionId,
@@ -310,18 +311,27 @@ export async function moveWorktreeSnapshotsWithSession(
   // either side of the same archive, then let the normal move protocol proceed.
   if (record.state !== 'valid') return;
   if (record.session.worktreeRemoved === undefined) {
-    await reconcileUnrecordedRemovedWorktree(
-      service,
-      sessionId,
-      destinationSidecar,
-      canonicalPathForTesting(record.session.worktreePath),
-      canonicalPathForTesting(
-        new GitWorktreeService(
-          record.session.originalCwd,
-        ).getUserWorktreesDir(),
-      ),
-      isSessionLive,
-    );
+    let expectedManagedRoot: string | undefined;
+    try {
+      expectedManagedRoot = canonicalPathForTesting(
+        new GitWorktreeService(record.session.originalCwd, {
+          worktreeRoot,
+        }).getUserWorktreesDir(),
+      );
+    } catch {
+      expectedManagedRoot = undefined;
+    }
+    if (expectedManagedRoot !== undefined) {
+      await reconcileUnrecordedRemovedWorktree(
+        service,
+        sessionId,
+        destinationSidecar,
+        canonicalPathForTesting(record.session.worktreePath),
+        expectedManagedRoot,
+        isSessionLive,
+        worktreeRoot,
+      );
+    }
     record = await readWorktreeSessionStrict(destinationSidecar);
     if (record.state !== 'valid') return;
   }

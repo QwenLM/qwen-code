@@ -291,3 +291,92 @@ describe('ExitWorktreeTool metadata and validation', () => {
     ).not.toBeNull();
   });
 });
+
+describe('EnterWorktreeTool and ExitWorktreeTool custom worktree.root (R1-1/R1-9/R1-16)', () => {
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'Test',
+    GIT_AUTHOR_EMAIL: 'test@example.com',
+    GIT_COMMITTER_NAME: 'Test',
+    GIT_COMMITTER_EMAIL: 'test@example.com',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+
+  async function initGitRepo(repoDir: string) {
+    await fs.mkdir(repoDir, { recursive: true });
+    execFileSync('git', ['init', '-q', '-b', 'main'], {
+      cwd: repoDir,
+      env: gitEnv,
+    });
+    await fs.writeFile(path.join(repoDir, 'README.md'), 'init\n');
+    execFileSync('git', ['add', 'README.md'], { cwd: repoDir, env: gitEnv });
+    execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+      cwd: repoDir,
+      env: gitEnv,
+    });
+  }
+
+  function makeRootConfig(targetDir: string, worktreeRoot?: string): Config {
+    return {
+      getTargetDir: vi.fn(() => targetDir),
+      getWorktreeSymlinkDirectories: () => [],
+      getWorktreeRoot: () => worktreeRoot,
+      getSessionId: () => 'session-custom-root',
+      getSessionService: () => ({
+        getWorktreeSessionPath: () => path.join(targetDir, '.no-sidecar.json'),
+      }),
+    } as unknown as Config;
+  }
+
+  it('creates and removes under custom worktree.root, allows repo under matching parent dir, and blocks cross-root nesting', async () => {
+    await withTmpDir('qwen-enter-custom-', async (base) => {
+      const realBase = await fs.realpath(base);
+      // Repo sits under `<base>/tmp/my-repo` while worktree.root is `tmp` (R1-1).
+      const repoDir = path.join(realBase, 'tmp', 'my-repo');
+      await initGitRepo(repoDir);
+
+      // Invalid worktree.root fails cleanly without creating anything.
+      const invalidRes = await new EnterWorktreeTool(
+        makeRootConfig(repoDir, '../escape'),
+      )
+        .build({ name: 'bad-root' })
+        .execute(new AbortController().signal);
+      expect(invalidRes.error?.message).toContain('Invalid worktree.root');
+
+      // Valid custom root `tmp` succeeds even though `repoDir` has `/tmp/` ancestor.
+      const entered = await new EnterWorktreeTool(
+        makeRootConfig(repoDir, 'tmp'),
+      )
+        .build({ name: 'feat-one' })
+        .execute(new AbortController().signal);
+      expect(entered.error).toBeUndefined();
+      const createdPath = path.join(repoDir, 'tmp', 'feat-one');
+      await expect(fs.access(createdPath)).resolves.toBeUndefined();
+
+      // Switching worktree.root to `.wt-b` still refuses nested creation from
+      // inside the linked worktree created under `tmp` (R1-9).
+      const nested = await new EnterWorktreeTool(
+        makeRootConfig(createdPath, '.wt-b'),
+      )
+        .build({ name: 'nested-nope' })
+        .execute(new AbortController().signal);
+      expect(nested.error?.message).toContain('Already inside a git worktree');
+
+      // ExitWorktreeTool fails cleanly on invalid worktree.root.
+      const badExit = await new ExitWorktreeTool(
+        makeRootConfig(repoDir, '../escape'),
+      )
+        .build({ name: 'feat-one', action: 'remove' })
+        .execute(new AbortController().signal);
+      expect(badExit.error?.message).toContain('Invalid worktree.root');
+
+      // ExitWorktreeTool removes the custom-root worktree cleanly.
+      const exited = await new ExitWorktreeTool(makeRootConfig(repoDir, 'tmp'))
+        .build({ name: 'feat-one', action: 'remove' })
+        .execute(new AbortController().signal);
+      expect(exited.error).toBeUndefined();
+      await expect(fs.access(createdPath)).rejects.toThrow();
+    });
+  });
+});

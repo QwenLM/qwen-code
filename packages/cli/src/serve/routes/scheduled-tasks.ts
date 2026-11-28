@@ -97,6 +97,7 @@ import {
   SCHEDULED_TASK_RUN_SOURCE_TYPE,
 } from '../../runtime/scheduled-task-run.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import { resolveRuntimeWorktreeRootSetting } from '../server/worktree-root.js';
 
 // The per-file create cap, shared with the scheduler's MAX_JOBS. The scheduler
 // caps DURABLE loads against a durable-only budget of MAX_JOBS (independent of
@@ -202,6 +203,7 @@ export function scheduledTaskSessionName(label: string): string {
 export interface ScheduledTaskTarget {
   workspaceCwd: string;
   runtimeBaseDir?: string;
+  worktreeRoot?: string;
   bridge?: ScheduledTasksSessionBridge;
   cleanupSession?: (sessionId: string) => Promise<unknown>;
   assertGenerationOpen?: () => void;
@@ -639,6 +641,9 @@ async function teardownBoundSession(
     await target.bridge.closeSession(sessionId).catch(() => {});
     const removed = await new SessionService(target.workspaceCwd, {
       runtimeBaseDir: target.runtimeBaseDir,
+      ...(target.worktreeRoot !== undefined
+        ? { worktreeRoot: target.worktreeRoot }
+        : {}),
     })
       .removeSession(sessionId)
       .catch(() => false);
@@ -2471,6 +2476,7 @@ export function registerScheduledTasksRoutes(
         ...(runtime
           ? {
               runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+              worktreeRoot: resolveRuntimeWorktreeRootSetting(runtime),
               ...(deps.cleanupSession
                 ? {
                     cleanupSession: (sessionId: string) =>
@@ -2558,6 +2564,7 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
       return {
         workspaceCwd: runtime.workspaceCwd,
         runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+        worktreeRoot: resolveRuntimeWorktreeRootSetting(runtime),
         ...(runtime.provenance === 'live-conversation' &&
         deps.conversationRuntimeActivity
           ? { activity: deps.conversationRuntimeActivity }

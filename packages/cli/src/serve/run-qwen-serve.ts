@@ -3455,13 +3455,42 @@ function bridgeHasLiveSessionWithin(
 
 async function createBranchRecoverySessionService(
   runtime: WorkspaceRuntime,
+  worktreeRoot?: string,
 ): Promise<SessionService> {
   const { SessionService } = await import(
     '@qwen-code/qwen-code-core/services/sessionService.js'
   );
   return new SessionService(runtime.workspaceCwd, {
     runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+    ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
   });
+}
+
+async function loadRuntimeWorktreeRootSetting(
+  runtime: WorkspaceRuntime,
+): Promise<string> {
+  const { resolveRuntimeWorktreeRootSetting } = await import(
+    './server/worktree-root.js'
+  );
+  return resolveRuntimeWorktreeRootSetting(runtime);
+}
+
+async function loadOptionalWorkspaceWorktreeRoot(
+  workspaceCwd: string,
+  environment: Readonly<NodeJS.ProcessEnv>,
+  workspaceTrusted: boolean,
+): Promise<string | undefined> {
+  const { readWorkspaceWorktreeRoot } = await import(
+    './server/worktree-root.js'
+  );
+  try {
+    return readWorkspaceWorktreeRoot(workspaceCwd, {
+      environment,
+      workspaceTrusted,
+    }).normalized;
+  } catch {
+    return undefined;
+  }
 }
 
 let brokenPipeGuardInstalled = false;
@@ -6634,6 +6663,12 @@ async function runQwenServeImpl(
       resolveWorkspace: subSessionWorkspaces.resolve,
       isTrusted: (bridge) =>
         subSessionWorkspaces.isTrusted(boundWorkspace, bridge),
+      getWorktreeRoot: () =>
+        loadOptionalWorkspaceWorktreeRoot(
+          boundWorkspace,
+          runtimeEffectiveEnv,
+          trustedWorkspace,
+        ),
     });
     const attachmentsRoots = sessionAttachmentsRoots(
       boundWorkspace,
@@ -6654,6 +6689,12 @@ async function runQwenServeImpl(
           bootWorkflowTrustAdmission,
         ),
         artifactSnapshotRuntimeBaseDir: primarySessionRuntimeBaseDir,
+        resolveWorktreeRoot: () =>
+          loadOptionalWorkspaceWorktreeRoot(
+            boundWorkspace,
+            runtimeEffectiveEnv,
+            trustedWorkspace,
+          ),
         sessionAttachmentsRoot: attachmentsRoots.root,
         sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
         // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
@@ -6758,6 +6799,12 @@ async function runQwenServeImpl(
                   },
                 }),
                 runtimeBaseDir: primarySessionRuntimeBaseDir,
+                getWorktreeRoot: () =>
+                  loadOptionalWorkspaceWorktreeRoot(
+                    boundWorkspace,
+                    runtimeEffectiveEnv,
+                    trustedWorkspace,
+                  ),
               }),
             }
           : { channelFactory }),
@@ -6954,11 +7001,16 @@ async function runQwenServeImpl(
       },
     ];
     if (trustedWorkspace && opts.profile !== 'hosted-harness') {
+      const recoveryWorktreeRoot = await loadRuntimeWorktreeRootSetting(
+        workspaceRuntimes[0],
+      );
       await recoverBranchWorktreePreparations({
         workspaceCwd: boundWorkspace,
         sessionService: await createBranchRecoverySessionService(
           workspaceRuntimes[0],
+          recoveryWorktreeRoot,
         ),
+        worktreeRoot: recoveryWorktreeRoot,
         assertGenerationOpen: () => primaryGenerationGuard.assertOpen(),
         isWorktreeOccupied: (worktreePath) =>
           bridgeHasLiveSessionWithin(bridge, boundWorkspace, worktreePath),
@@ -7284,6 +7336,12 @@ async function runQwenServeImpl(
         resolveWorkspace: subSessionWorkspaces.resolve,
         isTrusted: (bridge) =>
           subSessionWorkspaces.isTrusted(workspaceInput.cwd, bridge),
+        getWorktreeRoot: () =>
+          loadOptionalWorkspaceWorktreeRoot(
+            workspaceInput.cwd,
+            secondaryEnv.effectiveEnv ?? runtimeEffectiveEnv,
+            secondaryTrusted,
+          ),
       });
       const secondaryAttachmentsRoots = sessionAttachmentsRoots(
         workspaceInput.cwd,
@@ -7302,6 +7360,12 @@ async function runQwenServeImpl(
           bootWorkflowTrustAdmission,
         ),
         artifactSnapshotRuntimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
+        resolveWorktreeRoot: () =>
+          loadOptionalWorkspaceWorktreeRoot(
+            workspaceInput.cwd,
+            secondaryEnv.effectiveEnv ?? runtimeEffectiveEnv,
+            secondaryTrusted,
+          ),
         sessionAttachmentsRoot: secondaryAttachmentsRoots.root,
         sessionAttachmentsFallbackRoot: secondaryAttachmentsRoots.fallback,
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
@@ -7403,6 +7467,12 @@ async function runQwenServeImpl(
                   },
                 }),
                 runtimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
+                getWorktreeRoot: () =>
+                  loadOptionalWorkspaceWorktreeRoot(
+                    workspaceInput.cwd,
+                    secondaryEnv.effectiveEnv ?? runtimeEffectiveEnv,
+                    secondaryTrusted,
+                  ),
               }),
             }
           : { channelFactory: secondaryChannelFactory }),
@@ -8297,6 +8367,12 @@ async function runQwenServeImpl(
       const wsSubSessionLauncher = createSubSessionLauncher({
         getBridge: () => wsBridgeRef,
         getArchiveCoordinator: getSubSessionArchiveCoordinator,
+        getWorktreeRoot: () =>
+          loadOptionalWorkspaceWorktreeRoot(
+            cwd,
+            wsEnv.effectiveEnv ?? runtimeEffectiveEnv,
+            trusted,
+          ),
         boundWorkspace: cwd,
         runtimeBaseDir: wsEnv.sessionRuntimeBaseDir,
         ...(provenance === 'live-conversation'
@@ -8343,6 +8419,12 @@ async function runQwenServeImpl(
             workflowTrustAdmission,
           ),
           artifactSnapshotRuntimeBaseDir: wsEnv.sessionRuntimeBaseDir,
+          resolveWorktreeRoot: () =>
+            loadOptionalWorkspaceWorktreeRoot(
+              cwd,
+              wsEnv.effectiveEnv ?? runtimeEffectiveEnv,
+              trusted,
+            ),
           sessionAttachmentsRoot: wsAttachmentsRoots.root,
           sessionAttachmentsFallbackRoot: wsAttachmentsRoots.fallback,
           clientMcpSender: wsClientMcpRegistry.lookup,
@@ -8461,6 +8543,12 @@ async function runQwenServeImpl(
                     },
                   }),
                   runtimeBaseDir: wsEnv.sessionRuntimeBaseDir,
+                  getWorktreeRoot: () =>
+                    loadOptionalWorkspaceWorktreeRoot(
+                      cwd,
+                      wsEnv.effectiveEnv ?? runtimeEffectiveEnv,
+                      trusted,
+                    ),
                 }),
               }
             : { channelFactory: wsChannelFactory }),
@@ -8746,9 +8834,15 @@ async function runQwenServeImpl(
         wsRuntime.trusted &&
         opts.profile !== 'hosted-harness'
       ) {
+        const recoveryWorktreeRoot =
+          await loadRuntimeWorktreeRootSetting(wsRuntime);
         await recoverBranchWorktreePreparations({
           workspaceCwd: cwd,
-          sessionService: await createBranchRecoverySessionService(wsRuntime),
+          sessionService: await createBranchRecoverySessionService(
+            wsRuntime,
+            recoveryWorktreeRoot,
+          ),
+          worktreeRoot: recoveryWorktreeRoot,
           assertGenerationOpen: () => generationGuard.assertOpen(),
           isWorktreeOccupied: (worktreePath) =>
             bridgeHasLiveSessionWithin(wsBridge, cwd, worktreePath),

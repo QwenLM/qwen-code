@@ -45,20 +45,26 @@ export function __resetSessionSuggestionCacheForTest(): void {
 async function listSessionsCached(
   cwd: string,
   nowMs: number,
+  worktreeRoot?: string,
 ): Promise<SessionListItem[]> {
-  const cached = listingCache.get(cwd);
+  const cacheKey = `${cwd}\0${worktreeRoot ?? ''}`;
+  const cached = listingCache.get(cacheKey);
   if (cached && cached.expiresAt > nowMs) {
     return cached.items;
   }
   try {
-    const res = await new SessionService(cwd).listSessions({
+    const service =
+      worktreeRoot !== undefined
+        ? new SessionService(cwd, { worktreeRoot })
+        : new SessionService(cwd);
+    const res = await service.listSessions({
       size: MAX_SESSION_SUGGESTIONS,
       excludeSourceTypes: [
         AGENT_HOST_SESSION_SOURCE_TYPE,
         AGENT_SESSION_SOURCE_TYPE,
       ],
     });
-    listingCache.set(cwd, {
+    listingCache.set(cacheKey, {
       items: res.items,
       expiresAt: nowMs + SESSION_LIST_CACHE_TTL_MS,
     });
@@ -81,13 +87,16 @@ async function listSessionsCached(
  *
  * @param nowMs Injected clock for the cache TTL (defaults to Date.now()).
  *   Exposed for deterministic tests.
+ * @param worktreeRoot Configured `worktree.root` for matching sessions recorded
+ *   from custom-root worktrees.
  */
 export async function getSessionSuggestions(
   cwd: string,
   pattern: string,
   nowMs: number = Date.now(),
+  worktreeRoot?: string,
 ): Promise<Suggestion[]> {
-  const items = await listSessionsCached(cwd, nowMs);
+  const items = await listSessionsCached(cwd, nowMs, worktreeRoot);
 
   // Strip the `session:` prefix when present. A bare `@session` (no colon)
   // is treated as an empty filter so the user sees all sessions rather than

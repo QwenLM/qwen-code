@@ -37,6 +37,50 @@ describe('resolveBoundWorkspaceRoot', () => {
     );
     expect(resolveBoundWorkspaceRoot(worktree)).toBe(path.parse(worktree).root);
   });
+  it('strips a configured custom worktree root suffix when anchored to repoRoot', () => {
+    const customWorktree = `${agent}/.worktrees/my-feature`;
+    expect(resolveBoundWorkspaceRoot(customWorktree, '.worktrees', agent)).toBe(
+      path.resolve(agent),
+    );
+    const multiSegment = `${agent}/tmp/wts/my-feature`;
+    expect(resolveBoundWorkspaceRoot(multiSegment, 'tmp/wts', agent)).toBe(
+      path.resolve(agent),
+    );
+  });
+
+  it('does not widen a non-worktree repo matching a custom root segment (R1-6)', () => {
+    const standaloneRepo = '/x/worktrees/repo';
+    expect(resolveBoundWorkspaceRoot(standaloneRepo, 'worktrees')).toBe(
+      path.resolve(standaloneRepo),
+    );
+    // Legacy .qwen/worktrees/<slug> must still strip to repo root, not `.qwen`,
+    // even when worktree.root is configured as `worktrees`.
+    expect(resolveBoundWorkspaceRoot(myWorktree, 'worktrees')).toBe(
+      path.resolve(agent),
+    );
+    // R2-4: a custom root that itself ends with `.qwen/worktrees` (e.g.
+    // `sub/.qwen/worktrees`) must strip the full 3-segment root to `/repo`,
+    // not stop at `/repo/sub`.
+    const nestedCustom = `${agent}/sub/.qwen/worktrees/my-feature`;
+    expect(
+      resolveBoundWorkspaceRoot(nestedCustom, 'sub/.qwen/worktrees', agent),
+    ).toBe(path.resolve(agent));
+    expect(
+      toCanonicalWorkspaceArtifactPath(
+        `${nestedCustom}/report.csv`,
+        nestedCustom,
+        'sub/.qwen/worktrees',
+        agent,
+      ),
+    ).toBe('sub/.qwen/worktrees/my-feature/report.csv');
+  });
+
+  it('does not strip a custom prefix when worktreeRoot is invalid', () => {
+    const customWorktree = `${agent}/.worktrees/my-feature`;
+    expect(resolveBoundWorkspaceRoot(customWorktree, '../escape', agent)).toBe(
+      path.resolve(customWorktree),
+    );
+  });
 });
 
 describe('toCanonicalWorkspaceArtifactPath', () => {
@@ -50,6 +94,15 @@ describe('toCanonicalWorkspaceArtifactPath', () => {
     expect(
       toCanonicalWorkspaceArtifactPath(`${myWorktree}/report.csv`, myWorktree),
     ).toBe('.qwen/worktrees/my-feature/report.csv');
+    const customWorktree = `${agent}/.worktrees/my-feature`;
+    expect(
+      toCanonicalWorkspaceArtifactPath(
+        `${customWorktree}/report.csv`,
+        customWorktree,
+        '.worktrees',
+        agent,
+      ),
+    ).toBe('.worktrees/my-feature/report.csv');
   });
 
   it('returns null when the file is outside the bound workspace', () => {

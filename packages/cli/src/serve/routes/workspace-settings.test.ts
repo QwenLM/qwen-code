@@ -1868,6 +1868,70 @@ describe('Web Shell worktree retention setting', () => {
   );
 });
 
+describe('worktree.root setting', () => {
+  it('exposes worktree.root in GET /workspace/settings with default .qwen/worktrees', async () => {
+    const { app } = makeApp();
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    const descriptor = response.body.settings.find(
+      (setting: { key: string }) => setting.key === 'worktree.root',
+    );
+    expect(descriptor).toMatchObject({
+      key: 'worktree.root',
+      type: 'string',
+      default: '.qwen/worktrees',
+      values: { effective: '.qwen/worktrees' },
+    });
+  });
+
+  it.each(['.worktrees', 'tmp/qwen-wt', '.qwen/wt'])(
+    'persists valid repository-relative worktree.root %s',
+    async (value) => {
+      const { app, persistSetting } = makeApp();
+      const response = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'worktree.root',
+        value,
+      });
+      expect(response.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalledWith(
+        '/workspace',
+        SettingScope.Workspace,
+        'worktree.root',
+        value,
+      );
+    },
+  );
+
+  it.each([
+    '/tmp/outside',
+    '../escape',
+    'a/../../escape',
+    '.git',
+    '.git/wt',
+    '.qwen',
+    '.',
+    '',
+    '~/wt',
+    'C:\\wt',
+    '.worktrees\n*',
+    42,
+    null,
+  ])(
+    'rejects invalid worktree.root %s without persisting it',
+    async (value) => {
+      const { app, persistSetting } = makeApp();
+      const response = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'worktree.root',
+        value,
+      });
+      expect(response.status).toBe(400);
+      expect(persistSetting).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe('unset boolean settings', () => {
   it('serves the unset toggle value when the schema has no default', async () => {
     const { app } = makeApp();

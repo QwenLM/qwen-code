@@ -1037,6 +1037,7 @@ export async function main() {
   {
     const startupRes = await setupStartupWorktree(argv.worktree, {
       symlinkDirectories: settings.merged.worktree?.symlinkDirectories,
+      worktreeRoot: settings.merged.worktree?.root,
     });
     if (startupRes !== null) {
       if (!startupRes.ok) {
@@ -1064,10 +1065,16 @@ export async function main() {
       const { showResumeSessionPicker } = await import(
         './ui/components/StandaloneSessionPicker.js'
       );
-      resolvedSessionId = await showResumeSessionPicker();
+      resolvedSessionId = await showResumeSessionPicker(
+        process.cwd(),
+        undefined,
+        settings.merged.worktree?.root,
+      );
     } else if (!cliConfig.isValidSessionId(argv.resume)) {
       // Non-UUID argument — treat as custom title search
-      const sessionService = new SessionService(process.cwd());
+      const sessionService = new SessionService(process.cwd(), {
+        worktreeRoot: settings.merged.worktree?.root,
+      });
       const matches = await sessionService.findSessionsByTitle(argv.resume);
       if (matches.length === 1) {
         resolvedSessionId = matches[0].sessionId;
@@ -1082,6 +1089,7 @@ export async function main() {
         resolvedSessionId = await showResumeSessionPicker(
           process.cwd(),
           matches,
+          settings.merged.worktree?.root,
         );
       }
       // matches.length === 0 → resolvedSessionId stays undefined, handled below

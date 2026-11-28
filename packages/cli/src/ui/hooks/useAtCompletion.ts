@@ -452,7 +452,12 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
       // yields [] so it never blocks file/MCP/extension completion.
       // Merge order invariant: sessions are always appended LAST in every
       // SEARCH_SUCCESS dispatch path (mcp → file → session).
-      const sessionPromise = getSessionSuggestions(cwd, state.pattern);
+      const sessionPromise = getSessionSuggestions(
+        cwd,
+        state.pattern,
+        Date.now(),
+        config?.getWorktreeRoot?.(),
+      );
 
       if (!fileSearch.current) {
         // File index not ready yet; still surface non-file matches so they

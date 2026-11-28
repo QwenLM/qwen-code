@@ -124,6 +124,7 @@ import {
   type FileEncodingType,
 } from '../services/fileSystemService.js';
 import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
+import { resolveWorktreeRootPath } from '../utils/worktree-root.js';
 import {
   CronScheduler,
   DEFAULT_RECURRING_MAX_AGE_DAYS,
@@ -1082,15 +1083,23 @@ export interface SandboxConfig {
  */
 export interface WorktreeSettings {
   /**
+   * Repository-relative directory where general-purpose and Web Shell
+   * managed worktrees are created (default: `.qwen/worktrees`).
+   * Must stay inside the repository: absolute paths, `..`, `.git`,
+   * and `.qwen` directly are rejected.
+   */
+  root?: string;
+  /**
    * Directories under the main repository to symlink into every
    * general-purpose worktree on creation (the `enter_worktree` tool,
    * `agent isolation: "worktree"`, and the `--worktree` startup flag).
    *
    * Paths must be relative to the repo root; absolute paths and any
    * entry containing `..` are rejected by the service. Entries that
-   * resolve to git-internal paths (`.git`, `.qwen`) are also rejected
-   * — symlinking those would either break git inside the worktree or
-   * create a worktrees-inside-worktrees loop. Missing source dirs and
+   * resolve to git-internal paths (`.git`, `.qwen`) or overlap the
+   * configured `worktree.root` are also rejected — symlinking those
+   * would either break git inside the worktree or create a
+   * worktrees-inside-worktrees loop. Missing source dirs and
    * pre-existing destinations are silently skipped.
    */
   symlinkDirectories?: readonly string[];
@@ -5096,7 +5105,8 @@ export class Config {
           // sweep was permanently a no-op. Fast-bail still happens, just
           // against the *correct* directory.
           const root = findGitRoot(this.targetDir) ?? this.targetDir;
-          const worktreesDir = path.join(root, '.qwen', 'worktrees');
+          const worktreeRoot = this.getWorktreeRoot();
+          const worktreesDir = resolveWorktreeRootPath(root, worktreeRoot);
           try {
             await fsPromises.access(worktreesDir);
           } catch {
@@ -5110,7 +5120,9 @@ export class Config {
             );
             return;
           }
-          const removed = await cleanupStaleAgentWorktrees(root);
+          const removed = await cleanupStaleAgentWorktrees(root, {
+            worktreeRoot,
+          });
           if (removed > 0) {
             // Only the "actually removed something" path warrants
             // `info` — that's the signal an operator chasing a leak
@@ -10291,6 +10303,14 @@ export class Config {
   }
 
   /**
+   * Configured `worktree.root` relative path (undefined when using default
+   * `.qwen/worktrees`).
+   */
+  getWorktreeRoot(): string | undefined {
+    return this.getWorktreeSettings().root;
+  }
+
+  /**
    * Convenience accessor for `worktree.symlinkDirectories` — returns an
    * empty array when the setting is unset, so callers can pass the
    * result directly into the GitWorktreeService loop without nullchecks.
@@ -13446,6 +13466,7 @@ export class Config {
     if (!this.sessionService) {
       this.sessionService = new SessionService(this.storage.getProjectRoot(), {
         runtimeBaseDir: this.sessionRuntimeBaseDir,
+        worktreeRoot: this.getWorktreeRoot(),
       });
     }
     return this.sessionService;

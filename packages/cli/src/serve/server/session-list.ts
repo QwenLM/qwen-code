@@ -148,6 +148,8 @@ export interface ListWorkspaceSessionsReadOptions {
   includeGroups?: boolean;
   /** Runtime root owned by the selected managed workspace. */
   runtimeBaseDir?: string;
+  /** Resolved `worktree.root` setting (or fail-closed sentinel) for this workspace. */
+  worktreeRoot?: string;
   /** Aborts this caller's wait without cancelling other shared waiters. */
   signal?: AbortSignal;
   /** Optional retirement-fence probe for search results that lack a bridge parameter. */
@@ -160,6 +162,7 @@ interface ResolvedListWorkspaceSessionsReadOptions {
   paginateMerged?: boolean;
   includeGroups?: boolean;
   runtimeBaseDir: string;
+  worktreeRoot?: string;
   signal?: AbortSignal;
 }
 
@@ -595,7 +598,11 @@ export async function enrichWorktreeSidecars(
             sessionService,
             sessionId,
             sessionService.getProjectRoot(),
-            { quiet: true, runtimeRoots: await getRuntimeRoots() },
+            {
+              quiet: true,
+              runtimeRoots: await getRuntimeRoots(),
+              worktreeRoot: sessionService.getWorktreeRoot?.(),
+            },
           );
           if (
             candidate &&
@@ -645,7 +652,11 @@ export async function enrichWorktreeSidecars(
             sessionService,
             sessionId,
             sessionService.getProjectRoot(),
-            { quiet: true, runtimeRoots: await getRuntimeRoots() },
+            {
+              quiet: true,
+              runtimeRoots: await getRuntimeRoots(),
+              worktreeRoot: sessionService.getWorktreeRoot?.(),
+            },
           );
           if (
             candidate &&
@@ -1588,7 +1599,11 @@ async function listOrganizedWorkspaceSessionsForResponse(
   readOptions: ResolvedListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const archiveState = options.archiveState ?? 'active';
-  const sessionService = new SessionService(workspaceCwd);
+  const sessionService = new SessionService(workspaceCwd, {
+    ...(readOptions.worktreeRoot !== undefined
+      ? { worktreeRoot: readOptions.worktreeRoot }
+      : {}),
+  });
   const organizationService = createSessionOrganizationService(workspaceCwd);
   readOptions.signal?.throwIfAborted();
   const snapshot = await organizationService.readSnapshot();
@@ -1847,7 +1862,11 @@ async function listWorkspaceSessionsByMetadataForResponse(
   readOptions: ResolvedListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const archiveState = options.archiveState ?? 'active';
-  const sessionService = new SessionService(workspaceCwd);
+  const sessionService = new SessionService(workspaceCwd, {
+    ...(readOptions.worktreeRoot !== undefined
+      ? { worktreeRoot: readOptions.worktreeRoot }
+      : {}),
+  });
   const bySessionId = new Map<string, BridgeSessionSummary>();
   const persisted = await listAllPersistedSummaries(
     sessionService,
@@ -2094,6 +2113,9 @@ export async function listWorkspaceSessionsForResponse(
         ...(readOptions.includeGroups !== undefined
           ? { includeGroups: readOptions.includeGroups }
           : {}),
+        ...(readOptions.worktreeRoot !== undefined
+          ? { worktreeRoot: readOptions.worktreeRoot }
+          : {}),
         ...(readOptions.signal !== undefined
           ? { signal: readOptions.signal }
           : {}),
@@ -2104,7 +2126,12 @@ export async function listWorkspaceSessionsForResponse(
   if (options?.sortBy !== 'lastUserPromptAt') {
     await enrichPromptTimes(
       result.sessions,
-      new SessionService(workspaceCwd, { runtimeBaseDir }),
+      new SessionService(workspaceCwd, {
+        runtimeBaseDir,
+        ...(readOptions.worktreeRoot !== undefined
+          ? { worktreeRoot: readOptions.worktreeRoot }
+          : {}),
+      }),
       archiveState,
       readOptions,
     );
@@ -2239,7 +2266,11 @@ async function listWorkspaceSessionsForResponseInRuntime(
   }
   const isFirstPage = persistedCursor === undefined;
 
-  const sessionService = new SessionService(workspaceCwd);
+  const sessionService = new SessionService(workspaceCwd, {
+    ...(readOptions.worktreeRoot !== undefined
+      ? { worktreeRoot: readOptions.worktreeRoot }
+      : {}),
+  });
   const archiveState = options?.archiveState ?? 'active';
   const persisted = await sessionService.listSessions({
     cursor: persistedCursor,
@@ -2342,7 +2373,11 @@ export async function listLiveWorkspaceSessionsForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
   options?: Pick<ListWorkspaceSessionsOptions, 'cursor' | 'size'>,
-  readOptions: { runtimeBaseDir?: string; signal?: AbortSignal } = {},
+  readOptions: {
+    runtimeBaseDir?: string;
+    worktreeRoot?: string;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<ListWorkspaceSessionsResult> {
   const runtimeBaseDir = new Storage(
     workspaceCwd,
@@ -2386,7 +2421,11 @@ export async function listLiveWorkspaceSessionsForResponse(
     // flush, and a bridge entry re-created after a restart/close/reload
     // carries no `prs`, so every live-only row must read the sidecar like
     // the sibling live-only paths do — unconditionally.
-    const sessionService = new SessionService(workspaceCwd);
+    const sessionService = new SessionService(workspaceCwd, {
+      ...(readOptions.worktreeRoot !== undefined
+        ? { worktreeRoot: readOptions.worktreeRoot }
+        : {}),
+    });
     const enriched = await Promise.all(
       page.map((summary) =>
         liveOnlySummary(summary, sessionService, readOptions.signal),
@@ -2428,7 +2467,11 @@ export async function searchWorkspaceSessionsForResponse(
     readOptions.runtimeBaseDir,
   ).getRuntimeBaseDir();
   return Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, async () => {
-    const sessionService = new SessionService(workspaceCwd);
+    const sessionService = new SessionService(workspaceCwd, {
+      ...(readOptions.worktreeRoot !== undefined
+        ? { worktreeRoot: readOptions.worktreeRoot }
+        : {}),
+    });
     const hits = await sessionService.searchSessionContent(query, {
       ...(options.maxResults !== undefined
         ? { maxResults: options.maxResults }
@@ -2505,9 +2548,13 @@ export async function searchWorkspaceSessionsForResponse(
 export async function getWorkspaceSessionInfoForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
-  options: { includeLive?: boolean } = {},
+  options: { includeLive?: boolean; worktreeRoot?: string } = {},
 ): Promise<WorkspaceSessionInfoResult> {
-  const counts = await new SessionService(workspaceCwd).getSessionInfoCounts({
+  const counts = await new SessionService(workspaceCwd, {
+    ...(options.worktreeRoot !== undefined
+      ? { worktreeRoot: options.worktreeRoot }
+      : {}),
+  }).getSessionInfoCounts({
     excludeSourceTypes: [...HIDDEN_CATALOG_SOURCE_TYPES],
   });
   return {

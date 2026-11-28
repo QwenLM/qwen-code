@@ -24,6 +24,11 @@ import {
 } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import { SessionOrganizationService } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
 import { readCronTasks } from '@qwen-code/qwen-code-core/services/cronTasksFile.js';
+import {
+  assertWorktreeRootContainment,
+  parseWorktreeRoot,
+  type ParsedWorktreeRoot,
+} from '@qwen-code/qwen-code-core/utils/worktree-root.js';
 import { collectBoundSessionIds } from '../scheduled-task-keepalive.js';
 import { readSettingsSnapshot } from '../../config/settings.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
@@ -61,7 +66,9 @@ const RETENTION_INTERVAL_MS = 30_000;
 
 export interface RetentionScope {
   runtime: WorkspaceRuntime;
+  repoTop: string | undefined;
   root: string | undefined;
+  worktreeRoot: ParsedWorktreeRoot;
   /**
    * Managed worktree directories belonging to this runtime: the repository
    * top-level root (shared-root collision key) plus the workspace cwd root
@@ -81,7 +88,10 @@ export interface WorktreeRetentionReport {
   issues: string[];
 }
 
-function retentionLimit(runtime: WorkspaceRuntime): number {
+function readRetentionSettings(runtime: WorkspaceRuntime): {
+  limit: number;
+  worktreeRoot: ParsedWorktreeRoot;
+} {
   const environment = runtime.env.effectiveEnv;
   if (!environment) {
     throw new Error(
@@ -120,10 +130,18 @@ function retentionLimit(runtime: WorkspaceRuntime): number {
       'worktree.maxRetained must be a nonnegative safe integer; retention is paused',
     );
   }
-  return value;
+  let worktreeRoot: ParsedWorktreeRoot;
+  try {
+    worktreeRoot = parseWorktreeRoot(settings.merged.worktree?.root);
+  } catch (error) {
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)}; retention is paused`,
+    );
+  }
+  return { limit: value, worktreeRoot };
 }
 
-async function retentionRoot(
+async function retentionRepoTop(
   workspaceCwd: string,
 ): Promise<string | undefined> {
   const service = new GitWorktreeService(workspaceCwd);
@@ -144,10 +162,24 @@ async function retentionRoot(
       directory = parent;
     }
   }
-  const managedRootService = new GitWorktreeService(
-    canonicalPathForTesting(repoTop),
+  return canonicalPathForTesting(repoTop);
+}
+
+async function retentionRootForRepoTop(
+  canonicalRepoTop: string,
+  parsedRoot: ParsedWorktreeRoot,
+): Promise<string> {
+  const managedRootService = new GitWorktreeService(canonicalRepoTop, {
+    worktreeRoot: parsedRoot.normalized,
+  });
+  const dir = managedRootService.getUserWorktreesDir();
+  await assertWorktreeRootContainment(
+    canonicalRepoTop,
+    dir,
+    parsedRoot,
+    path.join(canonicalRepoTop, '.git'),
   );
-  return resolveManagedWorktreePath(managedRootService.getUserWorktreesDir());
+  return resolveManagedWorktreePath(dir);
 }
 
 /**
@@ -243,45 +275,67 @@ async function loadScopes(
   runtime: WorkspaceRuntime,
   registry: WorkspaceRegistry,
 ): Promise<RetentionScope[] | undefined> {
-  if (retentionLimit(runtime) === 0) return undefined;
+  if (readRetentionSettings(runtime).limit === 0) return undefined;
   const scopes: RetentionScope[] = [];
+  const erroredRepoTops = new Map<string, string>();
   for (const candidate of registry.list()) {
     // Root discovery also covers maxRetained=0: conflicts still block all
     // automatic reclamation shared by more than one runtime.
-    const root = await retentionRoot(candidate.workspaceCwd);
-    if (root === undefined) continue;
+    const repoTop = await retentionRepoTop(candidate.workspaceCwd);
+    if (repoTop === undefined) continue;
     // Untrusted scopes are never swept, but their roots still count in the
     // collision proof; their separately managed records must not be ignored.
     let limit = 0;
+    let worktreeRoot: ParsedWorktreeRoot = parseWorktreeRoot(undefined);
+    let root: string | undefined;
     let settingsError: string | undefined;
     try {
-      limit = retentionLimit(candidate);
+      const parsed = readRetentionSettings(candidate);
+      limit = parsed.limit;
+      worktreeRoot = parsed.worktreeRoot;
+      root = await retentionRootForRepoTop(repoTop, worktreeRoot);
     } catch (error) {
       settingsError = error instanceof Error ? error.message : String(error);
+      erroredRepoTops.set(repoTop, settingsError);
     }
     const workspaceManagedRoot = resolveManagedWorktreePath(
-      new GitWorktreeService(
-        canonicalPathForTesting(candidate.workspaceCwd),
-      ).getUserWorktreesDir(),
+      new GitWorktreeService(canonicalPathForTesting(candidate.workspaceCwd), {
+        worktreeRoot: worktreeRoot.normalized,
+      }).getUserWorktreesDir(),
     );
     scopes.push({
       runtime: candidate,
+      repoTop,
       root,
-      managedRoots: new Set([root, workspaceManagedRoot]),
+      worktreeRoot,
+      managedRoots: new Set(
+        root !== undefined
+          ? [root, workspaceManagedRoot]
+          : [workspaceManagedRoot],
+      ),
       limit,
       ...(settingsError === undefined ? {} : { settingsError }),
     });
   }
+  for (const scope of scopes) {
+    if (
+      scope.settingsError === undefined &&
+      scope.repoTop !== undefined &&
+      erroredRepoTops.has(scope.repoTop)
+    ) {
+      scope.settingsError = erroredRepoTops.get(scope.repoTop);
+    }
+  }
   // Registered siblings in transitioning/blocked/draining states are omitted
-  // from registry.list() but still claim their management root until removed.
-  const nonActiveRoots = new Set<string>();
+  // from registry.list() but still claim their repository until removed.
+  const nonActiveRepoTops = new Set<string>();
   for (const entry of registry.listEntries()) {
     if (entry.state === 'active') continue;
-    const root = await retentionRoot(entry.workspaceCwd);
-    if (root !== undefined) nonActiveRoots.add(root);
+    const repoTop = await retentionRepoTop(entry.workspaceCwd);
+    if (repoTop !== undefined) nonActiveRepoTops.add(repoTop);
   }
   for (const scope of scopes) {
-    if (scope.root !== undefined && nonActiveRoots.has(scope.root)) {
+    if (scope.repoTop !== undefined && nonActiveRepoTops.has(scope.repoTop)) {
       scope.sharedWithNonActive = true;
     }
   }
@@ -293,6 +347,9 @@ async function loadScopes(
         trusted: scope.runtime.trusted,
         root: scope.root,
         limit: scope.limit,
+        ...(scope.settingsError !== undefined
+          ? { settingsError: scope.settingsError }
+          : {}),
       })),
     )}`,
   );
@@ -435,10 +492,13 @@ async function collectEligible(
         service,
         sessionId,
         scope.runtime.workspaceCwd,
+        { worktreeRoot: scope.worktreeRoot.normalized },
       );
       if (!plan || plan.sidecar.worktreeRemoved !== undefined) continue;
       const planRoot = resolveManagedWorktreePath(
-        new GitWorktreeService(plan.sidecar.originalCwd).getUserWorktreesDir(),
+        new GitWorktreeService(plan.sidecar.originalCwd, {
+          worktreeRoot: scope.worktreeRoot.normalized,
+        }).getUserWorktreesDir(),
       );
       if (!scope.managedRoots.has(planRoot)) {
         throw new Error('management root is not attested to this runtime');
@@ -477,6 +537,7 @@ async function collectEligible(
               plan.lockKey,
               planRoot,
               (id) => sessionLiveOnBridge(scope.runtime.bridge, id),
+              scope.worktreeRoot.normalized,
             ))
               ? 'reconciled'
               : 'ineligible';
@@ -531,6 +592,7 @@ async function discardPreservedAttemptSnapshot(
     service,
     plan.sessionId,
     runtime.workspaceCwd,
+    { worktreeRoot: plan.worktreeRoot },
   );
   if (!current || current.sidecar.worktreeRemoved !== undefined) return;
   const ownership = await verifyWorktreeCleanupOwnership(current, (id) =>
@@ -698,6 +760,8 @@ async function removeRetainedCheckout(
   coordinator: SessionArchiveCoordinator,
   plan: WorktreeCleanupPlan,
   expectedRoot: RetentionScope['root'],
+  expectedRepoTop: RetentionScope['repoTop'],
+  expectedWorktreeRoot: string,
   expectedLimit: number,
   canContinue: () => boolean,
   onBindingPersisted?: () => void,
@@ -718,14 +782,17 @@ async function removeRetainedCheckout(
       if (isBridgeSessionRetirementFenced(runtime.bridge, plan.sessionId)) {
         return 'skipped';
       }
-      // Re-read the configured retention limit after acquiring the ownership
-      // and session locks, before starting snapshot capture: settings may have
-      // been disabled (`0`) or raised while this candidate waited on the lock.
-      const lockedLimit = retentionLimit(runtime);
-      if (lockedLimit === 0) {
+      // Re-read the configured retention limit and root after acquiring the
+      // ownership and session locks, before starting snapshot capture: settings
+      // may have been disabled (`0`), raised, or retargeted while waiting.
+      const locked = readRetentionSettings(runtime);
+      if (locked.limit === 0) {
         return 'disabled';
       }
-      if (lockedLimit !== expectedLimit) {
+      if (
+        locked.limit !== expectedLimit ||
+        locked.worktreeRoot.normalized !== expectedWorktreeRoot
+      ) {
         return 'limit-changed';
       }
       let attemptSnapshot: WorktreeSnapshotPaths | undefined;
@@ -777,7 +844,11 @@ async function removeRetainedCheckout(
             const current = scopes.find(
               (candidate) => candidate.runtime === runtime,
             );
-            if (current?.root !== expectedRoot || current.sharedWithNonActive) {
+            if (
+              current?.root !== expectedRoot ||
+              current.worktreeRoot.normalized !== expectedWorktreeRoot ||
+              current.sharedWithNonActive
+            ) {
               return false;
             }
             const evaluated = new Set(
@@ -794,8 +865,13 @@ async function removeRetainedCheckout(
                 if (entry.state !== 'active') return false;
                 continue;
               }
-              const root = await retentionRoot(entry.workspaceCwd);
-              if (root === expectedRoot) return false;
+              const entryRepoTop = await retentionRepoTop(entry.workspaceCwd);
+              if (
+                entryRepoTop !== undefined &&
+                entryRepoTop === expectedRepoTop
+              ) {
+                return false;
+              }
               // Plain non-Git workspaces are excluded only after the full ancestor
               // probe proves that absence, never when Git discovery is unreadable.
               evaluated.add(entry.workspaceId);
@@ -945,13 +1021,32 @@ async function sweepWorktreeRetentionOnceInStorage(
   const scopes = await loadScopes(runtime, registry);
   if (!scopes) return report;
   const scope = scopes.find((candidate) => candidate.runtime === runtime);
-  if (!scope?.root || scopes.some((candidate) => !candidate.root)) {
+  if (scope?.settingsError !== undefined) {
+    report.skipped.push(
+      `retention settings cannot be read for this root: ${scope.settingsError}`,
+    );
+    return report;
+  }
+  if (
+    !scope?.root ||
+    scopes.some(
+      (candidate) =>
+        !candidate.root &&
+        (candidate.repoTop === undefined ||
+          candidate.repoTop === scope.repoTop),
+    )
+  ) {
     report.skipped.push('management root cannot be uniquely attested');
     return report;
   }
   const holders = scopes.filter((candidate) => candidate.root === scope.root);
-  if (holders.some((candidate) => candidate.settingsError !== undefined)) {
-    report.skipped.push('retention settings cannot be read for this root');
+  const holderSettingsError = holders.find(
+    (candidate) => candidate.settingsError !== undefined,
+  )?.settingsError;
+  if (holderSettingsError !== undefined) {
+    report.skipped.push(
+      `retention settings cannot be read for this root: ${holderSettingsError}`,
+    );
     return report;
   }
   if (
@@ -993,20 +1088,23 @@ async function sweepWorktreeRetentionOnceInStorage(
       // (`worktree.maxRetained: 0`) or raised since this sweep started.
       // Without this re-check the sweep kept capturing and removing remaining
       // candidates against a stale plan.
-      let sweepLimit: number;
+      let sweepSettings: ReturnType<typeof readRetentionSettings>;
       try {
-        sweepLimit = retentionLimit(runtime);
+        sweepSettings = readRetentionSettings(runtime);
       } catch (error) {
         report.issues.push(
           error instanceof Error ? error.message : String(error),
         );
         break;
       }
-      if (sweepLimit === 0) {
+      if (sweepSettings.limit === 0) {
         report.skipped.push('retention disabled during sweep');
         break;
       }
-      if (sweepLimit !== scope.limit) {
+      if (
+        sweepSettings.limit !== scope.limit ||
+        sweepSettings.worktreeRoot.normalized !== scope.worktreeRoot.normalized
+      ) {
         report.skipped.push('retention limit changed during sweep');
         break;
       }
@@ -1017,6 +1115,8 @@ async function sweepWorktreeRetentionOnceInStorage(
           coordinator,
           plan,
           scope.root,
+          scope.repoTop,
+          scope.worktreeRoot.normalized,
           scope.limit,
           canContinue,
           () => {

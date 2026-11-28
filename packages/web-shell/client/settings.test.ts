@@ -305,6 +305,7 @@ describe('settings presentation aliases', () => {
         'experimental.modelAvailabilityTracking',
       'setting:voice-model': 'voiceModel',
       'setting:image-model': 'imageModel',
+      'setting:worktree-root': 'worktree.root',
       'setting:worktree-retention': 'worktree.maxRetained',
     } satisfies Record<string, string>;
     const settingIds = WEB_SHELL_SETTING_ITEM_IDS.filter((id) =>

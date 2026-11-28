@@ -80,6 +80,7 @@ import {
   type SessionExportResult,
 } from '../server/session-export.js';
 import { listWorkspaceSessionsForResponse } from '../server/session-list.js';
+import { resolveRuntimeWorktreeRootSetting } from '../server/worktree-root.js';
 import {
   createWorkspaceRuntimeSessionService,
   runWithWorkspaceRuntimeStorage,
@@ -737,6 +738,7 @@ export class StandaloneSessionService {
         },
         {
           runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+          worktreeRoot: resolveRuntimeWorktreeRootSetting(runtime),
           ...(runtime.trusted === false ? { allowSidecarWrite: false } : {}),
           ...(options.signal !== undefined ? { signal: options.signal } : {}),
         },

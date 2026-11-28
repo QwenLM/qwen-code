@@ -223,6 +223,11 @@ function createHarness(exportChannel?: string): Harness {
     provenance: 'live-conversation',
     trusted: true,
     removable: false,
+    env: {
+      mode: 'parent-process',
+      overlayKeys: [],
+      effectiveEnv: process.env,
+    },
     bridge: bridge as unknown as AcpSessionBridge,
     workspaceService: { getWorkspaceProvidersStatus },
   } as unknown as WorkspaceRuntime;
@@ -2976,7 +2981,7 @@ describe('StandaloneSessionService', () => {
       harness.bridge,
       root.canonicalRoot,
       { conversationKind: 'standalone-top-level' },
-      { runtimeBaseDir: '/runtime' },
+      { runtimeBaseDir: '/runtime', worktreeRoot: '.qwen/worktrees' },
     );
   });
 

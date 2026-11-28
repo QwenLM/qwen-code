@@ -104,6 +104,7 @@ const WEB_SHELL_SETTINGS = new Set([
   'visionBridgeTimeoutMs',
   'mcpServers',
   'worktree.defaultForNewSessions',
+  'worktree.root',
   'worktree.maxRetained',
 ]);
 

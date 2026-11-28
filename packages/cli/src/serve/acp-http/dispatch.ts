@@ -73,6 +73,7 @@ import {
   type HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY } from '../channel-worker-prompt-authorization.js';
+import { resolveWorkspaceWorktreeRootSetting } from '../server/worktree-root.js';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   AGENT_HOST_SESSION_SOURCE_TYPE,
@@ -1425,6 +1426,13 @@ export class AcpDispatcher {
     }
   }
 
+  private getWorktreeRootSetting(workspaceCwd = this.boundWorkspace): string {
+    return resolveWorkspaceWorktreeRootSetting(workspaceCwd, {
+      environment: this.getEnv(),
+      workspaceTrusted: this.isWorkspaceTrusted(),
+    });
+  }
+
   private removeOrphanSession(
     sessionId: string,
     removePersistedSession = false,
@@ -1435,6 +1443,7 @@ export class AcpDispatcher {
           sessionId,
           service: new SessionService(this.boundWorkspace, {
             runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+            worktreeRoot: this.getWorktreeRootSetting(),
           }),
           bridge: runtime.bridge,
           coordinator: this.archiveCoordinator,
@@ -2405,6 +2414,7 @@ export class AcpDispatcher {
             ) {
               const sessionService = new SessionService(cwd, {
                 runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
+                worktreeRoot: this.getWorktreeRootSetting(cwd),
               });
               let storageSessionId: string | undefined;
               try {
@@ -2468,8 +2478,10 @@ export class AcpDispatcher {
             const restoreInRuntime = () =>
               this.archiveCoordinator.runSharedMany([sessionId], async () => {
                 assertGenerationOpen?.();
+                const worktreeRoot = this.getWorktreeRootSetting(cwd);
                 const sessionService = new SessionService(cwd, {
                   runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
+                  worktreeRoot,
                 });
                 let storageSessionId = sessionId;
                 const persistedSessionId = await resolveSessionIdForRestore(
@@ -2486,6 +2498,7 @@ export class AcpDispatcher {
                   storageSessionId,
                   sessionId,
                   sessionRuntime.sessionRuntimeBaseDir,
+                  worktreeRoot,
                 );
                 // Re-seed the persisted parent lineage so a restored sub-session
                 // still reports its parent over the ACP transport (parity with the
@@ -2819,6 +2832,7 @@ export class AcpDispatcher {
               },
               {
                 runtimeBaseDir: this.sessionRuntimeBaseDir,
+                worktreeRoot: this.getWorktreeRootSetting(workspaceCwd),
                 ...(!this.isWorkspaceTrusted()
                   ? { allowSidecarWrite: false }
                   : {}),
@@ -3615,6 +3629,7 @@ export class AcpDispatcher {
               : {};
             const service = new SessionService(this.boundWorkspace, {
               runtimeBaseDir: this.sessionRuntimeBaseDir,
+              worktreeRoot: this.getWorktreeRootSetting(),
             });
             // Bridge entries are re-created without prs on daemon restart,
             // close/reload, and archive/restore, and the bridge itself is
@@ -3730,7 +3745,10 @@ export class AcpDispatcher {
             );
           }
           await this.archiveCoordinator.runSharedMany([sessionId], async () => {
-            const sessionService = new SessionService(this.boundWorkspace);
+            const sessionService = new SessionService(this.boundWorkspace, {
+              runtimeBaseDir: this.sessionRuntimeBaseDir,
+              worktreeRoot: this.getWorktreeRootSetting(),
+            });
             let exists =
               await sessionService.sessionExistsInAnyState(sessionId);
             if (!exists) {
@@ -5628,6 +5646,7 @@ export class AcpDispatcher {
           if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
+            worktreeRoot: this.getWorktreeRootSetting(),
           });
           const result = await this.runWithSessionListInvalidation(
             ['active', 'archived'],
@@ -5660,6 +5679,7 @@ export class AcpDispatcher {
           if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
+            worktreeRoot: this.getWorktreeRootSetting(),
           });
           const result = await this.runWithSessionListInvalidation(
             ['active', 'archived'],
@@ -5690,6 +5710,7 @@ export class AcpDispatcher {
           const resolveConflicts = this.parseResolveConflicts(params);
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
+            worktreeRoot: this.getWorktreeRootSetting(),
           });
           const result = await this.runWithSessionListInvalidation(
             ['active', 'archived'],

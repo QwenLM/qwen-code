@@ -84,6 +84,37 @@ describe('collectRecordableWorkspaceFiles', () => {
       ),
     ).toBe(true);
     expect(pathHasSkippedDirectoryComponent('.qwen/skills')).toBe(true);
+    expect(
+      pathHasSkippedDirectoryComponent(
+        '.worktrees/my-feature/reports',
+        '.worktrees',
+      ),
+    ).toBe(false);
+    expect(
+      pathHasSkippedDirectoryComponent(
+        '.worktrees/my-feature/.hidden/report.md',
+        '.worktrees',
+      ),
+    ).toBe(true);
+    expect(
+      pathHasSkippedDirectoryComponent(
+        '.worktrees/my-feature/reports',
+        '../invalid',
+      ),
+    ).toBe(true);
+    // R2-4: nested custom root ending in `.qwen/worktrees` strips the full 3-segment prefix.
+    expect(
+      pathHasSkippedDirectoryComponent(
+        'sub/.qwen/worktrees/my-feature/reports',
+        'sub/.qwen/worktrees',
+      ),
+    ).toBe(false);
+    expect(
+      pathHasSkippedDirectoryComponent(
+        'sub/.qwen/worktrees/my-feature/.hidden/report.md',
+        'sub/.qwen/worktrees',
+      ),
+    ).toBe(true);
   });
 
   it('records a regular file named after a skipped directory', async () => {

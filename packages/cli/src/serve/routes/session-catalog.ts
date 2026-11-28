@@ -32,6 +32,7 @@ import {
   resolveWorkspaceEntryBySelector,
 } from '../workspace-route-runtime.js';
 import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
+import { resolveRuntimeWorktreeRootSetting } from '../server/worktree-root.js';
 
 const READ_CONCURRENCY = 4;
 
@@ -194,6 +195,7 @@ export function registerSessionCatalogRoutes(
                     paginateMerged: true,
                     includeGroups,
                     runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+                    worktreeRoot: resolveRuntimeWorktreeRootSetting(runtime),
                     signal: controller.signal,
                   },
                 );

@@ -6,6 +6,10 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import {
+  DEFAULT_WORKTREE_ROOT_SEGMENTS,
+  parseWorktreeRoot,
+} from './worktree-root.js';
 
 export const MAX_DIRECTORY_ARTIFACT_FILES = 100;
 export const MAX_DIRECTORY_ARTIFACT_DEPTH = 4;
@@ -55,21 +59,66 @@ export function shouldSkipDirectoryArtifactName(name: string): boolean {
   );
 }
 
-const WORKTREE_ARTIFACT_PREFIX_RE = /^\.qwen\/worktrees\/[^/]+\//;
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildWorktreeArtifactPrefixRegex(segments: readonly string[]): RegExp {
+  const joined = segments.map(escapeRegex).join('/');
+  return new RegExp(`^${joined}/[^/]+/`);
+}
+
+const WORKTREE_ARTIFACT_PREFIX_RE = buildWorktreeArtifactPrefixRegex(
+  DEFAULT_WORKTREE_ROOT_SEGMENTS,
+);
 
 /**
  * Bound-root-canonical paths from a worktree session always start with
- * `.qwen/worktrees/<slug>/`. That leading `.qwen` must not itself trip the
- * skip-directory gate for ordinary subdirectories inside the worktree.
+ * `<worktree.root>/<slug>/` (default `.qwen/worktrees/<slug>/`). That leading
+ * managed root must not itself trip the skip-directory gate for ordinary
+ * subdirectories inside the worktree.
  */
-export function stripWorktreeArtifactPrefix(workspacePath: string): string {
-  return workspacePath.replace(WORKTREE_ARTIFACT_PREFIX_RE, '');
+export function stripWorktreeArtifactPrefix(
+  workspacePath: string,
+  worktreeRoot?: string,
+): string {
+  // Rank candidate prefixes by longest matched worktree root (most segments)
+  // so custom roots like `sub/.qwen/worktrees` and legacy `.qwen/worktrees`
+  // stay aligned with `resolveBoundWorkspaceRoot`.
+  let best: { stripped: string; segmentCount: number } | null = null;
+  if (WORKTREE_ARTIFACT_PREFIX_RE.test(workspacePath)) {
+    best = {
+      stripped: workspacePath.replace(WORKTREE_ARTIFACT_PREFIX_RE, ''),
+      segmentCount: DEFAULT_WORKTREE_ROOT_SEGMENTS.length,
+    };
+  }
+  if (worktreeRoot !== undefined) {
+    try {
+      const parsed = parseWorktreeRoot(worktreeRoot);
+      if (!parsed.isDefault) {
+        const customRe = buildWorktreeArtifactPrefixRegex(parsed.segments);
+        if (
+          customRe.test(workspacePath) &&
+          (!best || parsed.segments.length > best.segmentCount)
+        ) {
+          best = {
+            stripped: workspacePath.replace(customRe, ''),
+            segmentCount: parsed.segments.length,
+          };
+        }
+      }
+    } catch {
+      // Invalid worktree.root — do not strip a custom prefix.
+    }
+  }
+  return best ? best.stripped : workspacePath;
 }
 
 export function pathHasSkippedDirectoryComponent(
   workspacePath: string,
+  worktreeRoot?: string,
 ): boolean {
-  return stripWorktreeArtifactPrefix(workspacePath)
+  return stripWorktreeArtifactPrefix(workspacePath, worktreeRoot)
     .split('/')
     .filter(Boolean)
     .some((segment) => shouldSkipDirectoryArtifactName(segment));

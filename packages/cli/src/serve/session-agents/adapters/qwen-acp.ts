@@ -99,6 +99,8 @@ export interface QwenAcpAdapterOptions {
   cancelSettleMs?: number;
   /** See the file header. Absent means the session gets no `session_send`. */
   sessionSend?: QwenSessionSendBinding;
+  /** Optional lazy resolver for the workspace's `worktree.root` setting (or fail-closed sentinel). */
+  getWorktreeRoot?: () => string | undefined;
   /** Test seam. */
   sessionExists?: (sessionId: string) => Promise<boolean>;
 }
@@ -236,10 +238,14 @@ export function createQwenAcpAdapter(
   const { bridge, workspaceCwd, agentId } = options;
   const idleCloseMs = options.idleCloseMs ?? QWEN_AGENT_SESSION_IDLE_CLOSE_MS;
   const cancelSettleMs = options.cancelSettleMs ?? QWEN_AGENT_CANCEL_SETTLE_MS;
-  const sessions = new SessionService(workspaceCwd);
   const sessionExists =
     options.sessionExists ??
-    ((sessionId: string) => sessions.sessionExists(sessionId));
+    ((sessionId: string) => {
+      const worktreeRoot = options.getWorktreeRoot?.();
+      return new SessionService(workspaceCwd, {
+        ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
+      }).sessionExists(sessionId);
+    });
 
   const findSession = (sessionId: string) =>
     bridge

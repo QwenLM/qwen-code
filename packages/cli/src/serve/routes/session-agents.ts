@@ -29,6 +29,7 @@
 
 import express from 'express';
 import type { Application, Request, RequestHandler, Response } from 'express';
+import { resolveRuntimeWorktreeRootSetting } from '../server/worktree-root.js';
 import type { SessionAgentEventFrame } from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
 import {
   isTerminalSessionAgentRunStatus,
@@ -171,6 +172,7 @@ export function registerSessionAgentRoutes(
     const orchestrator = ensureSessionAgentOrchestrator({
       workspaceCwd,
       bridge: runtime.bridge,
+      getWorktreeRoot: () => resolveRuntimeWorktreeRootSetting(runtime),
       chainLimit: () => deps.agentChainLimitFor?.(workspaceCwd) ?? 0,
       ...(deps.agentTokenBudgetFor
         ? { tokenBudget: () => deps.agentTokenBudgetFor!(workspaceCwd) }

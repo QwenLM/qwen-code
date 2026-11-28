@@ -7807,6 +7807,9 @@ export function createSessionControlPlane(
         workspaceCwd,
         runtimeBaseDir: opts.artifactSnapshotRuntimeBaseDir,
         persistence: createSessionArtifactPersistence(ci.connection, sessionId),
+        ...(opts.resolveWorktreeRoot !== undefined
+          ? { worktreeRoot: opts.resolveWorktreeRoot }
+          : {}),
       }),
       artifactWorkspaceCwd: workspaceCwd,
       artifactWorkspaceReady: !isReservedStandaloneSessionSourceType(
@@ -13718,6 +13721,9 @@ export function createSessionControlPlane(
             entry.connection,
             sessionId,
           ),
+          ...(opts.resolveWorktreeRoot !== undefined
+            ? { worktreeRoot: opts.resolveWorktreeRoot }
+            : {}),
         });
         const pending = entry.pendingArtifactRestore;
         if (pending) {

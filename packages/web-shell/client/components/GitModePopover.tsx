@@ -74,12 +74,29 @@ interface GitModePopoverProps {
   showDetails?: boolean;
   intent: SessionGitIntent;
   onIntentChange: (intent: SessionGitIntent) => void;
+  /** Effective repository-relative worktree root directory (default `.qwen/worktrees`). */
+  worktreeRoot?: string;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   draft?: GitModePopoverDraft;
   onDraftChange?: (
     update: (current: GitModePopoverDraft) => GitModePopoverDraft,
   ) => void;
+}
+
+/**
+ * Formats `<worktreeRoot>/<slug>` for the copyable command preview. Ordinary
+ * shell-safe relative paths (such as `.qwen/worktrees` or `.worktrees`) render
+ * unquoted; any root containing whitespace or shell metacharacters is
+ * single-quoted with embedded quotes escaped so copying the line cannot inject
+ * extra commands.
+ */
+function formatWorktreePreviewTarget(worktreeRoot: string): string {
+  if (/^[A-Za-z0-9._/@+-]+$/.test(worktreeRoot)) {
+    return `${worktreeRoot}/<slug>`;
+  }
+  const escaped = worktreeRoot.replace(/'/g, `'\\''`);
+  return `'${escaped}/<slug>'`;
 }
 
 export function GitModePopover({
@@ -89,6 +106,7 @@ export function GitModePopover({
   showDetails = true,
   intent,
   onIntentChange,
+  worktreeRoot = '.qwen/worktrees',
   open: openProp,
   onOpenChange,
   draft,
@@ -389,7 +407,7 @@ export function GitModePopover({
               {selectedMode === 'branch'
                 ? `$ git checkout -b ${branchName || '…'} ← ${branch}`
                 : selectedMode === 'worktree'
-                  ? '$ git worktree add --detach .qwen/worktrees/<slug>'
+                  ? `$ git worktree add --detach ${formatWorktreePreviewTarget(worktreeRoot)}`
                   : `$ git checkout ${branch}`}
             </span>
             {selectedMode === 'branch' && (

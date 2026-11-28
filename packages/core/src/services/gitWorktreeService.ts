@@ -27,6 +27,11 @@ import { gitEnv, gitRemoteEnv } from '../utils/git-branches.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { raceWithAbort } from '../utils/race-with-abort.js';
+import {
+  assertWorktreeRootContainment,
+  parseWorktreeRoot,
+  type ParsedWorktreeRoot,
+} from '../utils/worktree-root.js';
 
 const debugLogger = createDebugLogger('GIT_WORKTREE_SERVICE');
 
@@ -1919,6 +1924,11 @@ interface SessionConfigFile {
   [key: string]: unknown;
 }
 
+export interface GitWorktreeServiceOptions {
+  /** Repository-relative root for user/session worktrees (default: '.qwen/worktrees'). */
+  worktreeRoot?: string;
+}
+
 /**
  * Service for managing git worktrees.
  *
@@ -1929,10 +1939,21 @@ export class GitWorktreeService {
   private sourceRepoPath: string;
   private gitPromise: Promise<SimpleGit> | undefined;
   private readonly customBaseDir?: string;
+  private readonly userWorktreeRoot: ParsedWorktreeRoot;
 
-  constructor(sourceRepoPath: string, customBaseDir?: string) {
+  constructor(
+    sourceRepoPath: string,
+    optionsOrCustomBaseDir?: string | GitWorktreeServiceOptions,
+  ) {
     this.sourceRepoPath = path.resolve(sourceRepoPath);
-    this.customBaseDir = customBaseDir;
+    if (typeof optionsOrCustomBaseDir === 'string') {
+      this.customBaseDir = optionsOrCustomBaseDir;
+      this.userWorktreeRoot = parseWorktreeRoot(undefined);
+    } else {
+      this.userWorktreeRoot = parseWorktreeRoot(
+        optionsOrCustomBaseDir?.worktreeRoot,
+      );
+    }
   }
 
   private getGit(): Promise<SimpleGit> {
@@ -3336,11 +3357,33 @@ export class GitWorktreeService {
   // ──────────────────────────────────────────────────────────────────────
 
   /**
+   * Returns true when `this.sourceRepoPath` is structurally inside a linked
+   * git worktree, regardless of which `worktree.root` created it or how deep
+   * inside the checkout the path sits. Uses the single `--absolute-git-dir`
+   * value plus the presence of `<gitDir>/commondir` (which git writes
+   * exclusively for linked worktrees), so paths containing newlines are never
+   * mis-split. Returns false for the main checkout or non-git dirs.
+   */
+  async isLinkedWorktree(): Promise<boolean> {
+    try {
+      const git = await this.getGit();
+      const raw = await git.raw(['rev-parse', '--absolute-git-dir']);
+      const gitDirRaw = raw.replace(/\r?\n$/, '');
+      if (!gitDirRaw) return false;
+      const absGitDir = path.resolve(this.sourceRepoPath, gitDirRaw);
+      await fs.access(path.join(absGitDir, 'commondir'));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Returns the directory holding all general-purpose worktrees for this
-   * repo: `<projectRoot>/.qwen/worktrees`.
+   * repo: `<projectRoot>/<worktree.root>` (default `<projectRoot>/.qwen/worktrees`).
    */
   getUserWorktreesDir(): string {
-    return path.join(this.sourceRepoPath, '.qwen', WORKTREES_DIR);
+    return path.join(this.sourceRepoPath, ...this.userWorktreeRoot.segments);
   }
 
   /**
@@ -3917,6 +3960,7 @@ export class GitWorktreeService {
     }
 
     let gitAddStarted = false;
+    let customExcludeRuleAdded = false;
     try {
       const worktreesDir = this.getUserWorktreesDir();
       const worktreePath = path.join(worktreesDir, slug);
@@ -3952,10 +3996,36 @@ export class GitWorktreeService {
 
       const git = await raceWithAbort(signal, () => this.getGit());
       signal?.throwIfAborted();
+      const rawGitDir = await raceWithAbort(signal, () =>
+        git
+          .raw(['rev-parse', '--absolute-git-dir'])
+          .then((out) => out.trim())
+          .catch(() => ''),
+      );
+      signal?.throwIfAborted();
+      try {
+        await assertWorktreeRootContainment(
+          this.sourceRepoPath,
+          worktreesDir,
+          this.userWorktreeRoot,
+          rawGitDir || undefined,
+        );
+      } catch (containmentError) {
+        const message =
+          containmentError instanceof Error
+            ? containmentError.message
+            : String(containmentError);
+        debugLogger.warn(`createUserWorktree: ${message}`);
+        return {
+          success: false,
+          error: message,
+          code: 'invalid_worktree_root',
+        };
+      }
       await fs.mkdir(worktreesDir, { recursive: true });
       signal?.throwIfAborted();
       // Keep managed checkouts out of the parent repo's status and file walks.
-      await this.ensureWorktreesGitignored();
+      customExcludeRuleAdded = await this.ensureWorktreesGitignored(slug);
       signal?.throwIfAborted();
 
       gitAddStarted = true;
@@ -4061,6 +4131,11 @@ export class GitWorktreeService {
               // a failed carry leaves no checkout behind, and fail closed
               // rather than relocate the session without the user's work.
               await this.removeWorktree(worktreePath).catch(() => undefined);
+              if (customExcludeRuleAdded) {
+                await this.removeCustomWorktreeExcludeRule(slug).catch(
+                  () => undefined,
+                );
+              }
               return { success: false, error: error.message };
             }
             throw error;
@@ -4098,6 +4173,9 @@ export class GitWorktreeService {
       };
       return { success: true, worktree, carriedPaths, carriedEntries };
     } catch (error) {
+      if (customExcludeRuleAdded) {
+        await this.removeCustomWorktreeExcludeRule(slug).catch(() => undefined);
+      }
       if (!gitAddStarted) signal?.throwIfAborted();
       const message = `Failed to create worktree "${slug}": ${error instanceof Error ? error.message : 'Unknown error'}`;
       debugLogger.warn(`createUserWorktree: ${message}`);
@@ -4682,6 +4760,13 @@ export class GitWorktreeService {
     }
     const gitDirAbs = path.join(repoRootAbs, '.git');
     const qwenDirAbs = path.join(repoRootAbs, '.qwen');
+    const worktreesDirAbs = path.join(
+      repoRootAbs,
+      ...this.userWorktreeRoot.segments,
+    );
+    const realWorktreesDirAbs = await fs
+      .realpath(worktreesDirAbs)
+      .catch(() => worktreesDirAbs);
     // Same canonical-vs-canonical requirement for the dest side. The
     // worktree was just created by `git worktree add`, so the path
     // should exist; fall back to the input path on realpath error so a
@@ -4762,6 +4847,16 @@ export class GitWorktreeService {
         );
         continue;
       }
+      if (
+        isWithinRoot(sourceAbs, worktreesDirAbs) ||
+        isWithinRoot(worktreesDirAbs, sourceAbs)
+      ) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — ` +
+            `overlaps configured worktree root "${this.userWorktreeRoot.normalized}"`,
+        );
+        continue;
+      }
 
       // Confirm the source exists. We don't insist on it being a directory
       // specifically — `node_modules` is canonically a dir, but a user
@@ -4815,6 +4910,17 @@ export class GitWorktreeService {
       if (isWithinRoot(realSource, qwenDirAbs)) {
         debugLogger.warn(
           `symlinkConfiguredDirectories: refusing path "${raw}" — real source ${realSource} resolves inside .qwen`,
+        );
+        continue;
+      }
+      if (
+        isWithinRoot(realSource, worktreesDirAbs) ||
+        isWithinRoot(worktreesDirAbs, realSource) ||
+        isWithinRoot(realSource, realWorktreesDirAbs) ||
+        isWithinRoot(realWorktreesDirAbs, realSource)
+      ) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — real source ${realSource} overlaps configured worktree root "${this.userWorktreeRoot.normalized}"`,
         );
         continue;
       }
@@ -4944,15 +5050,105 @@ export class GitWorktreeService {
    * root, so the rule is computed relative to the repository top — a
    * service rooted at a subdirectory ignores its own `.qwen/worktrees`.
    */
-  private async ensureWorktreesGitignored(): Promise<void> {
+  private async ensureWorktreesGitignored(slug?: string): Promise<boolean> {
     try {
-      await this.ensureWorktreesExcludeRule();
-      await this.migrateLegacyWorktreeGitignore();
+      const result = await this.ensureWorktreesExcludeRule(slug);
+      if (this.userWorktreeRoot.isDefault) {
+        await this.migrateLegacyWorktreeGitignore();
+      }
+      return !this.userWorktreeRoot.isDefault && result.added;
     } catch (error) {
       // Best-effort: if writing the exclude fails (read-only fs, etc.)
       // it is not worth aborting the worktree creation.
       debugLogger.warn(
         `ensureWorktreesGitignored failed (non-fatal): ${error}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Computes the repository's `info/exclude` path and anchored gitignore rule
+   * for either the dedicated default `.qwen/worktrees/` root or a single
+   * managed checkout under a custom `worktree.root` (`/<root>/<slug>/`).
+   * Scoping custom-root rules per checkout ensures pointing `worktree.root` at
+   * a directory that already holds user files never hides those files from git.
+   */
+  private async computeWorktreeExcludeTarget(slug?: string): Promise<{
+    excludePath: string;
+    repoTop: string;
+    realRoot: string;
+    rule: string;
+    targetSegments: readonly string[];
+  } | null> {
+    const git = await this.getGit();
+    const excludeRel = (
+      await git.raw(['rev-parse', '--git-path', 'info/exclude'])
+    ).trim();
+    const excludePath = path.resolve(this.sourceRepoPath, excludeRel);
+    const realRoot = await fs
+      .realpath(this.sourceRepoPath)
+      .catch(() => this.sourceRepoPath);
+    const repoTop =
+      (await this.getRepoTopLevel().catch(() => null)) ?? realRoot;
+    const targetSegments =
+      !this.userWorktreeRoot.isDefault && slug !== undefined
+        ? [...this.userWorktreeRoot.segments, slug]
+        : [...this.userWorktreeRoot.segments];
+    const rel = path.relative(repoTop, path.join(realRoot, ...targetSegments));
+    const segments = rel.split(path.sep);
+    if (
+      rel === '..' ||
+      rel.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(rel) ||
+      segments.some((s) => /[\n\r]/.test(s))
+    ) {
+      debugLogger.warn(
+        `ensureWorktreesGitignored: cannot represent ${rel} as an exclude rule; skipping`,
+      );
+      return null;
+    }
+    const escaped = segments
+      .map((s) =>
+        s
+          .replace(/[\\*?[\]#!]/g, '\\$&')
+          .replace(/ +$/, (m) => m.replace(/ /g, '\\ ')),
+      )
+      .join('/');
+    return {
+      excludePath,
+      repoTop,
+      realRoot,
+      rule: `/${escaped}/`,
+      targetSegments,
+    };
+  }
+
+  /**
+   * Removes the per-checkout `info/exclude` rule previously added for a custom
+   * `worktree.root` checkout. Best-effort and idempotent; leaves default
+   * `/.qwen/worktrees/` untouched.
+   */
+  async removeCustomWorktreeExcludeRule(slug: string): Promise<void> {
+    if (this.userWorktreeRoot.isDefault) return;
+    try {
+      const target = await this.computeWorktreeExcludeTarget(slug);
+      if (!target) return;
+      let existing: string;
+      try {
+        existing = await fs.readFile(target.excludePath, 'utf8');
+      } catch (error) {
+        if (isNodeError(error) && error.code === 'ENOENT') return;
+        throw error;
+      }
+      const lines = existing.split('\n');
+      const filtered = lines.filter((line) => line.trim() !== target.rule);
+      if (filtered.length === lines.length) return;
+      const next = filtered.join('\n');
+      await atomicWriteFile(target.excludePath, next);
+    } catch (error) {
+      debugLogger.warn(
+        `removeCustomWorktreeExcludeRule failed (non-fatal): ${error}`,
       );
     }
   }
@@ -4965,77 +5161,31 @@ export class GitWorktreeService {
    * legacy file when this returns false (unrepresentable path or a rule
    * git does not honor), or the checkout loses its only hiding mechanism.
    */
-  private async ensureWorktreesExcludeRule(): Promise<boolean> {
+  private async ensureWorktreesExcludeRule(
+    slug?: string,
+  ): Promise<{ active: boolean; added: boolean }> {
     const git = await this.getGit();
-    const excludeRel = (
-      await git.raw(['rev-parse', '--git-path', 'info/exclude'])
-    ).trim();
-    const excludePath = path.resolve(this.sourceRepoPath, excludeRel);
-    // Canonicalize both sides: git reports a physical toplevel, and a
-    // symlinked service root would otherwise produce a ../-prefixed
-    // (malformed) relative rule.
-    const realRoot = await fs
-      .realpath(this.sourceRepoPath)
-      .catch(() => this.sourceRepoPath);
-    const repoTop =
-      (await this.getRepoTopLevel().catch(() => null)) ?? realRoot;
-    const rel = path.relative(
-      repoTop,
-      path.join(realRoot, '.qwen', WORKTREES_DIR),
-    );
-    // The rule is a gitignore pattern, not a path: escape the pattern
-    // metacharacters per segment (a route directory like app/[id]
-    // would otherwise become a character class matching nothing).
-    // A line-based pattern cannot represent newline-bearing components
-    // or an out-of-root target; skip and log instead of writing garbage.
-    // Test for an actual parent segment, not a '..' prefix: an in-root
-    // directory named '..cache' is legal and must still get a rule.
-    const segments = rel.split(path.sep);
-    if (
-      rel === '..' ||
-      rel.startsWith(`..${path.sep}`) ||
-      path.isAbsolute(rel) ||
-      segments.some((s) => /[\n\r]/.test(s))
-    ) {
-      debugLogger.warn(
-        `ensureWorktreesGitignored: cannot represent ${rel} as an exclude rule; skipping`,
-      );
-      return false;
+    const target = await this.computeWorktreeExcludeTarget(slug);
+    if (!target) {
+      return { active: false, added: false };
     }
-    const escaped = segments
-      .map((s) =>
-        s
-          .replace(/[\\*?[\]#!]/g, '\\$&')
-          .replace(/ +$/, (m) => m.replace(/ /g, '\\ ')),
-      )
-      .join('/');
-    const rule = `/${escaped}/`;
+    const { excludePath, repoTop, realRoot, rule, targetSegments } = target;
     let existing = '';
     try {
       existing = await fs.readFile(excludePath, 'utf8');
     } catch (error) {
       if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
     }
+    let added = false;
     if (!existing.split('\n').some((line) => line.trim() === rule)) {
       await fs.mkdir(path.dirname(excludePath), { recursive: true });
       const prefix =
         existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
       await fs.appendFile(excludePath, `${prefix}${rule}\n`, 'utf8');
+      added = true;
     }
-    // Verify against git itself that the rule JUST WRITTEN is the one in
-    // force. A bare `check-ignore -q` is vacuous twice over: it exits 1
-    // with no output when the path is not ignored (simple-git's default
-    // detector resolves that, so a `.then(() => true)` always wins), and it
-    // answers whether ANY source ignores the path — a higher-priority
-    // per-directory `.gitignore` (e.g. `.qwen/*` + `!.qwen/worktrees/`)
-    // would answer for the info/exclude rule and let the migration unlink
-    // the only effective hiding mechanism. Use `-v` and accept only a
-    // verdict whose source is this exclude file and whose pattern is the
-    // rule. Forward slashes: a win32 native path would read as an escaped
-    // pathspec. Probe a FILE path, not the directory: a directory-form
-    // re-include negation only applies to paths git knows are directories.
     const probe = path
-      .join(realRoot, '.qwen', WORKTREES_DIR, 'probe')
+      .join(realRoot, ...targetSegments, 'probe')
       .split(path.sep)
       .join('/');
     // The legacy daemon .qwen/.gitignore outranks info/exclude and is the
@@ -5051,18 +5201,20 @@ export class GitWorktreeService {
       '.gitignore',
     );
     let legacyMoved: string | null = null;
-    const legacyContent = await fs
-      .readFile(legacyGitignore, 'utf8')
-      .catch(() => null);
-    if (
-      legacyContent === `# Auto-generated by qwen-code.\n${WORKTREES_DIR}/\n`
-    ) {
-      const moved = `${legacyGitignore}.probe-tmp`;
-      try {
-        await fs.rename(legacyGitignore, moved);
-        legacyMoved = moved;
-      } catch {
-        // Leave it in place; the probe below will attribute conservatively.
+    if (this.userWorktreeRoot.isDefault) {
+      const legacyContent = await fs
+        .readFile(legacyGitignore, 'utf8')
+        .catch(() => null);
+      if (
+        legacyContent === `# Auto-generated by qwen-code.\n${WORKTREES_DIR}/\n`
+      ) {
+        const moved = `${legacyGitignore}.probe-tmp`;
+        try {
+          await fs.rename(legacyGitignore, moved);
+          legacyMoved = moved;
+        } catch {
+          // Leave it in place; the probe below will attribute conservatively.
+        }
       }
     }
     let verdict = '';
@@ -5098,9 +5250,9 @@ export class GitWorktreeService {
       debugLogger.warn(
         `ensureWorktreesGitignored: rule ${rule} does not ignore the worktrees directory`,
       );
-      return false;
+      return { active: false, added };
     }
-    return true;
+    return { active: true, added };
   }
 
   /**
@@ -5136,7 +5288,7 @@ export class GitWorktreeService {
         // be established (unrepresentable path, or git does not honor
         // it), keep the legacy file — it is still the only mechanism
         // hiding the managed directory.
-        const established = await this.ensureWorktreesExcludeRule();
+        const established = (await this.ensureWorktreesExcludeRule()).active;
         if (established) {
           await fs.unlink(legacyGitignore);
         }
@@ -5191,6 +5343,23 @@ export class GitWorktreeService {
     keptBranch?: string;
   }> {
     const { signal } = options;
+    const worktreesDir = this.getUserWorktreesDir();
+    try {
+      await assertWorktreeRootContainment(
+        this.sourceRepoPath,
+        worktreesDir,
+        this.userWorktreeRoot,
+        path.join(this.sourceRepoPath, '.git'),
+      );
+    } catch (containmentError) {
+      return {
+        success: false,
+        error:
+          containmentError instanceof Error
+            ? containmentError.message
+            : String(containmentError),
+      };
+    }
     const worktreePath = this.getUserWorktreePath(slug);
     const branchName = worktreeBranchForSlug(slug);
     // Refuse to remove a checkout that EXISTS but cannot be verified as a
@@ -5257,6 +5426,7 @@ export class GitWorktreeService {
     if (!removed.success) {
       return removed;
     }
+    await this.removeCustomWorktreeExcludeRule(slug);
 
     if (!options.deleteBranch) {
       return { success: true };
@@ -5375,8 +5545,7 @@ export class GitWorktreeService {
       const canonicalRepo = await fs.realpath(this.sourceRepoPath);
       const canonicalExpectedPath = path.join(
         canonicalRepo,
-        '.qwen',
-        WORKTREES_DIR,
+        ...this.userWorktreeRoot.segments,
         slug,
       );
       if (
@@ -5570,6 +5739,7 @@ export class GitWorktreeService {
       // the source checkout still holds. git itself would refuse a dirty
       // tree without --force, stranding the worktree and its journal.
       await git.raw(['worktree', 'remove', worktreePath, '--force']);
+      await this.removeCustomWorktreeExcludeRule(slug);
       await onWorktreeRemoved?.();
       return await this.finalizePreparedUserWorktreeBranch(
         slug,

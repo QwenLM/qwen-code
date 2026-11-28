@@ -501,6 +501,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.worktree.defaultForNewSessions': '新会话默认使用 Worktree',
   'settings.description.worktree.defaultForNewSessions':
     '开启（默认）时，受信任 Git workspace 中的新 Web Shell 会话默认进入隔离 worktree：composer 缺省为 Worktree 模式，首条消息发送时创建 worktree。设为 false 则缺省使用当前分支。仅影响 Web Shell composer 的缺省值；显式模式选择与 daemon API 不变。',
+  'settings.label.worktree.root': 'Worktree 根目录',
+  'settings.description.worktree.root':
+    '创建通用 CLI worktree 与 Web Shell 会话 worktree 的仓库内相对目录（默认 .qwen/worktrees）。必须位于仓库内部，拒绝绝对路径、.. 穿越、.git 以及直接设为 .qwen。不影响 Arena worktree（agents.arena.worktreeBaseDir）。',
   'settings.label.worktree.maxRetained': '保留的会话 Worktree 上限',
   'settings.description.worktree.maxRetained':
     '每个归属唯一的管理根保留最近相应数量的合规会话 worktree，默认 15。活跃及置顶会话不占删除候选配额。设为 0 只关闭自动清扫，不禁止显式恢复快照。归属不明、根重叠或配置不可读时保留；不顺带删除孤儿快照。不影响工具/agent worktree。',
@@ -907,6 +910,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
     'Новые сессии по умолчанию в Worktree',
   'settings.description.worktree.defaultForNewSessions':
     'Если включено (по умолчанию), новые сессии Web Shell в доверенном Git workspace по умолчанию идут в изолированный worktree: композер по умолчанию в режиме Worktree, worktree создаётся при отправке первого сообщения. false — по умолчанию текущая ветка. Меняет только умолчание композера Web Shell; явный выбор режима и API daemon не затрагиваются.',
+  'settings.label.worktree.root': 'Корневой каталог worktree',
+  'settings.description.worktree.root':
+    'Относительный каталог внутри репозитория для общих worktree CLI и сессионных worktree Web Shell (по умолчанию .qwen/worktrees). Должен оставаться внутри репозитория: абсолютные пути, .., .git и напрямую .qwen отклоняются. Не влияет на Arena (agents.arena.worktreeBaseDir).',
   'settings.label.worktree.maxRetained': 'Лимит сохраняемых worktree',
   'settings.description.worktree.maxRetained':
     'Для каждого управляемого корня с уникальным владельцем сохраняйте до N самых недавних worktree для сеансов (по умолчанию N = 15). Активные и закреплённые сессии не входят в квоту на удаление. Значение 0 отключает только автоматическую очистку, но не явное восстановление снимков. При неясном владельце, перекрывающихся корнях или нечитаемой конфигурации состояние сохраняется. Сиротские снимки не удаляются. Рабочие деревья инструментов и агентов не затрагиваются.',

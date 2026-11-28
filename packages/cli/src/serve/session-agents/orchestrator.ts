@@ -310,6 +310,8 @@ export interface SessionAgentOrchestratorOptions {
   chainLimit?: () => number;
   /** `experimental.agentTokenBudget` for this workspace, read per use. */
   tokenBudget?: () => number;
+  /** Configured `worktree.root` setting (or fail-closed sentinel) for this workspace. */
+  getWorktreeRoot?: () => string | undefined;
   /** Test seams. */
   readAgents?: (workspaceCwd: string) => Promise<WorkspaceAgent[]>;
   readSquads?: (workspaceCwd: string) => Promise<SessionSquad[]>;
@@ -799,6 +801,7 @@ export class SessionAgentOrchestrator {
     agentId: string,
   ) => string | undefined;
   private readonly recordWatchMs: number;
+  private readonly getWorktreeRoot?: () => string | undefined;
   private readonly restoreSession: (sessionId: string) => Promise<void>;
   private readonly loadDefinition: (
     workspaceCwd: string,
@@ -837,12 +840,14 @@ export class SessionAgentOrchestrator {
       options.tokenBudget ?? (() => DEFAULT_AGENT_TOKEN_BUDGET);
     this.readAgents = options.readAgents ?? readWorkspaceAgents;
     this.readSquads = options.readSquads ?? readWorkspaceSquads;
+    this.getWorktreeRoot = options.getWorktreeRoot;
     this.loadRecords =
       options.loadRecords ??
       (async (sessionId) => {
-        const data = await new SessionService(this.workspaceCwd).loadSession(
-          sessionId,
-        );
+        const worktreeRoot = this.getWorktreeRoot?.();
+        const data = await new SessionService(this.workspaceCwd, {
+          ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
+        }).loadSession(sessionId);
         return data?.conversation.messages ?? [];
       });
     this.adapterFor = options.getAdapter ?? defaultGetAdapter;
@@ -2265,6 +2270,9 @@ export class SessionAgentOrchestrator {
         agentId: agent.id,
         permissionVoteContext: (requestId) => live.voterContexts.get(requestId),
         sessionSend,
+        ...(this.getWorktreeRoot
+          ? { getWorktreeRoot: this.getWorktreeRoot }
+          : {}),
       });
       const result = await adapter.runTurn({
         prompt: input.prompt,

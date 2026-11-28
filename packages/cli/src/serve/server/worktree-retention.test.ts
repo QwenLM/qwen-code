@@ -2142,8 +2142,13 @@ describe('worktree retention with real repositories', () => {
       target.runtime,
       { ...shared.runtime, workspaceCwd: nested },
     ]);
-    expect((await sweep(target, sharedRegistry)).skipped).toContain(
-      'retention settings cannot be read for this root',
+    const sharedReport = await sweep(target, sharedRegistry);
+    expect(sharedReport.skipped).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          'retention settings cannot be read for this root:',
+        ),
+      ]),
     );
     expect(fs.existsSync(newest.worktreePath)).toBe(true);
     expect(fs.existsSync(sharedCandidate.worktreePath)).toBe(true);

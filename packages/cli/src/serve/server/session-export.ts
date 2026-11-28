@@ -87,11 +87,15 @@ export async function exportSessionTranscript(params: {
   archiveState?: SessionArchiveState;
   config?: ExportConfig;
   runtimeBaseDir?: string;
+  worktreeRoot?: string;
 }): Promise<SessionExportResult> {
   const { workspaceCwd, sessionId, format } = params;
   const service = new SessionService(workspaceCwd, {
     ...(params.runtimeBaseDir !== undefined
       ? { runtimeBaseDir: params.runtimeBaseDir }
+      : {}),
+    ...(params.worktreeRoot !== undefined
+      ? { worktreeRoot: params.worktreeRoot }
       : {}),
   });
   const sessionData =

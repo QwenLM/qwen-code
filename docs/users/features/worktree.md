@@ -79,10 +79,10 @@ The two mid-session tools (`enter_worktree` / `exit_worktree`) are deliberately 
 
 ## What Gets Created
 
-Every Qwen-managed worktree is placed under your project's `.qwen` directory:
+By default, every Qwen-managed worktree is placed under `<repoRoot>/.qwen/worktrees/<slug>/`. You can relocate it to another repository-relative directory via `worktree.root` (see [Settings](#settings)):
 
 ```
-<repoRoot>/.qwen/worktrees/<slug>/         # Working directory
+<repoRoot>/<worktree.root>/<slug>/         # Working directory (default: .qwen/worktrees)
                           ↳ branch worktree-<slug>   # Created off your current branch
 ```
 
@@ -91,7 +91,7 @@ Every Qwen-managed worktree is placed under your project's `.qwen` directory:
 - **Hooks** — the worktree's `core.hooksPath` is automatically pointed at the main repo's `.husky/` (preferred) or `.git/hooks/` so commits inside the worktree still trigger your existing pre-commit / commit-msg hooks.
 - **Optional symlinks** — directories listed in `worktree.symlinkDirectories` (see [Settings](#settings)) are symlinked from the main repo into the new worktree so heavy dirs like `node_modules` can be reused without reinstalling.
 
-The general-purpose worktree path is **not configurable** — it must live under `<repoRoot>/.qwen/worktrees/` so the CLI can find it on restart and on stale-cleanup sweeps. (The unrelated `agents.arena.worktreeBaseDir` setting controls only [Agent Arena](./arena.md) worktrees, which use a separate path tree under `~/.qwen/arena/`.)
+The `worktree.root` path must stay relative to the repository root (absolute paths, `..` traversal, `.git`, `.qwen` directly, and custom-root symlink prefixes are rejected). The unrelated `agents.arena.worktreeBaseDir` setting controls only [Agent Arena](./arena.md) worktrees, which use a separate path tree under `~/.qwen/arena/`.
 
 ## Footer and Status Line
 
@@ -169,7 +169,7 @@ The model is **not** automatically `chdir`'d into the worktree — the reminder 
 
 ## Sub-Agent Isolation
 
-The `agent` tool accepts an optional `isolation: "worktree"` parameter. When set, Qwen Code creates an ephemeral worktree at `<repoRoot>/.qwen/worktrees/agent-<7hex>/` before the sub-agent starts, and:
+The `agent` tool accepts an optional `isolation: "worktree"` parameter. When set, Qwen Code creates an ephemeral worktree under the configured `worktree.root` (default `<repoRoot>/.qwen/worktrees/agent-<7hex>/`) before the sub-agent starts, and:
 
 - **No changes** → the worktree is automatically removed when the agent finishes.
 - **Has changes** → the worktree is preserved; its path and branch are appended to the agent's result, e.g.
@@ -218,13 +218,14 @@ The same three guards apply to the `WorktreeExitDialog → Remove` button.
 
 ## Settings
 
-Three settings shape the general-purpose worktree experience:
+Four settings shape the general-purpose and Web Shell worktree experience:
 
-| Key                               | Type       | Default     | Effect                                                                                                                                                                                                                                                                     |
-| --------------------------------- | ---------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ui.hideBuiltinWorktreeIndicator` | boolean    | `false`     | Hides the built-in `⎇ worktree-… (…)` Footer row. The `worktree` field is still delivered to custom status line scripts. Set to `true` only if your status line already renders the worktree — otherwise you lose all UI affordance.                                       |
-| `worktree.defaultForNewSessions`  | boolean    | `true`      | Web Shell only: a new session in a trusted Git workspace defaults to Worktree mode in the composer (the worktree is created when the first message is sent). Set to `false` to default to the current branch. Explicit mode selection and the daemon API are unchanged.    |
-| `worktree.symlinkDirectories`     | `string[]` | `undefined` | Directories under the main repo to symlink into every general-purpose worktree on creation. Paths are relative to the repo root; absolute paths and any entry containing `..` are rejected. Missing sources and existing destinations are silently skipped (no overwrite). |
+| Key                               | Type       | Default           | Effect                                                                                                                                                                                                                                                                                         |
+| --------------------------------- | ---------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ui.hideBuiltinWorktreeIndicator` | boolean    | `false`           | Hides the built-in `⎇ worktree-… (…)` Footer row. The `worktree` field is still delivered to custom status line scripts. Set to `true` only if your status line already renders the worktree — otherwise you lose all UI affordance.                                                           |
+| `worktree.defaultForNewSessions`  | boolean    | `true`            | Web Shell only: a new session in a trusted Git workspace defaults to Worktree mode in the composer (the worktree is created when the first message is sent). Set to `false` to default to the current branch. Explicit mode selection and the daemon API are unchanged.                        |
+| `worktree.root`                   | string     | `.qwen/worktrees` | Repository-relative directory where general-purpose CLI worktrees and Web Shell session worktrees are created. Rejects absolute paths, `..` traversal, `.git`, `.qwen` directly, and custom-root symlink prefixes.                                                                             |
+| `worktree.symlinkDirectories`     | `string[]` | `undefined`       | Directories under the main repo to symlink into every general-purpose worktree on creation. Paths are relative to the repo root; absolute paths, `..`, `.git`, `.qwen`, and any path overlapping `worktree.root` are rejected. Missing sources and existing destinations are silently skipped. |
 
 Example:
 
@@ -232,16 +233,17 @@ Example:
 // ~/.qwen/settings.json or <repo>/.qwen/settings.json
 {
   "worktree": {
+    "root": ".worktrees",
     "symlinkDirectories": ["node_modules", ".turbo", "dist"],
   },
 }
 ```
 
-Applies to ALL worktree-creation paths: `--worktree` flag, `enter_worktree` tool, and `agent isolation: "worktree"`.
+Applies to ALL worktree-creation paths: `--worktree` flag, `enter_worktree` tool, `agent isolation: "worktree"`, and Web Shell / daemon session worktrees.
 
 Settings unrelated to general worktrees but worth knowing about:
 
-- `agents.arena.worktreeBaseDir` — controls **Agent Arena** worktree placement (default `~/.qwen/arena`). Does not affect general-purpose worktrees, which always live under `<repoRoot>/.qwen/worktrees/`.
+- `agents.arena.worktreeBaseDir` — controls **Agent Arena** worktree placement (default `~/.qwen/arena`). Does not affect general-purpose worktrees, which use `worktree.root` (default `<repoRoot>/.qwen/worktrees/`).
 
 There is no schema for `worktree.sparsePaths` yet — that's a roadmap item (see [Limitations](#limitations)).
 
@@ -260,7 +262,7 @@ There is no schema for `worktree.sparsePaths` yet — that's a roadmap item (see
 Refuses to run when:
 
 - The CLI is not in a git repository.
-- The current working directory is already inside `.qwen/worktrees/` (no nested worktrees).
+- The current working directory is already inside a linked git worktree or the configured `worktree.root` (no nested worktrees).
 
 ### `exit_worktree`
 

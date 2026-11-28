@@ -40,6 +40,8 @@ export interface AgentAdapterContext {
   ) => BridgeClientRequestContext | undefined;
   /** See `QwenAcpAdapterOptions.sessionSend` (used by the `qwen` adapter). */
   sessionSend?: QwenSessionSendBinding;
+  /** See `QwenAcpAdapterOptions.getWorktreeRoot`. */
+  getWorktreeRoot?: () => string | undefined;
 }
 
 /** Fallback for a program this build does not know. */
@@ -70,6 +72,9 @@ export function getAdapter(
           ? { permissionVoteContext: context.permissionVoteContext }
           : {}),
         ...(context.sessionSend ? { sessionSend: context.sessionSend } : {}),
+        ...(context.getWorktreeRoot
+          ? { getWorktreeRoot: context.getWorktreeRoot }
+          : {}),
       });
     // The executable is the env override (QWEN_AGENT_CLAUDE_PATH /
     // QWEN_AGENT_CODEX_PATH), else the name resolved on PATH.

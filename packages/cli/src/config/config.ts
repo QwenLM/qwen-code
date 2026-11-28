@@ -2369,7 +2369,11 @@ export async function loadCliConfig(
   let deferProjectionUntilWriterLease = false;
 
   if (argv.continue || argv.resume) {
-    const sessionService = new SessionService(cwd);
+    const worktreeRoot = settings.worktree?.root;
+    const sessionService =
+      worktreeRoot !== undefined
+        ? new SessionService(cwd, { worktreeRoot })
+        : new SessionService(cwd);
     if (argv.continue) {
       sessionData = await sessionService.loadLastSession({
         excludeSourceTypes: [
@@ -2469,7 +2473,11 @@ export async function loadCliConfig(
     // Daemon-generated fresh UUIDs and Hosted-store IDs with local recording
     // disabled (`sessionIdGenerated`) skip this local occupancy check.
     if (!argv.sessionIdGenerated) {
-      const sessionService = new SessionService(cwd);
+      const worktreeRoot = settings.worktree?.root;
+      const sessionService =
+        worktreeRoot !== undefined
+          ? new SessionService(cwd, { worktreeRoot })
+          : new SessionService(cwd);
       let occupied: boolean;
       try {
         occupied =
@@ -3095,6 +3103,7 @@ export async function loadCliConfig(
       : undefined,
     worktree: settings.worktree
       ? {
+          root: settings.worktree.root,
           symlinkDirectories: settings.worktree.symlinkDirectories,
         }
       : undefined,

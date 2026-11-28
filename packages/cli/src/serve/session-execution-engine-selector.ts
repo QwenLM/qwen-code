@@ -34,6 +34,11 @@ export interface ManagedExecutionEngine {
 
 export interface SessionExecutionEngineSelectorOptions {
   readonly runtimeBaseDir: string;
+  /** Optional lazy resolver for the workspace's `worktree.root` setting (or fail-closed sentinel). */
+  readonly getWorktreeRoot?: () =>
+    | string
+    | undefined
+    | Promise<string | undefined>;
   /** Absent while no Managed engine exists for ordinary hosts. */
   readonly managed?: ManagedExecutionEngine;
 }
@@ -56,8 +61,10 @@ export function createSessionExecutionEngineSelector(
       return compatibility.status === 'compatible' ? 'managed' : 'legacy';
     }
     const { sessionId, workspaceCwd } = selection.request;
+    const worktreeRoot = await options.getWorktreeRoot?.();
     const service = new SessionService(workspaceCwd, {
       runtimeBaseDir: options.runtimeBaseDir,
+      ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
     });
     const persistedSessionId = await resolvePersistedSessionId(
       service,

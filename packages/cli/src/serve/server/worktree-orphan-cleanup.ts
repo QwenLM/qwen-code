@@ -32,6 +32,11 @@ import {
 } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import { runGit } from '@qwen-code/qwen-code-core/utils/git-branches.js';
 import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
+import {
+  assertWorktreeRootContainmentSync,
+  parseWorktreeRoot,
+  type ParsedWorktreeRoot,
+} from '@qwen-code/qwen-code-core/utils/worktree-root.js';
 import { acquireWorktreeOwnershipOp } from './worktree-ownership-op.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { safeLogValue } from './request-helpers.js';
@@ -52,6 +57,8 @@ export interface WorktreeCleanupPlan {
   sidecarPath: string;
   /** Canonical worktree path: realpath when resolvable, raw otherwise. */
   lockKey: string;
+  /** Validated repository-relative worktree root for this workspace. */
+  worktreeRoot?: string;
   /**
    * The sidecar dir of the other archive state, when it differs from the
    * one `sidecarPath` lives in.
@@ -137,12 +144,24 @@ export async function preclassifyWorktreeCleanup(
   service: SessionService,
   sessionId: string,
   runtimeWorkspaceCwd?: string,
-  options: { quiet?: boolean; runtimeRoots?: readonly string[] } = {},
+  options: {
+    quiet?: boolean;
+    runtimeRoots?: readonly string[];
+    worktreeRoot?: string;
+  } = {},
 ): Promise<WorktreeCleanupPlan | undefined> {
   const preserve = (reason: string): undefined => {
     if (!options.quiet) logWorktreeCleanupPreserve(sessionId, reason);
     return undefined;
   };
+  let parsedWorktreeRoot: ParsedWorktreeRoot;
+  try {
+    parsedWorktreeRoot = parseWorktreeRoot(options.worktreeRoot);
+  } catch (error) {
+    return preserve(
+      `invalid worktree.root (${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
   // The delete path covers active and archived records alike, and the
   // sidecar moves with the record — check the active location first.
   let sidecarPath = service.getWorktreeSessionPath(sessionId);
@@ -206,6 +225,9 @@ export async function preclassifyWorktreeCleanup(
     sidecar: session,
     sidecarPath,
     lockKey: canonicalPath(session.worktreePath),
+    ...(parsedWorktreeRoot.isDefault
+      ? {}
+      : { worktreeRoot: parsedWorktreeRoot.normalized }),
     ...(otherStateSidecarDir !== ownDir ? { otherStateSidecarDir } : {}),
   };
 }
@@ -327,18 +349,36 @@ export async function withWorktreeArchiveMove<T>(
 export async function worktreeAllowedRoots(
   workspaceCwd: string,
   originalCwd: string,
+  worktreeRoot?: string,
 ): Promise<string[]> {
+  const parsedRoot = parseWorktreeRoot(worktreeRoot);
   const roots = new Set<string>();
+  const tryAddRoot = (base: string): void => {
+    const candidate = path.join(base, ...parsedRoot.segments);
+    try {
+      assertWorktreeRootContainmentSync(
+        base,
+        candidate,
+        parsedRoot,
+        path.join(base, '.git'),
+      );
+      roots.add(candidate);
+    } catch {
+      // Unsafe symlink/junction containment — refuse to admit this root.
+    }
+  };
   for (const base of [workspaceCwd, originalCwd]) {
     // A relative or empty base would resolve against the daemon's own
     // cwd — never let it derive a root. preclassify already rejects
     // such sidecars; this is the defense in depth underneath it.
     if (!path.isAbsolute(base)) continue;
-    roots.add(path.join(base, '.qwen', 'worktrees'));
+    tryAddRoot(base);
     try {
-      const repoTop = await new GitWorktreeService(base).getRepoTopLevel();
+      const repoTop = await new GitWorktreeService(base, {
+        worktreeRoot: parsedRoot.normalized,
+      }).getRepoTopLevel();
       if (repoTop) {
-        roots.add(path.join(repoTop, '.qwen', 'worktrees'));
+        tryAddRoot(repoTop);
       }
     } catch {
       // Not a git repo from this base — its own root still counts.
@@ -400,10 +440,19 @@ export async function verifyWorktreeCleanupOwnership(
           : `marker ${marker.state}`,
     };
   }
-  const allowedRoots = await worktreeAllowedRoots(
-    current.workspaceCwd,
-    current.originalCwd,
-  );
+  let allowedRoots: string[];
+  try {
+    allowedRoots = await worktreeAllowedRoots(
+      current.workspaceCwd,
+      current.originalCwd,
+      plan.worktreeRoot,
+    );
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `invalid worktree.root (${error instanceof Error ? error.message : String(error)})`,
+    };
+  }
   const contained = allowedRoots.some((root) => {
     try {
       const realRoot = fs.realpathSync(root);
@@ -498,9 +547,9 @@ export async function verifyWorktreeCleanupOwnership(
   // both sides canonicalized, because the sidecar stores the realpath'd
   // path while the service joins against a merely resolved root.
   const removalTarget = canonicalPath(
-    new GitWorktreeService(current.originalCwd).getUserWorktreePath(
-      current.slug,
-    ),
+    new GitWorktreeService(current.originalCwd, {
+      worktreeRoot: plan.worktreeRoot,
+    }).getUserWorktreePath(current.slug),
   );
   if (removalTarget !== plan.lockKey) {
     return {
@@ -930,9 +979,9 @@ export async function executeWorktreeCleanup(
   // sidecar contract reserves it for exactly this resolution, and the
   // locked verification asserted this derived target is the verified
   // checkout.
-  const result = await new GitWorktreeService(
-    sidecar.originalCwd,
-  ).removeUserWorktree(sidecar.slug, {
+  const result = await new GitWorktreeService(sidecar.originalCwd, {
+    worktreeRoot: plan.worktreeRoot,
+  }).removeUserWorktree(sidecar.slug, {
     deleteBranch: true,
     // A sidecar recording the slug-derived branch names a named creation
     // (which owns its ref); '' or a user branch means detached/in-place,

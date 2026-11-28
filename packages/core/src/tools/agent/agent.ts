@@ -5,6 +5,11 @@
  */
 
 import { shellResultText } from '../../utils/shell-result.js';
+import {
+  DEFAULT_WORKTREE_ROOT,
+  isPathInsideWorktreeRoot,
+  parseWorktreeRoot,
+} from '../../utils/worktree-root.js';
 import { goalTurnContext } from '../../goals/goal-turn-context.js';
 import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
@@ -958,7 +963,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'string',
           enum: ['worktree'],
           description:
-            "Isolation mode. 'worktree' creates a temporary git worktree under <projectRoot>/.qwen/worktrees/agent-<7hex> so the agent works on an isolated copy of the repo. The worktree is auto-removed if the agent makes no changes; otherwise the worktree path and branch are returned in the result.",
+            "Isolation mode. 'worktree' creates a temporary git worktree under the configured worktree.root directory (default <projectRoot>/.qwen/worktrees/agent-<7hex>) so the agent works on an isolated copy of the repo. The worktree is auto-removed if the agent makes no changes; otherwise the worktree path and branch are returned in the result.",
         },
         working_dir: {
           type: 'string',
@@ -2878,6 +2883,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       path: string;
       branch: string;
       repoRoot: string;
+      worktreeRoot?: string;
       /**
        * True when `path` is a caller-owned worktree supplied via
        * `working_dir` (not provisioned by this tool). Teardown is the
@@ -2908,7 +2914,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // site funnels through this helper, so this one guard covers them
       // all.
       if (isolation.externallyManaged) return {};
-      const wtService = new GitWorktreeService(isolation.repoRoot);
+      const wtService = new GitWorktreeService(isolation.repoRoot, {
+        worktreeRoot: isolation.worktreeRoot,
+      });
       // The two checks have no data dependency on each other and each
       // spawns its own `git` invocation. Run them concurrently so
       // cleanup wall-clock on the common case is the slower of the two
@@ -3498,13 +3506,19 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
       } else if (this.params.isolation === 'worktree') {
         const cwd = this.config.getTargetDir();
-        // Refuse nested isolation. If the parent itself is already
-        // running inside a worktree (cwd contains `.qwen/worktrees/`),
-        // creating a sibling isolation worktree at the repo root
-        // would leave the model's mental map pointing at the outer
-        // worktree while the override aimed it at the inner one.
-        // Same guard `enter_worktree` uses.
-        if (/\.qwen[\\/]worktrees[\\/]/.test(cwd)) {
+        let worktreeRoot: string;
+        try {
+          worktreeRoot = parseWorktreeRoot(
+            this.config.getWorktreeRoot?.(),
+          ).normalized;
+        } catch (error) {
+          return failWorktreeProvisioning(
+            `Failed to set up worktree isolation: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+        if (isPathInsideWorktreeRoot(cwd, DEFAULT_WORKTREE_ROOT)) {
           return failWorktreeProvisioning(
             `Failed to set up worktree isolation: parent is already inside ` +
               `a worktree (${cwd}). Nested isolation worktrees are not ` +
@@ -3512,7 +3526,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               `the outer worktree.`,
           );
         }
-        const probe = new GitWorktreeService(cwd);
+        const probe = new GitWorktreeService(cwd, { worktreeRoot });
         const gitCheck = await probe.checkGitAvailable();
         if (!gitCheck.available) {
           return failWorktreeProvisioning(
@@ -3524,12 +3538,22 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             `Failed to set up worktree isolation: ${cwd} is not a git repository.`,
           );
         }
-        // Anchor the worktree at the repo top-level so monorepo subdir
-        // launches still gather worktrees under `<repoRoot>/.qwen/...`,
-        // which is also the path the startup sweep scans.
         const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
+        if (
+          (await probe.isLinkedWorktree?.()) ||
+          isPathInsideWorktreeRoot(cwd, worktreeRoot, projectRoot)
+        ) {
+          return failWorktreeProvisioning(
+            `Failed to set up worktree isolation: parent is already inside ` +
+              `a worktree (${cwd}). Nested isolation worktrees are not ` +
+              `supported — the model's inherited paths would still reference ` +
+              `the outer worktree.`,
+          );
+        }
         const wtService =
-          projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
+          projectRoot === cwd
+            ? probe
+            : new GitWorktreeService(projectRoot, { worktreeRoot });
 
         // Refuse isolation when the parent has uncommitted changes.
         // `git worktree add -b <branch> <path> <base>` checks out the
@@ -3595,6 +3619,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           path: created.worktree.path,
           branch: created.worktree.branch,
           repoRoot: projectRoot,
+          worktreeRoot,
         };
 
         // Tag the isolation worktree with the parent session id for
