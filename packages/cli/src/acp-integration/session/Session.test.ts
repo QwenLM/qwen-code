@@ -31,6 +31,12 @@ import {
   markCompressedHistory,
   RETAINED_COMPACTION_TAIL_REMINDER,
 } from '@qwen-code/qwen-code-core/core/environmentContext.js';
+import { InProcessBackend } from '@qwen-code/qwen-code-core/agents/backends/InProcessBackend.js';
+import { TeamManager } from '@qwen-code/qwen-code-core/agents/team/TeamManager.js';
+import {
+  readInbox,
+  writeMessage,
+} from '@qwen-code/qwen-code-core/agents/team/mailbox.js';
 import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
 import { StreamInactivityTimeoutError } from '@qwen-code/qwen-code-core/core/stream-guards.js';
@@ -1115,6 +1121,8 @@ describe('Session', () => {
       storage: {
         getRuntimeBaseDir: vi.fn(() => core.Storage.getRuntimeBaseDir()),
       },
+      getTeamManager: vi.fn().mockReturnValue(null),
+      onTeamManagerChange: vi.fn(),
       setApprovalMode: vi.fn(),
       // #buildInitialSystemReminders branches on ApprovalMode.PLAN on every
       // session.prompt(), so the default must be defined. Individual tests
@@ -1284,6 +1292,106 @@ describe('Session', () => {
       mockClient,
       mockSettings,
     );
+  });
+
+  it('delivers the team leader mailbox as its own ACP turn', async () => {
+    const qwenHome = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'acp-team-inbox-'),
+    );
+    vi.stubEnv('QWEN_HOME', qwenHome);
+    const manager = new TeamManager(new InProcessBackend(mockConfig), {
+      name: 'acp-team',
+      createdAt: Date.now(),
+      leadAgentId: 'leader',
+      members: [],
+    });
+    try {
+      const onTeamChanged = vi.mocked(mockConfig.onTeamManagerChange).mock
+        .calls[0]?.[0];
+      onTeamChanged?.(manager);
+      let markStreaming!: () => void;
+      const streaming = new Promise<void>((resolve) => {
+        markStreaming = resolve;
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(
+          async (
+            _model: string,
+            request: { config: { abortSignal: AbortSignal } },
+          ) =>
+            createOpenStream(
+              [],
+              request.config.abortSignal,
+              new Promise<void>(() => {}),
+              markStreaming,
+            ),
+        )
+        .mockImplementation(async () => createEmptyStream());
+
+      await writeMessage('acp-team', 'leader', {
+        from: 'researcher',
+        text: 'The reproduction passed.',
+        timestamp: new Date().toISOString(),
+        read: false,
+      });
+      await manager.drainLeaderInbox();
+      expect((await readInbox('acp-team', 'leader'))[0]?.read).toBe(true);
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1),
+      );
+      const parts = (
+        vi.mocked(mockChat.sendMessageStream).mock.calls[0]![1] as {
+          message: Array<{ text: string }>;
+        }
+      ).message;
+      expect(
+        parts.some(
+          ({ text }) =>
+            text.includes('<teammate_message') &&
+            text.includes('The reproduction passed.'),
+        ),
+      ).toBe(true);
+
+      await manager.drainLeaderInbox();
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+
+      await streaming;
+      await session.cancelPendingPrompt();
+      await writeMessage('acp-team', 'leader', {
+        from: 'researcher',
+        text: 'Wait for the leader to resume.',
+        timestamp: new Date().toISOString(),
+        read: false,
+      });
+      await manager.drainLeaderInbox();
+      expect((await readInbox('acp-team', 'leader')).at(-1)?.read).toBe(false);
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'Resume the investigation.' }],
+      });
+      await manager.drainLeaderInbox();
+      expect((await readInbox('acp-team', 'leader')).at(-1)?.read).toBe(true);
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3),
+      );
+
+      session.dispose();
+      await writeMessage('acp-team', 'leader', {
+        from: 'researcher',
+        text: 'This still belongs to the mailbox.',
+        timestamp: new Date().toISOString(),
+        read: false,
+      });
+      await manager.drainLeaderInbox();
+      expect((await readInbox('acp-team', 'leader')).at(-1)?.read).toBe(false);
+    } finally {
+      session.dispose();
+      await manager.cleanup();
+      await fs.rm(qwenHome, { recursive: true, force: true });
+    }
   });
 
   describe('agent loop diagnostic entry marker', () => {

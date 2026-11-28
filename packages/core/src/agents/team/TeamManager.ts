@@ -288,6 +288,7 @@ export class TeamManager {
   private leaderMessageCallback:
     | ((message: string, display: string) => void)
     | null = null;
+  private leaderInboxCanPoll?: () => boolean;
 
   /**
    * Shutdown state is isolated per teammate, so one teammate's writes or
@@ -1066,14 +1067,17 @@ export class TeamManager {
   /**
    * Register the callback that delivers teammate messages
    * to the leader's conversation. Called by the CLI layer.
-   * Pass `null` to detach a previously-installed callback.
+   * Pass `null` to detach a previously-installed callback. Hosts that pause
+   * delivery can leave messages unread by supplying a polling predicate.
    */
   setLeaderMessageCallback(
     cb: ((message: string, display: string) => void) | null,
+    canPoll?: () => boolean,
   ): void {
     this.leaderMessageCallback = cb
       ? (message, display) => runOutsideAgentContext(() => cb(message, display))
       : null;
+    this.leaderInboxCanPoll = cb ? canPoll : undefined;
   }
 
   requestPlanApproval(
@@ -1218,7 +1222,7 @@ export class TeamManager {
     // them. A stale-but-non-null callback is safe to call (callbacks
     // only append to an array).
     const callback = this.leaderMessageCallback;
-    if (!callback) {
+    if (!callback || this.leaderInboxCanPoll?.() === false) {
       return;
     }
     const newMessages = await this.consumeLeaderInbox();

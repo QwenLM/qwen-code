@@ -95,6 +95,7 @@ import {
   isWrappedSystemReminderPart,
   markCompressedHistory,
 } from '@qwen-code/qwen-code-core/core/environmentContext.js';
+import type { TeamManager } from '@qwen-code/qwen-code-core/agents/team/TeamManager.js';
 import { realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -1797,6 +1798,11 @@ export interface BackgroundNotificationQueueItem {
   };
 }
 
+interface TeamInboxBinding {
+  manager: TeamManager;
+  sessionId: string;
+}
+
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   channelWorkflowOrigin?: ChannelWorkflowOrigin;
   continuesTodoStopGuardWorkChain: boolean;
@@ -1804,6 +1810,7 @@ interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   turn?: BackgroundNotificationTurn;
   admissionRetries?: number;
   peer?: { sessionId: string; delivery: PeerQueuedDelivery };
+  team?: TeamInboxBinding;
 }
 
 /**
@@ -2503,6 +2510,7 @@ export class Session implements SessionContext {
   // Background notification drain state. ACP does not have the TUI's idle
   // hook, so the session serializes registry callbacks through this queue.
   private notificationQueue: QueuedBackgroundNotification[] = [];
+  #teamInbox?: TeamInboxBinding;
   /**
    * Notifications lost to queue overflow since the last drain. Reported as one
    * summary on the next notification turn rather than per loss, so an overflow
@@ -2860,6 +2868,8 @@ export class Session implements SessionContext {
 
     this.#bindGoalRuntime();
     this.#registerBackgroundNotificationCallbacks();
+    this.config.onTeamManagerChange?.(this.#bindTeamManager);
+    this.#bindTeamManager(this.config.getTeamManager?.() ?? null);
     this.#registerSubSessionSpawner();
     this.#registerCurrentSessionScheduledTaskCreator();
     this.config
@@ -2959,6 +2969,7 @@ export class Session implements SessionContext {
     this.#externalRecordIds.clear();
     const expired = this.takeQueuedPeerDeliveries(this.config.getSessionId());
     if (expired.length > 0) this.onPeerDeliveriesExpired?.(expired);
+    this.#bindTeamManager(this.config.getTeamManager?.() ?? null);
     this.#bindGoalRuntime();
   }
 
@@ -5392,6 +5403,8 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
+    this.config.onTeamManagerChange?.(null, this.#bindTeamManager);
+    this.#bindTeamManager(null);
     this.modsClosed ??= this.mods?.close();
     this.#dropDeferredExternalRecords();
     this.cancelMcpAppCalls();
@@ -9406,7 +9419,10 @@ export class Session implements SessionContext {
    */
   async #runAutomaticTurnOnSharedLoop(turn: {
     message: Content;
-    type: SendMessageType.Cron | SendMessageType.Notification;
+    type:
+      | SendMessageType.Cron
+      | SendMessageType.Notification
+      | SendMessageType.Teammate;
     /** The send options of the turn's first round. */
     options: Partial<SendMessageOptions>;
     interactionSpan?: SendMessageOptions['interactionSpan'];
@@ -13761,6 +13777,59 @@ export class Session implements SessionContext {
     );
   }
 
+  #bindTeamManager = (manager: TeamManager | null): void => {
+    const sessionId = this.config.getSessionId();
+    const previous = this.#teamInbox;
+    if (previous?.manager === manager && previous.sessionId === sessionId) {
+      return;
+    }
+    previous?.manager.setLeaderMessageCallback(null);
+    this.#teamInbox = manager ? { manager, sessionId } : undefined;
+    const queue = this.notificationQueue.filter((item) => !item.team);
+    if (queue.length !== this.notificationQueue.length) {
+      this.notificationQueue = queue;
+      if (!this.disposed) this.#activeWorkChanged();
+    }
+    const team = this.#teamInbox;
+    if (!team) return;
+
+    const isCurrent = () => this.#ownsTeamMessage(team);
+    team.manager.setLeaderMessageCallback(
+      (modelText, displayText) => {
+        // The poll may have started before a team replacement or /clear.
+        if (!isCurrent()) return;
+        // Teammate messages, like session peers, start their own turn and
+        // have no completed subagent task for the client to open.
+        this.notificationQueue.push({
+          modelText,
+          displayText,
+          taskId: randomUUID(),
+          status: 'completed',
+          kind: 'peer',
+          label: truncateNotificationLabel(displayText),
+          continuesTodoStopGuardWorkChain: false,
+          team,
+        });
+        this.#activeWorkChanged();
+        void this.#drainNotificationQueue();
+      },
+      () =>
+        isCurrent() &&
+        !this.closing &&
+        !this.notificationsPaused &&
+        this.notificationQueue.filter((item) => item.kind === 'peer').length <
+          MAX_BACKGROUND_NOTIFICATION_QUEUE,
+    );
+  };
+
+  #ownsTeamMessage(team: TeamInboxBinding): boolean {
+    return (
+      !this.disposed &&
+      team === this.#teamInbox &&
+      team.sessionId === this.config.getSessionId()
+    );
+  }
+
   #registerBackgroundNotificationCallbacks(): void {
     const backgroundRegistry = this.config.getBackgroundTaskRegistry();
     // Single-slot setter, so remember exactly what we installed and only ever
@@ -14484,7 +14553,8 @@ export class Session implements SessionContext {
   }
 
   #deferBackgroundAdmission(item: QueuedBackgroundNotification): void {
-    if (this.disposed) return;
+    if (this.disposed || (item.team && !this.#ownsTeamMessage(item.team)))
+      return;
     this.notificationQueue.unshift(item);
     this.notificationAdmissionDeferred = true;
     if (this.notificationsPaused) return;
@@ -14828,6 +14898,10 @@ export class Session implements SessionContext {
           }
           admitted = true;
           if (!channelTask) this.backgroundTurn = turn;
+          if (item.team && !this.#ownsTeamMessage(item.team)) {
+            await finishBackgroundNotificationTurn('cancelled', true);
+            return;
+          }
           if (ac.signal.aborted) {
             delete item.turn;
             this.notificationQueue.unshift(item);
@@ -14921,14 +14995,16 @@ export class Session implements SessionContext {
             ],
           };
           // `experimental.unifiedAgentLoop`: the turn's rounds go through
-          // `LlmClient` as a Notification send. The session keeps the
+          // `LlmClient` as a Notification or Teammate send. The session keeps the
           // notification's record and reminders, and shows each response
           // as one background message once it ended.
           logAgentLoopEntry(this.config, 'acp');
           if (this.config.isUnifiedAgentLoopEnabled?.('acp') === true) {
             const result = await this.#runAutomaticTurnOnSharedLoop({
               message: nextMessage,
-              type: SendMessageType.Notification,
+              type: item.team
+                ? SendMessageType.Teammate
+                : SendMessageType.Notification,
               options: {
                 userTurn: { promptId },
                 todoWorkChainId: item.todoWorkChainId,
