@@ -1561,6 +1561,31 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Skipped image file');
     });
 
+    it('names the model and the setting that decides image support', async () => {
+      const guessed = await readFakePng(
+        withConfig({
+          getContentGeneratorConfig: () => ({ modalities: {} }),
+          getContentGeneratorConfigSources: () => ({
+            modalities: { kind: 'computed' },
+          }),
+        }),
+      );
+      expect(guessed.llmContent).toContain("Model 'qwen3.5-plus'");
+      expect(guessed.llmContent).toContain('inferred from the model name');
+
+      const declared = await readFakePng(
+        withConfig({
+          getContentGeneratorConfig: () => ({ modalities: {} }),
+          getContentGeneratorConfigSources: () => ({
+            modalities: { kind: 'modelProviders' },
+          }),
+        }),
+      );
+      expect(declared.llmContent).toContain(
+        'this provider entry\'s "generationConfig.modalities"',
+      );
+    });
+
     describe('omni delivery gating', () => {
       // Exercises the omni-vs-legacy decision in processSingleFileContent:
       // enablement gate → delivery-active gate → content pre-sniff → per-

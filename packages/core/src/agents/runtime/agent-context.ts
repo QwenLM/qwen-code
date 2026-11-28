@@ -24,6 +24,7 @@ import type { LlmChat } from '../../core/llm-chat.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  ContentGeneratorConfigSources,
 } from '../../core/contentGenerator.js';
 import { isTeammate } from '../team/identity.js';
 import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
@@ -31,6 +32,14 @@ import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
 export interface RuntimeContentGeneratorView {
   readonly contentGenerator: ContentGenerator;
   readonly contentGeneratorConfig: ContentGeneratorConfig;
+  /**
+   * Where this view's own config values came from, when the view was built for
+   * a model other than the session's. {@link Config.getContentGeneratorConfigSources}
+   * reports the session's map, which names the primary model's settings, so a
+   * view without its own map must not let a caller attribute the primary's
+   * `modalities` source to the view's model (QwenLM/qwen-code#16185).
+   */
+  readonly configSources?: ContentGeneratorConfigSources;
 }
 
 interface AgentContext {

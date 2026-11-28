@@ -519,8 +519,14 @@ export async function runHostedHarnessTextTurn(input: {
     );
   else if (!sessionModelConfig) await applyHostedModelPin(config, model);
   if (input.publicChildModelRoute?.origin) {
-    // Config falls back to its own generator until authentication fills this frame.
-    const view = {} as RuntimeContentGeneratorView;
+    // Config falls back to its own generator until authentication fills this
+    // frame. The pin does not resolve a provider entry yet, so the value's
+    // modalities are the name-based default rather than anything declared.
+    const view = {
+      configSources: {
+        modalities: { kind: 'computed', detail: 'hosted model pin' },
+      },
+    } as unknown as RuntimeContentGeneratorView;
     return runWithRuntimeContentGenerator(view, () =>
       runPreparedHostedHarnessTextTurn(input, config, model, view),
     );
@@ -726,6 +732,14 @@ async function runPreparedHostedHarnessTextTurn(
         contentGenerator: resolved.contentGenerator,
         contentGeneratorConfig: resolved.contentGeneratorConfig,
       });
+      // The stub above describes the pre-resolution state; once the child
+      // route's generator is in place its own source map is the truthful one,
+      // and leaving the stub's `computed` attributes the routed entry's
+      // modalities to a name-based guess. Set it unconditionally — the fast
+      // path resolves without a map, and `Config` returns any truthy view map
+      // wholesale — so an absent map lets the session map answer.
+      (runtimeView as { configSources?: unknown }).configSources =
+        resolved.configSources;
       await config.getLlmClient().initialize(undefined, input.signal);
     }
     if (

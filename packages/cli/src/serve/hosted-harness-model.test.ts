@@ -906,6 +906,80 @@ describe('Hosted Harness model boundary', () => {
     },
   );
 
+  it('clears the pre-resolution stub when the resolved view has no source map', async () => {
+    const model = config([
+      { type: LlmEventType.Content, value: 'done' },
+      { type: LlmEventType.Finished },
+    ]);
+    const generation = {
+      model: 'child-model',
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'https://child.test/v1',
+      apiKey: 'synthetic-child-key',
+    };
+    state.config['getModel'] = () => generation.model;
+    state.config['getModelsConfig'] = () => ({
+      getCurrentAuthType: () => generation.authType,
+      getGenerationConfig: () => ({ ...generation }),
+    });
+    state.config['getContentGeneratorConfig'] = () => generation;
+    state.config['getAllConfiguredModels'] = () => [
+      {
+        id: generation.model,
+        authType: generation.authType,
+        baseUrl: generation.baseUrl,
+      },
+    ];
+    // The fast path production takes here resolves without a `configSources`
+    // map. The frame's pre-resolution stub must not survive it, or the turn
+    // reports the routed entry's modalities as name-inferred.
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGenerator: {},
+      contentGeneratorConfig: generation,
+    });
+    state.config['getBaseLlmClient'] = () => ({ resolveForModel });
+    let sourcesInTurn: unknown = 'unset';
+    model.sendMessageStream.mockImplementation(
+      async function* (_request, _signal, _promptId, options) {
+        await (
+          options as { onPreparedRequest: LlmPreparedRequestCallback }
+        ).onPreparedRequest({
+          request: { model: generation.model, contents: [], config: {} },
+          history: [],
+          completedToolCallIds: [],
+          routeSelector: 'openai:child-model',
+          providerPin: llmPreparedProviderPin(generation),
+          promptTokensForClamp: 0,
+        });
+        sourcesInTurn = getRuntimeContentGenerator()?.configSources;
+        yield { type: LlmEventType.Content, value: 'done' };
+        yield { type: LlmEventType.Finished };
+      },
+    );
+    await expect(
+      runHostedHarnessTextTurn({
+        ...input,
+        modelSelection: { modelId: generation.model, revision: 1 },
+        publicChildModelRoute: {
+          authType: 'openai',
+          endpointDigest: createHash('sha256')
+            .update(generation.baseUrl)
+            .digest('hex'),
+          providerPin: llmPreparedProviderPin(generation),
+          origin: {
+            modelId: generation.model,
+            authType: 'openai',
+            endpointDigest: createHash('sha256')
+              .update(generation.baseUrl)
+              .digest('hex'),
+            providerPin: llmPreparedProviderPin(generation),
+          },
+        },
+      }),
+    ).resolves.toMatchObject({ text: 'done' });
+    expect(sourcesInTurn).toBeUndefined();
+  });
+
   it('restores a configured endpoint by exact route and uses its registry key', async () => {
     config([]);
     const endpoint = 'https://second.test/v1';
