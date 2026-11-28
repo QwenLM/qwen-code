@@ -1044,7 +1044,10 @@ function readManagedExecutionEvidenceFromFdSync(
       // when a crash tore off its trailing newline — so consumers gating on
       // `=== false` (Managed-activation refusal, lease release) keep working.
       const text = line.bytes.toString('utf-8');
-      const { records } = parseLineTolerantWithIntegrity(text, filePath);
+      const { records, complete } = parseLineTolerantWithIntegrity(
+        text,
+        filePath,
+      );
       if (
         records.some(isManagedHeaderRecord) ||
         records.some(isManagedOwnerRecord)
@@ -1052,15 +1055,14 @@ function readManagedExecutionEvidenceFromFdSync(
         return true;
       }
       if (records.some(isExecutionEngineOwnerRecord)) {
-        // Positive Managed evidence always wins over a Legacy-shaped line. A
-        // fully parsed owner whose engine is not `managed` carries no positive
-        // Managed evidence whatever its version claims — `false` is the
-        // bounded reader's "no positive evidence", not proof of Legacy. A line
-        // that only partly parses (torn owner, mixed records) stays
-        // ambiguous: `undefined`.
-        return isLegacyOwnerRecord(records) || isManagedOwnerRecord(records)
-          ? false
-          : undefined;
+        // Positive Managed evidence always wins over a Legacy-shaped line.
+        // `false` is the bounded reader's "no positive Managed evidence
+        // found", never proof of Legacy ownership: an owner record whose
+        // engine is not `managed` carries none, whatever version it claims
+        // and whether or not other records share its physical line. Only a
+        // line that does not fully parse — a torn owner, a trailing
+        // fragment — leaves ownership unverifiable: `undefined`.
+        return complete ? false : undefined;
       }
       return false;
     }
@@ -1072,28 +1074,6 @@ function readManagedExecutionEvidenceFromFdSync(
     // keep it held until process exit on `undefined`.
     return error instanceof ManagedSessionRecordError ? false : undefined;
   }
-}
-
-/**
- * True when every parsed record on the line is a well-formed execution-engine
- * owner whose engine is not `managed`. The version is not validated: `false`
- * from the bounded reader means "no positive Managed evidence found", never
- * proof of Legacy ownership.
- */
-function isLegacyOwnerRecord(records: readonly unknown[]): boolean {
-  return records.every((record) => {
-    if (!record || typeof record !== 'object') return false;
-    const candidate = record as Record<string, unknown>;
-    if (candidate['type'] !== 'system') return false;
-    if (candidate['subtype'] !== EXECUTION_ENGINE_SUBTYPE) return false;
-    const payload = candidate['systemPayload'];
-    return (
-      !!payload &&
-      typeof payload === 'object' &&
-      !Array.isArray(payload) &&
-      (payload as Record<string, unknown>)['engine'] !== 'managed'
-    );
-  });
 }
 
 function isExecutionEngineOwnerRecord(record: unknown): boolean {

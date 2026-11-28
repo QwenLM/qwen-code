@@ -1108,6 +1108,81 @@ describe('Managed Session log recording', () => {
     expect.soft(await readFile(transcriptPath, 'utf8')).toBe(legacy);
   });
 
+  it.each([1, 2])(
+    'releases the lease when a recoverable v%s owner shares its line with a user record',
+    async (ownerVersion) => {
+      const transcriptPath =
+        sessionService().getSessionTranscriptPath(SESSION_ID);
+      await mkdir(path.dirname(transcriptPath), { recursive: true });
+      await writeFile(transcriptPath, '');
+      // The tolerant parser recovers both records and reports the line
+      // complete, so it carries no positive Managed evidence: the lease of a
+      // failed activation must be released, not stranded.
+      const glued = `${JSON.stringify({
+        uuid: randomUUID(),
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'session_execution_engine',
+        cwd: projectDir,
+        version: 'test',
+        systemPayload: { version: ownerVersion, engine: 'legacy' },
+      })}${JSON.stringify({
+        uuid: randomUUID(),
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: projectDir,
+        version: 'test',
+        message: { role: 'user', parts: [{ text: 'existing' }] },
+      })}\n`;
+
+      const config = managedConfig();
+      vi.spyOn(
+        config as unknown as { initializeInternal(): Promise<void> },
+        'initializeInternal',
+      ).mockResolvedValue(undefined);
+      const acquire = SessionWriterLease.acquire;
+      const acquiring = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockImplementation(async (options) => {
+          await writeFile(transcriptPath, glued);
+          return acquire(options);
+        });
+
+      const failure = await config.initialize().then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      acquiring.mockRestore();
+      const after = await readFile(transcriptPath, 'utf8');
+      const lock = await lockRecord().catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return undefined;
+        throw error;
+      });
+      let subsequentFailure: unknown;
+      try {
+        const lease = await SessionWriterLease.acquire({
+          runtimeBaseDir: runtimeDir,
+          sessionId: SESSION_ID,
+          transcriptPath,
+          processKind: 'acp',
+          qwenVersion: 'test',
+        });
+        await lease.release();
+      } catch (error) {
+        subsequentFailure = error;
+      }
+
+      expect(failure).toBeInstanceOf(SessionExecutionEngineError);
+      expect(after).toBe(glued);
+      expect(lock).toBeUndefined();
+      expect(subsequentFailure).toBeUndefined();
+    },
+  );
+
   it('preserves a schema 2 seal installed after the ownership precheck', async () => {
     const transcriptPath =
       sessionService().getSessionTranscriptPath(SESSION_ID);

@@ -26,6 +26,8 @@ const OWNERSHIP_HEAD_BYTES = 64 * 1024;
 // Full-line JSON inspection allocates several copies; refuse lines over 32 MiB
 // rather than infer ownership from a prefix or allow unbounded memory use.
 const MAX_INSPECTED_LINE_BYTES = 32 * 1024 * 1024;
+// One read for the boundary line: a chunk, not the file's remaining bytes.
+const BOUNDARY_READ_CHUNK_BYTES = 64 * 1024;
 const OPEN_CREATE_ATTEMPTS = 8;
 
 const fileLocks = new Map<string, Mutex>();
@@ -103,6 +105,50 @@ function readFromFd(fd: number, length: number, position: number): Buffer {
     offset += count;
   }
   return buffer.subarray(0, offset);
+}
+
+/**
+ * Reads the physical line that starts at `lineStart`, up to its newline or
+ * EOF. Returns undefined when that line exceeds the inspectable bound.
+ *
+ * Reads in chunks and stops at the first newline, so appending to a large
+ * transcript costs one chunk rather than every byte to its end — the tail
+ * probe stays a tail probe. At most one byte past the bound is ever read, so
+ * a line longer than the bound is refused rather than read in full, and both
+ * the memory and the I/O of the check stay bounded.
+ */
+function readBoundaryLine(
+  fd: number,
+  lineStart: number,
+  fileSize: number,
+): string | undefined {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  let position = lineStart;
+  while (position < fileSize) {
+    const remaining = fileSize - position;
+    const want = Math.min(
+      BOUNDARY_READ_CHUNK_BYTES,
+      remaining,
+      MAX_INSPECTED_LINE_BYTES + 1 - total,
+    );
+    if (want <= 0) return undefined;
+    const chunk = readFromFd(fd, want, position);
+    if (chunk.length === 0) break;
+    const newline = chunk.indexOf(10);
+    if (newline >= 0) {
+      chunks.push(chunk.subarray(0, newline));
+      return Buffer.concat(chunks).toString('utf8');
+    }
+    chunks.push(chunk);
+    total += chunk.length;
+    position += chunk.length;
+  }
+  // The file ended inside the line: an EOF-terminated line still has to fit
+  // the bound, or it is refused rather than read in full.
+  return total > MAX_INSPECTED_LINE_BYTES
+    ? undefined
+    : Buffer.concat(chunks).toString('utf8');
 }
 
 type LineShape = 'ordinary' | 'torn-user' | 'owner' | 'unknown';
@@ -192,7 +238,6 @@ function classifyLine(line: string): LineShape {
   if (line[index++] !== '{') return 'unknown';
   const firstKey = skipJsonWhitespace(line, index);
   let user = false;
-  let seenSubtype = false;
   const keys = new Set<string>();
   for (;;) {
     index = skipJsonWhitespace(line, index);
@@ -209,25 +254,31 @@ function classifyLine(line: string): LineShape {
     index = skipJsonWhitespace(line, key.next);
     if (line[index++] !== ':') return 'unknown';
     index = skipJsonWhitespace(line, index);
-    if (key.value === 'type' || key.value === 'subtype') {
+    if (key.value === 'type') {
       if (line[index] !== '"') return 'unknown';
       const value = readJsonStringAt(line, index);
       if (!value) return 'unknown';
-      if (key.value === 'type') {
-        user = value.value === 'user';
-      } else {
-        if (OWNER_SUBTYPES.has(value.value)) return 'owner';
-        seenSubtype = true;
-      }
+      user = value.value === 'user';
+      index = value.next;
+    } else if (key.value === 'subtype') {
+      if (line[index] !== '"') return 'unknown';
+      const value = readJsonStringAt(line, index);
+      if (!value) return 'unknown';
+      // An owner subtype makes this line an ownership record whatever the
+      // rest holds; a user record's own subtype (`goal_runtime`, mid-turn)
+      // does not — `type: "user"` already excludes an owner record.
+      if (OWNER_SUBTYPES.has(value.value)) return 'owner';
       index = value.next;
     } else {
       const next = skipJsonValue(line, index);
       if (next === undefined) {
         // The remaining bytes must really be an unfinished JSON string inside
         // the user message, not arbitrary malformed or trailing record data.
+        // A non-owner `subtype` is fine: recorder user records carry one
+        // (`goal_runtime`, mid-turn), and `type: "user"` already excludes an
+        // owner record.
         return key.value === 'message' &&
           user &&
-          !seenSubtype &&
           !hasDuplicateOwnerFields(line) &&
           isValidTornMessagePrefix(line, index) &&
           isTornUserMessage(line.slice(index))
@@ -237,6 +288,14 @@ function classifyLine(line: string): LineShape {
       index = next;
     }
     index = skipJsonWhitespace(line, index);
+    if (index >= line.length) {
+      // The outer object never closed: the line ends between keys or right
+      // after a complete value. The bytes on disk name `type: "user"` and no
+      // ownership field, so whatever the unwritten tail would have added, it
+      // cannot turn this into an owner record — a user message is safe to
+      // continue past; anything else stays refused.
+      return user && !hasDuplicateOwnerFields(line) ? 'torn-user' : 'unknown';
+    }
     if (line[index] === '}') {
       const rest = skipJsonWhitespace(line, index + 1);
       if (rest === line.length) return 'ordinary';
@@ -338,26 +397,14 @@ function ownerEvidenceFromFd(
   if (headLength < Number(stats.size)) {
     const lastNewline = head.lastIndexOf(10);
     const lineStart = lastNewline + 1;
-    const length = Number(
-      stats.size - BigInt(lineStart) < BigInt(MAX_INSPECTED_LINE_BYTES + 1)
-        ? stats.size - BigInt(lineStart)
-        : BigInt(MAX_INSPECTED_LINE_BYTES + 1),
-    );
-    const bytes = readFromFd(fd, length, lineStart);
-    const newline = bytes.indexOf(10);
-    if (
-      newline < 0 &&
-      (bytes.length > MAX_INSPECTED_LINE_BYTES ||
-        lineStart + bytes.length < Number(stats.size))
-    ) {
+    const boundary = readBoundaryLine(fd, lineStart, Number(stats.size));
+    if (boundary === undefined) {
       throw new SessionExecutionEngineError(
         sessionId,
         'ownership could not be verified: line exceeds the read bound',
       );
     }
-    linesToInspect[linesToInspect.length - 1] = (
-      newline < 0 ? bytes : bytes.subarray(0, newline)
-    ).toString('utf8');
+    linesToInspect[linesToInspect.length - 1] = boundary;
   }
 
   for (const line of linesToInspect) {
@@ -538,6 +585,18 @@ export async function appendLegacySessionTranscriptLine(
       if (serialized === undefined) {
         throw new SessionWriterUnavailableError({
           cause: new Error('Transcript record is not JSON-serializable'),
+        });
+      }
+      // Every later append verifies ownership by reading this record's
+      // physical line. A record past the inspectable bound would be accepted
+      // now and would then fail every append that follows, so refuse it
+      // before it reaches the file instead of stranding the recorder.
+      if (Buffer.byteLength(serialized, 'utf8') > MAX_INSPECTED_LINE_BYTES) {
+        throw new SessionWriterUnavailableError({
+          message: `Transcript record exceeds the ${MAX_INSPECTED_LINE_BYTES} byte verification bound`,
+          cause: new Error(
+            'A record this large cannot be verified on later appends',
+          ),
         });
       }
       let fd: number | undefined;
