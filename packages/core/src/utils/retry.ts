@@ -401,7 +401,12 @@ export async function retryWithBackoff<T>(
             `  - Fireworks AI:  https://docs.fireworks.ai/api-reference/introduction\n` +
             `  - ModelStudio:   https://help.aliyun.com/zh/model-studio/coding-plan\n\n` +
             `After setting up your API key, run /auth to configure your provider.`,
-          singleAttempt ? { cause: error } : undefined,
+          // Attach the cause unconditionally (not only under singleAttempt): the
+          // fallback chain's retryWithBackoff call passes no singleAttempt, and
+          // the terminal-quota predicate reads the quota signal through this
+          // cause. The replacement stays status-less so it does not re-trigger
+          // the stream-side rate-limit retry loop.
+          { cause: error },
         );
       }
 

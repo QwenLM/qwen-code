@@ -42,9 +42,10 @@ describe('ModelAvailabilityService', () => {
   });
 
   it('tracks a terminal capacity failure and upgrades a consumed sticky mark', () => {
-    // markTerminal is retained ported API (its terminal/quota-marking caller is
-    // a separate feature); pin both terminal reasons and that a terminal mark
-    // upgrades an already-consumed sticky mark rather than being ignored.
+    // markTerminal is ported API; the fallback catch calls it with reason quota
+    // (2026-11-19 terminal-quota design), while reason capacity still has no
+    // caller. Pin both terminal reasons and that a terminal mark upgrades an
+    // already-consumed sticky mark rather than being ignored.
     service.markRetryOncePerTurn(model);
     service.consumeStickyAttempt(model);
     expect(service.snapshot(model)).toEqual({
