@@ -9,10 +9,9 @@ public final class RuntimeSession {
 
     public RuntimeSession(String harnessSessionId, String runtimeSessionId,
             String turnKind, RuntimeScope scope) {
-        this.harnessSessionId = BrokerValues.requireId(harnessSessionId,
+        this.harnessSessionId = BrokerValues.requireHarnessSessionId(harnessSessionId,
                 "harnessSessionId");
-        this.runtimeSessionId = BrokerValues.requireWellFormed(
-                BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"),
+        this.runtimeSessionId = BrokerValues.requireRuntimeSessionId(runtimeSessionId,
                 "runtimeSessionId");
         if (!"bootstrap".equals(turnKind)
                 && !"continuation".equals(turnKind)

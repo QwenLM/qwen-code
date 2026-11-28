@@ -1388,6 +1388,35 @@ describe('parseArguments', () => {
     }
   });
 
+  it('should accept managed as a channel identifier', async () => {
+    process.argv = ['node', 'script.js', '--channel', 'managed'];
+    const argv = await parseArguments();
+    expect(argv.channel).toBe('managed');
+  });
+
+  it('reports the managed channel for Hosted Harness ACP children', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    try {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('managed');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps an explicit --channel over the managed marker', async () => {
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    try {
+      process.argv = ['node', 'script.js', '--acp', '--channel', 'SDK'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('SDK');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('should reject invalid --approval-mode values', async () => {
     process.argv = ['node', 'script.js', '--approval-mode', 'invalid'];
 
@@ -1590,14 +1619,14 @@ describe('loadCliConfig', () => {
       const argv = await parseArguments();
       vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
       vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
-      // ACP is off by default for both switches.
+      // The Hosted Harness is off by default for both switches.
       const defaults = await loadCliConfig({}, argv);
-      expect(defaults[getter]('acp')).toBe(false);
+      expect(defaults[getter]('hosted')).toBe(false);
       const enabled = await loadCliConfig(
         { experimental: { [setting]: true } },
         argv,
       );
-      expect(enabled[getter]('acp')).toBe(true);
+      expect(enabled[getter]('hosted')).toBe(true);
     },
   );
 
@@ -1614,6 +1643,48 @@ describe('loadCliConfig', () => {
     expect(mockConfigConstructorParams.mock.lastCall?.[0].folderTrust).toBe(
       true,
     );
+  });
+
+  it('resolves the launcher-marker channel for synthesized ACP argv', async () => {
+    // The Hosted Harness per-turn configs never pass through parseArguments.
+    const argv = {
+      acp: true,
+      sessionId: 'channel-fallback-test',
+      sessionIdGenerated: true,
+    } as CliArgs;
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    await loadCliConfig({}, argv);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe(
+      'managed',
+    );
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '');
+    await loadCliConfig({}, argv);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe(
+      'daemon',
+    );
+    await loadCliConfig({}, { ...argv, channel: 'SDK' });
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe('SDK');
+  });
+
+  it('resolves the launcher-marker channel for the deprecated experimentalAcp alias', async () => {
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    await loadCliConfig({}, {
+      experimentalAcp: true,
+      sessionId: 'channel-fallback-alias-test',
+      sessionIdGenerated: true,
+    } as CliArgs);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe(
+      'managed',
+    );
+  });
+
+  it('leaves the channel unset for non-ACP argv even under a marker', async () => {
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    await loadCliConfig({}, {} as CliArgs);
+    expect(
+      mockConfigConstructorParams.mock.lastCall?.[0].channel,
+    ).toBeUndefined();
   });
 
   it.each(['bare', 'safe', 'ssh', 'agent-host', 'provisional'] as const)(
@@ -3397,6 +3468,44 @@ describe('loadCliConfig', () => {
     expect(mockConfigConstructorParams).toHaveBeenCalledWith(
       expect.objectContaining({
         unifiedAgentLoopEnabled: false,
+      }),
+    );
+  });
+
+  it('propagates the model availability tracking opt-in and opt-out', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig(
+      { experimental: { modelAvailabilityTracking: true } },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: true,
+      }),
+    );
+
+    await loadCliConfig(
+      { experimental: { modelAvailabilityTracking: false } },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: false,
+      }),
+    );
+  });
+
+  it('leaves the model availability tracking setting unset by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: undefined,
       }),
     );
   });
@@ -6350,6 +6459,22 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(NativeLspService).not.toHaveBeenCalled();
   });
 
+  it('keeps the retention limit out of the static worktree config', async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'retention-config-'));
+    try {
+      const argv = await parseArguments();
+      await loadCliConfig(
+        { worktree: { maxRetained: 0 } } as Settings,
+        argv,
+        cwd,
+      );
+      const forwarded = mockConfigConstructorParams.mock.lastCall?.[0];
+      expect(forwarded.worktree).not.toHaveProperty('maxRetained');
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   describe('project hooks approval gate', () => {
     const projectHooks = { SessionStart: [{ hooks: [] }] };
     const cwd = path.resolve(path.sep, 'home', 'user', 'project');
@@ -7303,47 +7428,25 @@ describe('loadCliConfig chatCompression', () => {
     });
   });
 
-  it('passes model.loopProtection to the core config, defaulting to warn', async () => {
+  it('leaves the per-turn tool-call cap off unless maxToolCallsPerTurn is set', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
-    const load = (loopProtection?: unknown) =>
-      loadCliConfig(
-        { model: { loopProtection } } as Settings,
-        argv,
-        undefined,
-        [],
-      );
-    expect((await load('stop')).getLoopProtection()).toBe('stop');
-    expect((await load('off')).getLoopProtection()).toBe('off');
-    expect((await load()).getLoopProtection()).toBe('warn');
-    expect((await load('never')).getLoopProtection()).toBe('warn');
-  });
-
-  it('warns once about an invalid model.loopProtection value', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments();
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      for (let i = 0; i < 2; i++) {
-        const config = await loadCliConfig(
-          { model: { loopProtection: 'Stop' } } as unknown as Settings,
-          argv,
-          undefined,
-          [],
-        );
-        expect(config.getLoopProtection()).toBe('warn');
-      }
-      const warnings = errorSpy.mock.calls.filter(([message]) =>
-        String(message).includes('model.loopProtection'),
-      );
-      expect(warnings).toEqual([
-        [
-          'WARNING: Invalid model.loopProtection value "Stop": expected "warn", "stop" or "off"; using the default "warn".',
-        ],
-      ]);
-    } finally {
-      errorSpy.mockRestore();
-    }
+    const load = (model: Settings['model']) =>
+      loadCliConfig({ model } as Settings, argv, undefined, []);
+    expect((await load({})).getMaxToolCallsPerTurn()).toBe(
+      Number.POSITIVE_INFINITY,
+    );
+    expect(
+      (await load({ maxToolCallsPerTurn: 100 })).getMaxToolCallsPerTurn(),
+    ).toBe(100);
+    expect(
+      (
+        await load({
+          loopProtection: 'stop',
+          skipLoopDetection: false,
+        } as unknown as Settings['model'])
+      ).getMaxToolCallsPerTurn(),
+    ).toBe(Number.POSITIVE_INFINITY);
   });
 
   it('should have undefined chatCompression if not in settings', async () => {

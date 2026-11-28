@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createServer, get } from 'node:http';
+import { createServer, get, request } from 'node:http';
+import { connect as netConnect, type Socket as NetSocket } from 'node:net';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -173,6 +174,88 @@ describe('ServeAppLifecycle', () => {
     client.destroy();
   });
 
+  it('force-closes a non-answering upgraded peer when an embed listener is already closing', async () => {
+    // waitForClosingListener() is the second force-close call site; only
+    // closeListener() had an upgraded-peer pin. The upgrade is accepted raw
+    // so no ws server owns the socket and only the tracked-destroy sweep
+    // can release it.
+    const app = express();
+    const lifecycle = installServeAppLifecycle(app);
+    const server = createServer(app);
+    servers.add(server);
+    server.on('upgrade', (_req, socket) => {
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n',
+      );
+    });
+    lifecycle.bindServer(server);
+    server.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No address');
+    const client = await new Promise<NetSocket>((resolve, reject) => {
+      const sock = netConnect(address.port, '127.0.0.1', () => {
+        sock.write(
+          'GET /acp HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n',
+        );
+      });
+      sock.once('data', () => resolve(sock));
+      sock.once('error', reject);
+    });
+    try {
+      server.close();
+      expect(server.listening).toBe(false);
+      await lifecycle.close({ timeoutMs: 0 });
+      expect(server.listening).toBe(false);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  it('prunes closed sockets before the shutdown force-close sweep', async () => {
+    const lifecycle = installServeAppLifecycle(express());
+    const server = createServer();
+    servers.add(server);
+    const accepted: NetSocket[] = [];
+    server.on('connection', (socket) => accepted.push(socket));
+    lifecycle.bindServer(server);
+    server.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No address');
+    const connectClient = () =>
+      new Promise<NetSocket>((resolve, reject) => {
+        const client = netConnect(address.port, '127.0.0.1', () =>
+          resolve(client),
+        );
+        client.once('error', reject);
+      });
+
+    const firstClient = await connectClient();
+    let secondClient: NetSocket | undefined;
+    try {
+      await vi.waitFor(() => expect(accepted).toHaveLength(1));
+      const closedSocket = accepted[0]!;
+      const closed = new Promise<void>((resolve) => {
+        closedSocket.once('close', resolve);
+      });
+      firstClient.destroy();
+      await closed;
+      const destroyClosed = vi.spyOn(closedSocket, 'destroy');
+
+      // A second live socket keeps the force timer necessary and observable.
+      secondClient = await connectClient();
+      await vi.waitFor(() => expect(accepted).toHaveLength(2));
+      await lifecycle.close({ timeoutMs: 0 });
+
+      expect(destroyClosed).not.toHaveBeenCalled();
+    } finally {
+      firstClient.destroy();
+      secondClient?.destroy();
+      await lifecycle.close({ timeoutMs: 0 }).catch(() => undefined);
+    }
+  });
+
   it('starts every drain and listener close when one drain throws synchronously', async () => {
     const app = express();
     const lifecycle = installServeAppLifecycle(app);
@@ -274,5 +357,65 @@ describe('ServeAppLifecycle', () => {
       code: 'conversation_runtime_unavailable',
       retryable: true,
     });
+  });
+
+  it('keeps the request-handler fall-through for upgrades while no transport owns them', async () => {
+    const app = express();
+    app.use((_req, res) => {
+      res.status(404).type('text/plain').send('Not Found');
+    });
+    const lifecycle = installServeAppLifecycle(app);
+    const server = createServer(app);
+    servers.add(server);
+    lifecycle.bindServer(server);
+    server.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const { port } = server.address() as { port: number };
+
+    const req = request({
+      host: '127.0.0.1',
+      port,
+      path: '/acp',
+      headers: {
+        Connection: 'Upgrade',
+        Upgrade: 'websocket',
+        'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+        'Sec-WebSocket-Version': '13',
+      },
+    });
+    const response = new Promise<number>((resolve, reject) => {
+      req.on('response', (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode ?? 0));
+      });
+      req.on('upgrade', (_res, socket) => {
+        socket.destroy();
+        reject(new Error('upgrade emitted instead of request fall-through'));
+      });
+      req.on('error', reject);
+    });
+    req.end();
+    // A suppressed fall-through parks the upgrade with no response at all;
+    // report that cause explicitly instead of burning the test timeout.
+    let timer: NodeJS.Timeout | undefined;
+    const bounded = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              'upgrade request got no response; request-handler fall-through suppressed',
+            ),
+          ),
+        2_000,
+      );
+    });
+    try {
+      const status = await Promise.race([response, bounded]);
+      expect(status).toBe(404);
+    } finally {
+      clearTimeout(timer);
+      req.destroy();
+    }
+    await lifecycle.close();
   });
 });

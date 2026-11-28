@@ -105,6 +105,10 @@ import type {
   DaemonSessionCatalogResult,
   DaemonSessionLiveStateBatchRequest,
   DaemonSessionLiveStateBatchResult,
+  DaemonRestartRecoveryBatchRequest,
+  DaemonRestartRecoveryBatchResult,
+  DaemonRestartRecoveryContinueRequest,
+  DaemonRestartRecoveryContinueBatchResult,
   DaemonSessionSearchOptions,
   DaemonSessionSearchResult,
   DaemonWorkspaceSessionInfo,
@@ -120,8 +124,8 @@ import type {
   DaemonStatusReport,
   DaemonUpdateStatus,
   DaemonStatusReportDetail,
+  DaemonSessionCancelableTaskKind,
   DaemonSessionTaskRuntimeStatus,
-  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonWorkflowActionInput,
@@ -198,6 +202,7 @@ import type {
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
+  RateSessionTurnResult,
   SetModelResult,
   SetSessionLanguageResult,
   SetUserLanguageResult,
@@ -248,6 +253,8 @@ import type {
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionRecapResult,
+  DaemonModRow,
+  DaemonModRowAnswer,
   DaemonShellCommandResult,
   DaemonRuntimeMcpAddRequest,
   DaemonRuntimeMcpAddResult,
@@ -269,6 +276,10 @@ import type {
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
   DaemonSessionArtifactsEnvelope,
+  DaemonArtifactLibrarySessionEnvelope,
+  DaemonArtifactLibrarySessionMetadata,
+  DaemonWorkspaceArtifactLibraryResult,
+  DaemonWorkspaceArtifactLibraryStreamEvent,
   SessionSourceInput,
   SessionSourcesResult,
   SessionSourceUpsertResult,
@@ -329,7 +340,7 @@ import type {
   DaemonWorkspaceTrustStatusV2,
   DaemonUnarchiveSessionsResult,
 } from './types.js';
-import { parseSseStream, SseFramingError } from './sse.js';
+import { parseNamedSseStream, parseSseStream, SseFramingError } from './sse.js';
 import {
   DaemonStandaloneCreationOutcomeUnknownError,
   STANDALONE_SESSION_OPTIONS_CAPABILITY,
@@ -366,6 +377,121 @@ import {
 const WORKSPACE_MEMORY_REMEMBER_PATH = '/workspace/memory/remember';
 const WORKSPACE_MEMORY_FORGET_PATH = '/workspace/memory/forget';
 const WORKSPACE_MEMORY_DREAM_PATH = '/workspace/memory/dream';
+
+function parseArtifactLibraryStreamEvent(
+  eventName: string | undefined,
+  data: Record<string, unknown>,
+): DaemonWorkspaceArtifactLibraryStreamEvent | undefined {
+  if (data['v'] !== 1) return undefined;
+  switch (eventName) {
+    case 'start':
+      if (
+        typeof data['total'] !== 'number' ||
+        !Number.isSafeInteger(data['total']) ||
+        data['total'] < 0
+      ) {
+        return undefined;
+      }
+      return { type: 'start', v: 1, total: data['total'] };
+    case 'session': {
+      const session = data['session'];
+      const limits = data['limits'];
+      if (
+        typeof data['sessionId'] !== 'string' ||
+        !Array.isArray(data['artifacts']) ||
+        typeof data['generatedAt'] !== 'string' ||
+        typeof session !== 'object' ||
+        session === null ||
+        Array.isArray(session) ||
+        typeof limits !== 'object' ||
+        limits === null
+      ) {
+        return undefined;
+      }
+      const meta = session as Record<string, unknown>;
+      if (
+        typeof meta['createdAt'] !== 'string' ||
+        (meta['archiveState'] !== 'active' &&
+          meta['archiveState'] !== 'archived') ||
+        typeof meta['sourceType'] !== 'string'
+      ) {
+        return undefined;
+      }
+      return {
+        type: 'session',
+        v: 1,
+        sessionId: data['sessionId'],
+        artifacts: data[
+          'artifacts'
+        ] as DaemonArtifactLibrarySessionEnvelope['artifacts'],
+        generatedAt: data['generatedAt'],
+        limits: limits as DaemonArtifactLibrarySessionEnvelope['limits'],
+        session: meta as unknown as DaemonArtifactLibrarySessionMetadata,
+        ...(Array.isArray(data['warnings'])
+          ? { warnings: data['warnings'] as string[] }
+          : {}),
+        ...(Array.isArray(data['warningDetails'])
+          ? {
+              warningDetails: data[
+                'warningDetails'
+              ] as DaemonArtifactLibrarySessionEnvelope['warningDetails'],
+            }
+          : {}),
+      };
+    }
+    case 'session_error':
+      if (
+        typeof data['sessionId'] !== 'string' ||
+        typeof data['status'] !== 'number' ||
+        typeof data['code'] !== 'string' ||
+        typeof data['message'] !== 'string'
+      ) {
+        return undefined;
+      }
+      return {
+        type: 'session_error',
+        v: 1,
+        sessionId: data['sessionId'],
+        status: data['status'],
+        code: data['code'],
+        message: data['message'],
+      };
+    case 'complete':
+      if (
+        typeof data['total'] !== 'number' ||
+        typeof data['succeeded'] !== 'number' ||
+        typeof data['failed'] !== 'number' ||
+        typeof data['skipped'] !== 'number'
+      ) {
+        return undefined;
+      }
+      return {
+        type: 'complete',
+        v: 1,
+        total: data['total'],
+        succeeded: data['succeeded'],
+        failed: data['failed'],
+        skipped: data['skipped'],
+      };
+    case 'error':
+      if (
+        typeof data['status'] !== 'number' ||
+        typeof data['code'] !== 'string' ||
+        typeof data['message'] !== 'string'
+      ) {
+        return undefined;
+      }
+      return {
+        type: 'error',
+        v: 1,
+        status: data['status'],
+        code: data['code'],
+        message: data['message'],
+      };
+    default:
+      return undefined;
+  }
+}
 
 function parseSessionGenerationEvent(
   value: unknown,
@@ -834,6 +960,8 @@ export interface RestoreSessionRequest extends ResumeSessionRequest {
   compactedReplayMode?: 'full' | 'summary';
 }
 
+export type RestoreWorktreeSessionRequest = RestoreSessionRequest;
+
 export interface WorktreeResetSessionRequest {
   /**
    * Workspace path the daemon must have registered. Omit to let the daemon use
@@ -853,6 +981,14 @@ export interface PromptRequest {
   /** Per-prompt projection for all subscribers and ring replay; defaults to full. */
   eventDetailMode?: 'full' | 'summary';
   prompt: PromptContentBlock[];
+  /** Opt in when the daemon advertises `turn_skill_file_snapshot`. */
+  pinSkills?: boolean;
+  /** Decline before admission if a captured skill could require unsupported session effects. Requires pinSkills. */
+  requireSessionSkillEffects?: boolean;
+  /** Lowercase SHA-256 of the intended skill material. Requires pinSkills. */
+  expectedSkillDigest?: string;
+  pinExtensions?: boolean;
+  expectedExtensionGeneration?: number;
   /** Deliver the successful final answer directly through a channel worker. */
   delivery?: DaemonChannelDelivery;
   /** Optional ACP _meta passthrough. */
@@ -871,6 +1007,12 @@ export interface PromptRequest {
    * relying on it.
    */
   deadlineMs?: number;
+  /**
+   * Caller-supplied deduplication key (1–200 chars). Retries with the same
+   * key after an uncertain admission return the original prompt admission
+   * instead of enqueueing a duplicate turn.
+   */
+  idempotencyKey?: string;
   [key: string]: unknown;
 }
 
@@ -880,6 +1022,10 @@ export interface PromptRequest {
  */
 export interface NonBlockingPromptAccepted {
   promptId: string;
+  /** The admitted skill-file digest, present when pinSkills was accepted. */
+  skillDigest?: string;
+  sessionSkillEffectsChecked?: true;
+  extensionGeneration?: number;
   lastEventId: number;
   /**
    * Epoch token of the bus that produced `lastEventId`. Clients that seed
@@ -889,6 +1035,8 @@ export interface NonBlockingPromptAccepted {
    * older daemons.
    */
   eventEpoch?: string;
+  /** True when the daemon deduplicated this request via `idempotencyKey`. */
+  deduplicated?: boolean;
 }
 
 export interface SubscribeOptions {
@@ -1278,6 +1426,35 @@ export class DaemonClient {
       label,
       opts,
     );
+  }
+
+  /** @internal */
+  async *workspaceArtifactLibraryStream(
+    workspaceSelector: string,
+    opts: { signal?: AbortSignal; clientId?: string } = {},
+  ): AsyncGenerator<DaemonWorkspaceArtifactLibraryStreamEvent> {
+    const label = 'GET /workspaces/:workspace/artifact-library';
+    const res = await this._fetch(
+      `${this.baseUrl}/workspaces/${workspaceSelector}/artifact-library`,
+      {
+        headers: this.headers({ Accept: 'text/event-stream' }, opts.clientId),
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      },
+    );
+    if (!res.ok) throw await this.failOnError(res, label);
+    const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+    if (!contentType.includes('text/event-stream')) {
+      throw new SseFramingError(
+        `${label}: expected text/event-stream response, got ${res.headers.get('content-type') ?? '(missing)'}`,
+      );
+    }
+    if (!res.body) {
+      throw new SseFramingError(`${label}: response body is missing`);
+    }
+    for await (const frame of parseNamedSseStream(res.body, opts.signal)) {
+      const event = parseArtifactLibraryStreamEvent(frame.event, frame.data);
+      if (event) yield event;
+    }
   }
 
   /** @internal */
@@ -3809,6 +3986,74 @@ export class DaemonClient {
     );
   }
 
+  /** Deadline for the whole recovery batch. Explicit per-request/global values
+   * win. Otherwise each member gets the restore budget, capped by the platform
+   * timer limit; zero means no deadline.
+   */
+  private resolveRestartRecoveryTimeoutMs(
+    perRequestTimeoutMs: number | undefined,
+    memberCount: number,
+  ): number {
+    if (perRequestTimeoutMs !== undefined || this.hasExplicitFetchTimeout) {
+      return this.resolveRestoreTimeoutMs(perRequestTimeoutMs);
+    }
+    const perMember = this.resolveRestoreTimeoutMs(undefined);
+    if (perMember === 0) return 0;
+    const deadline = perMember * Math.max(1, memberCount);
+    return Math.min(MAX_TIMER_DELAY_MS, deadline);
+  }
+
+  /**
+   * List sessions whose newest prompt did not settle, via
+   * `POST /sessions/recovery`. Read-only: no session is loaded and the
+   * response carries no prompt content. Requires a daemon new enough to
+   * serve the route.
+   */
+  getRestartRecoveries(
+    request: DaemonRestartRecoveryBatchRequest,
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<DaemonRestartRecoveryBatchResult> {
+    return this.jsonRequest<DaemonRestartRecoveryBatchResult>(
+      '/sessions/recovery',
+      'POST /sessions/recovery',
+      {
+        method: 'POST',
+        body: request,
+        mode: 'rest',
+        signal: opts?.signal,
+        timeoutMs: this.resolveRestartRecoveryTimeoutMs(
+          opts?.timeoutMs,
+          request.workspaces.length,
+        ),
+      },
+    );
+  }
+
+  /**
+   * Continue selected restart-interrupted sessions via
+   * `POST /sessions/recovery/continue`. The daemon serializes the batch,
+   * loads each session when needed, and returns one result per session.
+   */
+  continueRestartRecoveries(
+    request: DaemonRestartRecoveryContinueRequest,
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<DaemonRestartRecoveryContinueBatchResult> {
+    return this.jsonRequest<DaemonRestartRecoveryContinueBatchResult>(
+      '/sessions/recovery/continue',
+      'POST /sessions/recovery/continue',
+      {
+        method: 'POST',
+        body: request,
+        mode: 'rest',
+        signal: opts?.signal,
+        timeoutMs: this.resolveRestartRecoveryTimeoutMs(
+          opts?.timeoutMs,
+          request.sessions.length,
+        ),
+      },
+    );
+  }
+
   async listSessionGroups(
     workspaceCwd: string,
   ): Promise<DaemonSessionGroupCatalog> {
@@ -4046,6 +4291,56 @@ export class DaemonClient {
         return (await res.json()) as DaemonSession;
       },
       this.resolveSessionSpawnTimeoutMs(),
+    );
+  }
+
+  /**
+   * Reconstruct a registered worktree from its managed snapshot. The server
+   * owns archive selection; callers provide the owning workspace, never a
+   * raw archive path or restore target. Secondary workspaces require cwd.
+   */
+  async restoreWorktreeSession(
+    sessionId: string,
+    req: RestoreWorktreeSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonRestoredSession> {
+    const timeoutMs = this.resolveRestoreTimeoutMs(req.timeoutMs);
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/worktree-restore`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({
+          ...(req.workspaceCwd !== undefined ? { cwd: req.workspaceCwd } : {}),
+          ...(req.approvalMode !== undefined
+            ? { approvalMode: req.approvalMode }
+            : {}),
+          ...(req.historyPageSize !== undefined
+            ? { historyPageSize: req.historyPageSize }
+            : {}),
+          ...(req.compactedReplayMode !== undefined
+            ? { compactedReplayMode: req.compactedReplayMode }
+            : {}),
+          ...(req.liveReplayMode !== undefined
+            ? { liveReplayMode: req.liveReplayMode }
+            : {}),
+          ...(req.sourceType !== undefined
+            ? { sourceType: req.sourceType }
+            : {}),
+          ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+        }),
+        signal: req.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/worktree-restore',
+          );
+        }
+        return (await res.json()) as DaemonRestoredSession;
+      },
+      timeoutMs,
     );
   }
 
@@ -4464,14 +4759,15 @@ export class DaemonClient {
   async sessionTaskCancel(
     sessionId: string,
     taskId: string,
-    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
+    kind: DaemonSessionCancelableTaskKind,
     clientId?: string,
+    source?: 'cron' | 'wakeup',
   ): Promise<{ cancelled: boolean }> {
     return await this.sessionTaskMutation<{ cancelled: boolean }>(
       sessionId,
       taskId,
       'cancel',
-      { kind },
+      { kind, ...(source ? { source } : {}) },
       clientId,
     );
   }
@@ -4916,6 +5212,33 @@ export class DaemonClient {
     );
     if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/recap');
     return (await res.json()) as DaemonSessionRecapResult;
+  }
+
+  /**
+   * Ask a live session's Mods for a transcript row over REST. Check for
+   * `session_mod_rows` in `capabilities.features` before calling. The daemon
+   * waits for the row's `ui.render` hooks, which can take as long as a model
+   * call. `signal` aborts only the local fetch.
+   */
+  async askSessionModRow(
+    sessionId: string,
+    row: DaemonModRow,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonModRowAnswer> {
+    const res = await this._fetch(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/mod-row`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify(row),
+        signal: opts?.signal,
+      },
+    );
+    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/mod-row');
+    return (await res.json()) as DaemonModRowAnswer;
   }
 
   async *generateSessionContent(
@@ -5622,8 +5945,11 @@ export class DaemonClient {
   /**
    * Ask the daemon to deliver the session's queued mid-turn messages now
    * instead of at the agent's next tool boundary: a model response that a
-   * foreground turn is streaming is cut short unless it has started a tool
-   * call, and running tools still finish first. Otherwise, as in a channel,
+   * foreground turn is streaming is cut short, and once that response has
+   * started a tool call, or while its tools run, the turn ends as `cancelled`
+   * and the daemon promotes the messages when the prompt FIFO permits it.
+   * An earlier queued prompt can take the messages at a tool boundary, or
+   * they can be promoted when that prompt settles. Otherwise, as in a channel,
    * cron or background turn, the messages are delivered as without the
    * request, at a tool boundary or by promotion when the turn ends; the
    * protocol reference lists the narrow windows where neither happens.
@@ -7070,6 +7396,35 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Record a per-turn satisfied/not-satisfied mark into the session's
+   * telemetry pipeline as a `user_feedback` event. The daemon fills model
+   * and approval mode from the live session Config; the caller supplies
+   * only the turn's admitted prompt id and the mark direction. Clearing a
+   * mark is client-local and has no wire call.
+   */
+  async rateSessionTurn(
+    sessionId: string,
+    promptId: string,
+    rating: 'up' | 'down',
+    clientId?: string,
+  ): Promise<RateSessionTurnResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/feedback`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ promptId, rating }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/feedback');
+        }
+        return (await res.json()) as RateSessionTurnResult;
+      },
+    );
+  }
+
   setSessionConfigOption(
     sessionId: string,
     configId: 'reasoning_effort',
@@ -7191,7 +7546,8 @@ export class DaemonClient {
     signal?: AbortSignal,
     clientId?: string,
   ): Promise<PromptResult> {
-    signal?.throwIfAborted();
+    const capabilityCheck = this.requirePinnedPromptCapability(req, signal);
+    if (capabilityCheck) await capabilityCheck;
     const releasePromptSlot = this.reservePromptSlot(sessionId);
     let releaseOnExit = true;
     try {
@@ -7209,7 +7565,7 @@ export class DaemonClient {
       );
 
       if (res.status === 202) {
-        const accept = (await res.json()) as NonBlockingPromptAccepted;
+        const accept = await this.readPromptAcceptance(res, req);
         releaseOnExit = false;
         try {
           return await this._awaitTurnComplete(
@@ -7232,6 +7588,8 @@ export class DaemonClient {
           sessionId,
         );
       }
+      if (req.pinSkills)
+        throw new Error('Expected a skill snapshot admission receipt');
       return (await res.json()) as PromptResult;
     } finally {
       if (releaseOnExit) releasePromptSlot();
@@ -7262,6 +7620,8 @@ export class DaemonClient {
     signal?: AbortSignal,
     clientId?: string,
   ): Promise<NonBlockingPromptAccepted | PromptResult> {
+    const capabilityCheck = this.requirePinnedPromptCapability(req, signal);
+    if (capabilityCheck) await capabilityCheck;
     const res = await this.transport.fetch(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/prompt`,
       {
@@ -7273,13 +7633,102 @@ export class DaemonClient {
     );
 
     if (res.status === 202) {
-      return (await res.json()) as NonBlockingPromptAccepted;
+      return this.readPromptAcceptance(res, req);
     }
 
     if (!res.ok) {
       throw await this.failOnError(res, 'POST /session/:id/prompt', sessionId);
     }
+    if (req.pinSkills)
+      throw new Error('Expected a skill snapshot admission receipt');
     return (await res.json()) as PromptResult;
+  }
+
+  private requirePinnedPromptCapability(
+    req: PromptRequest,
+    signal?: AbortSignal,
+  ): Promise<void> | undefined {
+    signal?.throwIfAborted();
+    if (
+      req.expectedSkillDigest !== undefined &&
+      (!req.pinSkills ||
+        typeof req.expectedSkillDigest !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(req.expectedSkillDigest))
+    )
+      throw new Error(
+        'expectedSkillDigest requires pinSkills and a lowercase SHA-256 digest',
+      );
+    const generation = req.expectedExtensionGeneration;
+    if (
+      req.pinExtensions
+        ? !req.pinSkills ||
+          typeof generation !== 'number' ||
+          !Number.isSafeInteger(generation) ||
+          generation < 0
+        : generation !== undefined
+    )
+      throw new Error(
+        'pinExtensions requires pinSkills and a nonnegative safe expectedExtensionGeneration',
+      );
+    if (req.requireSessionSkillEffects && !req.pinSkills)
+      throw new Error('requireSessionSkillEffects requires pinSkills');
+    if (!req.pinSkills) return undefined;
+    const features = ['turn_skill_file_snapshot'];
+    if (req.pinExtensions) features.push('turn_extension_store_lease');
+    if (req.requireSessionSkillEffects)
+      features.push('turn_skill_session_effects_check');
+    return this.capabilities().then((caps) => {
+      signal?.throwIfAborted();
+      for (const feature of features) {
+        if (!Array.isArray(caps.features) || !caps.features.includes(feature)) {
+          throw new DaemonCapabilityMissingError(
+            feature,
+            `daemon does not advertise the ${feature} feature`,
+          );
+        }
+      }
+    });
+  }
+
+  private async readPromptAcceptance(
+    res: Response,
+    req: PromptRequest,
+  ): Promise<NonBlockingPromptAccepted> {
+    const accepted = (await res.json()) as NonBlockingPromptAccepted;
+    if (
+      req.pinSkills &&
+      (!accepted ||
+        typeof accepted.promptId !== 'string' ||
+        !accepted.promptId ||
+        !Number.isSafeInteger(accepted.lastEventId) ||
+        accepted.lastEventId < 0)
+    )
+      throw new Error('Daemon did not return a usable pinned prompt receipt');
+    if (
+      req.requireSessionSkillEffects &&
+      accepted.sessionSkillEffectsChecked !== true
+    )
+      throw new Error(
+        'Daemon did not confirm the requested skill session effects check',
+      );
+    if (
+      req.pinSkills &&
+      (typeof accepted.skillDigest !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(accepted.skillDigest) ||
+        (req.expectedSkillDigest &&
+          accepted.skillDigest !== req.expectedSkillDigest))
+    ) {
+      throw new Error('Daemon did not confirm the requested skill snapshot');
+    }
+    if (
+      req.pinExtensions &&
+      (req.expectedExtensionGeneration === undefined ||
+        accepted.extensionGeneration !== req.expectedExtensionGeneration)
+    )
+      throw new Error(
+        'Daemon did not confirm the requested extension generation',
+      );
+    return accepted;
   }
 
   private async _awaitTurnComplete(
@@ -8246,6 +8695,8 @@ export class DaemonClient {
     sessionId: string,
     metadata: {
       displayName?: string;
+      /** Best-effort initial title for a session without a custom title. */
+      initialDisplayName?: string;
       pr?: Omit<DaemonSessionPrInfo, 'issues'>;
     },
     clientId?: string,
@@ -8287,6 +8738,30 @@ export class WorkspaceDaemonClient {
     private readonly client: DaemonClient,
     private readonly workspaceSelector: string,
   ) {}
+
+  async restoreWorktreeSession(
+    sessionId: string,
+    req: RestoreWorktreeSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonRestoredSession> {
+    // workspaceByCwd stores an encoded URL selector, not a filesystem path.
+    const selector = decodeURIComponent(this.workspaceSelector);
+    const workspaceCwd =
+      req.workspaceCwd ??
+      (selector.startsWith('/') ||
+      /^[A-Za-z]:[\\/]/.test(selector) ||
+      selector.startsWith('\\\\')
+        ? selector
+        : undefined);
+    if (workspaceCwd === undefined) {
+      throw new Error('Worktree restore requires a registered workspace cwd');
+    }
+    return await this.client.restoreWorktreeSession(
+      sessionId,
+      { ...req, workspaceCwd },
+      clientId,
+    );
+  }
 
   workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
@@ -9379,8 +9854,11 @@ export class WorkspaceDaemonClient {
     return this.get('/tools', 'GET /workspaces/:workspace/tools');
   }
 
-  workspaceMemory(): Promise<DaemonWorkspaceMemoryStatus> {
-    return this.get('/memory', 'GET /workspaces/:workspace/memory');
+  workspaceMemory(options?: {
+    includeContent?: boolean;
+  }): Promise<DaemonWorkspaceMemoryStatus> {
+    const query = options?.includeContent ? '?content=true' : '';
+    return this.get(`/memory${query}`, 'GET /workspaces/:workspace/memory');
   }
 
   previewMemoryImport(
@@ -10036,6 +10514,17 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  setVisionBridgeSettings(
+    model: string,
+    timeoutMs: number,
+  ): Promise<DaemonSettingUpdateResult> {
+    return this.post(
+      '/settings/vision-bridge',
+      'POST /workspaces/:workspace/settings/vision-bridge',
+      { model, timeoutMs },
+    );
+  }
+
   workspaceTrust(opts?: {
     clientId?: string;
     statusVersion?: 1;
@@ -10323,6 +10812,28 @@ export class WorkspaceDaemonClient {
       '/file/delete',
       'POST /workspaces/:workspace/file/delete',
       { method: 'POST', body: { path: filePath }, clientId, mode: 'rest' },
+    );
+  }
+
+  artifactLibrary(opts?: {
+    signal?: AbortSignal;
+    clientId?: string;
+  }): Promise<DaemonWorkspaceArtifactLibraryResult> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceArtifactLibraryResult>(
+      this.workspaceSelector,
+      '/artifact-library',
+      'GET /workspaces/:workspace/artifact-library',
+      { mode: 'rest', signal: opts?.signal, clientId: opts?.clientId },
+    );
+  }
+
+  artifactLibraryStream(opts?: {
+    signal?: AbortSignal;
+    clientId?: string;
+  }): AsyncGenerator<DaemonWorkspaceArtifactLibraryStreamEvent> {
+    return this.client.workspaceArtifactLibraryStream(
+      this.workspaceSelector,
+      opts,
     );
   }
 

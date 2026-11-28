@@ -15,6 +15,7 @@ import {
   type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
+  type RestoreWorktreeSessionRequest,
   type ResumeSessionRequest,
   type SubscribeOptions,
   type WorktreeResetSessionRequest,
@@ -54,6 +55,8 @@ import type {
   DaemonSessionLspStatus,
   DaemonSessionResourcesStatus,
   DaemonSessionRecapResult,
+  DaemonModRow,
+  DaemonModRowAnswer,
   DaemonSessionSummary,
   DaemonShellCommandResult,
   DaemonSessionArtifactInput,
@@ -65,10 +68,11 @@ import type {
   SessionSourceRemoveResult,
   DaemonSessionState,
   DaemonSession,
+  DaemonRestoredSession,
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionCancelableTaskKind,
   DaemonSessionTaskRuntimeStatus,
-  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonWorkflowActionInput,
@@ -80,6 +84,7 @@ import type {
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
+  RateSessionTurnResult,
   SetModelResult,
   SessionMetadataResult,
   DaemonSessionPrInfo,
@@ -458,53 +463,7 @@ export class DaemonSessionClient {
     clientId?: string,
   ): Promise<DaemonSessionClient> {
     const restored = await client.loadSession(sessionId, req, clientId);
-    const replaySnapshotComplete =
-      Array.isArray(restored.compactedReplay) &&
-      Array.isArray(restored.liveJournal);
-    const {
-      state,
-      hasActivePrompt,
-      compactedReplay,
-      liveJournal,
-      lifecycleReplay,
-      lifecycleReplayIncomplete,
-      historyHasMore,
-      historyAnchorRecordId,
-      replayProjectionWatermark,
-      replayDegraded,
-      partial,
-      replayError,
-      lastEventId: serverLastEventId,
-      eventEpoch,
-      artifacts,
-      ...session
-    } = restored;
-    const result = new DaemonSessionClient({
-      client,
-      session,
-      hasActivePrompt,
-      state,
-      lastEventId: serverLastEventId ?? 0,
-      eventEpoch,
-      restoredArtifacts: artifacts,
-      replaySnapshot: {
-        compactedReplay: compactedReplay ?? [],
-        liveJournal: liveJournal ?? [],
-        ...(lifecycleReplay !== undefined ? { lifecycleReplay } : {}),
-        ...(lifecycleReplayIncomplete !== undefined
-          ? { lifecycleReplayIncomplete }
-          : {}),
-      },
-      replaySnapshotComplete,
-      replayPartial: partial === true,
-      replayError,
-      historyHasMore,
-      historyAnchorRecordId,
-      replayProjectionWatermark,
-      replayDegraded,
-    });
-    await result.hydrateReplaySnapshot(req.signal);
-    return result;
+    return this.fromRestoredSession(client, restored, req.signal);
   }
 
   /**
@@ -571,6 +530,79 @@ export class DaemonSessionClient {
       lastEventId: 0,
       eventEpoch: session.eventEpoch,
     });
+  }
+
+  /**
+   * Restore this session's retained worktree, preserving its workspace owner.
+   * The server performs snapshot selection and ordinary session loading before
+   * this returns a client whose replay starts at the server's last event id.
+   */
+  static async restoreWorktree(
+    client: DaemonClient,
+    sessionId: string,
+    req: RestoreWorktreeSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonSessionClient> {
+    const restored = await client.restoreWorktreeSession(
+      sessionId,
+      req,
+      clientId,
+    );
+    return this.fromRestoredSession(client, restored, req.signal);
+  }
+
+  private static async fromRestoredSession(
+    client: DaemonClient,
+    restored: DaemonRestoredSession,
+    signal?: AbortSignal,
+  ): Promise<DaemonSessionClient> {
+    const replaySnapshotComplete =
+      Array.isArray(restored.compactedReplay) &&
+      Array.isArray(restored.liveJournal);
+    const {
+      state,
+      hasActivePrompt,
+      compactedReplay,
+      liveJournal,
+      lifecycleReplay,
+      lifecycleReplayIncomplete,
+      historyHasMore,
+      historyAnchorRecordId,
+      replayProjectionWatermark,
+      replayDegraded,
+      partial,
+      replayError,
+      lastEventId: serverLastEventId,
+      eventEpoch,
+      artifacts,
+      ...session
+    } = restored;
+    const result = new DaemonSessionClient({
+      client,
+      session,
+      hasActivePrompt,
+      state,
+      lastEventId: serverLastEventId ?? 0,
+      eventEpoch,
+      restoredArtifacts: artifacts,
+      replaySnapshot: {
+        compactedReplay: compactedReplay ?? [],
+        liveJournal: liveJournal ?? [],
+        ...(lifecycleReplay !== undefined ? { lifecycleReplay } : {}),
+        ...(lifecycleReplayIncomplete !== undefined
+          ? { lifecycleReplayIncomplete }
+          : {}),
+      },
+      replaySnapshotComplete,
+      replayPartial: partial === true,
+      replayError,
+      historyHasMore,
+      historyAnchorRecordId,
+      replayProjectionWatermark,
+      replayDegraded,
+    });
+    await result.hydrateReplaySnapshot(signal);
+    return result;
   }
 
   static async createStandalone(
@@ -766,23 +798,39 @@ export class DaemonSessionClient {
    * `turn_complete` / `turn_error` SSE event. Callers that need final turn
    * results should use `prompt()` or manage SSE terminal events themselves.
    * `beforeDispatch` can reject a stale caller before each HTTP attempt,
-   * including the retry after client registration recovery.
+   * including the retry after client registration recovery. An asynchronous
+   * caller revalidation must settle before the request is sent. Abortion
+   * interrupts that asynchronous wait as well.
    */
   async submitPrompt(
     req: PromptRequest,
     signal?: AbortSignal,
-    beforeDispatch?: (clientId: string | undefined) => void,
+    beforeDispatch?: (clientId: string | undefined) => void | Promise<void>,
   ): Promise<NonBlockingPromptAccepted> {
-    const accepted = await this.withClientIdSelfHeal(() => {
-      signal?.throwIfAborted();
-      beforeDispatch?.(this.clientId);
+    const accepted = await this.withClientIdSelfHeal(async () => {
+      let guardedClientId: string | undefined;
+      do {
+        if (signal?.aborted) throw signal.reason;
+        guardedClientId = this.clientId;
+        if (beforeDispatch && signal) {
+          // A signal must also settle an asynchronous caller guard before the
+          // transport has a request it could abort.
+          await this.waitForCallerAbort(
+            () => beforeDispatch(guardedClientId),
+            signal,
+          );
+        } else if (beforeDispatch) {
+          await beforeDispatch(guardedClientId);
+        }
+      } while (guardedClientId !== this.clientId);
+      if (signal?.aborted) throw signal.reason;
       return this.client.promptNonBlocking(
         this.sessionId,
         req,
         signal,
-        this.clientId,
+        guardedClientId,
       );
-    });
+    }, signal);
     if (!isNonBlockingAccepted(accepted)) {
       throw new Error('Expected non-blocking prompt acceptance');
     }
@@ -868,6 +916,31 @@ export class DaemonSessionClient {
   }
 
   /**
+   * Cancel only this caller's wait, preserving the caller's exact reason.
+   * The operation has its own lifecycle: shared reattachment and an async
+   * caller-supplied guard may still settle after the wait is cancelled.
+   */
+  private async waitForCallerAbort<T>(
+    operation: () => Promise<T> | T,
+    signal: AbortSignal,
+  ): Promise<T> {
+    if (signal.aborted) {
+      throw signal.reason;
+    }
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal.reason);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    aborted.catch(() => {});
+    try {
+      return await Promise.race([operation(), aborted]);
+    } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  /**
    * Run a prompt-admission call, recovering from a stale `clientId`.
    *
    * A daemon restart (or session reload) wipes the daemon's in-memory client
@@ -877,13 +950,24 @@ export class DaemonSessionClient {
    * cannot double-execute. We re-register to obtain a fresh `clientId` and
    * retry the admission exactly once. Any other error (and a second
    * `invalid_client_id`) propagates.
+   *
+   * With an abort signal, caller cancellation takes precedence over this
+   * classification and preserves its exact reason.
    */
-  private async withClientIdSelfHeal<T>(fn: () => Promise<T>): Promise<T> {
+  private async withClientIdSelfHeal<T>(
+    fn: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
     try {
       return await fn();
     } catch (err) {
+      if (signal?.aborted) throw signal.reason;
       if (!isInvalidClientId(err)) throw err;
-      await this.reattach();
+      if (signal) {
+        await this.waitForCallerAbort(() => this.reattach(), signal);
+      } else {
+        await this.reattach();
+      }
       return await fn();
     }
   }
@@ -1041,6 +1125,23 @@ export class DaemonSessionClient {
     );
   }
 
+  /**
+   * Report a per-turn satisfied/not-satisfied mark to telemetry.
+   * Fire-and-forget callers should swallow failures: the mark is local UI
+   * state and never depends on this call's outcome.
+   */
+  rateSessionTurn(
+    promptId: string,
+    rating: 'up' | 'down',
+  ): Promise<RateSessionTurnResult> {
+    return this.client.rateSessionTurn(
+      this.sessionId,
+      promptId,
+      rating,
+      this.clientId,
+    );
+  }
+
   setConfigOption(
     configId: 'reasoning_effort',
     value: ReasoningSelection,
@@ -1131,6 +1232,17 @@ export class DaemonSessionClient {
    */
   recap(opts?: { signal?: AbortSignal }): Promise<DaemonSessionRecapResult> {
     return this.client.recapSession(this.sessionId, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  /** Ask this session's Mods for a row; see `DaemonClient.askSessionModRow`. */
+  askModRow(
+    row: DaemonModRow,
+    opts?: { signal?: AbortSignal },
+  ): Promise<DaemonModRowAnswer> {
+    return this.client.askSessionModRow(this.sessionId, row, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
@@ -1405,13 +1517,15 @@ export class DaemonSessionClient {
 
   cancelTask(
     taskId: string,
-    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
+    kind: DaemonSessionCancelableTaskKind,
+    source?: 'cron' | 'wakeup',
   ): Promise<{ cancelled: boolean }> {
     return this.client.sessionTaskCancel(
       this.sessionId,
       taskId,
       kind,
       this.clientId,
+      source,
     );
   }
 
@@ -1493,6 +1607,8 @@ export class DaemonSessionClient {
 
   async updateMetadata(metadata: {
     displayName?: string;
+    /** Best-effort initial title for a session without a custom title. */
+    initialDisplayName?: string;
     pr?: Omit<DaemonSessionPrInfo, 'issues'>;
   }): Promise<SessionMetadataResult> {
     return await this.client.updateSessionMetadata(

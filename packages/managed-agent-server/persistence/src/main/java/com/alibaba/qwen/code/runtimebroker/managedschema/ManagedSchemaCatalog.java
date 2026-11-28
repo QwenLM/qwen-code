@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -366,25 +367,25 @@ final class ManagedSchemaCatalog {
 
     private static boolean compatibleType(String declaration, int type) {
         return switch (declaration) {
-            case "VARBINARY" -> type == java.sql.Types.VARBINARY;
-            case "VARCHAR" -> type == java.sql.Types.VARCHAR;
-            case "CHAR" -> type == java.sql.Types.CHAR;
-            case "BIGINT" -> type == java.sql.Types.BIGINT;
-            case "INT" -> type == java.sql.Types.INTEGER;
-            case "TINYINT" -> type == java.sql.Types.TINYINT;
+            case "VARBINARY" -> type == Types.VARBINARY;
+            case "VARCHAR" -> type == Types.VARCHAR;
+            case "CHAR" -> type == Types.CHAR;
+            case "BIGINT" -> type == Types.BIGINT;
+            case "INT" -> type == Types.INTEGER;
+            case "TINYINT" -> type == Types.TINYINT;
             case "BOOLEAN" ->
-                    type == java.sql.Types.BOOLEAN
-                            || type == java.sql.Types.BIT
-                            || type == java.sql.Types.TINYINT;
-            case "DATETIME" -> type == java.sql.Types.TIMESTAMP;
+                    type == Types.BOOLEAN
+                            || type == Types.BIT
+                            || type == Types.TINYINT;
+            case "DATETIME" -> type == Types.TIMESTAMP;
             case "LONGTEXT", "MEDIUMTEXT" ->
-                    type == java.sql.Types.LONGVARCHAR
-                            || type == java.sql.Types.CLOB
-                            || type == java.sql.Types.VARCHAR;
+                    type == Types.LONGVARCHAR
+                            || type == Types.CLOB
+                            || type == Types.VARCHAR;
             case "MEDIUMBLOB", "LONGBLOB" ->
-                    type == java.sql.Types.LONGVARBINARY
-                            || type == java.sql.Types.BLOB
-                            || type == java.sql.Types.VARBINARY;
+                    type == Types.LONGVARBINARY
+                            || type == Types.BLOB
+                            || type == Types.VARBINARY;
             default -> false;
         };
     }

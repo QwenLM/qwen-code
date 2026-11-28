@@ -8,6 +8,53 @@
 // Deutsche Übersetzungen für Qwen Code CLI
 
 export default {
+  user: 'Benutzer',
+  assistant: 'Assistent',
+  thinking: 'Überlegung',
+  task: 'Aufgabe',
+  compaction: 'Komprimierung',
+  info: 'Information',
+  warning: 'Warnung',
+  retry: 'Wiederholung',
+  'stop-hook': 'Stopp-Hook',
+  'away-recap': 'Abwesenheitszusammenfassung',
+  'user-shell': 'Benutzerbefehl',
+  advisor: 'Berater',
+  'arena-agent': 'Arena-Agent',
+  'arena-session': 'Arena-Sitzung',
+  goal: 'Ziel',
+  'Protected input': 'Geschützte Eingabe',
+  'Focused input. Cursor: {{position}}':
+    'Eingabe fokussiert. Cursor: {{position}}',
+  'Unfocused input.': 'Eingabe nicht fokussiert.',
+  'Focused Prompt: {{value}}': 'Fokussierte Eingabeaufforderung: {{value}}',
+  'Prompt: {{value}}': 'Eingabeaufforderung: {{value}}',
+  'Focused Input: {{value}}': 'Fokussierte Eingabe: {{value}}',
+  'Input: {{value}}': 'Eingabe: {{value}}',
+  'Placeholder: {{value}}': 'Platzhalter: {{value}}',
+  'Cursor: {{position}}': 'Cursor: {{position}}',
+  'Selected {{value}}': 'Ausgewählt {{value}}',
+  'Disabled {{value}}': 'Deaktiviert {{value}}',
+  'Focused Toggle on: {{value}}': 'Fokussiert, Schalter an: {{value}}',
+  'Focused Toggle off: {{value}}': 'Fokussiert, Schalter aus: {{value}}',
+  'Toggle on: {{value}}': 'Schalter an: {{value}}',
+  'Toggle off: {{value}}': 'Schalter aus: {{value}}',
+  'Conversation cleared.': 'Unterhaltung geleert.',
+  '{{role}}: {{value}}': '{{role}}: {{value}}',
+  'Revision {{value}}': 'Überarbeitung {{value}}',
+  Dialog: 'Dialog',
+  'Dialog closed. Focus: prompt.':
+    'Dialog geschlossen. Fokus: Eingabeaufforderung.',
+  'Dialog closed.': 'Dialog geschlossen.',
+  'Waiting for confirmation': 'Warte auf Bestätigung',
+  'Working. Escape to cancel.': 'Wird ausgeführt. Escape zum Abbrechen.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'Verlaufseinträge {{start}}-{{end}} von {{total}}.',
+  'Worktree: {{value}}': 'Arbeitsbaum: {{value}}',
+  'Workflow mode: on': 'Workflow-Modus: ein',
+  'Workflow mode: on (unavailable)': 'Workflow-Modus: ein (nicht verfügbar)',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Umschalt+Auf/Ab oder BildAuf/BildAb zum Lesen; Strg+Pos1/Ende für ersten/neuesten Eintrag.',
   'Generated UI': 'Generated UI',
   'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
     'Aktiviert die integrierte Generated UI in unterstützten lokalen Sitzungen. Starten Sie die zugehörige Sitzung neu, um Änderungen anzuwenden.',
@@ -411,6 +458,7 @@ export default {
   'Debug Keystroke Logging': 'Debug-Protokollierung von Tastatureingaben',
   'Language: UI': 'Sprache: Benutzeroberfläche',
   'Language: Model': 'Sprache: Modell',
+  'Language: Display Translation': 'Sprache: Anzeigeübersetzung',
   'Output Format': 'Ausgabeformat',
   'Hide Window Title': 'Fenstertitel ausblenden',
   'Show Status in Title': 'Status im Titel anzeigen',
@@ -430,7 +478,6 @@ export default {
   'Screen Reader Mode': 'Bildschirmleser-Modus',
   'Max Session Turns': 'Maximale Sitzungsrunden',
   'Skip Next Speaker Check': 'Nächste-Sprecher-Prüfung überspringen',
-  'Skip Loop Detection': 'Schleifenerkennung überspringen',
   'Skip Startup Context': 'Startkontext überspringen',
   'Enable OpenAI Logging': 'OpenAI-Protokollierung aktivieren',
   'OpenAI Logging Directory': 'OpenAI-Protokollierungsverzeichnis',
@@ -721,6 +768,8 @@ export default {
   'List all configured hooks': 'Alle konfigurierten Hooks auflisten',
   // Hooks - Dialog
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}':
+    'Ein Hook hat die Runde beendet: {{reason}}',
   'Loading hooks...': 'Hooks werden geladen...',
   'Error loading hooks:': 'Fehler beim Laden der Hooks:',
   'Press Escape to close': 'Escape zum Schließen drücken',
@@ -1101,6 +1150,8 @@ export default {
     'Chatverlauf konnte nicht komprimiert werden, da die Komprimierungszusammenfassung abgeschnitten wurde.',
   'Could not compress chat history due to an API error.':
     'Chatverlauf konnte aufgrund eines API-Fehlers nicht komprimiert werden.',
+  'Could not compress chat history because it is too large for the context window.':
+    'Chatverlauf konnte nicht komprimiert werden, da er für das Kontextfenster zu groß ist.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================

@@ -1197,7 +1197,7 @@ describe('package scripts', () => {
     expect(paths).not.toContain('packages/vscode-ide-companion');
   });
 
-  it('keeps the Mem0 Extension manifest aligned with release versions', () => {
+  it('keeps the Mem0 and Teams extension manifests aligned with release versions', () => {
     const versionScript = readFileSync(
       path.join(root, 'scripts/version.js'),
       'utf8',
@@ -1207,14 +1207,14 @@ describe('package scripts', () => {
       "'integrations/external-context-mem0/qwen-extension.json'",
     );
     expect(versionScript).toContain(
-      'const mem0Manifest = readJson(mem0ManifestPath);',
+      "'packages/channels/msteams/qwen-extension.json'",
     );
-    expect(versionScript).toContain('mem0Manifest.version = newVersion');
+    expect(versionScript).toContain('for (const manifestPath of [');
+    expect(versionScript).toContain('const manifest = readJson(manifestPath);');
+    expect(versionScript).toContain('manifest.version = newVersion');
+    expect(versionScript).toContain('writeJson(manifestPath, manifest);');
     expect(versionScript).toContain(
-      'writeJson(mem0ManifestPath, mem0Manifest);',
-    );
-    expect(versionScript).toContain(
-      "'npx prettier --experimental-cli --write integrations/external-context-mem0/qwen-extension.json'",
+      'run(`npx prettier --experimental-cli --write ${manifestPath}`);',
     );
   });
 
@@ -1798,6 +1798,11 @@ describe('package scripts', () => {
         'packages/browser-use/src/test-utils',
       ],
       'permission-bits.mocked-fs.test.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+      ],
+      'permission-bits.mocked-path.test.ts': [
         'packages/cli/src/test-utils',
         'packages/core/src/test-utils',
         'packages/browser-use/src/test-utils',
@@ -3005,7 +3010,7 @@ describe('package scripts', () => {
     );
     expect(setupGitIdx).toBeGreaterThan(exportTokenIdx);
     expect(setupGitIdx).toBeLessThan(
-      releaseStepScript.indexOf('git push --force --set-upstream'),
+      releaseStepScript.indexOf('git push --set-upstream'),
     );
     expect(buildStep).toContain('run-release-step.sh build-package');
   });
@@ -3195,6 +3200,7 @@ describe('package scripts', () => {
       'packages/channels/dws',
       'packages/channels/feishu',
       'packages/channels/github',
+      'packages/channels/msteams',
       'packages/channels/qqbot',
       'packages/channels/telegram',
       'packages/channels/wecom',

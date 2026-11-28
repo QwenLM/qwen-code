@@ -73,10 +73,14 @@ import {
 } from './managed-workspace-binding.js';
 import { parseHostedFileHistoryRecord } from './hosted-file-history-protocol.js';
 import { readHostedApprovalDefinition } from './hosted-tool-approval.js';
-import { readHostedSkills } from './hosted-skill-catalog.js';
 import {
-  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
-  hasHostedExternalFilesExcludedOptions,
+  parseSessionSkillsRef,
+  readHostedSkills,
+} from './hosted-skill-catalog.js';
+import {
+  hasHostedExternalExcludedOptions,
+  isHostedWorkspaceExternalProfile,
+  isHostedWorkspaceExternalShellProfile,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
 } from './hosted-workspace-profiles.js';
@@ -117,7 +121,6 @@ export interface RecoverySessionSource {
     readonly workspaceId: string;
     readonly sessionId: string;
     readonly state: string;
-    readonly storageVersion: number;
     readonly writerId: string | null;
     readonly writerGeneration: number;
     readonly writerLeaseUntil: string | null;
@@ -318,6 +321,21 @@ function settledCheckpoint(checkpoint: HarnessCheckpointV1): boolean {
   );
 }
 
+/**
+ * Whether the definition's Session Skills reference passes the same parse the
+ * resident load applies. A malformed reference rejects through the gate's own
+ * vocabulary instead of escaping with the parser's message.
+ */
+function admitsSessionSkillsRef(ref: unknown): boolean {
+  if (ref === undefined) return true;
+  try {
+    parseSessionSkillsRef(ref);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function verifyRecoverySession(
   source: RecoverySessionSource,
   io: RecoverySessionIO,
@@ -357,7 +375,6 @@ export async function verifyRecoverySession(
         typeof retiredHead.workspaceId === 'string' &&
         retiredHead.workspaceId.length > 0 &&
         retiredHead.state === 'DELETED' &&
-        [1, 2, 3, 4, 5].includes(retiredHead.storageVersion) &&
         retiredHead.writerId === null &&
         retiredHead.writerLeaseUntil === null &&
         retiredHead.latestCheckpointResourceId === null &&
@@ -410,7 +427,6 @@ export async function verifyRecoverySession(
     !head ||
       (head.sessionId === source.sessionId &&
         head.tenantId === source.binding.tenantId &&
-        [1, 2, 3, 4, 5].includes(head.storageVersion) &&
         head.journalRevision >= 1 &&
         head.compactedThroughRevision === 0 &&
         head.recoveryStatus === 'READY'),
@@ -852,9 +868,18 @@ export async function verifyRecoverySession(
         definition['engine'] === 'managed' &&
           definition['sessionId'] === source.sessionId &&
           definition['mcpServers'] === undefined &&
-          (definition['toolProfile'] !==
-            HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
-            !hasHostedExternalFilesExcludedOptions(definition)) &&
+          (!isHostedWorkspaceExternalProfile(definition['toolProfile']) ||
+            !hasHostedExternalExcludedOptions(
+              definition,
+              definition['toolProfile'],
+            )) &&
+          // The external lanes admit a Session skill catalog, so the malformed
+          // reference the exclusion list used to reject needs its own check:
+          // the resident load parses the same field and would fail every turn.
+          // Deliberately every hosted profile, not just external: a definition
+          // that reaches recovery carrying a broken reference must be refused
+          // whatever lane wrote it.
+          admitsSessionSkillsRef(definition['sessionSkillsRef']) &&
           (definition['toolProfile'] === undefined ||
             isHostedWorkspaceProfile(definition['toolProfile'])),
         'unsupported Hosted profile',
@@ -871,7 +896,10 @@ export async function verifyRecoverySession(
       requireValue(
         readHostedApprovalDefinition(definition) &&
           (definition['captureBytes'] === undefined ||
-            (isHostedWorkspaceShellProfile(definition['toolProfile']) &&
+            ((isHostedWorkspaceShellProfile(definition['toolProfile']) ||
+              isHostedWorkspaceExternalShellProfile(
+                definition['toolProfile'],
+              )) &&
               Number.isSafeInteger(definition['captureBytes']) &&
               (definition['captureBytes'] as number) >= 1 &&
               (definition['captureBytes'] as number) <= 2 ** 41)),
@@ -1087,10 +1115,7 @@ export async function verifyRecoverySession(
       for (const nested of collectNestedResourceRefs(ref, bytes))
         await io.enqueue(nested);
     } else if (ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND) {
-      requireValue(
-        ref.schemaVersion === 1 && (head?.storageVersion ?? 0) >= 5,
-        'unsupported tool measurements',
-      );
+      requireValue(ref.schemaVersion === 1, 'unsupported tool measurements');
       parseManagedToolMeasurementEvidence(bytes);
     } else if (ref.kind === EXECUTION_DIAGNOSTICS_KIND) {
       if (ref.schemaVersion !== 1)

@@ -1,0 +1,1658 @@
+{
+  "reference": {
+    "version": "2.1.270",
+    "binarySha256": "a506b6d970a4cf44f6abdb53a81ddcd5d3b0ce042a95c502fe9d1f946bdb8807",
+    "functions": [
+      "Nse",
+      "GAo",
+      "HAo",
+      "jAo",
+      "sRo",
+      "L_r",
+      "M_r",
+      "delivering_work_max"
+    ],
+    "extractedSha256": "6ca868e57efc9aced712464189ae66546f8f3f4ddc8ecf6501f4f37253a5f686"
+  },
+  "texts": {
+    "standard": "# Text output (does not apply to tool calls)\nAssume users can't see most tool calls or thinking — only your text output. Before your first tool call, state in one sentence what you're about to do. While working, give short updates at key moments: when you find something, when you change direction, or when you hit a blocker. Brief is good — silent is not. One sentence per update is almost always enough.\n\nDon't narrate your internal deliberation. User-facing text should be relevant communication to the user, not a running commentary on your thought process. State results and decisions directly, and focus user-facing text on relevant updates for the user.\n\nWhen you do write updates, write so the reader can pick up cold: complete sentences, no unexplained jargon or shorthand from earlier in the session. But keep it tight — a clear sentence is better than a clear paragraph.\n\nEnd-of-turn summary: one or two sentences. What changed and what's next. Nothing else.\n\nMatch responses to the task: a simple question gets a direct answer, not headers and sections.\n\nIn code: default to writing no comments. Never write multi-paragraph docstrings or multi-line comment blocks — one short line max. Don't create planning, decision, or analysis documents unless the user asks for them — work from conversation context, not intermediate files.",
+    "code_style": "Write code that reads like the surrounding code: match its comment density, naming, and idiom.",
+    "outcome_first_final": "# Communicating with the user\n\nYour text output is what the user reads; they usually can't see your thinking or the raw tool results. Write it for a teammate who stepped away and is catching up, not for a log file: they don't know the codenames or shorthand you created along the way, and they didn't watch your process unfold. Before your first tool call, say in a sentence what you're about to do; while working, give brief updates when you find something load-bearing or change direction.\n\nText you write between tool calls may not be shown to the user. Everything the user needs from this turn, including answers, summaries, findings, conclusions, and deliverables, must be in the final text message of your turn, with no tool calls after it. Keep text between tool calls to brief status notes. If something important appeared only mid-turn or in your thinking, restate it in that final message.\n\nLead with the outcome. Your first sentence after finishing should answer \"what happened\" or \"what did you find\": the thing the user would ask for if they said \"just give me the TLDR.\" Supporting detail and reasoning come after, for readers who want them.\n\nBeing readable and being concise are different things, and readable matters more. If the user has to reread your summary or ask you to explain, any time saved by brevity is gone. The way to keep output short is to be selective about what you include (drop details that don't change what the reader would do next), not to compress the writing into fragments, abbreviations, arrow chains like `A → B → fails`, or jargon. What you do include, write in complete sentences with the technical terms spelled out. Don't make the reader cross-reference labels or numbering you invented earlier; say what you mean in place.\n\nMatch the response to the question: a simple question gets a direct answer in prose, not headers and sections. Use tables only for short enumerable facts, with explanations in the surrounding prose rather than the cells. Calibrate to the user: a bit tighter for an expert, more explanatory for someone newer.\n\nWrite code that reads like the surrounding code: match its comment density, naming, and idiom.\nOnly write a code comment to state a constraint the code itself can't show, never to say where it came from, what the next line does, or why your change is correct; that's you talking to the reviewer, not the next reader, and it's noise the moment the change merges.",
+    "autonomy": "You are operating autonomously. The user is not watching in real time and cannot answer questions mid-task, so asking 'Want me to…?' or 'Shall I…?' will block the work. For reversible actions that follow from the original request, proceed without asking. Stop only for destructive actions or genuine scope changes the user must decide. Offering follow-ups after the task is done is fine; asking permission before doing the work is not.\n\nException: when the user is describing a problem, asking a question, or thinking out loud rather than requesting a change, the deliverable is your assessment. Report your findings and stop. Don't apply a fix until they ask for one.\n\nBefore ending your turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done ('I'll…', 'let me know when…'), do that work now with tool calls. That includes retrying after errors and gathering missing information yourself. Do not stop because the context or session is long. End your turn only when the task is complete or you are blocked on input only the user can provide.\n\nBefore running a command that changes system state (such as restarts, deletes, or config edits), check that the evidence actually supports that specific action. A signal that pattern-matches to a known failure may have a different cause.",
+    "turn_updates": "Before you start, say in a line what you're about to do; brief updates while you work help the user follow along. Close with a short recap that stands on its own — what you found, what you did, and what's next — so a reader who only sees the last message has the full picture.",
+    "delivering_work": "# Delivering work\nDo ordinary work as asked, acting on the actual request rather than on speculation about what lies behind it. The requested scope is the deliverable — don't quietly narrow, widen, or transform it. Interpret ambiguity the way a careful colleague would: make routine judgment calls yourself, and check in only when different readings would lead to materially different work. If you find a real problem with the task as specified, state the concern in a sentence or two, then keep building: deliver the complete work under explicitly stated assumptions, flagging important factors for the user. Finish the whole task, not just easy parts — report completion only when fully done. If part of the scope turns out to be blocked or problematic, finish every other part in full and say explicitly what you left out and why — scaling the work down is the user's call, not yours. Stop short of actions or changes clearly beyond what the user's ask implies.\n\nIf you find an uncertainty mid-task, first do everything that doesn't depend on the answer; for what does, state your assumption or ask your question to the user at the right time. Reserve blocking questions — stopping with nothing delivered until the user answers — for cases where proceeding under any assumption would be unsafe or would make the work useless if wrong.\n\nIf you raise a concern about a request and the user repeats or reaffirms it, treat that as their decision, communicate this, and proceed with the full request. Be fair and factual in resolving disagreements about the premises, scope, or approach of the work. Refusals are only for requests that are genuinely harmful or clearly prohibited, not for ordinary work that merely touches a sensitive-sounding topic. If you decline, say so plainly in a sentence, offer the nearest thing you can do, and move on without moralizing or criticism. This applies to producing work products: it doesn't override necessary refusals or the need for confirmation on risky or destructive actions.",
+    "outcome_first_between": "# Communicating with the user\n\nYour text output is what the user reads between tool calls; they usually can't see your thinking or the raw tool results. Write it for a teammate who stepped away and is catching up, not for a log file: they don't know the codenames or shorthand you created along the way, and they didn't watch your process unfold. Before your first tool call, say in a sentence what you're about to do; while working, give brief updates when you find something load-bearing or change direction.\n\nLead with the outcome. Your first sentence after finishing should answer \"what happened\" or \"what did you find\": the thing the user would ask for if they said \"just give me the TLDR.\" Supporting detail and reasoning come after, for readers who want them.\n\nBeing readable and being concise are different things, and readable matters more. If the user has to reread your summary or ask you to explain, any time saved by brevity is gone. The way to keep output short is to be selective about what you include (drop details that don't change what the reader would do next), not to compress the writing into fragments, abbreviations, arrow chains like `A → B → fails`, or jargon. What you do include, write in complete sentences with the technical terms spelled out. Don't make the reader cross-reference labels or numbering you invented earlier; say what you mean in place.\n\nMatch the response to the question: a simple question gets a direct answer in prose, not headers and sections. Use tables only for short enumerable facts, with explanations in the surrounding prose rather than the cells. Calibrate to the user: a bit tighter for an expert, more explanatory for someone newer.\n\nWrite code that reads like the surrounding code: match its comment density, naming, and idiom.\nOnly write a code comment to state a constraint the code itself can't show, never to say where it came from, what the next line does, or why your change is correct; that's you talking to the reviewer, not the next reader, and it's noise the moment the change merges."
+  },
+  "cases": [
+    {
+      "name": "unconfigured-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "standard"
+      }
+    },
+    {
+      "name": "unconfigured-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "code_style"
+      }
+    },
+    {
+      "name": "mitigations-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "mitigations": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": false,
+        "communication": "outcome_first_final"
+      }
+    },
+    {
+      "name": "mitigations-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "mitigations": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": false,
+        "communication": "outcome_first_final"
+      }
+    },
+    {
+      "name": "modern-defaults-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "modern-defaults-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "extended-defaults-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "extendedDefaults": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "standard"
+      }
+    },
+    {
+      "name": "extended-defaults-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "extendedDefaults": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "code_style"
+      }
+    },
+    {
+      "name": "model-turn-updates-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "turnUpdates": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "model-turn-updates-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "turnUpdates": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "model-outcome-first-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "outcomeFirst": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "outcome_first_between"
+      }
+    },
+    {
+      "name": "model-outcome-first-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "outcomeFirst": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "outcome_first_between"
+      }
+    },
+    {
+      "name": "flag-turn-updates-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {
+          "turnUpdates": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "flag-turn-updates-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {
+          "turnUpdates": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "flag-outcome-first-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {
+          "outcomeFirst": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "outcome_first_between"
+      }
+    },
+    {
+      "name": "flag-outcome-first-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {
+          "outcomeFirst": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "outcome_first_between"
+      }
+    },
+    {
+      "name": "flag-autonomy-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {
+          "autonomy": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": false,
+        "communication": "standard"
+      }
+    },
+    {
+      "name": "flag-autonomy-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {
+          "autonomy": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": false,
+        "communication": "code_style"
+      }
+    },
+    {
+      "name": "flag-delivery-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {
+          "deliveringWork": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "standard"
+      }
+    },
+    {
+      "name": "flag-delivery-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {
+          "deliveringWork": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "code_style"
+      }
+    },
+    {
+      "name": "explicit-enabled-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "communication.turn_updates": "enable",
+          "behavior.autonomy": "enable",
+          "behavior.delivering_work": "enable"
+        },
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": true,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "explicit-enabled-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "communication.turn_updates": "enable",
+          "behavior.autonomy": "enable",
+          "behavior.delivering_work": "enable"
+        },
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": true,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "modern-turn-disabled-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "communication.turn_updates": "disable"
+        },
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "standard"
+      }
+    },
+    {
+      "name": "modern-turn-disabled-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "communication.turn_updates": "disable"
+        },
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "code_style"
+      }
+    },
+    {
+      "name": "modern-mitigated-turn-disabled-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "communication.turn_updates": "disable"
+        },
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true,
+            "mitigations": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": true,
+        "communication": "outcome_first_final"
+      }
+    },
+    {
+      "name": "modern-mitigated-turn-disabled-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "communication.turn_updates": "disable"
+        },
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true,
+            "mitigations": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": true,
+        "communication": "outcome_first_final"
+      }
+    },
+    {
+      "name": "mitigated-brief-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "mitigations": true
+          }
+        },
+        "behaviorFlags": {
+          "brief": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": false,
+        "communication": "outcome_first_between"
+      }
+    },
+    {
+      "name": "mitigated-brief-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "mitigations": true
+          }
+        },
+        "behaviorFlags": {
+          "brief": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": false,
+        "communication": "outcome_first_between"
+      }
+    },
+    {
+      "name": "outcome-first-brief-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {
+          "outcomeFirst": true,
+          "brief": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "outcome_first_between"
+      }
+    },
+    {
+      "name": "outcome-first-brief-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {
+          "outcomeFirst": true,
+          "brief": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "outcome_first_between"
+      }
+    },
+    {
+      "name": "autonomy-master-disabled-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "mitigations": true
+          }
+        },
+        "behaviorFlags": {
+          "autonomy": true,
+          "autonomyEnabled": false
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "outcome_first_final"
+      }
+    },
+    {
+      "name": "autonomy-master-disabled-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "mitigations": true
+          }
+        },
+        "behaviorFlags": {
+          "autonomy": true,
+          "autonomyEnabled": false
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "outcome_first_final"
+      }
+    },
+    {
+      "name": "autonomy-switch-disabled-is-not-a-veto-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "behavior.autonomy": "disable"
+        },
+        "behaviorByModel": {
+          "test-model": {
+            "mitigations": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "autonomy": false
+      },
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": false,
+        "communication": "outcome_first_final"
+      }
+    },
+    {
+      "name": "autonomy-switch-disabled-is-not-a-veto-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "behavior.autonomy": "disable"
+        },
+        "behaviorByModel": {
+          "test-model": {
+            "mitigations": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "autonomy": false
+      },
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": false,
+        "communication": "outcome_first_final"
+      }
+    },
+    {
+      "name": "modern-delivery-disabled-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "behavior.delivering_work": "disable"
+        },
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "modern-delivery-disabled-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "behavior.delivering_work": "disable"
+        },
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "extended-disabled-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "extendedDefaults": true
+          }
+        },
+        "behaviorFlags": {
+          "extendedDefaultsDisabled": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "standard"
+      }
+    },
+    {
+      "name": "extended-disabled-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "extendedDefaults": true
+          }
+        },
+        "behaviorFlags": {
+          "extendedDefaultsDisabled": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "code_style"
+      }
+    },
+    {
+      "name": "delivery-flag-survives-extended-disable-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "extendedDefaults": true
+          }
+        },
+        "behaviorFlags": {
+          "extendedDefaultsDisabled": true,
+          "deliveringWork": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "standard"
+      }
+    },
+    {
+      "name": "delivery-flag-survives-extended-disable-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "extendedDefaults": true
+          }
+        },
+        "behaviorFlags": {
+          "extendedDefaultsDisabled": true,
+          "deliveringWork": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "code_style"
+      }
+    },
+    {
+      "name": "env-false-beats-turn-enable-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "communication.turn_updates": "enable"
+        },
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "turnUpdates": false
+      },
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "standard"
+      }
+    },
+    {
+      "name": "env-false-beats-turn-enable-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "communication.turn_updates": "enable"
+        },
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "turnUpdates": false
+      },
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "code_style"
+      }
+    },
+    {
+      "name": "env-true-beats-turn-disable-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "communication.turn_updates": "disable"
+        },
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "turnUpdates": true
+      },
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "env-true-beats-turn-disable-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "communication.turn_updates": "disable"
+        },
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "turnUpdates": true
+      },
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "env-false-beats-delivery-enable-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "behavior.delivering_work": "enable"
+        },
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "deliveringWork": false
+      },
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "env-false-beats-delivery-enable-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "behavior.delivering_work": "enable"
+        },
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "deliveringWork": false
+      },
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "env-true-beats-delivery-disable-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "behavior.delivering_work": "disable"
+        },
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "deliveringWork": true
+      },
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "standard"
+      }
+    },
+    {
+      "name": "env-true-beats-delivery-disable-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "behavior.delivering_work": "disable"
+        },
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "deliveringWork": true
+      },
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "code_style"
+      }
+    },
+    {
+      "name": "env-outcome-first-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "outcomeFirst": true
+      },
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "outcome_first_between"
+      }
+    },
+    {
+      "name": "env-outcome-first-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "outcomeFirst": true
+      },
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "outcome_first_between"
+      }
+    },
+    {
+      "name": "env-autonomy-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "autonomy": true
+      },
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": false,
+        "communication": "standard"
+      }
+    },
+    {
+      "name": "env-autonomy-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {}
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "autonomy": true
+      },
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": false,
+        "communication": "code_style"
+      }
+    },
+    {
+      "name": "false-outcome-flag-does-not-veto-mitigations-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "mitigations": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "outcomeFirst": false
+      },
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": false,
+        "communication": "outcome_first_final"
+      }
+    },
+    {
+      "name": "false-outcome-flag-does-not-veto-mitigations-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "mitigations": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "outcomeFirst": false
+      },
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": false,
+        "communication": "outcome_first_final"
+      }
+    },
+    {
+      "name": "unknown-model-does-not-inherit-full",
+      "effectiveModel": "alibaba/qwen3.8-max",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "alibaba/qwen3.8-max": {},
+          "other-model": {
+            "mitigations": true,
+            "modernDefaults": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "standard"
+      }
+    },
+    {
+      "name": "unknown-model-does-not-inherit-lean",
+      "effectiveModel": "alibaba/qwen3.8-max",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "alibaba/qwen3.8-max": {},
+          "other-model": {
+            "mitigations": true,
+            "modernDefaults": true
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "code_style"
+      }
+    },
+    {
+      "name": "model-turn-disabled-modern-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true,
+            "turnUpdates": false
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "standard"
+      }
+    },
+    {
+      "name": "model-turn-disabled-modern-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true,
+            "turnUpdates": false
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "code_style"
+      }
+    },
+    {
+      "name": "model-turn-disabled-global-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "turnUpdates": false
+          }
+        },
+        "behaviorFlags": {
+          "turnUpdates": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "standard"
+      }
+    },
+    {
+      "name": "model-turn-disabled-global-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "turnUpdates": false
+          }
+        },
+        "behaviorFlags": {
+          "turnUpdates": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "code_style"
+      }
+    },
+    {
+      "name": "model-turn-disabled-modern-mitigated-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true,
+            "mitigations": true,
+            "turnUpdates": false
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": true,
+        "communication": "outcome_first_final"
+      }
+    },
+    {
+      "name": "model-turn-disabled-modern-mitigated-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true,
+            "mitigations": true,
+            "turnUpdates": false
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": true,
+        "communication": "outcome_first_final"
+      }
+    },
+    {
+      "name": "model-turn-disabled-modern-mitigated-brief-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true,
+            "mitigations": true,
+            "turnUpdates": false
+          }
+        },
+        "behaviorFlags": {
+          "brief": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": true,
+        "communication": "outcome_first_between"
+      }
+    },
+    {
+      "name": "model-turn-disabled-modern-mitigated-brief-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true,
+            "mitigations": true,
+            "turnUpdates": false
+          }
+        },
+        "behaviorFlags": {
+          "brief": true
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": true,
+        "deliveringWork": true,
+        "communication": "outcome_first_between"
+      }
+    },
+    {
+      "name": "env-turn-enabled-beats-model-disable-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true,
+            "turnUpdates": false
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "turnUpdates": true
+      },
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "env-turn-enabled-beats-model-disable-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true,
+            "turnUpdates": false
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {
+        "turnUpdates": true
+      },
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "section-turn-enabled-beats-model-disable-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "communication.turn_updates": "enable"
+        },
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true,
+            "turnUpdates": false
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "section-turn-enabled-beats-model-disable-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {
+          "communication.turn_updates": "enable"
+        },
+        "behaviorByModel": {
+          "test-model": {
+            "modernDefaults": true,
+            "turnUpdates": false
+          }
+        },
+        "behaviorFlags": {}
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": true,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "model-turn-enabled-global-disabled-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "turnUpdates": true
+          }
+        },
+        "behaviorFlags": {
+          "turnUpdates": false
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "model-turn-enabled-global-disabled-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "turnUpdates": true
+          }
+        },
+        "behaviorFlags": {
+          "turnUpdates": false
+        }
+      },
+      "overrides": {},
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "turn_updates"
+      }
+    },
+    {
+      "name": "env-turn-disabled-beats-model-enable-full",
+      "effectiveModel": "test-model",
+      "bundle": "full",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "turnUpdates": true
+          }
+        },
+        "behaviorFlags": {
+          "turnUpdates": true
+        }
+      },
+      "overrides": {
+        "turnUpdates": false
+      },
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "standard"
+      }
+    },
+    {
+      "name": "env-turn-disabled-beats-model-enable-lean",
+      "effectiveModel": "test-model",
+      "bundle": "lean",
+      "policy": {
+        "bundleByModel": {},
+        "sectionGates": {},
+        "behaviorByModel": {
+          "test-model": {
+            "turnUpdates": true
+          }
+        },
+        "behaviorFlags": {
+          "turnUpdates": true
+        }
+      },
+      "overrides": {
+        "turnUpdates": false
+      },
+      "expected": {
+        "autonomy": false,
+        "deliveringWork": false,
+        "communication": "code_style"
+      }
+    }
+  ]
+}

@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ManagedArtifactPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.EventIdentity;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.Artifact;
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.Claim;
@@ -11,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.Proj
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.Source;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -121,12 +121,12 @@ public class ManagedToolResultProjector {
     private Projection resolve(Source source, ToolPublicationRetentionStore.ReadLease lease, Runnable guard) throws IOException {
         guard.run();
         store.verifySource(source);
-        var candidates = jdbc.query("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns("p") + ", CASE WHEN is_quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM ma_output_capture p WHERE scope_key = ? AND tenant_id = ?"
-                        + " AND workspace_id = ? AND session_id = ? AND execution_key = ?",
-                (schemaRow, schemaIndex) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(schemaRow),
+        var candidates = jdbc.query("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns("p") + ", CASE WHEN is_quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM ma_output_capture p WHERE scope_ref = ? AND tenant_id = ?"
+                        + " AND workspace_id = ? AND session_id = ? AND execution_call_id = ?",
+                (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 ToolPublicationDataStore.scope(source.sessionKey()),
                 source.tenantId(), source.workspaceId(), source.sessionId(),
-                ToolPublicationContract.sha256(source.executionCallId().getBytes(StandardCharsets.UTF_8)));
+                source.executionCallId());
         if (candidates.isEmpty()) {
             return null;
         }
@@ -144,7 +144,7 @@ public class ManagedToolResultProjector {
         var turns = jdbc.query("SELECT t.tenant_id, t.session_id, t.prompt_id, t.turn_id, s.workspace_id FROM ma_turn t"
                         + " JOIN ma_session s ON s.tenant_id = t.tenant_id AND s.session_id = t.session_id"
                         + " WHERE t.tenant_id = ? AND t.session_id = ? AND t.prompt_id = ?",
-                (schemaRow, schemaIndex) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(schemaRow),
+                (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 source.tenantId(), source.sessionId(), binding.path("turnId").asText());
         if (turns.isEmpty()) {
             throw new NoSuchElementException("Public Turn mapping is missing");
@@ -302,11 +302,11 @@ public class ManagedToolResultProjector {
 
     private JsonNode inlineOutcome(Source source) {
         var rows = jdbc.query("SELECT kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state"
-                        + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?"
-                        + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND deletion_operation_key IS NULL",
-                (schemaRow, schemaIndex) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(schemaRow),
-                ManagedSessionStore.sessionScopeKey(source.tenantId(), source.sessionId()), source.outcomeRef().path("resourceId").asText(),
-                source.tenantId(), source.workspaceId(), source.sessionId());
+                        + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?"
+                        + " AND workspace_id = ? AND deletion_operation_ref IS NULL",
+                (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                source.tenantId(), source.sessionId(), source.outcomeRef().path("resourceId").asText(),
+                source.workspaceId());
         require(rows.size() == 1, "Not-started outcome is missing");
         var row = rows.getFirst();
         require("MYSQL_INLINE".equals(row.get("storage_kind")) && "REFERENCED".equals(row.get("state"))

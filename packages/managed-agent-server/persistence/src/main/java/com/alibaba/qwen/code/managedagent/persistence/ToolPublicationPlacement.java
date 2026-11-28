@@ -5,7 +5,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
@@ -82,7 +81,7 @@ final class ToolPublicationPlacement {
                     "SELECT binding_id FROM ma_runtime_binding WHERE binding_id = ?" + lock)) {
                 // The bound findByIdForUpdate uses for the same row.
                 statement.setQueryTimeout(10);
-                statement.setBytes(1, bindingId.getBytes(StandardCharsets.UTF_8));
+                statement.setString(1, bindingId);
                 statement.executeQuery().close();
             }
         }

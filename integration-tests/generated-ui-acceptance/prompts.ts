@@ -28,6 +28,7 @@ export const BILL_SPLITTER_PROMPT = [
   'Use one direct child of shares per person in order. Each child displays one amount with two decimal places and may include a currency marker and an integer person label. Put any other numbers outside these children.',
   'Use chart for the allocation chart and error for the validation message, which is empty when valid.',
   'Buttons: reset, copy.',
+  'Copy the current total on the first line, then the current share for each person on its own line in order. A share line may start with a person number.',
 ].join('\n');
 
 export const CHECKLIST_PROMPT = [
@@ -70,7 +71,7 @@ export const COMPARATOR_SUPPORT_PROMPT = [
   '',
   CONTRACT_PREAMBLE,
   'Keep the earlier IDs and amount formats. Add support (checkbox, checked) and keep the export button.',
-  'Export CSV with header plan,payment. Use basic, pro or team as the plan key and the current actual payment in CNY, including the selected plan.',
+  'Export CSV with header plan,payment and one row each for basic, pro and team. Use the current actual payment in CNY for each plan.',
 ].join('\n');
 
 export const COMPARATOR_RESET_PROMPT =

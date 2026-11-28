@@ -787,7 +787,11 @@ describe('createAndAttachSessionForPrompt', () => {
       expect(actions.attachSession).not.toHaveBeenCalled();
       expect(actions.setModel).not.toHaveBeenCalled();
       expect(client.setModel).toHaveBeenCalledWith('qwen3');
-      expect(onSessionCreated).toHaveBeenCalledWith('session-1', client);
+      expect(onSessionCreated).toHaveBeenCalledWith(
+        'session-1',
+        client,
+        client,
+      );
       expect(actions.releaseSession).not.toHaveBeenCalled();
       expect(actions.clearSession).not.toHaveBeenCalled();
     });
@@ -810,6 +814,30 @@ describe('createAndAttachSessionForPrompt', () => {
       );
       expect(actions.attachSession).not.toHaveBeenCalled();
       expect(client.setModel).not.toHaveBeenCalled();
+    });
+
+    it('keeps the startup effort when standalone creation is detached', async () => {
+      const client = createDetachedClient();
+      const actions = createUnboundActions(client);
+      const modelId = 'qwen3.8-max(USE_OPENAI)';
+
+      const result = await prepareSession({
+        sessionActions: actions,
+        modelId,
+        reasoningEffort: 'none',
+        supportsSessionStartupConfig: true,
+        sessionContext: { kind: 'standalone' },
+        getCurrentSessionId: () => 'session-2',
+      });
+
+      expect(actions.createSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          startupConfig: { modelServiceId: modelId, reasoningEffort: 'none' },
+        }),
+      );
+      expect(result.detachedSession).toBe(client);
+      expect(client.setConfigOption).not.toHaveBeenCalled();
+      expect(actions.setReasoningEffort).not.toHaveBeenCalled();
     });
 
     it('applies Plan and reasoning through the created client', async () => {

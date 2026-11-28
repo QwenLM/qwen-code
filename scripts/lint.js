@@ -249,6 +249,7 @@ export function getLinters() {
         -ignore 'SC2016:' \
         -ignore 'SC2129:' \
         -ignore 'unexpected key "deployment" for "environment" section' \
+        -ignore 'unexpected key "queue" for "concurrency" section' \
         -ignore 'label ".+" is unknown'
     `,
       },

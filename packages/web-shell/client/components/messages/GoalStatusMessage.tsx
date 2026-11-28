@@ -1,4 +1,3 @@
-import { DAEMON_GOAL_STATUS_SENTINEL_PREFIX } from '@qwen-code/sdk/daemon';
 import { useState } from 'react';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
@@ -9,6 +8,8 @@ import {
   CollapsibleTrigger,
 } from '../ui/collapsible';
 import styles from './GoalStatusMessage.module.css';
+
+export const GOAL_STATUS_SENTINEL_PREFIX = 'web-shell:goal-status:v1:';
 
 export type GoalStatusKind =
   | 'set'
@@ -34,7 +35,7 @@ const {
   serialize: serializeGoalStatusMessage,
   parse: parseRawGoalStatusMessage,
 } = createSentinelSerializer<SerializedGoalStatusMessage>(
-  DAEMON_GOAL_STATUS_SENTINEL_PREFIX,
+  GOAL_STATUS_SENTINEL_PREFIX,
 );
 
 const VALID_GOAL_KINDS = new Set<string>([

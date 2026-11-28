@@ -24,6 +24,7 @@ const observed = vi.hoisted(() => ({
 }));
 vi.mock('../daemon/session/DaemonSessionProvider', () => ({
   useDaemonHistoryNavigationStore: () => observed.store,
+  useOptionalDaemonHistoryNavigationStore: () => observed.store,
 }));
 vi.mock('../WebShellContexts', async () => {
   const { createContext } = await import('react');
@@ -35,6 +36,7 @@ vi.mock('./MessageItem', () => ({
 vi.mock('./messages/ToolApproval', () => ({ ToolApproval: () => null }));
 vi.mock('./messages/AskUserQuestion', () => ({ AskUserQuestion: () => null }));
 const { TranscriptViewport } = await import('./TranscriptViewport');
+const { DaemonTranscriptViewport } = await import('./DaemonTranscriptViewport');
 
 let root: Root | undefined;
 let container: HTMLElement | undefined;
@@ -180,6 +182,7 @@ async function setup() {
     root!.render(
       <I18nProvider language="en">
         <TranscriptViewport
+          sessionViewportComponent={DaemonTranscriptViewport}
           messages={live}
           pendingApproval={null}
           isResponding={false}

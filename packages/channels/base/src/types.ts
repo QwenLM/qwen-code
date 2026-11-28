@@ -13,7 +13,7 @@ export type PrivatePolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
 export type GroupSenderPolicy = 'open' | 'allowlist';
 /** @deprecated Use PrivatePolicy. */
 export type DmPolicy = 'disabled' | 'open';
-export type DispatchMode = 'collect' | 'steer' | 'followup';
+export type DispatchMode = 'collect' | 'steer' | 'followup' | 'inject';
 export type ChannelOutputMode = 'per_task' | 'per_response' | 'per_turn';
 
 export interface ChannelIdentityConfig {
@@ -157,6 +157,14 @@ export interface Envelope {
   messageId?: string;
   isGroup: boolean;
   isMentioned: boolean;
+  /**
+   * The message text names the bot itself (an explicit mention), as opposed
+   * to `isMentioned`, which an adapter also sets for an implicitly directed
+   * event (a thread the account owns, an aggregate digest). Only an explicit
+   * mention proves a sender is waiting for an answer, so adapters gate a
+   * public failure receipt on this flag.
+   */
+  isExplicitMention?: boolean;
   isReplyToBot: boolean;
   /** Text of the message being replied to (quoted/referenced message). */
   referencedText?: string;
@@ -195,6 +203,13 @@ export interface Envelope {
    * flag does not bypass sanitization.
    */
   alreadyPrefixed?: true;
+  /**
+   * Marks the synthetic envelope a collect-buffer drain replays. The replay
+   * MUST become its own turn: `inject` must not hand it back to a running turn
+   * (that would fold parked messages into somebody else's turn, or destroy
+   * them if the re-offer is rejected against the now-empty buffer).
+   */
+  collectReplay?: true;
 }
 
 export interface SessionTarget {

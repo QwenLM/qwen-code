@@ -6,9 +6,10 @@
 
 // The SDK's getEndpoint() console.log()s the resolved config (clientSecret)
 // and the gateway response, ungated by its own debug flag. Silence rather
-// than redact: a key allowlist stays open to future SDK logs. Shared by the
-// Legacy channel and the managed adapter so this credential guard has a
-// single copy — a fix to one must not leave the other leaking.
+// than redact: a key allowlist stays open to future SDK logs. The async
+// connect scope below is the Legacy channel's; the managed adapter owns its
+// endpoint discovery instead and never logs, so it uses only the synchronous
+// frame scope (#17173 R11). Both still share one depth counter.
 
 /* eslint-disable no-console -- swapping console.log out is the whole job here */
 let connectLogDepth = 0;

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.event;
 
+import com.alibaba.qwen.code.managedagent.contracts.event.EventMessageListener;
 import com.alibaba.qwen.code.managedagent.contracts.event.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.contracts.event.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.repository.TransportConsumerStore;
@@ -36,7 +37,7 @@ import java.util.concurrent.RejectedExecutionException;
  * never one per notice in parallel, and the listener thread never waits on
  * the store's row locks.
  */
-public class EventTransportConsumer implements Closeable, com.alibaba.qwen.code.managedagent.contracts.event.EventMessageListener {
+public class EventTransportConsumer implements Closeable, EventMessageListener {
     private static final Logger LOG = LoggerFactory.getLogger(
             EventTransportConsumer.class);
     private static final ObjectMapper JSON = new ObjectMapper();

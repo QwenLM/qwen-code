@@ -4,18 +4,14 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.maintenance.WorkspaceMigrationMain;
 import com.alibaba.qwen.code.managedagent.maintenance.WorkspaceRecoveryCommand;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
-import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.IOException;
-import java.net.URL;
+import java.lang.reflect.InvocationTargetException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Collections;
-import java.util.Enumeration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -23,25 +19,22 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @DisabledOnOs(OS.WINDOWS)
 class RuntimeProviderMaintenanceTest {
     @Test
-    void localMaintenanceRequiresItsFactoryBeforeSqlOrFilesystemAccess(@TempDir Path directory) {
-        Thread thread = Thread.currentThread();
-        ClassLoader previous = thread.getContextClassLoader();
-        thread.setContextClassLoader(new ClassLoader(previous) {
-            @Override
-            public Enumeration<URL> getResources(String name) throws IOException {
-                return name.equals("META-INF/services/" + RuntimeProviderFactory.class.getName())
-                        ? Collections.emptyEnumeration() : super.getResources(name);
-            }
-        });
-        try {
-            assertThatThrownBy(() -> WorkspaceRecoveryCommand.main(new String[]{"inspect", "unused", "1"}))
-                    .isInstanceOf(IllegalStateException.class).hasMessageContaining("not installed: local-process");
-            Path absent = directory.resolve("missing.json");
-            assertThatThrownBy(() -> WorkspaceMigrationMain.main(new String[]{"retire", absent.toString(), "--offline-confirmed"}))
-                    .isInstanceOf(IllegalStateException.class).hasMessageContaining("not installed: local-process");
-            assertThat(absent).doesNotExist();
-        } finally {
-            thread.setContextClassLoader(previous);
+    void localMaintenanceRequiresItsFactoryBeforeSqlOrFilesystemAccess(@TempDir Path directory) throws Exception {
+        try (var loader = RuntimeProviderLoaders.withoutFactoryServices()) {
+            RuntimeProviderLoaders.withContextLoader(loader, () -> {
+                var recovery = loader.loadClass(WorkspaceRecoveryCommand.class.getName());
+                assertThatThrownBy(() -> recovery.getMethod("main", String[].class)
+                        .invoke(null, (Object) new String[]{"inspect", "unused", "1"}))
+                        .isInstanceOf(InvocationTargetException.class)
+                        .rootCause().hasMessageContaining("not installed: local-process");
+                Path absent = directory.resolve("missing.json");
+                var migration = loader.loadClass(WorkspaceMigrationMain.class.getName());
+                assertThatThrownBy(() -> migration.getMethod("main", String[].class)
+                        .invoke(null, (Object) new String[]{"retire", absent.toString(), "--offline-confirmed"}))
+                        .isInstanceOf(InvocationTargetException.class)
+                        .rootCause().hasMessageContaining("not installed: local-process");
+                assertThat(absent).doesNotExist();
+            });
         }
     }
 

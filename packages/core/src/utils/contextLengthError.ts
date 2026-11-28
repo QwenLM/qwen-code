@@ -49,6 +49,9 @@ const CONTEXT_LENGTH_PATTERNS = [
   // llama.cpp: "request (279935 tokens) exceeds the available context size
   // (262144 tokens), try increasing it" (#13415).
   /\bexceeds the available context size\b/i,
+  // Kimi / OpenAI-compatible servers: "The input (1347344 tokens) is longer
+  // than the model's context length (1048576 tokens)."
+  /\bis\s+longer\s+than\s+(?:the\s+)?(?:model['’]s\s+)?context\s+length\b/i,
 ];
 
 function parseInteger(value: string): number {
@@ -79,8 +82,9 @@ function parseTokenCounts(text: string): {
     };
   }
 
+  // SGLang states the window as "maximum context length of N tokens".
   const maxContextLimitMatch = text.match(
-    /maximum context length is\s*(\d[\d,]*)\s*tokens?/i,
+    /maximum context length (?:is|of)\s*(\d[\d,]*)\s*tokens?/i,
   );
   if (maxContextLimitMatch) {
     return {
@@ -152,6 +156,19 @@ function parseTokenCounts(text: string): {
     return {
       actualTokens: parseInteger(llamaCppMatch[1]!),
       limitTokens: parseInteger(llamaCppMatch[2]!),
+      limitKind: 'total',
+    };
+  }
+
+  // Kimi / OpenAI-compatible servers: "The input (1347344 tokens) is longer
+  // than the model's context length (1048576 tokens)."
+  const longerThanContextMatch = text.match(
+    /\(\s*(\d[\d,]{0,31})\s*tokens?\s*\)\s*is\s+longer\s+than\s+(?:the\s+)?(?:model['’]s\s+)?context\s+length\s*\(\s*(\d[\d,]{0,31})\s*tokens?\s*\)/i,
+  );
+  if (longerThanContextMatch) {
+    return {
+      actualTokens: parseInteger(longerThanContextMatch[1]!),
+      limitTokens: parseInteger(longerThanContextMatch[2]!),
       limitKind: 'total',
     };
   }
@@ -288,11 +305,7 @@ export function getContextLengthExceededInfo(
   // sibling field was reported as not-an-overflow and never reached the
   // compaction path. A fragment counts as evidence only if it names a
   // context-length failure and is not itself a timeout message.
-  const isExceeded = fragments.some(
-    (fragment) =>
-      CONTEXT_LENGTH_PATTERNS.some((pattern) => pattern.test(fragment)) &&
-      !TIMEOUT_PATTERNS.some((pattern) => pattern.test(fragment)),
-  );
+  const isExceeded = fragments.some(isOverflowText);
   const counts = isExceeded ? parseTokenCounts(message) : {};
 
   return {
@@ -300,6 +313,35 @@ export function getContextLengthExceededInfo(
     message,
     ...counts,
   };
+}
+
+/** A fragment that names a context-length failure and is not a timeout. */
+function isOverflowText(fragment: string): boolean {
+  return (
+    CONTEXT_LENGTH_PATTERNS.some((pattern) => pattern.test(fragment)) &&
+    !TIMEOUT_PATTERNS.some((pattern) => pattern.test(fragment))
+  );
+}
+
+/**
+ * The context windows the error's rejections state: one per fragment that is
+ * itself a context-length rejection, when its wording names the window. A
+ * request may only be made smaller by these. An earlier attempt's rejection
+ * carried in another field still names a window the same server stated, so
+ * the caller takes the smallest. Two kinds of figure are left out: an untyped
+ * "N tokens > M" (rate-limit and quota text share the shape), and an input
+ * bound, which lets `prompt + max_tokens` exceed it, so sizing a window by it
+ * floors the summary budget (#13876).
+ */
+export function statedContextWindows(error: unknown): number[] {
+  return uniqueNonEmpty(collectStrings(error, new Set<object>()))
+    .filter(isOverflowText)
+    .map(parseTokenCounts)
+    .flatMap((counts) =>
+      counts.limitKind === 'total' && counts.limitTokens !== undefined
+        ? [counts.limitTokens]
+        : [],
+    );
 }
 
 export function isContextLengthExceededError(error: unknown): boolean {

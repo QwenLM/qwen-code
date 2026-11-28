@@ -47,7 +47,7 @@ sweep 相矛盾，后者在 turn 结算的同一秒内停止仍存活的后台 r
   recovery-blocked（hosted-harness-session.ts:4702）。这个 park 正是钉住
   的故障门禁所断言的诚实契约：在被拒的 release 之上关闭的 Session 把它的
   Monitor 停成 `runtime_lost`，而不是为一个没人停止过的进程铸
-  `stop_requested`（hosted-harness-session.test.ts:6715）。
+  `stop_requested`（hosted-harness-session.runtime-cleanup.test.ts）。
 - **broker release sweep 会 drain。** `settleUnprovenBackgroundRows`
   （RuntimeBrokerService.java:1911）对每个存活的 `:process` 行执行
   status → `shell-terminate` → status，而 `releaseSessionAfterSweep`

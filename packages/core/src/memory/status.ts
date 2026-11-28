@@ -4,15 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as fs from 'node:fs/promises';
 import { type MemoryManager, type MemoryTaskRecord } from './manager.js';
 import {
-  getAutoMemoryExtractCursorPath,
   getAutoMemoryIndexPath,
-  getAutoMemoryMetadataPath,
   getAutoMemoryRoot,
+  type ProjectMemoryOwner,
 } from './paths.js';
+import {
+  readProjectMemoryCursor,
+  readProjectMemoryMetadata,
+} from './project-commit.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
+import { readAutoMemoryIndex } from './store.js';
 import type {
   AutoMemoryExtractCursor,
   AutoMemoryMetadata,
@@ -40,29 +43,21 @@ export interface ManagedAutoMemoryStatus {
   migrationTasks: MemoryTaskRecord[];
 }
 
-async function readJsonFile<T>(filePath: string): Promise<T | undefined> {
-  try {
-    const content = await fs.readFile(filePath, 'utf-8');
-    return JSON.parse(content) as T;
-  } catch {
-    return undefined;
-  }
-}
-
 export async function getManagedAutoMemoryStatus(
   projectRoot: string,
   manager: MemoryManager,
+  owner?: ProjectMemoryOwner,
 ): Promise<ManagedAutoMemoryStatus> {
-  const root = getAutoMemoryRoot(projectRoot);
-  const indexPath = getAutoMemoryIndexPath(projectRoot);
+  const root = getAutoMemoryRoot(projectRoot, owner);
+  const indexPath = getAutoMemoryIndexPath(projectRoot, owner);
 
-  const [indexContent, cursor, metadata, docs] = await Promise.all([
-    fs.readFile(indexPath, 'utf-8').catch(() => ''),
-    readJsonFile<AutoMemoryExtractCursor>(
-      getAutoMemoryExtractCursorPath(projectRoot),
-    ),
-    readJsonFile<AutoMemoryMetadata>(getAutoMemoryMetadataPath(projectRoot)),
-    scanAutoMemoryTopicDocuments(projectRoot),
+  const indexContent = await readAutoMemoryIndex(projectRoot, owner).catch(
+    () => '',
+  );
+  const [cursor, metadata, docs] = await Promise.all([
+    readProjectMemoryCursor(root, owner).catch(() => undefined),
+    readProjectMemoryMetadata(projectRoot, owner).catch(() => undefined),
+    scanAutoMemoryTopicDocuments(projectRoot, owner),
   ]);
 
   // Aggregate per-entry files by topic
@@ -91,7 +86,7 @@ export async function getManagedAutoMemoryStatus(
   return {
     root,
     indexPath,
-    indexContent,
+    indexContent: indexContent ?? '',
     cursor,
     metadata,
     extractionRunning: manager

@@ -2817,6 +2817,8 @@ describe('createTranscriptReplayMachine', () => {
       'agent_message_chunk',
       'agent_message_chunk',
     ]);
+    expect(assistant[0]?._meta?.['source']).toBe('history_gap');
+    expect(assistant[1]?._meta?.['source']).toBeUndefined();
     expect(
       assistant
         .slice(0, 2)
@@ -3025,6 +3027,18 @@ describe('ui_telemetry timing frames', () => {
       promptId: 'session-1########0',
       model: 'qwen3.8-max',
     });
+  });
+
+  it('keeps the first visible offset separate from dispatch-based TTFT', () => {
+    expect(
+      timings(
+        timingMachine(),
+        telemetry('tel-1', {
+          ...API_RESPONSE_EVENT,
+          first_visible_offset_ms: 2544,
+        }),
+      ),
+    ).toMatchObject([{ ttftMs: 2344, firstVisibleOffsetMs: 2544 }]);
   });
 
   it('carries the telemetry record as the emission source', () => {

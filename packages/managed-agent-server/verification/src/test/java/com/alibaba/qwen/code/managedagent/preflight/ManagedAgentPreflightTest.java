@@ -341,9 +341,11 @@ class ManagedAgentPreflightTest {
 
     @Test
     void requiresTheLifecycleTheWorkspaceToolsNeed() throws IOException {
+        // D3: ordinary files needs lifecycle v2 (external-files keeps v1).
         HttpServer textOnly = capabilitiesServer(capabilities(DIGEST, "")
                 .replace("\"lifecycleProtocolVersion\":1,", ""));
-        HttpServer filesOnly = capabilitiesServer(capabilities(DIGEST, ""));
+        HttpServer filesOnly = capabilitiesServer(
+                capabilities(DIGEST, "\"hosted-workspace-files/1\""));
         try {
             ManagedAgentProperties files = harness(
                     "http://127.0.0.1:" + textOnly.getAddress().getPort());
@@ -351,7 +353,8 @@ class ManagedAgentPreflightTest {
             ManagedAgentPreflight.Check noFiles =
                     ManagedAgentPreflight.harnessCheck(files, null);
             assertEquals(ManagedAgentPreflight.Status.FAIL, noFiles.status());
-            assertTrue(noFiles.detail().endsWith("does not support Workspace files"));
+            assertTrue(noFiles.detail().endsWith("does not offer hosted-workspace-files/1"),
+                    noFiles.detail());
             ManagedAgentProperties shell = harness(
                     "http://127.0.0.1:" + filesOnly.getAddress().getPort());
             shell.getHarness().setWorkspaceFilesEnabled(true);
@@ -361,7 +364,7 @@ class ManagedAgentPreflightTest {
             assertEquals(ManagedAgentPreflight.Status.FAIL, noShell.status());
             assertEquals("add hosted-workspace-shell/1 to QWEN_HOSTED_LIFECYCLE_V2_PROFILES"
                     + " in the Harness environment; an explicit value replaces the whole"
-                    + " list, so set it to hosted-workspace-shell/1", noShell.fix());
+                    + " list, so set it to hosted-workspace-files/1,hosted-workspace-shell/1", noShell.fix());
             // Profiles an AgentDefinition may select need their lifecycle too.
             ManagedAgentProperties mcp = harness(
                     "http://127.0.0.1:" + filesOnly.getAddress().getPort());
@@ -388,14 +391,14 @@ class ManagedAgentPreflightTest {
             ManagedAgentPreflight.Check check = ManagedAgentPreflight.harnessCheck(shell, null);
             assertEquals(ManagedAgentPreflight.Status.FAIL, check.status());
             assertTrue(check.fix().endsWith("so set it to"
-                    + " hosted-workspace-mcp/1,hosted-workspace-shell/1"), check.fix());
+                    + " hosted-workspace-mcp/1,hosted-workspace-files/1,hosted-workspace-shell/1"), check.fix());
         } finally {
             mcpOnly.stop(0);
         }
         HttpServer withShell = capabilitiesServer(
-                capabilities(DIGEST, "\"hosted-workspace-shell/1\""));
+                capabilities(DIGEST, "\"hosted-workspace-files/1\",\"hosted-workspace-shell/1\""));
         HttpServer withShellMcp = capabilitiesServer(
-                capabilities(DIGEST, "\"hosted-workspace-shell/1\"").replace(
+                capabilities(DIGEST, "\"hosted-workspace-files/1\",\"hosted-workspace-shell/1\"").replace(
                         "\"lifecycleProtocolVersion\":1,",
                         "\"features\":[\"workspace-shell-mcp/1\"],\"lifecycleProtocolVersion\":1,"));
         try {
@@ -859,11 +862,6 @@ class ManagedAgentPreflightTest {
             assertTrue(invalid.contains("online:FAIL"), invalid.toString());
             // A malformed value still runs the remaining rows offline.
             assertTrue(invalid.contains("server-port:FAIL"), invalid.toString());
-            // The Broker port is checked the same way.
-            List<String> broker = statuses("--check", "--online", "--server.port=" + live,
-                    "--qwen.managed-agent.runtime-broker.enabled=true",
-                    "--qwen.managed-agent.runtime-broker.port=" + live);
-            assertTrue(broker.contains("broker-port:PASS"), broker.toString());
             // Offline, the busy port's fix points at --online.
             ManagedAgentPreflight.Check busy = ManagedAgentPreflight.checks(new String[] {
                     "--check", "--server.port=" + live, "--spring.datasource.url="})
@@ -886,18 +884,15 @@ class ManagedAgentPreflightTest {
                 "--server.port=" + closed);
         assertTrue(lastWins.contains("server-port:PASS"), lastWins.toString());
         ManagedAgentPreflight.Check silent = ManagedAgentPreflight.listeningCheck(
-                "broker", "127.0.0.1", closed);
+                "server", "127.0.0.1", closed);
         assertEquals(ManagedAgentPreflight.Status.FAIL, silent.status());
-        assertEquals("broker-port", silent.name());
+        assertEquals("server-port", silent.name());
         ManagedAgentPreflight.Check unresolved = ManagedAgentPreflight.listeningCheck(
                 "server", "no-such-host.invalid", closed);
         assertEquals(ManagedAgentPreflight.Status.FAIL, unresolved.status());
         assertEquals("cannot resolve no-such-host.invalid", unresolved.detail());
-        List<String> online = statuses("--check", "--online", "--server.port=" + closed,
-                "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=" + closed);
+        List<String> online = statuses("--check", "--online", "--server.port=" + closed);
         assertTrue(online.contains("server-port:FAIL"), online.toString());
-        assertTrue(online.contains("broker-port:FAIL"), online.toString());
         // Without a local-process Runtime, online gives the offline reason.
         ManagedAgentPreflight.Check workers = ManagedAgentPreflight.checks(new String[] {
                 "--check", "--online", "--server.port=" + closed, "--spring.datasource.url="})
@@ -916,7 +911,6 @@ class ManagedAgentPreflightTest {
         ManagedAgentPreflight.Check workers = ManagedAgentPreflight.checks(new String[] {
                 "--check", "--server.port=" + free, "--spring.datasource.url=",
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.state-directory=" + state})
                 .stream().filter(check -> check.name().equals("workers"))
                 .findFirst().orElseThrow();
@@ -957,9 +951,9 @@ class ManagedAgentPreflightTest {
             assertEquals("server-port", offline.name());
             assertEquals(port + " is not a TCP port", offline.detail());
             ManagedAgentPreflight.Check online =
-                    ManagedAgentPreflight.listeningCheck("broker", "127.0.0.1", port);
+                    ManagedAgentPreflight.listeningCheck("server", "127.0.0.1", port);
             assertEquals(ManagedAgentPreflight.Status.FAIL, online.status());
-            assertEquals("broker-port", online.name());
+            assertEquals("server-port", online.name());
         }
     }
 
@@ -1531,6 +1525,12 @@ class ManagedAgentPreflightTest {
         // The Harness takes the Broker URL and token from the file together.
         Path textOnly = credentialsFile(directory, "token", DIGEST);
         ManagedAgentProperties bound = fromFile(textOnly, "http://127.0.0.1:1");
+        List<ManagedAgentPreflight.Check> withoutBroker =
+                ManagedAgentPreflight.brokerChecks(bound);
+        assertEquals(1, withoutBroker.size(), withoutBroker.toString());
+        assertEquals(ManagedAgentPreflight.Status.SKIP,
+                withoutBroker.get(0).status());
+        assertEquals("disabled", withoutBroker.get(0).detail());
         bound.getRuntimeBroker().setEnabled(true);
         List<ManagedAgentPreflight.Check> checks =
                 ManagedAgentPreflight.brokerChecks(bound);
@@ -1543,243 +1543,124 @@ class ManagedAgentPreflightTest {
     }
 
     @Test
-    void comparesTheHarnessBrokerUrlWithTheBrokerAddress(
+    void comparesTheHarnessBrokerUrlWithTheManagedAgentOrigin(
             @TempDir Path directory) throws IOException {
         Path file = Files.writeString(directory.resolve("harness.env"),
                 "QWEN_SERVER_TOKEN=token\nQWEN_HOSTED_HARNESS_CAPABILITY_DIGEST="
                         + DIGEST + "\nQWEN_MANAGED_RUNTIME_BROKER_URL="
-                        + "http://127.0.0.1:4182\nQWEN_MANAGED_RUNTIME_BROKER_TOKEN=broker\n");
-        ManagedAgentProperties properties = fromFile(file, "http://127.0.0.1:1");
-        ManagedAgentProperties.RuntimeBroker broker =
-                properties.getRuntimeBroker();
-        broker.setEnabled(true);
+                        + "http://127.0.0.1:8080\nQWEN_MANAGED_RUNTIME_BROKER_TOKEN=broker\n");
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getHarness().setCredentialsFile(file.toString());
+        properties.getHarness().setBaseUrl("http://127.0.0.1:1");
+        properties.setEnvironment(new MockEnvironment());
+        properties.validateForPreflight();
+        properties.getRuntimeBroker().setEnabled(true);
+        // The standalone default resolves the Store and Broker to port 8080.
+        assertEquals("http://127.0.0.1:8080",
+                properties.getSessionStore().getBaseUrl());
         assertEquals(ManagedAgentPreflight.Status.PASS,
                 urlRow(properties).status());
-        // The Broker moved through its own settings; the file still names
-        // 4182, which only a proxy could forward, so preflight warns.
-        broker.setPort(4200);
+
+        // A configured internal connector origin is also the comparison target.
+        properties.getSessionStore().setBaseUrl("http://127.0.0.1:8081");
         ManagedAgentPreflight.Check moved = urlRow(properties);
         assertEquals(ManagedAgentPreflight.Status.WARN, moved.status());
-        assertEquals("the Hosted Harness dials http://127.0.0.1:4182, not the"
-                + " Broker's listener at 127.0.0.1:4200; a proxy may forward it,"
-                + " which preflight cannot verify", moved.detail());
+        assertEquals("the Hosted Harness dials http://127.0.0.1:8080, not the"
+                + " Managed Agent's internal origin at http://127.0.0.1:8081;"
+                + " a proxy may forward it, which preflight cannot verify",
+                moved.detail());
         assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in " + file
-                + " at http://127.0.0.1:4200, unless a proxy forwards"
-                + " http://127.0.0.1:4182 there", moved.fix());
-        // The URL the fix names passes once written to the file.
+                + " at http://127.0.0.1:8081, unless a proxy forwards"
+                + " http://127.0.0.1:8080 there", moved.fix());
         assertEquals(ManagedAgentPreflight.Status.PASS,
-                urlCheck("http://127.0.0.1:4200", broker).status());
-        broker.setPort(4182);
-        // A non-loopback bind sits behind a TLS-terminating proxy, which the
-        // Harness reaches over https; the fix never names plain http there.
-        broker.setHost("192.0.2.7");
-        broker.setAllowNonLoopback(true);
-        ManagedAgentPreflight.Check proxied =
-                urlCheck("https://198.51.100.5:8443", broker);
-        assertEquals(ManagedAgentPreflight.Status.WARN, proxied.status());
-        assertEquals("check that a proxy forwards https://198.51.100.5:8443"
-                + " to 192.0.2.7:4182", proxied.fix());
-        ManagedAgentPreflight.Check plain =
-                urlCheck("http://192.0.2.7:4182", broker);
+                urlCheck("http://127.0.0.1:8081",
+                        "http://127.0.0.1:8081").status());
+
+        // A remote deployment's HTTPS origin is valid for the shared Spring
+        // listener; there is no separate plaintext Broker socket to reject it.
+        String https = "https://managed.example:8443";
+        ManagedAgentPreflight.Check tls = urlCheck(https + "/", https);
+        assertEquals(ManagedAgentPreflight.Status.PASS, tls.status());
+        assertEquals(https + "/", tls.detail());
+        ManagedAgentPreflight.Check plain = urlCheck(
+                "http://192.0.2.7:8080", https);
         assertEquals(ManagedAgentPreflight.Status.FAIL, plain.status());
-        assertEquals("the Hosted Harness refuses http://192.0.2.7:4182,"
+        assertEquals("the Hosted Harness refuses http://192.0.2.7:8080,"
                 + " because it uses plain http outside the loopback interface",
                 plain.detail());
-        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at the https"
-                + " URL of the TLS-terminating proxy in front of"
-                + " 192.0.2.7:4182", plain.fix());
-        // A wildcard bind serves this machine's addresses, not any address,
-        // and the Harness dials it over loopback.
-        broker.setHost("0.0.0.0");
-        assertEquals(ManagedAgentPreflight.Status.PASS,
-                urlRow(properties).status());
-        assertEquals(ManagedAgentPreflight.Status.WARN,
-                urlCheck("http://127.0.0.2:4183", broker).status());
-        ManagedAgentPreflight.Check outside =
-                urlCheck("http://192.0.2.7:4182", broker);
-        assertEquals(ManagedAgentPreflight.Status.FAIL, outside.status());
-        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at"
-                + " http://127.0.0.1:4182", outside.fix());
-        // The IPv4 wildcard takes IPv6 only from a dual-stack JVM, which
-        // preflight cannot confirm; the IPv4 URL reaches it either way.
-        ManagedAgentPreflight.Check ipv6 = urlCheck("http://[::1]:4182", broker);
-        assertEquals(ManagedAgentPreflight.Status.WARN, ipv6.status());
-        assertEquals("the Hosted Harness dials http://[::1]:4182 over IPv6, but"
-                + " the Broker binds 0.0.0.0, which takes IPv6 only when its"
-                + " JVM listens on both families, unlike under"
-                + " -Djava.net.preferIPv4Stack=true", ipv6.detail());
-        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at"
-                + " http://127.0.0.1:4182", ipv6.fix());
-        // Over https, a dual-stack JVM's plain socket would break TLS, but an
-        // IPv4-only one leaves [::1]:4182 to another listener, such as a TLS
-        // proxy, so this stays a warning too.
-        ManagedAgentPreflight.Check tlsIpv6 =
-                urlCheck("https://[::1]:4182", broker);
-        assertEquals(ManagedAgentPreflight.Status.WARN, tlsIpv6.status());
-        assertEquals("the Hosted Harness dials https://[::1]:4182 over IPv6:"
-                + " a Broker JVM that listens on both families takes it on the"
-                + " plain-HTTP socket at 0.0.0.0:4182, where TLS cannot"
-                + " connect, while under -Djava.net.preferIPv4Stack=true"
-                + " another listener, such as a TLS proxy, may hold it",
-                tlsIpv6.detail());
-        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at"
-                + " http://127.0.0.1:4182, unless a proxy forwards"
-                + " https://[::1]:4182 there", tlsIpv6.fix());
-        // A URL the Broker's own socket takes in either mode still fails over
-        // https.
-        assertEquals(ManagedAgentPreflight.Status.FAIL,
-                urlCheck("https://127.0.0.1:4182", broker).status());
-        // The JDK binds :: only on a dual-stack socket, which takes IPv4 too.
-        broker.setHost("::");
-        assertEquals(ManagedAgentPreflight.Status.PASS,
-                urlCheck("http://127.0.0.1:4182", broker).status());
-        assertEquals(ManagedAgentPreflight.Status.PASS,
-                urlCheck("http://[::1]:4182", broker).status());
-        broker.setAllowNonLoopback(false);
-        broker.setHost("127.0.0.1");
-        assertEquals(ManagedAgentPreflight.Status.PASS,
-                urlCheck("http://localhost:4182", broker).status());
-        assertEquals(ManagedAgentPreflight.Status.PASS,
-                urlCheck("http://127.0.0.1:4182/", broker).status());
-        // A specific bind serves its own address, not every loopback one.
-        assertEquals(ManagedAgentPreflight.Status.WARN,
-                urlCheck("http://127.0.0.2:4182", broker).status());
-        // The Broker speaks plain HTTP, so https to its own socket fails,
-        // while https to another port may be a TLS front end.
-        ManagedAgentPreflight.Check tls = urlCheck("https://127.0.0.1:4182", broker);
-        assertEquals(ManagedAgentPreflight.Status.FAIL, tls.status());
-        assertEquals("the Hosted Harness dials https://127.0.0.1:4182, but the"
-                + " Broker serves plain HTTP there, so TLS cannot connect",
-                tls.detail());
-        assertEquals(ManagedAgentPreflight.Status.WARN,
-                urlCheck("https://127.0.0.1:8443", broker).status());
-        assertEquals(ManagedAgentPreflight.Status.WARN,
-                urlCheck("http://127.0.0.1", broker).status());
-        // The Harness accepts only an http or https origin.
-        assertEquals(ManagedAgentPreflight.Status.FAIL,
-                urlCheck("127.0.0.1:4182", broker).status());
-        ManagedAgentPreflight.Check ftp = urlCheck("ftp://127.0.0.1:4182", broker);
-        assertEquals(ManagedAgentPreflight.Status.FAIL, ftp.status());
-        assertEquals("the Hosted Harness refuses ftp://127.0.0.1:4182, which is"
-                + " not an http or https origin", ftp.detail());
-        assertEquals(ManagedAgentPreflight.Status.FAIL,
-                urlCheck("http://127.0.0.1:4182/broker", broker).status());
-        // A host name the URI parser takes only as a registry authority is
-        // still read as a host.
-        assertEquals("the Hosted Harness refuses http://qwen_broker:4182,"
-                + " because it uses plain http outside the loopback interface",
-                urlCheck("http://qwen_broker:4182", broker).detail());
-        assertEquals(ManagedAgentPreflight.Status.FAIL,
-                urlCheck("https://qwen_broker:port", broker).status());
-        // IPv6 loopback is one socket family; the IPv4 URL does not reach it.
-        broker.setHost("::1");
-        assertEquals(ManagedAgentPreflight.Status.PASS,
-                urlCheck("http://[::1]:4182", broker).status());
-        ManagedAgentPreflight.Check family =
-                urlCheck("http://127.0.0.1:4182", broker);
-        assertEquals(ManagedAgentPreflight.Status.WARN, family.status());
-        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at"
-                + " http://[::1]:4182, unless a proxy forwards"
-                + " http://127.0.0.1:4182 there", family.fix());
-        assertEquals("the Hosted Harness dials http://127.0.0.1:4182, not the"
-                + " Broker's listener at [::1]:4182; a proxy may forward it,"
-                + " which preflight cannot verify", family.detail());
-        broker.setHost("2001:db8::1");
-        broker.setAllowNonLoopback(true);
-        assertEquals("check that a proxy forwards https://198.51.100.5:8443"
-                + " to [2001:db8::1]:4182",
-                urlCheck("https://198.51.100.5:8443", broker).fix());
+        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at " + https,
+                plain.fix());
     }
 
     @Test
     void readsTheBrokerUrlTheWayTheHarnessDoes() {
-        ManagedAgentProperties.RuntimeBroker broker =
-                new ManagedAgentProperties().getRuntimeBroker();
-        broker.setHost("127.0.0.1");
-        broker.setPort(4182);
-        // Canonical http(s)://host[:port][/] spellings pass.
-        for (String url : List.of("http://127.0.0.1:4182", "http://127.0.0.1:4182/",
-                "http://localhost:4182", "http://LocalHost:4182", "HTTP://127.0.0.1:4182")) {
+        String origin = "http://127.0.0.1:8080";
+        // Canonical http(s)://host[:port][/] spellings pass when the origin
+        // matches, including case-insensitive scheme and host names.
+        for (String url : List.of("http://127.0.0.1:8080", "http://127.0.0.1:8080/",
+                "HTTP://127.0.0.1:8080")) {
             assertEquals(ManagedAgentPreflight.Status.PASS,
-                    urlCheck(url, broker).status(), url);
+                    urlCheck(url, origin).status(), url);
         }
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                urlCheck("http://LocalHost:8080", "http://localhost:8080").status());
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                urlCheck("http://[::1]:8080", "http://[0:0:0:0:0:0:0:1]:8080").status());
         // Non-canonical WHATWG spellings and invalid ports/octets are refused directly.
-        for (String url : List.of("http://127.1:4182", "http://2130706433:4182",
-                "http://0177.0.0.1:4182", "http://127.0.0.010:4182",
-                "http:/127.0.0.1:4182", "http:///127.0.0.1:4182",
-                "http://127.0.0.08:4182", "http://127.0.0.1:65536",
+        for (String url : List.of("http://127.1:8080", "http://2130706433:8080",
+                "http://0177.0.0.1:8080", "http://127.0.0.010:8080",
+                "http:/127.0.0.1:8080", "http:///127.0.0.1:8080",
+                "http://127.0.0.08:8080", "http://127.0.0.1:65536",
                 "http://127.0.0.1:99999", "http://127.0.0.1:0", "http://127.0.0.1:")) {
-            ManagedAgentPreflight.Check check = urlCheck(url, broker);
+            ManagedAgentPreflight.Check check = urlCheck(url, origin);
             assertEquals(ManagedAgentPreflight.Status.FAIL, check.status(), url);
             assertEquals("the Hosted Harness refuses " + url
                     + ", which is not a valid URL", check.detail());
         }
         // Dot-segment paths are refused as non-origin URLs rather than folded.
-        for (String url : List.of("http://127.0.0.1:4182/./", "http://127.0.0.1:4182/proxy/..")) {
-            ManagedAgentPreflight.Check check = urlCheck(url, broker);
+        for (String url : List.of("http://127.0.0.1:8080/./", "http://127.0.0.1:8080/proxy/..")) {
+            ManagedAgentPreflight.Check check = urlCheck(url, origin);
             assertEquals(ManagedAgentPreflight.Status.FAIL, check.status(), url);
             assertEquals("the Hosted Harness refuses " + url
                     + ", which is not an http or https origin", check.detail());
         }
+        // The Harness accepts only an http or https origin.
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                urlCheck("127.0.0.1:8080", origin).status());
+        ManagedAgentPreflight.Check ftp = urlCheck("ftp://127.0.0.1:8080", origin);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, ftp.status());
+        assertEquals("the Hosted Harness refuses ftp://127.0.0.1:8080, which is"
+                + " not an http or https origin", ftp.detail());
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                urlCheck("http://127.0.0.1:8080/broker", origin).status());
+        // A host name the URI parser takes only as a registry authority is
+        // still read as a host.
+        assertEquals("the Hosted Harness refuses http://qwen_broker:8080,"
+                + " because it uses plain http outside the loopback interface",
+                urlCheck("http://qwen_broker:8080", origin).detail());
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                urlCheck("https://qwen_broker:port", origin).status());
         // Only whether the Harness accepts an https host with an xn-- label
         // depends on IDNA; plain http to one is refused either way.
         assertEquals(ManagedAgentPreflight.Status.WARN,
-                urlCheck("https://xn--bcher-kva.example:4182", broker).status());
+                urlCheck("https://xn--bcher-kva.example:8080", origin).status());
         assertEquals(ManagedAgentPreflight.Status.FAIL,
-                urlCheck("http://xn--bcher-kva.example:4182", broker).status());
-        broker.setHost("::1");
+                urlCheck("http://xn--bcher-kva.example:8080", origin).status());
         assertEquals(ManagedAgentPreflight.Status.FAIL,
-                urlCheck("http://::1:4182", broker).status());
-        broker.setHost("127.0.0.10");
+                urlCheck("http://::1:8080", origin).status());
         assertEquals(ManagedAgentPreflight.Status.PASS,
-                urlCheck("http://127.0.0.10:4182", broker).status());
-        // The fix names the bound address, which the Harness accepts
-        // whatever the configured spelling.
-        broker.setHost("::ffff:127.0.0.1");
-        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at"
-                + " http://127.0.0.1:4182, unless a proxy forwards"
-                + " http://127.0.0.1:4200 there",
-                urlCheck("http://127.0.0.1:4200", broker).fix());
-        assertEquals(ManagedAgentPreflight.Status.PASS,
-                urlCheck("http://127.0.0.1:4182", broker).status());
-    }
-
-    @Test
-    void refusesANonLoopbackBrokerListenerWithoutTheOptIn() {
-        ManagedAgentProperties.RuntimeBroker broker =
-                new ManagedAgentProperties().getRuntimeBroker();
-        broker.setHost("127.0.0.1");
-        assertNull(ManagedAgentPreflight.brokerListenCheck(broker));
-        broker.setHost("::1");
-        assertNull(ManagedAgentPreflight.brokerListenCheck(broker));
-        broker.setHost("0.0.0.0");
-        ManagedAgentPreflight.Check wildcard =
-                ManagedAgentPreflight.brokerListenCheck(broker);
-        assertEquals(ManagedAgentPreflight.Status.FAIL, wildcard.status());
-        assertEquals("the Broker refuses to listen on 0.0.0.0 without"
-                + " runtime-broker.allow-non-loopback", wildcard.detail());
-        assertEquals("bind 127.0.0.1, or set"
-                + " QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK=true"
-                + " behind a TLS-terminating proxy", wildcard.fix());
-        broker.setHost("192.0.2.7");
-        assertEquals(ManagedAgentPreflight.Status.FAIL,
-                ManagedAgentPreflight.brokerListenCheck(broker).status());
-        broker.setAllowNonLoopback(true);
-        assertNull(ManagedAgentPreflight.brokerListenCheck(broker));
-        broker.setHost("0.0.0.0");
-        assertNull(ManagedAgentPreflight.brokerListenCheck(broker));
-        // The Broker rows carry it.
-        ManagedAgentProperties properties = new ManagedAgentProperties();
-        properties.getRuntimeBroker().setEnabled(true);
-        properties.getRuntimeBroker().setHost("0.0.0.0");
-        assertTrue(ManagedAgentPreflight.brokerChecks(properties).stream()
-                .anyMatch(check -> check.status() == ManagedAgentPreflight.Status.FAIL
-                        && check.detail().equals(wildcard.detail())));
+                urlCheck("http://127.0.0.10:8080", "http://127.0.0.10:8080").status());
+        assertEquals("point QWEN_MANAGED_RUNTIME_BROKER_URL in f at " + origin
+                + ", unless a proxy forwards http://127.0.0.1:8081 there",
+                urlCheck("http://127.0.0.1:8081", origin).fix());
     }
 
     private static ManagedAgentPreflight.Check urlCheck(String url,
-            ManagedAgentProperties.RuntimeBroker broker) {
-        return ManagedAgentPreflight.harnessBrokerUrlCheck(url, broker, "f");
+            String managedAgentOrigin) {
+        return ManagedAgentPreflight.harnessBrokerUrlCheck(
+                url, managedAgentOrigin, "f");
     }
 
     private static ManagedAgentPreflight.Check urlRow(

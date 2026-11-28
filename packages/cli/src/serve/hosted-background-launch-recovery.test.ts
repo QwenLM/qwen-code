@@ -232,7 +232,7 @@ describe('hosted background launch recovery (#13847)', () => {
             'managed-action-options',
             Buffer.from(
               JSON.stringify({
-                v: 1,
+                v: 3,
                 requestId: ACTION_ID,
                 turnId: PROMPT_ID,
                 functionCallId: 'call-1',

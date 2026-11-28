@@ -1,12 +1,16 @@
 // @vitest-environment jsdom
 
 import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
-import { act, type ReactNode } from 'react';
+import { act, Profiler, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { EnvironmentPanel } from './EnvironmentPanel';
 import type { SourcesState } from './SourcesSection';
+import type {
+  SessionDurableScheduledTask,
+  SessionScheduledTask,
+} from '../../hooks/useSessionScheduledTasks';
 
 vi.mock('../BranchPickerPopover', async () => {
   const { createElement } = await import('react');
@@ -1059,50 +1063,747 @@ describe('EnvironmentPanel', () => {
     ).toHaveLength(2);
   });
 
-  it('re-expands a collapsed artifacts section when the header entry signals', () => {
-    const base = {
-      workspaceCwd: '/work/qwen-code',
-      tasks: [] as const,
-      onOpenTask: vi.fn(),
-      artifacts: [
-        {
-          id: 'artifact-1',
-          kind: 'document' as const,
-          storage: 'workspace' as const,
-          source: 'tool' as const,
-          status: 'available' as const,
-          title: 'Quarterly report',
-          workspacePath: 'reports/report.md',
-          retention: 'restorable' as const,
-          clientRetained: false,
-          createdAt: '2026-08-26T00:00:00.000Z',
-          updatedAt: '2026-08-26T00:00:00.000Z',
-        },
-      ],
-      artifactsExpandSignal: 0,
+  it('renders session scheduled tasks with scope badges and inline controls', () => {
+    const onOpenScheduledTask = vi.fn();
+    const onToggleScheduledTask = vi.fn();
+    const onRunScheduledTask = vi.fn();
+    const onDeleteScheduledTask = vi.fn();
+    const onCancelSessionScheduledTask = vi.fn();
+    const onManageAllScheduledTasks = vi.fn();
+
+    const durableEntry = {
+      scope: 'durable' as const,
+      id: 'd-1',
+      title: 'Nightly report',
+      prompt: 'Generate nightly summary',
+      cronExpr: '0 9 * * *',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_000,
+      lastFiredAt: null,
+      nextRunAt: Date.now() + 10 * 60_000,
+      gate: null,
+      task: {
+        id: 'd-1',
+        name: 'Nightly report',
+        cron: '0 9 * * *',
+        prompt: 'Generate nightly summary',
+        recurring: true,
+        enabled: true,
+        createdAt: 1_000,
+        lastFiredAt: null,
+        nextRunAt: Date.now() + 10 * 60_000,
+        sessionId: 'session-1',
+        sessionMode: 'persistent',
+      },
     };
-    const view = mount(base);
-    expect(view.textContent).toContain('report.md');
+    const sessionEntry = {
+      scope: 'session' as const,
+      source: 'wakeup' as const,
+      id: 'wk-1',
+      title: 'Re-check CI run',
+      prompt: 'Re-check CI run',
+      cronExpr: '@wakeup',
+      recurring: false,
+      enabled: true as const,
+      createdAt: 2_000,
+      lastFiredAt: null,
+      nextRunAt: Date.now() + 3 * 60_000,
+      expiresAt: null,
+      task: {
+        id: 'wk-1',
+        source: 'wakeup' as const,
+        cronExpr: '@wakeup',
+        prompt: 'Re-check CI run',
+        recurring: false,
+        createdAt: 2_000,
+        expiresAt: null,
+        lastFiredAt: null,
+        nextRunAt: Date.now() + 3 * 60_000,
+      },
+    };
 
-    // Collapse the artifacts section via its own header button.
-    const sectionHeader = Array.from(
-      view.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
-    ).find((button) => button.textContent?.trim() === 'Artifacts');
-    expect(sectionHeader).toBeTruthy();
-    act(() => sectionHeader!.click());
-    expect(sectionHeader!.getAttribute('aria-expanded')).toBe('false');
-    expect(view.textContent).not.toContain('report.md');
+    const view = mount({
+      scheduledTasks: [durableEntry, sessionEntry],
+      onOpenScheduledTask,
+      onToggleScheduledTask,
+      onRunScheduledTask,
+      onDeleteScheduledTask,
+      onCancelSessionScheduledTask,
+      onManageAllScheduledTasks,
+    });
 
-    // The header artifact entry bumps the signal. The panel hides rather than
-    // unmounts, so its local collapsed state would otherwise persist and the
-    // entry would open the panel with no artifact listed.
+    const section = view.querySelector(
+      '[data-testid="environment-scheduled-tasks-section"]',
+    );
+    expect(section).not.toBeNull();
+    expect(section?.textContent).toContain('Nightly report');
+    expect(section?.textContent).toContain('Persistent');
+    expect(section?.textContent).toContain('Re-check CI run');
+    expect(section?.textContent).toContain('Loop');
+
+    const disableBtn = section?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Disable"]',
+    );
+    const runBtn = section?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Run now"]',
+    );
+    const deleteBtn = section?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete"]',
+    );
+    const stopBtn = section?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Stop"]',
+    );
+    const manageAllBtn = Array.from(
+      section?.querySelectorAll('button') ?? [],
+    ).find((btn) => btn.textContent === 'Manage all');
+    const confirmDelete = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
     act(() => {
+      disableBtn?.click();
+      runBtn?.click();
+      deleteBtn?.click();
+      stopBtn?.click();
+      manageAllBtn?.click();
+    });
+
+    expect(onToggleScheduledTask).toHaveBeenCalledWith(durableEntry);
+    expect(onRunScheduledTask).toHaveBeenCalledWith(durableEntry);
+    expect(confirmDelete).toHaveBeenCalledOnce();
+    expect(onDeleteScheduledTask).toHaveBeenCalledWith(durableEntry);
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(sessionEntry);
+    expect(onManageAllScheduledTasks).toHaveBeenCalledOnce();
+  });
+
+  it('routes same-id cron and wakeup Stop buttons to their own source', async () => {
+    const makeEntry = (source: 'cron' | 'wakeup') => {
+      const title = source === 'cron' ? 'Cron row' : 'Wakeup row';
+      const cronExpr = source === 'cron' ? '0 9 * * *' : '@wakeup';
+      const recurring = source === 'cron';
+      return {
+        scope: 'session' as const,
+        source,
+        id: 'shared-environment-task',
+        title,
+        prompt: title,
+        cronExpr,
+        recurring,
+        enabled: true as const,
+        createdAt: 1_000,
+        lastFiredAt: null,
+        nextRunAt: null,
+        expiresAt: null,
+        task: {
+          id: 'shared-environment-task',
+          source,
+          cronExpr,
+          prompt: title,
+          recurring,
+          createdAt: 1_000,
+          expiresAt: null,
+          lastFiredAt: null,
+          nextRunAt: null,
+        },
+      };
+    };
+    const entries = [makeEntry('cron'), makeEntry('wakeup')];
+    const onCancelSessionScheduledTask = vi.fn();
+    const view = mount({
+      scheduledTasks: entries,
+      scheduledTasksOwnerSessionId: 'session-1',
+      onCancelSessionScheduledTask,
+    });
+    const rows = Array.from(
+      view.querySelectorAll<HTMLElement>(
+        '[data-testid="environment-scheduled-task"]',
+      ),
+    );
+    expect(rows).toHaveLength(2);
+
+    for (const [index, entry] of entries.entries()) {
+      const row = rows.find((candidate) =>
+        candidate.textContent?.includes(entry.title),
+      );
+      const stop = row?.querySelector<HTMLButtonElement>(
+        'button[aria-label="Stop"]',
+      );
+      expect(row).toBeDefined();
+      expect(stop).not.toBeNull();
+      await act(async () => {
+        stop?.click();
+        await Promise.resolve();
+      });
+      expect(onCancelSessionScheduledTask).toHaveBeenNthCalledWith(
+        index + 1,
+        entry,
+      );
+    }
+  });
+
+  it('does not restore focus into a replacement session', () => {
+    const entry = {
+      scope: 'session' as const,
+      source: 'wakeup' as const,
+      id: 'wakeup-old-owner',
+      title: 'Old session wakeup',
+      prompt: 'Old session wakeup',
+      cronExpr: '@wakeup',
+      recurring: false,
+      enabled: true as const,
+      createdAt: 1_000,
+      lastFiredAt: null,
+      nextRunAt: 60_000,
+      expiresAt: null,
+      task: {
+        id: 'wakeup-old-owner',
+        source: 'wakeup' as const,
+        cronExpr: '@wakeup',
+        prompt: 'Old session wakeup',
+        recurring: false,
+        createdAt: 1_000,
+        expiresAt: null,
+        lastFiredAt: null,
+        nextRunAt: 60_000,
+      },
+    };
+    const receiver = document.createElement('button');
+    receiver.textContent = 'New session';
+    document.body.appendChild(receiver);
+    const onCancelSessionScheduledTask = vi.fn(() => {
+      receiver.focus();
       root!.render(
         <I18nProvider language="en">
-          <EnvironmentPanel {...base} artifactsExpandSignal={1} />
+          <EnvironmentPanel
+            tasks={[]}
+            scheduledTasks={[]}
+            scheduledTasksOwnerSessionId="session-b"
+            onOpenTask={vi.fn()}
+            onCancelSessionScheduledTask={vi.fn()}
+          />
         </I18nProvider>,
       );
     });
-    expect(view.textContent).toContain('report.md');
+    const view = mount({
+      scheduledTasks: [entry],
+      scheduledTasksOwnerSessionId: 'session-a',
+      onCancelSessionScheduledTask,
+    });
+    const stop = view.querySelector<HTMLButtonElement>(
+      'button[aria-label="Stop"]',
+    );
+    expect(stop).not.toBeNull();
+    act(() => {
+      stop!.focus();
+      stop!.click();
+    });
+    expect(document.activeElement).toBe(receiver);
+    receiver.remove();
+  });
+
+  it.each(['durable', 'session'] as const)(
+    'does not restore focus later after a failed %s removal',
+    async (scope) => {
+      const entry: SessionScheduledTask =
+        scope === 'durable'
+          ? {
+              scope,
+              id: 'durable-failed-removal',
+              title: 'Failed durable removal',
+              prompt: 'Do not steal focus',
+              cronExpr: '0 9 * * *',
+              recurring: true,
+              enabled: true,
+              createdAt: 1_000,
+              lastFiredAt: null,
+              nextRunAt: null,
+              gate: null,
+              workspaceId: 'ws-1',
+              task: {
+                id: 'durable-failed-removal',
+                name: 'Failed durable removal',
+                cron: '0 9 * * *',
+                prompt: 'Do not steal focus',
+                recurring: true,
+                enabled: true,
+                createdAt: 1_000,
+                lastFiredAt: null,
+                nextRunAt: null,
+                sessionId: 'session-1',
+                sessionMode: 'persistent',
+              },
+            }
+          : {
+              scope,
+              source: 'cron',
+              id: 'session-failed-removal',
+              title: 'Failed session stop',
+              prompt: 'Do not steal focus',
+              cronExpr: '0 9 * * *',
+              recurring: true,
+              enabled: true,
+              createdAt: 1_000,
+              lastFiredAt: null,
+              nextRunAt: null,
+              expiresAt: null,
+              task: {
+                id: 'session-failed-removal',
+                source: 'cron',
+                cronExpr: '0 9 * * *',
+                prompt: 'Do not steal focus',
+                recurring: true,
+                enabled: true,
+                createdAt: 1_000,
+                lastFiredAt: null,
+                nextRunAt: null,
+                expiresAt: null,
+              },
+            };
+      const onDeleteScheduledTask = vi
+        .fn()
+        .mockRejectedValue(new Error('delete failed'));
+      const onCancelSessionScheduledTask = vi.fn().mockResolvedValue(false);
+      const view = mount({
+        workspaceCwd: '/work/qwen-code',
+        scheduledTasks: [entry],
+        scheduledTasksOwnerSessionId: 'session-1',
+        onDeleteScheduledTask,
+        onCancelSessionScheduledTask,
+      });
+      const receiver = document.createElement('button');
+      receiver.textContent = 'External receiver';
+      document.body.appendChild(receiver);
+      if (scope === 'durable') {
+        vi.spyOn(window, 'confirm').mockReturnValue(true);
+      }
+      const label = scope === 'durable' ? 'Delete' : 'Stop';
+      const action = view.querySelector<HTMLButtonElement>(
+        `[data-testid="environment-scheduled-task"] button[aria-label="${label}"]`,
+      );
+      expect(action).not.toBeNull();
+      await act(async () => {
+        action!.click();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      receiver.focus();
+      act(() => {
+        root!.render(
+          <I18nProvider language="en">
+            <EnvironmentPanel
+              tasks={[]}
+              workspaceCwd="/work/qwen-code"
+              scheduledTasks={[]}
+              scheduledTasksOwnerSessionId="session-1"
+              onOpenTask={vi.fn()}
+              onDeleteScheduledTask={onDeleteScheduledTask}
+              onCancelSessionScheduledTask={onCancelSessionScheduledTask}
+            />
+          </I18nProvider>,
+        );
+      });
+      expect(document.activeElement).toBe(receiver);
+      receiver.remove();
+    },
+  );
+
+  it('waits for cancellation confirmation before restoring focus on natural removal', async () => {
+    const entry: SessionScheduledTask = {
+      scope: 'session',
+      source: 'cron',
+      id: 'pending-session-removal',
+      title: 'Pending cancellation',
+      prompt: 'Wait for confirmation',
+      cronExpr: '0 9 * * *',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      expiresAt: null,
+      task: {
+        id: 'pending-session-removal',
+        source: 'cron',
+        cronExpr: '0 9 * * *',
+        prompt: 'Wait for confirmation',
+        recurring: true,
+        enabled: true,
+        createdAt: 1_000,
+        lastFiredAt: null,
+        nextRunAt: null,
+        expiresAt: null,
+      },
+    };
+    const pending = Promise.withResolvers<boolean>();
+    const onCancelSessionScheduledTask = vi.fn(() => pending.promise);
+    const view = mount({
+      workspaceCwd: '/work/qwen-code',
+      scheduledTasks: [entry],
+      scheduledTasksOwnerSessionId: 'session-1',
+      onCancelSessionScheduledTask,
+    });
+    const receiver = document.createElement('button');
+    receiver.textContent = 'External receiver';
+    document.body.appendChild(receiver);
+    const stop = view.querySelector<HTMLButtonElement>(
+      '[data-testid="environment-scheduled-task"] button[aria-label="Stop"]',
+    );
+    expect(stop).not.toBeNull();
+    act(() => stop!.click());
+    receiver.focus();
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <EnvironmentPanel
+            tasks={[]}
+            workspaceCwd="/work/qwen-code"
+            scheduledTasks={[]}
+            scheduledTasksOwnerSessionId="session-1"
+            onOpenTask={vi.fn()}
+            onCancelSessionScheduledTask={onCancelSessionScheduledTask}
+          />
+        </I18nProvider>,
+      );
+    });
+    expect(document.activeElement).toBe(receiver);
+    await act(async () => {
+      pending.resolve(false);
+      await pending.promise;
+    });
+    expect(document.activeElement).toBe(receiver);
+    receiver.remove();
+  });
+
+  it.each([true, undefined])(
+    'keeps a predictable focus target after deletion resolves with %s',
+    async (succeeded) => {
+      const firstTask: SessionDurableScheduledTask = {
+        scope: 'durable',
+        id: 'd-1',
+        title: 'First report',
+        prompt: 'Generate the first report',
+        cronExpr: '0 9 * * *',
+        recurring: true,
+        enabled: true,
+        createdAt: 1_000,
+        lastFiredAt: null,
+        nextRunAt: null,
+        gate: null,
+        workspaceId: 'ws-1',
+        task: {
+          id: 'd-1',
+          name: 'First report',
+          cron: '0 9 * * *',
+          prompt: 'Generate the first report',
+          recurring: true,
+          enabled: true,
+          createdAt: 1_000,
+          lastFiredAt: null,
+          nextRunAt: null,
+          sessionId: 'session-1',
+          sessionMode: 'persistent',
+        },
+      };
+      let scheduledTasks: SessionScheduledTask[] = [
+        firstTask,
+        { ...firstTask, id: 'd-2', title: 'Second report' },
+      ];
+      const onDeleteScheduledTask = vi.fn(
+        (entry: SessionDurableScheduledTask) => {
+          scheduledTasks = scheduledTasks.filter(
+            (task) => task.id !== entry.id,
+          );
+          root!.render(
+            <I18nProvider language="en">
+              <EnvironmentPanel
+                tasks={[]}
+                workspaceCwd="/work/qwen-code"
+                scheduledTasks={scheduledTasks}
+                scheduledTasksOwnerSessionId="session-1"
+                onOpenTask={vi.fn()}
+                onDeleteScheduledTask={onDeleteScheduledTask}
+                onOpenScheduledTask={vi.fn()}
+              />
+            </I18nProvider>,
+          );
+          return succeeded;
+        },
+      );
+      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      const view = mount({
+        workspaceCwd: '/work/qwen-code',
+        scheduledTasks,
+        scheduledTasksOwnerSessionId: 'session-1',
+        onDeleteScheduledTask,
+        onOpenScheduledTask: vi.fn(),
+      });
+      const firstDelete = view.querySelector<HTMLButtonElement>(
+        '[data-testid="environment-scheduled-task"] button[aria-label="Delete"]',
+      );
+      expect(firstDelete).not.toBeNull();
+      act(() => firstDelete!.focus());
+      expect(document.activeElement).toBe(firstDelete);
+      await act(async () => firstDelete!.click());
+
+      const remainingTask = view.querySelector(
+        '[data-testid="environment-scheduled-task"]',
+      );
+      expect(remainingTask?.textContent).toContain('Second report');
+      expect(document.activeElement).toBe(
+        remainingTask?.querySelector('button'),
+      );
+
+      const lastDelete = remainingTask?.querySelector<HTMLButtonElement>(
+        'button[aria-label="Delete"]',
+      );
+      expect(lastDelete).not.toBeNull();
+      await act(async () => lastDelete!.click());
+      expect(
+        view.querySelectorAll('[data-testid="environment-scheduled-task"]'),
+      ).toHaveLength(0);
+      expect(document.activeElement).toBe(
+        view.querySelector('[data-testid="environment-panel"]'),
+      );
+    },
+  );
+
+  it('scrolls on a new focus nonce only, and does not leak wakeup internals', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-01T08:00:00Z'));
+    const scrollIntoView = vi.fn();
+    const previousDescriptor = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      'scrollIntoView',
+    );
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const scheduledTasks = [
+      {
+        scope: 'session' as const,
+        source: 'wakeup' as const,
+        id: 'wakeup-1',
+        title: 'Check deployment again',
+        prompt: 'Check deployment again',
+        cronExpr: '@wakeup',
+        recurring: false,
+        enabled: true as const,
+        createdAt: 1_000,
+        lastFiredAt: null,
+        nextRunAt: Date.now(),
+        expiresAt: null,
+        task: {
+          id: 'wakeup-1',
+          source: 'wakeup' as const,
+          cronExpr: '@wakeup',
+          prompt: 'Check deployment again',
+          recurring: false,
+          createdAt: 1_000,
+          expiresAt: null,
+          lastFiredAt: null,
+          nextRunAt: Date.now(),
+          enabled: true,
+        },
+      },
+    ];
+    const view = (focusScheduledTasksNonce: number) => (
+      <I18nProvider language="en">
+        <EnvironmentPanel
+          tasks={[]}
+          scheduledTasks={scheduledTasks}
+          focusScheduledTasksNonce={focusScheduledTasksNonce}
+          onOpenTask={() => {}}
+        />
+      </I18nProvider>
+    );
+    try {
+      act(() => {
+        root.render(view(1));
+      });
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      expect(container.textContent).toContain('Runs once');
+      expect(container.textContent).not.toContain('Next in Due now');
+      const entry = container.querySelector(
+        '[data-testid="environment-scheduled-task"]',
+      );
+      const titles = Array.from(entry?.querySelectorAll('[title]') ?? []).map(
+        (element) => element.getAttribute('title'),
+      );
+      expect(titles.every((title) => !title?.includes('@wakeup'))).toBe(true);
+
+      act(() => {
+        root.render(view(2));
+      });
+      expect(scrollIntoView).toHaveBeenCalledOnce();
+
+      act(() => root.unmount());
+      const remounted = createRoot(container);
+      act(() => {
+        remounted.render(view(2));
+      });
+      expect(scrollIntoView).toHaveBeenCalledOnce();
+      act(() => remounted.unmount());
+    } finally {
+      act(() => {
+        if (root) root.unmount();
+      });
+      if (previousDescriptor) {
+        Object.defineProperty(
+          HTMLElement.prototype,
+          'scrollIntoView',
+          previousDescriptor,
+        );
+      } else {
+        Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView');
+      }
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    { items: ['environment'] as const, expectTicks: false },
+    { items: ['environment', 'scheduledTasks'] as const, expectTicks: true },
+  ])(
+    'only subscribes to the 1 Hz countdown clock when scheduledTasks is in items (expectTicks=$expectTicks)',
+    ({ items, expectTicks }) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-11-27T00:00:00Z'));
+      let renders = 0;
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      const futureEntry: SessionScheduledTask = {
+        scope: 'session',
+        id: 'hidden-countdown',
+        source: 'cron',
+        title: 'Hidden countdown',
+        prompt: 'tick',
+        cronExpr: '*/5 * * * *',
+        recurring: true,
+        enabled: true,
+        createdAt: Date.now() - 10_000,
+        expiresAt: null,
+        lastFiredAt: null,
+        nextRunAt: Date.now() + 60_000,
+      };
+      try {
+        act(() => {
+          root.render(
+            <I18nProvider language="en">
+              <Profiler
+                id="env-countdown"
+                onRender={() => {
+                  renders += 1;
+                }}
+              >
+                <EnvironmentPanel
+                  tasks={[]}
+                  items={[...items]}
+                  workspaceCwd="/work/qwen-code"
+                  scheduledTasks={[futureEntry]}
+                  onOpenTask={() => {}}
+                />
+              </Profiler>
+            </I18nProvider>,
+          );
+        });
+        const initialRenders = renders;
+        act(() => {
+          vi.advanceTimersByTime(2_500);
+        });
+        if (expectTicks) {
+          expect(renders).toBeGreaterThan(initialRenders);
+        } else {
+          expect(renders).toBe(initialRenders);
+        }
+      } finally {
+        act(() => root.unmount());
+        container.remove();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('does not yank focus back from an outside node focused while deletion awaits resolution', async () => {
+    const firstTask: SessionDurableScheduledTask = {
+      scope: 'durable',
+      id: 'd-focus-outside',
+      title: 'Slow delete task',
+      prompt: 'Slow delete task',
+      cronExpr: '0 9 * * *',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      gate: null,
+      workspaceId: 'ws-1',
+      task: {
+        id: 'd-focus-outside',
+        name: 'Slow delete task',
+        cron: '0 9 * * *',
+        prompt: 'Slow delete task',
+        recurring: true,
+        enabled: true,
+        createdAt: 1_000,
+        lastFiredAt: null,
+        nextRunAt: null,
+        sessionId: 'session-1',
+        sessionMode: 'persistent',
+      },
+    };
+    let resolveDelete!: (value: boolean) => void;
+    const pendingDelete = new Promise<boolean>((resolve) => {
+      resolveDelete = resolve;
+    });
+    const onDeleteScheduledTask = vi.fn(() => pendingDelete);
+    const outsideInput = document.createElement('textarea');
+    document.body.appendChild(outsideInput);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderTasks = (tasks: SessionScheduledTask[]) =>
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <EnvironmentPanel
+              tasks={[]}
+              workspaceCwd="/work/qwen-code"
+              scheduledTasks={tasks}
+              scheduledTasksOwnerSessionId="session-1"
+              onOpenTask={() => {}}
+              onDeleteScheduledTask={onDeleteScheduledTask}
+            />
+          </I18nProvider>,
+        );
+      });
+    try {
+      renderTasks([firstTask]);
+      const deleteBtn = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Delete"]',
+      );
+      expect(deleteBtn).not.toBeNull();
+      act(() => {
+        deleteBtn!.focus();
+        deleteBtn!.click();
+      });
+      // User moves focus to the composer while the daemon round trip is in flight.
+      outsideInput.focus();
+      expect(document.activeElement).toBe(outsideInput);
+
+      await act(async () => {
+        resolveDelete(true);
+        await pendingDelete;
+      });
+      renderTasks([]);
+      expect(document.activeElement).toBe(outsideInput);
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+      outsideInput.remove();
+    }
   });
 });

@@ -207,19 +207,18 @@ final class HookAdmissionHistory {
         try (var insert =
                 connection.prepareStatement(
                         "INSERT INTO"
-                                + " ma_session_record (session_scope_key,"
-                                + " record_key, tenant_id, workspace_id, session_id, domain,"
-                                + " record_id, operation_hash, revision, record_resource_id,"
-                                + " gmt_create, hook_once_key_hash) SELECT session_scope_key, ?,"
+                                + " ma_session_record ("
+                                + "tenant_id, workspace_id, session_id, domain,"
+                                + " record_id, operation_id, revision, record_resource_id,"
+                                + " gmt_create, hook_once_key) SELECT"
                                 + " tenant_id, workspace_id, session_id, 'hook_execution',"
                                 + " 'intruder', ?, 1, record_resource_id, gmt_create, ? FROM"
                                 + " ma_session_record WHERE session_id = ?"
                                 + " AND record_id = ?")) {
-            insert.setString(1, ExtensionRecordJournal.sha256("intruder"));
-            insert.setString(2, ExtensionRecordJournal.sha256("intruder-command"));
-            insert.setString(3, ExtensionRecordJournal.sha256(onceKey));
-            insert.setString(4, sessionId);
-            insert.setString(5, "registration-1");
+            insert.setString(1, "intruder-command");
+            insert.setString(2, onceKey);
+            insert.setString(3, sessionId);
+            insert.setString(4, "registration-1");
             insert.executeUpdate();
         } catch (SQLException error) {
             throw new IllegalStateException(error);

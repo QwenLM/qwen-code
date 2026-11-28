@@ -28,3 +28,28 @@ export function hasLiveWork(session: DaemonSessionSummary): boolean {
     session.hasRunningBackgroundTasks === true
   );
 }
+
+/**
+ * Whether Delete must be refused for this session.
+ *
+ * Background work blocks any row: the delete route has no idle guard, so
+ * confirming would kill work the row advertises. Other live work blocks only
+ * the session this client is attached to, whose runtime the delete tears down
+ * (#12619); a turn running in some other session stays deletable, which is the
+ * policy the sidebar row already applies.
+ *
+ * `isCurrent` is supplied by the caller rather than derived here, because each
+ * surface has its own notion of it: the sidebar compares workspace-qualified
+ * identity and lets the recent/standalone adapters override it, while the
+ * delete dialog compares session ids. Deriving it from an id here would
+ * silently narrow the sidebar's comparison.
+ */
+export function sessionBlocksDelete(
+  session: DaemonSessionSummary,
+  isCurrent: boolean,
+): boolean {
+  return (
+    session.hasRunningBackgroundTasks === true ||
+    (isCurrent && hasLiveWork(session))
+  );
+}

@@ -301,6 +301,9 @@ describe('qwen serve multi-workspace channel workers', () => {
           '--port',
           '0',
           '--no-web',
+          // Channel-worker contracts, not host-load admission, are under
+          // test here; keep a shared runner's load out of session creation.
+          '--no-load-admission',
           '--token',
           TOKEN,
           '--workspace',
@@ -483,6 +486,9 @@ describe('qwen serve multi-workspace channel workers', () => {
         '--port',
         '0',
         '--no-web',
+        // Channel-worker contracts, not host-load admission, are under
+        // test here; keep a shared runner's load out of session creation.
+        '--no-load-admission',
         '--token',
         TOKEN,
         '--workspace',
@@ -613,6 +619,9 @@ describe('qwen serve multi-workspace channel workers', () => {
         '--port',
         '0',
         '--no-web',
+        // Channel-worker contracts, not host-load admission, are under
+        // test here; keep a shared runner's load out of session creation.
+        '--no-load-admission',
         '--token',
         TOKEN,
         '--workspace',
@@ -744,6 +753,9 @@ describe('qwen serve multi-workspace channel workers', () => {
         '--port',
         '0',
         '--no-web',
+        // Channel-worker contracts, not host-load admission, are under
+        // test here; keep a shared runner's load out of session creation.
+        '--no-load-admission',
         '--token',
         TOKEN,
         '--workspace',
@@ -873,6 +885,9 @@ describe('qwen serve multi-workspace channel workers', () => {
         '--port',
         '0',
         '--no-web',
+        // Channel-worker contracts, not host-load admission, are under
+        // test here; keep a shared runner's load out of session creation.
+        '--no-load-admission',
         '--token',
         TOKEN,
         '--workspace',
@@ -984,6 +999,9 @@ describe('qwen serve multi-workspace channel workers', () => {
         '--port',
         '0',
         '--no-web',
+        // Channel-worker contracts, not host-load admission, are under
+        // test here; keep a shared runner's load out of session creation.
+        '--no-load-admission',
         '--token',
         TOKEN,
         '--workspace',

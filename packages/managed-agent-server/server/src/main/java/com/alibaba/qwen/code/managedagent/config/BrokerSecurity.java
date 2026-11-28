@@ -8,11 +8,15 @@ import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
 import org.springframework.stereotype.Component;
 
 import java.net.InetAddress;
+import java.net.URI;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -46,7 +50,7 @@ public class BrokerSecurity {
         ManagedAgentProperties.Auth auth = properties.getAuth();
         String configured = configuredMode(auth);
         this.allowInsecureBind = auth.isAllowInsecureBind();
-        java.util.List<String> skippedGuards = new java.util.ArrayList<>();
+        List<String> skippedGuards = new ArrayList<>();
         InetAddress publicAddress = server.getAddress();
         boolean publicLoopback = publicAddress != null
                 && publicAddress.isLoopbackAddress();
@@ -154,6 +158,13 @@ public class BrokerSecurity {
                             + " from server.port; the surface routing is"
                             + " port-based.");
         }
+        if (properties.getRuntimeBroker().isEnabled() && !publicLoopback
+                && internal.getPort() <= 0) {
+            throw new IllegalStateException(
+                    "qwen.managed-agent.runtime-broker.enabled requires an"
+                            + " isolated qwen.managed-agent.internal-server.port"
+                            + " when server.address is not loopback.");
+        }
         // The trusted channel adapter surface authenticates by the tenant
         // header alone, so its only protection is an isolated internal
         // listener; enabling it on the shared listener is refused here.
@@ -221,9 +232,9 @@ public class BrokerSecurity {
         if (StringUtils.isBlank(baseUrl)) {
             return;
         }
-        java.net.URI uri;
+        URI uri;
         try {
-            uri = java.net.URI.create(baseUrl);
+            uri = URI.create(baseUrl);
         } catch (IllegalArgumentException error) {
             return;
         }
@@ -255,9 +266,9 @@ public class BrokerSecurity {
         if (StringUtils.isBlank(baseUrl)) {
             return;
         }
-        java.net.URI uri;
+        URI uri;
         try {
-            uri = java.net.URI.create(baseUrl);
+            uri = URI.create(baseUrl);
         } catch (IllegalArgumentException error) {
             return;
         }
@@ -274,7 +285,7 @@ public class BrokerSecurity {
 
     // The broker→harness attach leg carries the issued writer credential.
     static void checkHarnessTransport(ManagedAgentProperties properties,
-            java.util.List<String> skippedGuards) {
+            List<String> skippedGuards) {
         if (!properties.getHarness().isEnabled()) {
             return;
         }
@@ -283,7 +294,7 @@ public class BrokerSecurity {
                 throw new IllegalStateException("Harness pool requires an enabled Session Store and binding key");
             }
             for (var instance : properties.getHarness().getPool().getInstances()) {
-                java.net.URI endpoint = java.net.URI.create(instance.getBaseUrl());
+                URI endpoint = URI.create(instance.getBaseUrl());
                 if (!"https".equals(endpoint.getScheme())
                         && !("http".equals(endpoint.getScheme()) && isLoopback(hostOf(endpoint)))) {
                     throw new IllegalStateException("Harness pool requires TLS for remote endpoints");
@@ -295,9 +306,9 @@ public class BrokerSecurity {
         if (StringUtils.isBlank(baseUrl)) {
             return;
         }
-        java.net.URI uri;
+        URI uri;
         try {
-            uri = java.net.URI.create(baseUrl);
+            uri = URI.create(baseUrl);
         } catch (IllegalArgumentException error) {
             return;
         }
@@ -318,11 +329,11 @@ public class BrokerSecurity {
     // The publication surface is handed to remote runtimes; the consumer
     // (the runtime-side endpoint()) requires an absolute URL with no path
     // prefix and a literal loopback host for plaintext http.
-    private static final java.util.Set<String> PUBLICATION_LOOPBACK_HOSTS =
-            java.util.Set.of("127.0.0.1", "localhost", "[::1]");
+    private static final Set<String> PUBLICATION_LOOPBACK_HOSTS =
+            Set.of("127.0.0.1", "localhost", "[::1]");
 
     static void checkPublicationTransport(ManagedAgentProperties properties,
-            java.util.List<String> skippedGuards) {
+            List<String> skippedGuards) {
         ManagedAgentProperties.ToolPublication publication =
                 properties.getToolPublication();
         if (!publication.isEnabled()) {
@@ -332,9 +343,9 @@ public class BrokerSecurity {
         if (StringUtils.isBlank(baseUrl)) {
             return;
         }
-        java.net.URI uri;
+        URI uri;
         try {
-            uri = java.net.URI.create(baseUrl);
+            uri = URI.create(baseUrl);
         } catch (IllegalArgumentException error) {
             uri = null;
         }
@@ -369,7 +380,7 @@ public class BrokerSecurity {
     // URI.getHost() is null for spellings the WHATWG parser accepts
     // (127.1); fall back to the authority so both sides classify them the
     // same.
-    private static String hostOf(java.net.URI uri) {
+    private static String hostOf(URI uri) {
         String host = uri.getHost();
         if (host != null) {
             return host;

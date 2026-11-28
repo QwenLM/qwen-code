@@ -143,7 +143,10 @@ cases: large-object tests require `max_allowed_packet >= 134217728`; the
 actual startup settings and record local platform deviations. Multi-fork runs
 need a distinct MySQL instance per fork to isolate server-wide deadlock counters.
 Repair an invalid environment before running tests; report unavailable checks
-and remaining CI work explicitly.
+and remaining CI work explicitly. Hand-started disposable instances must follow
+the [disposable MySQL safety procedure](README.md#disposable-mysql-safety):
+capped output, paired start/stop, and a fail-closed presence check before
+datadir removal.
 
 For shared-contract or TypeScript-consumer changes, also follow the root
 build/typecheck requirements and run affected consumer tests. The local Maven
