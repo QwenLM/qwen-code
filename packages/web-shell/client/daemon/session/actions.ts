@@ -23,7 +23,7 @@ import type {
   DaemonRewindResult,
   DaemonSessionRecapResult,
   DaemonRewindSnapshotInfo,
-  DaemonSessionTaskWithWorkflowStatus,
+  DaemonSessionCancelableTaskKind,
   DaemonSessionArtifactsEnvelope,
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
@@ -53,6 +53,7 @@ import {
   isInvalidClientIdError,
   isAcpChildCapacityError,
   isSessionLimitExceededError,
+  isSystemOverloadedError,
 } from './httpErrors.js';
 import {
   applyConfigOptions,
@@ -574,12 +575,12 @@ export function createDaemonSessionActions({
     session: DaemonSessionClient,
     request: PromptRequest,
     signal?: AbortSignal,
-    beforeDispatch?: (clientId: string | undefined) => void,
+    beforeDispatch?: (clientId: string | undefined) => void | Promise<void>,
   ): Promise<PromptAdmission> {
     const adapter = adapterFor(session);
     if (adapter) {
       signal?.throwIfAborted();
-      beforeDispatch?.(session.clientId);
+      await beforeDispatch?.(session.clientId);
       return await adapter.submitPrompt(session, request, signal);
     }
     if (beforeDispatch) {
@@ -1119,6 +1120,8 @@ export function createDaemonSessionActions({
       sessionContext?: DaemonProductSessionContext;
       reconcilePromptActivity?: boolean;
       artifactCountHint?: number;
+      failureAction?: string;
+      failureOperation?: DaemonNoticeOperation;
       restoredSession?: DaemonSessionClient;
     },
     signal?: AbortSignal,
@@ -1329,6 +1332,15 @@ export function createDaemonSessionActions({
           artifactCountHintSessionId: undefined,
         }));
       }
+      if (isSystemOverloadedError(error)) {
+        throw dispatchActionError(
+          addNotice,
+          options?.failureAction ?? `${capitalize(mode)} session failed`,
+          error,
+          options?.failureOperation ?? getSessionLoadNoticeOperation(mode),
+          { code: 'system_overloaded' },
+        );
+      }
       throw error;
     });
   }
@@ -1511,6 +1523,7 @@ export function createDaemonSessionActions({
         replayedTurnEvents: new Map(),
       });
       let admissionError = false;
+      let beforeDispatchFailed = false;
       try {
         // Normalize images once and pass the same array to both calls
         const normalizedImages: Array<{ data: string; mimeType: string }> = (
@@ -1554,7 +1567,8 @@ export function createDaemonSessionActions({
         const optimisticMessageAppended =
           shouldAppendOptimisticMessage &&
           displayedImages.length === 0 &&
-          displayedFiles.length === 0;
+          displayedFiles.length === 0 &&
+          !options?.beforeDispatch;
         let optimisticBlockId: string | undefined = options?.bindBlockId;
         if (optimisticMessageAppended) {
           store.appendLocalUserMessage(
@@ -1599,7 +1613,8 @@ export function createDaemonSessionActions({
           if (
             sessionRef.current === session &&
             shouldRecordUserMessage &&
-            !optimisticMessageAppended
+            !optimisticMessageAppended &&
+            !options?.beforeDispatch
           ) {
             store.appendLocalUserMessage(
               text,
@@ -1633,20 +1648,43 @@ export function createDaemonSessionActions({
           promptRequest['suppressInputHistory'] = true;
         }
         let accepted: PromptAdmission;
+        const guardedBeforeDispatch = options?.beforeDispatch
+          ? (clientId: string | undefined): void | Promise<void> => {
+              beforeDispatchFailed = false;
+              try {
+                const result = options.beforeDispatch!(clientId);
+                if (
+                  result &&
+                  typeof (result as Promise<void>).then === 'function'
+                ) {
+                  return (result as Promise<void>).catch((error: unknown) => {
+                    beforeDispatchFailed = true;
+                    throw error;
+                  });
+                }
+                return result;
+              } catch (error) {
+                beforeDispatchFailed = true;
+                throw error;
+              }
+            }
+          : undefined;
         try {
           const request = promptRequest as PromptRequest;
           for (let attempt = 0; ; attempt += 1) {
+            beforeDispatchFailed = false;
             try {
               accepted = await submitSessionPrompt(
                 session,
                 request,
                 ctrl.signal,
-                options?.beforeDispatch,
+                guardedBeforeDispatch,
               );
               break;
             } catch (error) {
               const retryDelayMs = PROMPT_ADMISSION_RETRY_DELAYS_MS[attempt];
               if (
+                beforeDispatchFailed ||
                 !options?.idempotencyKey ||
                 adapter ||
                 retryDelayMs === undefined ||
@@ -1676,7 +1714,9 @@ export function createDaemonSessionActions({
           if (
             sessionRef.current === session &&
             shouldRecordUserMessage &&
-            !optimisticMessageAppended
+            !optimisticMessageAppended &&
+            !beforeDispatchFailed &&
+            !(options?.beforeDispatch && isAbortError(error))
           ) {
             store.appendLocalUserMessage(
               text,
@@ -1704,7 +1744,11 @@ export function createDaemonSessionActions({
             return { ...current, clientId };
           });
         }
-        if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+        if (
+          sessionRef.current === session &&
+          shouldAppendOptimisticMessage &&
+          !optimisticMessageAppended
+        ) {
           store.appendLocalUserMessage(
             text,
             displayedImages,
@@ -1794,6 +1838,12 @@ export function createDaemonSessionActions({
           }
           if (options?.source === 'mcp-app' && admissionError) throw error;
           return { stopReason: 'cancelled' };
+        }
+        if (beforeDispatchFailed) {
+          if (sessionRef.current?.sessionId === sessionId) {
+            store.dispatch({ type: 'assistant.done', reason: 'cancelled' });
+          }
+          throw error;
         }
         if (isDaemonTurnError(error)) {
           throw error;
@@ -2276,6 +2326,8 @@ export function createDaemonSessionActions({
           accepted = await submitSessionPrompt(
             session,
             promptRequest as PromptRequest,
+            undefined,
+            options?.beforeDetachedDispatch,
           );
         } catch (error) {
           if (isDefinitelyRejectedPromptAdmission(error)) {
@@ -2955,7 +3007,23 @@ export function createDaemonSessionActions({
     },
 
     async restoreWorktreeSession(sessionId, options) {
-      return restoreDetachedWorktreeSession(sessionId, options.workspaceCwd);
+      try {
+        return await restoreDetachedWorktreeSession(
+          sessionId,
+          options.workspaceCwd,
+        );
+      } catch (error) {
+        if (isSystemOverloadedError(error)) {
+          dispatchActionError(
+            addNotice,
+            'Restore worktree session failed',
+            error,
+            'load_session',
+            { code: 'system_overloaded' },
+          );
+        }
+        throw error;
+      }
     },
 
     async reloadSession(signal, options) {
@@ -3273,7 +3341,9 @@ export function createDaemonSessionActions({
           'create_session',
           isSessionLimitExceededError(error)
             ? { code: 'session_limit_exceeded' }
-            : undefined,
+            : isSystemOverloadedError(error)
+              ? { code: 'system_overloaded' }
+              : undefined,
         );
       }
     },
@@ -4109,7 +4179,8 @@ export function createDaemonSessionActions({
 
     async cancelTask(
       taskId: string,
-      kind: DaemonSessionTaskWithWorkflowStatus['kind'],
+      kind: DaemonSessionCancelableTaskKind,
+      source?: 'cron' | 'wakeup',
     ) {
       const session = requireSessionForAction(
         addNotice,
@@ -4119,7 +4190,7 @@ export function createDaemonSessionActions({
       );
       try {
         return await withActionTimeout(
-          session.cancelTask(taskId, kind),
+          session.cancelTask(taskId, kind, source),
           'Cancel task timed out',
         );
       } catch (error) {
@@ -4430,26 +4501,34 @@ export function createDaemonSessionActions({
           ('worktree' in options && options.worktree !== undefined)
             ? (result as DaemonBranchedSession)
             : undefined;
+        let switchCompleted: Promise<boolean> | undefined;
         if (switchStarted) {
           if (restored?.clientId) {
             persistStableClientId(restored.clientId, restored.sessionId);
           }
-          void startSessionSwitch(result.sessionId, 'load').catch(
-            (switchError: unknown) => {
+          switchCompleted = startSessionSwitch(result.sessionId, 'load', {
+            failureAction: 'Branch session failed',
+            failureOperation: 'branch_session',
+          })
+            .then(() => true)
+            .catch((switchError: unknown) => {
               if (restored?.clientId) {
                 void session.client
                   .detachSession(restored.sessionId, restored.clientId)
                   .catch(() => undefined);
               }
-              if (isAbortError(switchError)) return;
+              if (isAbortError(switchError)) return false;
               dispatchActionError(
                 addNotice,
                 'Branch session failed',
                 switchError,
                 'branch_session',
+                isSystemOverloadedError(switchError)
+                  ? { code: 'system_overloaded' }
+                  : undefined,
               );
-            },
-          );
+              return false;
+            });
         } else if (restored?.clientId) {
           void session.client
             .detachSession(restored.sessionId, restored.clientId)
@@ -4459,6 +4538,7 @@ export function createDaemonSessionActions({
           sessionId: result.sessionId,
           displayName: result.displayName,
           switchStarted,
+          ...(switchCompleted ? { switchCompleted } : {}),
           ...(result.sourceWarnings?.length
             ? { sourceWarnings: result.sourceWarnings }
             : {}),
@@ -4477,6 +4557,9 @@ export function createDaemonSessionActions({
           'Branch session failed',
           error,
           'branch_session',
+          isSystemOverloadedError(error)
+            ? { code: 'system_overloaded' }
+            : undefined,
         );
       } finally {
         branchInFlight = false;
@@ -4549,6 +4632,9 @@ export function createDaemonSessionActions({
           'Fork session failed',
           error,
           'fork_session',
+          isSystemOverloadedError(error)
+            ? { code: 'system_overloaded' }
+            : undefined,
         );
       }
     },
@@ -4707,6 +4793,13 @@ function dispatchActionError(
     code?: string;
   },
 ): Error {
+  if (
+    error instanceof Error &&
+    '_alreadyDispatched' in error &&
+    error._alreadyDispatched === true
+  ) {
+    return error;
+  }
   if (isAbortError(error)) {
     if (error instanceof Error) return error;
     const message = error instanceof DOMException ? error.message : 'Aborted';
@@ -4715,16 +4808,20 @@ function dispatchActionError(
     return abortError;
   }
   const message = error instanceof Error ? error.message : String(error);
+  const overloaded =
+    isSystemOverloadedError(error) || opts?.code === 'system_overloaded';
   const noticeKey = opts?.noticeOnceKey;
   const dispatchedNoticeKeys = opts?.dispatchedNoticeKeys;
   if (!noticeKey || !dispatchedNoticeKeys?.has(noticeKey)) {
     addNotice({
-      severity: 'error',
+      severity: overloaded ? 'warning' : 'error',
       category: 'user_action',
       operation,
       code: isAcpChildCapacityError(error)
         ? 'acp_child_capacity_exhausted'
-        : (opts?.code ?? `daemon.${operation}.failed`),
+        : overloaded
+          ? 'system_overloaded'
+          : (opts?.code ?? `daemon.${operation}.failed`),
       message: `${action}: ${message}`,
       debugMessage: message,
       recoverable: true,

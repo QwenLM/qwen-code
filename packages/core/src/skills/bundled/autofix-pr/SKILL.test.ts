@@ -534,4 +534,70 @@ describe('bundled autofix-pr skill', () => {
     expect(scoping).not.toBeNull();
     expect(scoping![1]).toContain('beyond the fields these instructions name');
   });
+
+  it('supports --watch and scheduled --in-place --watch with per-round approval and no unattended/discard', () => {
+    const { config, body } = loadSkill();
+    expect(config.description).toContain('[--watch]');
+    expect(body).toContain(
+      'If the start gives `--once` with `--watch` or `--every`, stop and say so before running `prepare`',
+    );
+    expect(body).toContain(
+      '`--in-place --watch` (or `--in-place --every <n>`, which implies `--watch`)',
+    );
+    expect(body).toContain(
+      '- `tick <owner>/<repo>#<n>` followed by optional `--task <id>`, `--in-place`, `--no-reply` and `-- <instructions>`',
+    );
+    const inPlace =
+      /\n## In-place \(`--in-place`\)\n([\s\S]*?)\n## After a background fix/.exec(
+        body,
+      )?.[1] ?? '';
+    expect(inPlace).toContain('`Fix it` / `Not now` / `Stop watching`');
+    expect(inPlace).toContain(
+      '**Ask before editing on scheduled or resumed rounds.**',
+    );
+    expect(inPlace).toContain(
+      'ask the user with `ask_user_question` before writing the brief, launching the fix agent, re-running CI, pushing, or replying',
+    );
+    expect(inPlace).toContain('No background fix, no `unattended`.');
+    expect(inPlace).toContain('`sync --discard` is never run');
+    expect(inPlace).toContain(
+      'prepare <pr> --repo <repo> --host <host> --in-place --take-over',
+    );
+    // Resume passes --in-place for in-place watches and never grants unattended to them.
+    const resume = /\n## Resume\n([\s\S]*)$/.exec(body)?.[1] ?? '';
+    expect(resume).toContain(
+      'adding `--in-place` when the watch has `inPlace` true',
+    );
+    expect(resume).toContain('never for an `inPlace` watch');
+    // Step-3 take-over explicitly skips step 5's cancel cleanup.
+    expect(body).toContain(
+      "skipping step 5's question and cancel cleanup and running only its last paragraph",
+    );
+    // R1-1: Start step 3 carves out --in-place for localUnpushedCommits/localUncommittedChanges.
+    expect(body).toContain(
+      "for a worktree start (not `--in-place`), the user's own copy of the head branch could not be squared with the PR",
+    );
+    expect(body).toContain(
+      "otherwise mention what the checkout holds as the user's own work (never discarded",
+    );
+    // R1-3: Round step 1 and In-place preserve clean unpushed commits on --in-place instead of discarding.
+    expect(body).toContain(
+      "For an `--in-place` watch, `synced: true` with `unpushed` commits means the user's own local commits sit cleanly on top of the PR head: do not run `sync --discard` and do not stop",
+    );
+    expect(inPlace).toContain(
+      '`sync` answering `synced: true` with `unpushed` commits on a clean checkout is **not** discarded and does **not** stop the round',
+    );
+    // R1-4: prepare takes --watch with --in-place only for scheduled starts.
+    expect(body).toContain(
+      'adding `--in-place` when the start gave it — and also `--watch` when starting a scheduled `--in-place --watch` or `--in-place --every <n>`',
+    );
+    // R1-8: One-shot start on an already-running watch reports that the existing watch continues running.
+    expect(body).toContain(
+      'say that the existing watch continues running and `/autofix-pr stop <n>` ends it',
+    );
+    // R1-8 (PR #18546): Per-round proposal includes unpushed local commits count.
+    expect(inPlace).toContain(
+      'and when `sync` reported `unpushed` commits, that count (noting that approving "Fix it" pushes those local commits on top of the PR head too)',
+    );
+  });
 });

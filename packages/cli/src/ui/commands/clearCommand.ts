@@ -14,7 +14,10 @@ import {
   ToolNames,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
-import { flushRunUsageOnSessionSwap } from '../../utils/usage-persistence.js';
+import {
+  flushRunUsageOnSessionSwap,
+  persistSessionUsageOnClose,
+} from '../../utils/usage-persistence.js';
 import {
   hasBlockingBackgroundWork,
   buildBackgroundWorkBlockedMessage,
@@ -79,7 +82,17 @@ export const clearCommand: SlashCommand = {
       config.getBackgroundShellRegistry().abortAll();
       resetBackgroundStateForSessionSwitch(config);
 
-      flushRunUsageOnSessionSwap(config, config.getSessionId());
+      const previousSessionId = config.getSessionId();
+      const isAcp = context.executionMode === 'acp';
+      if (isAcp) {
+        // ACP hosts multiple sessions in one process: persist and immediately
+        // clear only this session's bucket before any await so a later error
+        // cannot double-write and sibling sessions remain untouched.
+        persistSessionUsageOnClose(config, previousSessionId);
+        uiTelemetryService.resetSession(previousSessionId);
+      } else {
+        flushRunUsageOnSessionSwap(config, previousSessionId);
+      }
 
       const interactiveMods = getInteractiveModSession(config);
       interactiveMods?.invalidateTools();
@@ -88,7 +101,16 @@ export const clearCommand: SlashCommand = {
       if (interactiveMods) await interactiveMods.syncSession('clear');
 
       // Reset UI telemetry metrics for the new session
-      uiTelemetryService.reset();
+      if (isAcp) {
+        if (previousSessionId && previousSessionId !== newSessionId) {
+          uiTelemetryService.removeSession(previousSessionId);
+        }
+        if (newSessionId) {
+          uiTelemetryService.resetSession(newSessionId);
+        }
+      } else {
+        uiTelemetryService.reset();
+      }
 
       // Clear loaded-skills tracking so /context doesn't show stale data
       const skillTool = config

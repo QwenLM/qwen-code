@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   act,
   createRef,
+  useEffect,
   useState,
   type CSSProperties,
   type ReactNode,
@@ -10,6 +11,10 @@ import {
 import { createRoot, type Root } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import { DAEMON_APPROVAL_MODES } from './test/sidebarHarness';
+import {
+  createScheduledTaskCancellation,
+  isScheduledTaskCancellation,
+} from './utils/scheduledTaskManualRun';
 const notificationScrollToBottom = vi.hoisted(() => vi.fn());
 const messageListScrollToMessage = vi.hoisted(() =>
   vi.fn((_messageId: string, _callId?: string) => true),
@@ -99,6 +104,7 @@ import type {
   WebShellAssistantFeedbackOptions,
   WebShellComposerToolbarRenderInfo,
 } from './customization';
+import { getTranslator } from './i18n';
 import { createContextUsageMessageData } from './components/messages/ContextUsageMessage';
 import { createStatsMessageData } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
@@ -112,6 +118,8 @@ import { HotkeySetter } from './live/HotkeySetter';
 import { TOUCH_COMPOSER_QUERY } from './hooks/useIsTouchComposer';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
+import type { ComposerIntegrations } from './components/composer/composer-integrations';
+import { DAEMON_COMPOSER_INTEGRATIONS } from './components/composer/daemon-composer-integrations';
 
 vi.mock('./components/managed/ManagedSessionsPage', async () => {
   const React = await import('react');
@@ -367,6 +375,7 @@ type ChatEditorTestProps = {
   btwEnabled?: boolean;
   contextChipPlacement?: 'toolbar' | 'below' | 'header';
   liveVoicePortalContainer?: HTMLElement | null;
+  composerIntegrations?: ComposerIntegrations;
   onSkillsOpenChange?: (open: boolean) => void;
   skillsLoading?: boolean;
   skillsLoadError?: boolean;
@@ -800,6 +809,10 @@ const {
     forkSession: vi.fn().mockResolvedValue({ launched: false }),
     sendShellCommand: vi.fn().mockResolvedValue(undefined),
     cancel: vi.fn().mockResolvedValue(undefined),
+    cancelTask: vi.fn(
+      (...args: Parameters<typeof mockWorkspace.client.sessionTaskCancel>) =>
+        mockWorkspace.client.sessionTaskCancel(...args),
+    ),
     getStats: vi.fn().mockResolvedValue({}),
     getContextUsage: vi.fn().mockResolvedValue({}),
     readAttachment: vi.fn().mockResolvedValue({
@@ -897,6 +910,8 @@ const {
       listScheduledTasks: vi.fn(),
       updateScheduledTask: vi.fn(),
       deleteScheduledTask: vi.fn(),
+      runScheduledTask: vi.fn(),
+      assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
       deleteModel: vi.fn().mockResolvedValue(undefined),
       unarchiveSession: vi.fn().mockResolvedValue(undefined),
       controlGoal: vi.fn().mockResolvedValue({
@@ -952,6 +967,7 @@ const {
       notices: [] as import('./daemon/session/types').DaemonSessionNotice[],
       dismissNotice: vi.fn(),
       ownerVersion: 0,
+      workspaceRuntime: undefined as typeof mockWorkspace | undefined,
       recoveryVersion: 0,
       prompt: 'hello',
       inputAnnotations: undefined as DaemonInputAnnotation[] | undefined,
@@ -1115,9 +1131,19 @@ const {
       latestAskUserQuestionOnError: null as
         | ((error: unknown, fallback: string) => void)
         | null,
+      latestAskUserQuestionOnConfirm: null as
+        | ((
+            id: string,
+            selectedOption: string,
+            answers?: Record<string, string>,
+          ) => boolean | void | Promise<boolean | void>)
+        | null,
       latestAskUserQuestionOnAskDetails: null as (() => void) | null,
       latestBackgroundTasksRefreshTrigger: null as number | null,
       backgroundTasks: [] as DaemonSessionTaskStatus[],
+      sessionScheduledTasks: undefined as
+        | readonly import('@qwen-code/sdk/daemon').DaemonSessionScheduledTaskStatus[]
+        | undefined,
       latestMonitorDetailsOnOpen: null as
         | ((tool: {
             callId: string;
@@ -1219,6 +1245,22 @@ const {
         };
         currentSessionSchedulingAvailable?: boolean;
         autofixPrWatchesAvailable?: boolean;
+        shouldRefuseManualRun?: (task: {
+          recurring: boolean;
+          sessionId: string | null;
+          sessionMode?: 'persistent' | 'per_run';
+        }) => boolean;
+        isTaskDeleted?: (task: {
+          id: string;
+          workspaceId?: string;
+          sessionId?: string | null;
+        }) => boolean;
+        onTaskDeleted?: (task: {
+          id: string;
+          workspaceId?: string;
+          sessionId?: string | null;
+        }) => void;
+        onError?: (error: unknown, fallback: string) => void;
       } | null,
       latestPrWatchesProps: null as {
         onRunPrompt?: (
@@ -1397,7 +1439,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
       release: vi.fn(),
     }),
     useTranscriptStore: () => mockStore,
-    useWorkspace: () => mockWorkspace,
+    useWorkspace: () => testState.workspaceRuntime ?? mockWorkspace,
     useWorkspaceActions: () => mockWorkspaceActions,
     useMcp: () => mockMcp,
     useWorkspaceEventSignals: () => testState.workspaceEventSignals,
@@ -1490,8 +1532,20 @@ vi.mock('./hooks/useBackgroundTasks', () => ({
     _taskActivityActive: boolean,
     _connected: boolean,
     refreshTrigger = 0,
+    _workflowsEnabled: boolean,
+    onScheduledTasks?: (
+      tasks: readonly import('@qwen-code/sdk/daemon').DaemonSessionScheduledTaskStatus[],
+    ) => void,
+    scheduledTaskActivityKey = '',
   ) => {
     testState.latestBackgroundTasksRefreshTrigger = refreshTrigger;
+    // Mirror the real channel only when scheduling activity is present; the
+    // default fixture must not invent an always-on fetch or empty snapshot.
+    useEffect(() => {
+      if (scheduledTaskActivityKey && testState.sessionScheduledTasks) {
+        onScheduledTasks?.(testState.sessionScheduledTasks);
+      }
+    }, [onScheduledTasks, scheduledTaskActivityKey]);
     return testState.backgroundTasks;
   },
 }));
@@ -1564,6 +1618,41 @@ vi.mock('./daemon/session/DaemonSessionProvider', async (importOriginal) => {
     },
   };
 });
+
+// This harness renders App without a DaemonWorkspaceProvider; the overload
+// pause hook reads the workspace status resource, so stub it here with a
+// per-test controllable state (default unpaused, reset in beforeEach).
+const overloadPauseStub = vi.hoisted(() => ({
+  paused: false,
+  pollOverloaded: false,
+  loadAdmission: undefined as
+    | {
+        enabled: boolean;
+        overloaded: boolean;
+        reason: string | null;
+        loadRatio: number;
+        eventLoopLagP99Ms: number;
+        sampledAtMs: number;
+      }
+    | undefined,
+  refusalMessage: undefined as string | undefined,
+}));
+
+vi.mock('./daemon/workspace/hooks/useDaemonOverloadPause.js', () => ({
+  OVERLOAD_REFUSAL_TTL_MS: 15_000,
+  useDaemonOverloadPause: (options?: {
+    refusal?: { message: string; expiresAt: number } | null;
+  }) => {
+    const refusal = options?.refusal ?? null;
+    const reactiveActive = refusal !== null && Date.now() < refusal.expiresAt;
+    return {
+      paused: overloadPauseStub.paused || reactiveActive,
+      pollOverloaded: overloadPauseStub.pollOverloaded,
+      loadAdmission: overloadPauseStub.loadAdmission,
+      refusalMessage: refusal?.message ?? overloadPauseStub.refusalMessage,
+    };
+  },
+}));
 
 vi.mock('./components/ChatEditor', async () => {
   const React = await import('react');
@@ -3047,7 +3136,12 @@ vi.doMock('./components/dialogs/ScheduledTasksDialog', async () => {
   const React = await import('react');
   return {
     ScheduledTasksDialog: (props: {
-      onRunPrompt?: (prompt: string, sessionId: string | null) => Promise<void>;
+      onRunPrompt?: (
+        prompt: string,
+        sessionId: string | null,
+        workspaceCwd?: string,
+        isStale?: () => boolean,
+      ) => Promise<void>;
       workspaces?: Array<{ id: string; cwd: string }>;
       lockedWorkspace?: { id: string; cwd: string; primary: boolean };
       currentSession?: {
@@ -3055,6 +3149,7 @@ vi.doMock('./components/dialogs/ScheduledTasksDialog', async () => {
         pendingInteractionCount?: number;
       };
       currentSessionSchedulingAvailable?: boolean;
+      onError?: (error: unknown, fallback: string) => void;
     }) => {
       testState.latestScheduledTasksProps = props;
       return React.createElement('div');
@@ -3226,12 +3321,18 @@ vi.doMock('./components/messages/AskUserQuestion', async () => {
   return {
     AskUserQuestion: (props: {
       keyboardActive?: boolean;
+      onConfirm: (
+        id: string,
+        selectedOption: string,
+        answers?: Record<string, string>,
+      ) => boolean | void | Promise<boolean | void>;
       onError: (error: unknown, fallback: string) => void;
       onAskDetails?: () => void;
     }) => {
       testState.latestAskUserQuestionKeyboardActive =
         props.keyboardActive ?? null;
       testState.askUserKeyboardActiveHistory.push(props.keyboardActive ?? null);
+      testState.latestAskUserQuestionOnConfirm = props.onConfirm;
       testState.latestAskUserQuestionOnError = props.onError;
       testState.latestAskUserQuestionOnAskDetails = props.onAskDetails ?? null;
       return React.createElement('div', { 'data-web-shell-ask-panel': '' });
@@ -4720,6 +4821,130 @@ describe('task activity key', () => {
     ).toContain('report.html');
   });
 
+  it('keeps a pressed close affordance for a restored zero-artifact artifacts tab', async () => {
+    // App-layer witness for the artifactsTabActive join: with an empty live
+    // list the count term is 0, so only (rightPanelOpen && artifactsTabActive)
+    // keeps the entry visible. The restore arm reopens the persisted tab while
+    // artifacts is still [] (cold load, or artifacts since deleted); the entry
+    // is then the header's only close affordance. Mutating artifactsTabActive
+    // to false or a wrong id prefix reddens this case.
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'artifacts:session-1',
+          tabs: [
+            {
+              id: 'artifacts:session-1',
+              kind: 'artifacts',
+              title: 'Artifacts',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp();
+    await vi.waitFor(async () => {
+      await flush();
+      const entry = container.querySelector('[data-web-shell-artifacts-entry]');
+      expect(entry).not.toBeNull();
+      expect(entry!.getAttribute('aria-pressed')).toBe('true');
+    });
+    expect(
+      container.querySelector('[data-testid="artifacts-list-empty"]'),
+    ).not.toBeNull();
+    // One click closes the panel. With the count still 0 and the panel closed,
+    // the entry's render condition no longer holds, so it hides entirely rather
+    // than lingering as a pressed-false zero entry.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-artifacts-entry]')
+        ?.click();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="artifacts-list-empty"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-artifacts-entry]'),
+    ).toBeNull();
+  });
+
+  it('does not show the artifacts entry for an unrelated restored tab at zero artifacts', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'review:stored',
+          tabs: [
+            { id: 'review:stored', kind: 'review', title: 'Stored review' },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    expect(
+      container.querySelector('[role="tab"][title="Stored review"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-artifacts-entry]'),
+    ).toBeNull();
+  });
+
+  it('does not show the artifacts entry for an inactive artifacts tab at zero artifacts', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'review:stored',
+          tabs: [
+            {
+              id: 'artifacts:session-1',
+              kind: 'artifacts',
+              title: 'Artifacts',
+              sessionId: 'session-1',
+            },
+            { id: 'review:stored', kind: 'review', title: 'Stored review' },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp();
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector('[role="tab"][title="Stored review"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[role="tab"][title="Artifacts"]'),
+      ).not.toBeNull();
+    });
+    expect(
+      container.querySelector('[data-web-shell-artifacts-entry]'),
+    ).toBeNull();
+  });
+
   it('does not restore a persisted artifacts tab when the host hides the artifacts entry', async () => {
     mockConnection.capabilities = {
       ...mockConnection.capabilities,
@@ -4889,6 +5114,7 @@ describe('task activity key', () => {
   });
 
   it('exposes the artifact count and opener to a custom chat header', async () => {
+    const t = getTranslator('en');
     mockConnection.capabilities = {
       ...mockConnection.capabilities,
       features: ['session_artifacts'],
@@ -4946,18 +5172,37 @@ describe('task activity key', () => {
       ),
     ).toBeNull();
 
-    // The artifacts tab serializes into the persisted right-panel state.
+    // The artifacts tab serializes into the persisted right-panel state with
+    // the exact shape parsePersistedArtifactPanelTab accepts: a string id and
+    // title (the common gate) plus kind and sessionId. A kind-only assertion
+    // would stay green for a serialize arm that dropped id/title, yet the tab
+    // would vanish on every reload; pin the fields the restore arm reads.
     await vi.waitFor(async () => {
       await flush();
       const rawState = JSON.parse(
         window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
           '{}',
-      ) as Record<string, { tabs?: Array<{ kind?: string }> }>;
-      expect(
-        Object.values(rawState).some((entry) =>
-          entry.tabs?.some((tab) => tab.kind === 'artifacts'),
-        ),
-      ).toBe(true);
+      ) as Record<
+        string,
+        {
+          activeTabId?: string;
+          tabs?: Array<{
+            id?: string;
+            kind?: string;
+            title?: string;
+            sessionId?: string;
+          }>;
+        }
+      >;
+      const entry = Object.values(rawState).find((candidate) =>
+        candidate.tabs?.some((tab) => tab.kind === 'artifacts'),
+      );
+      const tab = entry?.tabs?.find((item) => item.kind === 'artifacts');
+      expect(tab).toBeDefined();
+      expect(tab!.id).toBe('artifacts:session-1');
+      expect(tab!.title).toBe(t('environment.artifacts'));
+      expect(tab!.sessionId).toBe('session-1');
+      expect(entry!.activeTabId).toBe('artifacts:session-1');
     });
 
     // A second click toggles the right panel closed.
@@ -6499,6 +6744,1779 @@ describe('task activity key', () => {
     expect(
       container.querySelector('button[title="Daily report"]'),
     ).not.toBeNull();
+  });
+
+  const verifyRestoredSource = async (
+    source: 'wakeup' | undefined,
+    expectedCron: string | undefined,
+    owner: string,
+  ) => {
+    const taskId = 'shared-restore-source';
+    const cron = {
+      id: taskId,
+      source: 'cron' as const,
+      cronExpr: '0 9 * * *',
+      prompt: 'Wrong cron sibling',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_000,
+      expiresAt: null,
+      lastFiredAt: null,
+      nextRunAt: null,
+    };
+    const wakeup = {
+      ...cron,
+      source: 'wakeup' as const,
+      cronExpr: '@wakeup',
+      prompt: 'Restore the wakeup, not the cron',
+      recurring: false,
+    };
+    mockWorkspace.client.sessionTasks.mockResolvedValue({
+      v: 1,
+      sessionId: owner,
+      tasks: [],
+      scheduledTasks: [cron, wakeup],
+    });
+    const tabId = `scheduled-task:${owner}:saved-shared-source`;
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: tabId,
+          tabs: [
+            {
+              id: tabId,
+              kind: 'scheduled_task',
+              title: 'Restore by persistent source identity',
+              toolCallId: 'saved-tool-call-without-scheduled-prefix',
+              taskId,
+              taskScope: 'session',
+              ...(source ? { taskSource: source } : {}),
+              sourceSessionId: owner,
+            },
+          ],
+        },
+      }),
+    );
+
+    renderApp();
+    await vi.waitFor(() => {
+      expect(mockWorkspace.client.sessionTasks).toHaveBeenCalled();
+    });
+    await act(async () => {
+      await flush();
+      await flush();
+    });
+
+    expect(mockWorkspace.client.sessionTasks.mock.calls[0]?.[0]).toBe(owner);
+    const scheduledTabs = testState.latestArtifactPanelProps?.tabs.filter(
+      (tab) => tab.kind === 'scheduled_task',
+    );
+    expect(scheduledTabs).toHaveLength(expectedCron ? 1 : 0);
+    if (expectedCron) {
+      expect(
+        scheduledTabs?.[0]?.kind === 'scheduled_task' && scheduledTabs[0].task,
+      ).toMatchObject({
+        id: taskId,
+        cron: '@wakeup',
+        prompt: wakeup.prompt,
+        toolCallId: `scheduled:session:wakeup:${taskId}`,
+      });
+      await vi.waitFor(() => {
+        const saved = JSON.parse(
+          window.localStorage.getItem(
+            'qwen-code-web-shell-right-panel-state',
+          ) ?? '{}',
+        ) as Record<string, { tabs?: Array<Record<string, unknown>> }>;
+        expect(
+          Object.values(saved).some((state) =>
+            state.tabs?.some(
+              (tab) => tab.taskId === taskId && tab.taskSource === 'wakeup',
+            ),
+          ),
+        ).toBe(true);
+      });
+    }
+  };
+
+  it('preserves wakeup source when the same id also has a cron', async () => {
+    await verifyRestoredSource('wakeup', '@wakeup', 'wakeup-source-restorer');
+  });
+
+  it('does not restore an arbitrary source for a legacy ambiguous reference', async () => {
+    await verifyRestoredSource(
+      undefined,
+      undefined,
+      'legacy-ambiguous-restorer',
+    );
+  });
+
+  it('normalizes a legacy primary owner identity without changing its task route', async () => {
+    const ownedTask = {
+      id: 'durable:legacy-primary',
+      name: 'Legacy primary',
+      cron: '0 9 * * *',
+      prompt: 'Legacy primary prompt',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      sessionId: 'session-1',
+      runs: [],
+    };
+    mockConnection.workspaceCwd = '/tmp/project';
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary-id',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([ownedTask]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...ownedTask,
+      enabled: false,
+    });
+    mockWorkspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'scheduled-task:session-1:legacy-call',
+          tabs: [
+            {
+              id: 'scheduled-task:session-1:legacy-call',
+              kind: 'scheduled_task',
+              title: 'Legacy primary task',
+              toolCallId: 'scheduled:durable:durable:legacy-primary',
+              sourceSessionId: 'session-1',
+              workspaceCwd: '/tmp/project',
+              workspaceId: 'primary-id',
+            },
+          ],
+        },
+      }),
+    );
+    const renderChatHeader = vi.fn(() => null);
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+      renderChatHeader,
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      const tab = testState.latestArtifactPanelProps?.tabs.find(
+        (candidate) => candidate.kind === 'scheduled_task',
+      );
+      expect(tab?.kind === 'scheduled_task' && tab.task.workspaceId).toBe(
+        undefined,
+      );
+    });
+    expect(
+      testState.latestArtifactPanelProps?.tabs.find(
+        (candidate) =>
+          candidate.kind === 'scheduled_task' &&
+          candidate.id === 'scheduled-task:session-1:legacy-call',
+      )?.workspaceId,
+    ).toBe('primary-id');
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledWith(
+      undefined,
+    );
+    const openScheduledTasks =
+      renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks;
+    expect(openScheduledTasks).toBeTypeOf('function');
+    await act(async () => {
+      openScheduledTasks?.();
+    });
+    const envRow = () =>
+      container.querySelector('[data-testid="environment-scheduled-task"]');
+    await vi.waitFor(async () => {
+      await flush();
+      expect(envRow()).not.toBeNull();
+    });
+    expect(container.textContent).toContain('Legacy primary prompt');
+    await act(async () => {
+      envRow()
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Disable"]')
+        ?.click();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        Array.from(
+          container.querySelectorAll(
+            '[role="group"][aria-label="Scheduled tasks"] button',
+          ),
+        ).some((button) => button.textContent?.trim() === 'Enable'),
+      ).toBe(true);
+    });
+    await act(async () => {
+      envRow()
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Delete"]')
+        ?.click();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(container.textContent).toContain('has been deleted');
+    });
+    expect(container.textContent).toContain('Legacy primary prompt');
+    expect(container.textContent).not.toContain(
+      'Scheduled task workspace owner no longer matches',
+    );
+  });
+
+  it('does not restore a missing-owner secondary from a legacy primary', async () => {
+    mockConnection.workspaceCwd = '/secondary';
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/primary',
+      workspaces: undefined,
+    } as typeof mockWorkspace.capabilities;
+    testState.messages = [
+      {
+        id: 'legacy-secondary-creation',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'legacy-secondary-call',
+            toolName: 'cron_create',
+            status: 'completed',
+            args: {
+              cron: '0 10 * * *',
+              prompt: 'legacy secondary original',
+              recurring: true,
+              durable: true,
+            },
+            rawOutput: {
+              returnDisplay:
+                'Scheduled recurring job durable-legacy-unknown (0 10 * * *).',
+            },
+          },
+        ],
+      },
+    ];
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      {
+        id: 'durable-legacy-unknown',
+        name: 'Wrong primary record',
+        cron: '0 10 * * *',
+        prompt: 'primary must not be borrowed',
+        recurring: true,
+        enabled: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        nextRunAt: null,
+        sessionId: 'session-1',
+        runs: [],
+      },
+    ]);
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/secondary\0session-1': {
+          open: true,
+          activeTabId: 'scheduled-task:session-1:legacy-secondary-call',
+          tabs: [
+            {
+              id: 'scheduled-task:session-1:legacy-secondary-call',
+              kind: 'scheduled_task',
+              title: 'Secondary without an owner ID',
+              toolCallId: 'scheduled:durable:durable-legacy-unknown',
+              sourceSessionId: 'session-1',
+              workspaceCwd: '/secondary',
+            },
+          ],
+        },
+      }),
+    );
+
+    const { container } = renderApp();
+    await vi.waitFor(async () => {
+      await flush();
+      expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+    });
+    expect(container.textContent).toContain(
+      'This workspace may have been removed or the link is no longer valid.',
+    );
+    expect(container.textContent).toContain('Secondary without an owner ID');
+    expect(container.textContent).not.toContain('primary must not be borrowed');
+  });
+
+  it('preserves the secondary workspace identity on restored durable history', async () => {
+    mockConnection.workspaceCwd = '/tmp/secondary';
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([]);
+    testState.messages = [
+      {
+        id: 'secondary-durable-creation',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'cron-create-secondary',
+            toolName: 'cron_create',
+            status: 'completed',
+            args: {
+              cron: '0 12 * * *',
+              prompt: 'secondary history prompt',
+              recurring: true,
+              durable: true,
+            },
+            rawOutput: {
+              returnDisplay:
+                'Scheduled recurring job durable-secondary-backend (0 12 * * *).',
+            },
+          },
+        ],
+      },
+    ];
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/secondary\0session-1': {
+          open: true,
+          activeTabId: 'scheduled-task:session-1:cron-create-secondary',
+          tabs: [
+            {
+              id: 'scheduled-task:session-1:cron-create-secondary',
+              kind: 'scheduled_task',
+              title: 'Secondary historical task',
+              toolCallId: 'cron-create-secondary',
+              sourceSessionId: 'session-1',
+              workspaceCwd: '/tmp/secondary',
+              workspaceId: 'secondary',
+            },
+          ],
+        },
+      }),
+    );
+
+    const { container } = renderApp();
+    await vi.waitFor(async () => {
+      await flush();
+      const tab = testState.latestArtifactPanelProps?.tabs.find(
+        (item) => item.kind === 'scheduled_task',
+      );
+      expect(tab?.kind === 'scheduled_task' && tab.task).toMatchObject({
+        id: 'durable-secondary-backend',
+        workspaceId: 'secondary',
+        prompt: 'secondary history prompt',
+      });
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(container.textContent).toContain('secondary history prompt');
+    });
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledWith(
+      'secondary',
+    );
+    expect(container.textContent).not.toContain(
+      'Scheduled task workspace owner no longer matches',
+    );
+  });
+
+  it('restores an environment durable task without a transcript call and preserves its owner', async () => {
+    const ownedTask = {
+      id: 'durable:environment',
+      name: 'Owned environment task',
+      cron: '15 8 * * *',
+      prompt: 'Prompt from the owning session',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      sessionId: 'session-1',
+      runs: [],
+    };
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([ownedTask]);
+    mockWorkspace.client.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      events: [],
+      hasMore: false,
+    });
+    const renderChatHeader = vi.fn(() => null);
+    const options = {
+      environmentPanel: { items: ['scheduledTasks'] },
+      renderChatHeader,
+    } as const;
+    const first = renderApp(options);
+    await flush();
+    await act(async () => {
+      renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks?.();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        first.container.querySelector(
+          '[data-testid="environment-scheduled-task"] button',
+        ),
+      ).not.toBeNull();
+    });
+    await act(async () => {
+      first.container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="environment-scheduled-task"] button',
+        )
+        ?.click();
+    });
+    await vi.waitFor(() => {
+      const state = JSON.parse(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+          '{}',
+      )['/tmp/project\0session-1'];
+      expect(state?.tabs?.[0]).toMatchObject({
+        kind: 'scheduled_task',
+        toolCallId: 'scheduled:durable:durable:environment',
+      });
+    });
+    first.unmount();
+
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([ownedTask]);
+    const second = renderApp(options);
+    await vi.waitFor(async () => {
+      await flush();
+      const tab = testState.latestArtifactPanelProps?.tabs.find(
+        (item) => item.kind === 'scheduled_task',
+      );
+      expect(tab?.kind === 'scheduled_task' && tab.task.prompt).toBe(
+        ownedTask.prompt,
+      );
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(second.container.textContent).toContain(ownedTask.prompt);
+      expect(second.container.textContent).toContain(ownedTask.cron);
+    });
+    expect(second.container.textContent).toContain(ownedTask.name);
+    const modernPersisted = JSON.parse(
+      window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+        '{}',
+    )['/tmp/project\0session-1'];
+    expect(modernPersisted.tabs[0]).toMatchObject({
+      taskId: ownedTask.id,
+      taskScope: 'durable',
+    });
+    second.unmount();
+
+    delete modernPersisted.tabs[0].taskId;
+    delete modernPersisted.tabs[0].taskScope;
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({ '/tmp/project\0session-1': modernPersisted }),
+    );
+    const legacy = renderApp(options);
+    await vi.waitFor(async () => {
+      await flush();
+      expect(legacy.container.textContent).toContain(ownedTask.prompt);
+      expect(legacy.container.textContent).toContain(ownedTask.cron);
+    });
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledWith(
+      undefined,
+    );
+    legacy.unmount();
+
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      {
+        ...ownedTask,
+        name: 'Foreign environment task',
+        prompt: 'Prompt from a foreign session',
+        sessionId: 'foreign-session',
+      },
+    ]);
+    const foreign = renderApp(options);
+    await vi.waitFor(async () => {
+      await flush();
+      const tab = testState.latestArtifactPanelProps?.tabs.find(
+        (item) => item.id === modernPersisted.tabs[0].id,
+      );
+      expect(tab?.kind).toBe('pending');
+      expect(tab?.kind === 'pending' && tab.loadError).toEqual(
+        expect.any(String),
+      );
+    });
+    expect(
+      testState.latestArtifactPanelProps?.tabs.some(
+        (item) => item.kind === 'scheduled_task',
+      ),
+    ).toBe(false);
+    expect(foreign.container.textContent).not.toContain(
+      'Prompt from a foreign session',
+    );
+  });
+
+  it('does not refresh durable tasks from an unregistered workspace', async () => {
+    mockConnection.workspaceCwd = '/tmp/unregistered-workspace';
+    testState.messages = [
+      {
+        id: 'scheduled-intent-unregistered',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'cron-create-unregistered',
+            toolName: 'cron_create',
+            status: 'completed',
+            args: {
+              cron: '0 9 * * *',
+              prompt: 'must remain unread',
+              recurring: true,
+              durable: true,
+            },
+          },
+        ],
+      },
+    ];
+    const renderChatHeader = vi.fn(() => null);
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+      renderChatHeader,
+    });
+    await flush();
+    const openScheduledTasks =
+      renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks;
+    expect(openScheduledTasks).toBeTypeOf('function');
+    await act(async () => {
+      openScheduledTasks?.();
+    });
+    await flush();
+    expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('must remain unread');
+  });
+
+  it.each([
+    {
+      label: 'explicit empty workspaces',
+      workspaceCwd: '/primary',
+      primaryCwd: '/primary',
+      workspaces: [],
+    },
+    {
+      label: 'secondary missing id',
+      workspaceCwd: '/secondary',
+      primaryCwd: '/primary',
+      workspaces: [
+        { id: '', cwd: '/secondary', primary: false, trusted: true },
+      ],
+    },
+    {
+      label: 'duplicate cwd',
+      workspaceCwd: '/secondary',
+      primaryCwd: '/primary',
+      workspaces: [
+        { id: 'a', cwd: '/secondary', primary: false, trusted: true },
+        { id: 'b', cwd: '/secondary', primary: false, trusted: true },
+      ],
+    },
+    {
+      label: 'duplicate workspace id',
+      workspaceCwd: '/primary',
+      primaryCwd: '/primary',
+      workspaces: [
+        { id: 'shared-id', cwd: '/primary', primary: true, trusted: true },
+        { id: 'shared-id', cwd: '/secondary', primary: false, trusted: true },
+      ],
+    },
+    {
+      label: 'inconsistent primary marker',
+      workspaceCwd: '/secondary',
+      primaryCwd: '/primary',
+      workspaces: [
+        { id: 'primary', cwd: '/primary', primary: true, trusted: true },
+        { id: 'secondary', cwd: '/secondary', primary: true, trusted: true },
+      ],
+    },
+  ])(
+    'refuses scheduled-task reads for $label registrations',
+    async ({ workspaceCwd, primaryCwd, workspaces }) => {
+      mockConnection.workspaceCwd = workspaceCwd;
+      mockWorkspace.capabilities = {
+        workspaceCwd: primaryCwd,
+        workspaces,
+      } as typeof mockWorkspace.capabilities;
+      testState.messages = [
+        {
+          id: 'scheduled-intent-ambiguous-workspace',
+          role: 'tool_group',
+          tools: [
+            {
+              callId: 'cron-create-ambiguous-workspace',
+              toolName: 'cron_create',
+              status: 'completed',
+              args: {
+                cron: '0 9 * * *',
+                prompt: 'ambiguous registration must not be used',
+                recurring: true,
+                durable: true,
+              },
+            },
+          ],
+        },
+      ];
+      const renderChatHeader = vi.fn(() => null);
+      renderApp({
+        environmentPanel: { items: ['scheduledTasks'] },
+        renderChatHeader,
+      });
+      await flush();
+      const openScheduledTasks =
+        renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks;
+      expect(openScheduledTasks).toBeTypeOf('function');
+      await act(async () => {
+        openScheduledTasks?.();
+      });
+      await flush();
+      expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not restore an explicit empty workspace registry through primary', async () => {
+    mockConnection.workspaceCwd = '/tmp/project';
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [],
+    } as typeof mockWorkspace.capabilities;
+    const liveTask = {
+      id: 'legacy-primary-restore',
+      name: 'Legacy primary restoration',
+      cron: '0 9 * * *',
+      prompt: 'empty registrations must not borrow primary',
+      recurring: true,
+      enabled: true,
+      createdAt: 1,
+      lastFiredAt: null,
+      nextRunAt: Date.now() + 60_000,
+      sessionId: 'session-1',
+      sessionMode: 'persistent' as const,
+      gate: null,
+      runs: [],
+    };
+    testState.messages = [
+      {
+        id: 'scheduled-create-empty-registry',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'create-legacy-primary-restore',
+            toolName: 'cron_create',
+            status: 'completed',
+            args: {
+              cron: liveTask.cron,
+              prompt: liveTask.prompt,
+              recurring: true,
+              durable: true,
+            },
+            rawOutput: `Scheduled recurring job ${liveTask.id} (${liveTask.cron}).`,
+          },
+        ],
+      },
+    ];
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([liveTask]);
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'scheduled-task:legacy-primary-restore',
+          tabs: [
+            {
+              id: 'scheduled-task:legacy-primary-restore',
+              kind: 'scheduled_task',
+              title: 'Legacy primary restoration',
+              toolCallId: 'create-legacy-primary-restore',
+              taskId: liveTask.id,
+              taskScope: 'durable',
+              sourceSessionId: 'session-1',
+              workspaceCwd: '/tmp/project',
+              workspaceId: 'old-primary-id',
+            },
+          ],
+        },
+      }),
+    );
+    renderApp({ environmentPanel: { items: ['scheduledTasks'] } });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(testState.latestArtifactPanelProps?.tabs.length).toBeGreaterThan(
+        0,
+      );
+    });
+    expect(
+      mockWorkspaceActions.listScheduledTasks.mock.calls.some(
+        ([workspaceId]) => workspaceId === undefined,
+      ),
+    ).toBe(false);
+  });
+
+  it('normalizes a durable owner after its workspace is re-registered', async () => {
+    mockConnection.workspaceCwd = '/tmp/project';
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'new-id', cwd: '/secondary', primary: false, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const liveDurable = {
+      id: 'task-replaced-owner',
+      name: 'Task with replaced owner',
+      cron: '0 9 * * *',
+      prompt: 'still runnable at new owner',
+      recurring: true,
+      enabled: true,
+      createdAt: 1,
+      lastFiredAt: null,
+      nextRunAt: Date.now() + 60_000,
+      sessionId: 'session-1',
+      sessionMode: 'persistent' as const,
+      gate: null,
+      runs: [],
+    };
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([liveDurable]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...liveDurable,
+      enabled: false,
+    });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'scheduled-task:replace-owner',
+          tabs: [
+            {
+              id: 'scheduled-task:replace-owner',
+              kind: 'scheduled_task',
+              title: 'Task with replaced owner',
+              toolCallId: 'call-replace-owner',
+              taskId: liveDurable.id,
+              taskScope: 'durable',
+              sourceSessionId: 'session-1',
+              workspaceCwd: '/secondary',
+              workspaceId: 'old-id',
+            },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(testState.latestArtifactPanelProps?.tabs[0]?.workspaceId).toBe(
+        'new-id',
+      );
+    });
+    const toggle = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Disable',
+    );
+    expect(toggle).toBeDefined();
+    expect(toggle?.disabled).toBe(false);
+    await act(async () => {
+      toggle?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+      liveDurable.id,
+      { enabled: false },
+      'new-id',
+      'session-1',
+    );
+  });
+
+  it('shares an Environment-confirmed session stop across detail instances', async () => {
+    const task = {
+      id: 'cron-cross-detail-stop',
+      source: 'cron' as const,
+      cronExpr: '0 9 * * *',
+      prompt: 'Stop through the environment',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      expiresAt: null,
+      lastFiredAt: null,
+      nextRunAt: Date.now() + 60_000,
+    };
+    testState.sessionScheduledTasks = [task];
+    testState.messages = [
+      {
+        id: 'scheduled-intent-cross-detail-stop',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'cron-create-cross-detail-stop',
+            toolName: 'cron_create',
+            status: 'completed',
+            args: {
+              cron: task.cronExpr,
+              prompt: task.prompt,
+              recurring: true,
+            },
+            rawOutput: `Scheduled recurring job ${task.id} (${task.cronExpr}).`,
+          },
+        ],
+      },
+    ];
+    const { container, rerender } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector('[data-testid="environment-scheduled-task"]'),
+      ).not.toBeNull();
+    });
+    const row = () =>
+      container.querySelector('[data-testid="environment-scheduled-task"]');
+    act(() => row()?.querySelector('button')?.click());
+    await vi.waitFor(async () => {
+      await flush();
+      expect(container.textContent).toContain('Stop task');
+    });
+
+    await act(async () => {
+      row()
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')
+        ?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockWorkspace.client.sessionTaskCancel).toHaveBeenCalledWith(
+      task.id,
+      'cron',
+      'cron',
+    );
+    expect(container.textContent).toContain(
+      'This session-scoped scheduled task is no longer active.',
+    );
+    expect(testState.latestArtifactPanelProps?.activeTabId).not.toBeNull();
+    testState.captureArtifactPanelOnly = true;
+    rerender();
+    await flush();
+    testState.captureArtifactPanelOnly = false;
+    rerender();
+    await flush();
+    expect(container.textContent).toContain(
+      'This session-scoped scheduled task is no longer active.',
+    );
+  });
+
+  it('scopes same-id Environment tabs and stop confirmations by task source', async () => {
+    const taskId = 'shared-app-scheduled-task';
+    const cronTask = {
+      id: taskId,
+      source: 'cron' as const,
+      cronExpr: '0 9 * * *',
+      prompt: 'Cron source prompt',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_000,
+      expiresAt: null,
+      lastFiredAt: null,
+      nextRunAt: null,
+    };
+    const wakeupTask = {
+      ...cronTask,
+      source: 'wakeup' as const,
+      cronExpr: '@wakeup',
+      prompt: 'Wakeup source prompt',
+      recurring: false,
+      createdAt: 2_000,
+    };
+    testState.sessionScheduledTasks = [cronTask, wakeupTask];
+    testState.messages = [
+      {
+        id: 'scheduled-intent-shared-sources',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'cron-create-shared-sources',
+            toolName: 'cron_create',
+            status: 'completed',
+            args: {
+              cron: cronTask.cronExpr,
+              prompt: cronTask.prompt,
+              recurring: true,
+            },
+            rawOutput: `Scheduled recurring job ${taskId} (${cronTask.cronExpr}).`,
+          },
+        ],
+      },
+    ];
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelectorAll(
+          '[data-testid="environment-scheduled-task"]',
+        ),
+      ).toHaveLength(2);
+    });
+    const environmentRows = () =>
+      Array.from(
+        container.querySelectorAll<HTMLElement>(
+          '[data-testid="environment-scheduled-task"]',
+        ),
+      );
+    const openRow = async (prompt: string) => {
+      const row = environmentRows().find((candidate) =>
+        candidate.textContent?.includes(prompt),
+      );
+      expect(row).toBeDefined();
+      await act(async () => {
+        row?.querySelector<HTMLButtonElement>('button')?.click();
+        await flush();
+      });
+    };
+
+    await openRow(cronTask.prompt);
+    const cronTabId = `scheduled-task:session-1:scheduled:session:cron:${taskId}`;
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(cronTabId);
+    expect(
+      testState.latestArtifactPanelProps?.tabs.find(
+        (tab) => tab.id === cronTabId,
+      ),
+    ).toMatchObject({
+      kind: 'scheduled_task',
+      sourceSessionId: 'session-1',
+      task: { toolCallId: `scheduled:session:cron:${taskId}` },
+    });
+
+    await openRow(wakeupTask.prompt);
+    const wakeupTabId = `scheduled-task:session-1:scheduled:session:wakeup:${taskId}`;
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(wakeupTabId);
+    expect(testState.latestArtifactPanelProps?.tabs).toHaveLength(2);
+    expect(
+      testState.latestArtifactPanelProps?.tabs.find(
+        (tab) => tab.id === wakeupTabId,
+      ),
+    ).toMatchObject({
+      kind: 'scheduled_task',
+      sourceSessionId: 'session-1',
+      task: { toolCallId: `scheduled:session:wakeup:${taskId}` },
+    });
+
+    const notifyStopped =
+      testState.latestArtifactPanelProps?.onSessionScheduledTaskStopped;
+    expect(notifyStopped).toBeTypeOf('function');
+    act(() => {
+      Reflect.apply(notifyStopped!, undefined, [taskId, 'session-1', 'wakeup']);
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(environmentRows()).toHaveLength(1);
+      expect(environmentRows()[0]?.textContent).toContain(cronTask.prompt);
+      expect(container.textContent).toContain(
+        'This session-scoped scheduled task is no longer active.',
+      );
+    });
+  });
+
+  it('retires an environment row immediately after a direct detail deletion without awaiting refresh', async () => {
+    const ownedTask = {
+      id: 'durable:detail-delete',
+      name: 'Delete from the detail',
+      cron: '15 8 * * *',
+      prompt: 'Delete this task from its detail',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      sessionId: 'session-1',
+      runs: [],
+    };
+    const pendingList = Promise.withResolvers<(typeof ownedTask)[]>();
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([ownedTask]);
+    mockWorkspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const renderChatHeader = vi.fn(() => null);
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+      renderChatHeader,
+    });
+    await flush();
+    await act(async () => {
+      renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks?.();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector(
+          '[data-testid="environment-scheduled-task"] button',
+        ),
+      ).not.toBeNull();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="environment-scheduled-task"] button',
+        )
+        ?.click();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        Array.from(
+          container.querySelectorAll(
+            '[role="group"][aria-label="Scheduled tasks"] button',
+          ),
+        ).some((button) => button.textContent?.trim() === 'Edit'),
+      ).toBe(true);
+    });
+
+    mockWorkspaceActions.listScheduledTasks.mockImplementation(
+      () => pendingList.promise,
+    );
+    const readsBeforeDelete =
+      mockWorkspaceActions.listScheduledTasks.mock.calls.length;
+    const openDelete = Array.from(
+      container.querySelectorAll(
+        '[role="group"][aria-label="Scheduled tasks"] button',
+      ),
+    ).find((button) => button.textContent?.trim() === 'Delete');
+    act(() => openDelete?.click());
+    const confirmDelete = Array.from(document.body.querySelectorAll('button'))
+      .filter((button) => button.textContent?.trim() === 'Delete')
+      .at(-1);
+    await act(async () => {
+      confirmDelete?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledWith(
+      ownedTask.id,
+      undefined,
+      ownedTask.sessionId,
+    );
+    expect(
+      mockWorkspaceActions.listScheduledTasks.mock.calls.length,
+    ).toBeGreaterThan(readsBeforeDelete);
+    expect(
+      container.querySelector('[data-testid="environment-scheduled-task"]'),
+    ).toBeNull();
+    expect(container.textContent).toContain('has been deleted');
+    await act(async () => {
+      pendingList.resolve([]);
+      await Promise.resolve();
+    });
+    await flush();
+
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      testState.latestScheduledTasksProps?.isTaskDeleted?.(ownedTask),
+    ).toBe(true);
+    expect(
+      testState.latestScheduledTasksProps?.isTaskDeleted?.({
+        ...ownedTask,
+        sessionId: 'another-owner',
+      }),
+    ).toBe(false);
+  });
+
+  it('keeps a confirmed detail deletion after an Environment update lands first', async () => {
+    const ownedTask = {
+      id: 'durable:live-during-delete',
+      name: 'Delete while another update lands',
+      cron: '15 8 * * *',
+      prompt: 'A live update arrives before delete settles',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      sessionId: 'session-1',
+      runs: [],
+    };
+    let finishDelete: (() => void) | undefined;
+    const pendingList = Promise.withResolvers<(typeof ownedTask)[]>();
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([ownedTask]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...ownedTask,
+      enabled: false,
+    });
+    mockWorkspaceActions.deleteScheduledTask.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishDelete = resolve;
+        }),
+    );
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const renderChatHeader = vi.fn(() => null);
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+      renderChatHeader,
+    });
+    await flush();
+    await act(async () => {
+      renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks?.();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector(
+          '[data-testid="environment-scheduled-task"] button',
+        ),
+      ).not.toBeNull();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="environment-scheduled-task"] button',
+        )
+        ?.click();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        Array.from(
+          container.querySelectorAll(
+            '[role="group"][aria-label="Scheduled tasks"] button',
+          ),
+        ).some((button) => button.textContent?.trim() === 'Edit'),
+      ).toBe(true);
+    });
+
+    mockWorkspaceActions.listScheduledTasks.mockImplementation(
+      () => pendingList.promise,
+    );
+    const openDelete = Array.from(
+      container.querySelectorAll(
+        '[role="group"][aria-label="Scheduled tasks"] button',
+      ),
+    ).find((button) => button.textContent?.trim() === 'Delete');
+    act(() => openDelete?.click());
+    const confirmDelete = Array.from(document.body.querySelectorAll('button'))
+      .filter((button) => button.textContent?.trim() === 'Delete')
+      .at(-1);
+    await act(async () => {
+      confirmDelete?.click();
+      await Promise.resolve();
+    });
+    expect(finishDelete).toBeTypeOf('function');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="environment-scheduled-task"] button[aria-label="Disable"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container
+        .querySelector('[data-testid="environment-scheduled-task"]')
+        ?.getAttribute('data-enabled'),
+    ).toBe('false');
+
+    await act(async () => {
+      finishDelete?.();
+      await Promise.resolve();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector('[data-testid="environment-scheduled-task"]'),
+      ).toBeNull();
+    });
+    expect(container.textContent).toContain('has been deleted');
+    await act(async () => {
+      pendingList.resolve([]);
+      await Promise.resolve();
+    });
+    await flush();
+  });
+
+  it('keeps scheduled-task error context localized without hiding the cause', async () => {
+    const { getTranslator, loadLanguage } = await import('./i18n');
+    await loadLanguage('ru');
+    expect(getTranslator('ru')('scheduledTasks.error.toggleFailed')).toBe(
+      'Не удалось обновить задачу',
+    );
+    const ownedTask = {
+      id: 'durable:localized-error',
+      name: 'Localized scheduled task failure',
+      cron: '15 8 * * *',
+      prompt: 'A scheduled task',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      sessionId: 'session-1',
+      runs: [],
+    };
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([ownedTask]);
+    mockWorkspaceActions.updateScheduledTask.mockRejectedValue(
+      new Error('backend_refused_update'),
+    );
+    const renderChatHeader = vi.fn(() => null);
+    const onToast = vi.fn();
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+      renderChatHeader,
+      language: 'ru',
+      onToast,
+    });
+    await flush();
+    await act(async () => {
+      renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks?.();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector('[data-testid="environment-scheduled-task"]'),
+      ).not.toBeNull();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="environment-scheduled-task"] button[aria-label="Отключить"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalled();
+    await vi.waitFor(async () => {
+      await flush();
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        'Не удалось обновить задачу: backend_refused_update',
+      );
+    });
+  });
+
+  it('synchronizes durable environment mutations into an already open detail', async () => {
+    const ownedTask = {
+      id: 'durable:environment-sync',
+      name: 'Synchronized environment task',
+      cron: '15 8 * * *',
+      prompt: 'Prompt owned by both panels',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      sessionId: 'session-1',
+      runs: [],
+    };
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([ownedTask]);
+    mockWorkspaceActions.updateScheduledTask.mockImplementation(async () => ({
+      ...ownedTask,
+      enabled: false,
+    }));
+    mockWorkspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const renderChatHeader = vi.fn(() => null);
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+      renderChatHeader,
+    });
+    await flush();
+    await act(async () => {
+      renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks?.();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector(
+          '[data-testid="environment-scheduled-task"] button',
+        ),
+      ).not.toBeNull();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="environment-scheduled-task"] button',
+        )
+        ?.click();
+    });
+    const detailButton = (label: string) =>
+      Array.from(
+        container.querySelectorAll<HTMLButtonElement>(
+          '[role="group"][aria-label="Scheduled tasks"] button',
+        ),
+      ).find((button) => button.textContent?.trim() === label);
+    await vi.waitFor(async () => {
+      await flush();
+      expect(detailButton('Disable')).not.toBeNull();
+    });
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="environment-scheduled-task"] button[aria-label="Disable"]',
+        )
+        ?.click();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(detailButton('Enable')).not.toBeNull();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+      ownedTask.id,
+      { enabled: false },
+      undefined,
+      ownedTask.sessionId,
+    );
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="environment-scheduled-task"] button[aria-label="Delete"]',
+        )
+        ?.click();
+    });
+    await vi.waitFor(async () => {
+      await flush();
+      expect(container.textContent).toContain('has been deleted');
+    });
+    expect(detailButton('Edit')?.disabled).toBe(true);
+    expect(detailButton('Enable')?.disabled).toBe(true);
+    expect(detailButton('Delete')?.disabled).toBe(true);
+    expect(
+      container.querySelectorAll('[data-testid="environment-scheduled-task"]'),
+    ).toHaveLength(0);
+  });
+
+  it('restores a stopped session task from its original creation record', async () => {
+    const taskId = 'cron-cancelled-history';
+    const prompt = 'History preserved after the schedule was stopped';
+    testState.messages = [
+      {
+        id: 'original-stop-history',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'cron-create-original-history',
+            toolName: 'cron_create',
+            status: 'completed',
+            args: { cron: '*/5 * * * *', prompt, recurring: true },
+            rawOutput: {
+              returnDisplay: `Scheduled recurring job ${taskId} (*/5 * * * *).`,
+            },
+          },
+        ],
+      },
+    ];
+    testState.sessionScheduledTasks = [];
+    mockSessionActions.getTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 1_000,
+      tasks: [],
+      scheduledTasks: [],
+    });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'saved-stopped-cron',
+          tabs: [
+            {
+              id: 'saved-stopped-cron',
+              kind: 'scheduled_task',
+              title: 'Stopped cron',
+              toolCallId: `scheduled:session:${taskId}`,
+              taskId,
+              taskScope: 'session',
+              sourceSessionId: 'session-1',
+              workspaceCwd: '/tmp/project',
+              workspaceId: 'primary',
+            },
+          ],
+        },
+      }),
+    );
+
+    renderApp({ environmentPanel: { items: ['scheduledTasks'] } });
+    await vi.waitFor(async () => {
+      await flush();
+      const tab = testState.latestArtifactPanelProps?.tabs.find(
+        (item) => item.kind === 'scheduled_task',
+      );
+      expect(tab?.kind === 'scheduled_task' && tab.task.prompt).toBe(prompt);
+    });
+    expect(mockSessionActions.getTasks).toHaveBeenCalled();
+    expect(mockWorkspace.client.sessionTasks).not.toHaveBeenCalled();
+  });
+
+  it('surfaces consumed one-shot and recurring revalidation AbortErrors through App toasts', async () => {
+    const oneShotTask = {
+      id: 'durable:oneshot-toast',
+      name: 'One-shot toast',
+      cron: '0 9 * * *',
+      prompt: 'One-shot prompt',
+      recurring: false,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      sessionId: 'session-1',
+      runs: [],
+    };
+    const recurringTask = {
+      ...oneShotTask,
+      id: 'durable:recurring-toast',
+      name: 'Recurring toast',
+      prompt: 'Recurring prompt',
+      recurring: true,
+    };
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockConnection.workspaceCwd = '/tmp/project';
+    testState.messages = [
+      {
+        id: 'seed-task',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'call-1',
+            toolName: 'cron_create',
+            status: 'completed',
+            args: {
+              cron: '0 9 * * *',
+              prompt: 'Recurring prompt',
+              recurring: true,
+              durable: true,
+            },
+            resultDisplay: {
+              id: recurringTask.id,
+              humanSchedule: 'Daily at 09:00',
+              recurring: true,
+              durable: true,
+            },
+          },
+        ],
+      },
+    ];
+    const onToast = vi.fn();
+    let recurringRevalidationRead = false;
+    mockWorkspaceActions.listScheduledTasks.mockImplementation(async () =>
+      recurringRevalidationRead ? [] : [oneShotTask, recurringTask],
+    );
+    mockWorkspaceActions.runScheduledTask.mockResolvedValue(oneShotTask);
+    mockSessionActions.loadSession.mockResolvedValue(undefined);
+    mockSessionActions.sendPrompt
+      .mockRejectedValueOnce(
+        createScheduledTaskCancellation('Bound run target was replaced'),
+      )
+      .mockImplementationOnce(async (_prompt: string, options: unknown) => {
+        recurringRevalidationRead = true;
+        const opts = options as {
+          beforeDispatch?: () => void | Promise<void>;
+        };
+        try {
+          await opts.beforeDispatch?.();
+        } catch (error) {
+          if (error instanceof DOMException && error.name === 'AbortError') {
+            return { stopReason: 'cancelled' };
+          }
+          throw error;
+        }
+      });
+
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+      onToast,
+    });
+    const findRow = (label: string) =>
+      Array.from(
+        container.querySelectorAll<HTMLElement>(
+          '[data-testid="environment-scheduled-task"]',
+        ),
+      ).find((el) => el.textContent?.includes(label));
+    await vi.waitFor(async () => {
+      await flush();
+      expect(findRow('One-shot toast')).toBeDefined();
+      expect(findRow('Recurring toast')).toBeDefined();
+    });
+
+    await act(async () => {
+      findRow('One-shot toast')
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Run now"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        'The task was deleted but the prompt could not be delivered — it never ran. Recreate it to try again.',
+      ),
+    );
+    expect(
+      onToast.mock.calls.some(([, msg]) =>
+        String(msg).includes('Bound run target was replaced'),
+      ),
+    ).toBe(false);
+
+    onToast.mockClear();
+    await act(async () => {
+      findRow('Recurring toast')
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Run now"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(onToast).toHaveBeenCalledWith('error', 'Failed to record the run'),
+    );
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+
+    // Non-AbortError constructed inside useSessionScheduledTasks / scheduledTaskManualRun
+    // must use App's real translator instead of leaking raw i18n keys.
+    onToast.mockClear();
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValueOnce([
+      { ...recurringTask, enabled: false },
+    ]);
+    await act(async () => {
+      findRow('Recurring toast')
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Run now"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(onToast).toHaveBeenCalledWith('error', 'Failed to record the run'),
+    );
+    expect(
+      onToast.mock.calls.some(([, msg]) =>
+        String(msg).includes('scheduledTasks.error.'),
+      ),
+    ).toBe(false);
+
+    onToast.mockClear();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      testState.latestScheduledTasksProps?.onError?.(
+        createScheduledTaskCancellation('Bound run runtime was replaced'),
+        'Dialog consumed warning',
+      );
+    });
+    await vi.waitFor(() =>
+      expect(onToast).toHaveBeenCalledWith('error', 'Dialog consumed warning'),
+    );
+
+    // Empty-message Error must fall back cleanly to the localized fallback
+    // rather than producing a blank toast or trailing colon.
+    onToast.mockClear();
+    await act(async () => {
+      testState.latestScheduledTasksProps?.onError?.(
+        new Error(''),
+        'Dialog empty-error fallback',
+      );
+    });
+    await vi.waitFor(() =>
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        'Dialog empty-error fallback',
+      ),
+    );
+  });
+
+  it('preserves secondary workspaceCwd on EnvironmentPanel manual run and isolates primary deletion scope', async () => {
+    const secondaryTask = {
+      id: 'shared-task-id',
+      name: 'Secondary bound task',
+      cron: '0 9 * * *',
+      prompt: 'Secondary task prompt',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      sessionId: 'session-1',
+      runs: [],
+    };
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/work/primary',
+      workspaces: [
+        {
+          id: 'ws-primary',
+          cwd: '/work/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'ws-secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockConnection.workspaceCwd = '/work/secondary';
+    testState.messages = [
+      {
+        id: 'seed-secondary',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'call-sec',
+            toolName: 'cron_create',
+            status: 'completed',
+            args: {
+              cron: '0 9 * * *',
+              prompt: 'Secondary task prompt',
+              recurring: true,
+              durable: true,
+            },
+            resultDisplay: {
+              id: secondaryTask.id,
+              humanSchedule: 'Daily at 09:00',
+              recurring: true,
+              durable: true,
+            },
+          },
+        ],
+      },
+    ];
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([secondaryTask]);
+    mockWorkspaceActions.runScheduledTask.mockResolvedValue(secondaryTask);
+    mockSessionActions.loadSession.mockResolvedValue(undefined);
+    mockSessionActions.sendPrompt.mockImplementation(
+      async (_prompt: string, options: unknown) => {
+        const opts = options as {
+          beforeDispatch?: () => void | Promise<void>;
+          onAdmitted?: (admission: { promptId: string }) => void;
+        };
+        await opts.beforeDispatch?.();
+        opts.onAdmitted?.({ promptId: 'p-sec-1' });
+      },
+    );
+
+    const { container } = renderApp({
+      environmentPanel: { items: ['scheduledTasks'] },
+    });
+    const envRow = () =>
+      container.querySelector('[data-testid="environment-scheduled-task"]');
+    await vi.waitFor(async () => {
+      await flush();
+      expect(envRow()).not.toBeNull();
+    });
+
+    mockSessionActions.loadSession.mockClear();
+    await act(async () => {
+      envRow()
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Run now"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+        'session-1',
+        expect.objectContaining({
+          workspaceCwd: '/work/secondary',
+          sessionContext: { kind: 'workspace', cwd: '/work/secondary' },
+        }),
+      ),
+    );
+
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    const primarySameIdTask = {
+      id: secondaryTask.id,
+      sessionId: 'session-1',
+      workspaceId: undefined,
+    };
+    await act(async () => {
+      testState.latestScheduledTasksProps?.onTaskDeleted?.(primarySameIdTask);
+    });
+    await flush();
+    expect(
+      testState.latestScheduledTasksProps?.isTaskDeleted?.(primarySameIdTask),
+    ).toBe(false);
+    expect(
+      testState.latestScheduledTasksProps?.isTaskDeleted?.({
+        id: secondaryTask.id,
+        sessionId: 'session-1',
+        workspaceId: 'ws-secondary',
+      }),
+    ).toBe(false);
   });
 
   it.each([
@@ -10656,7 +12674,7 @@ describe('artifact panel fullscreen', () => {
       testState.latestChatEditorProps?.onSelectMode?.('yolo');
       await expect(
         testState.latestToolApprovalOnConfirm?.('req-1', 'restore_previous'),
-      ).rejects.toThrow('still pending');
+      ).rejects.toThrow('Approval was not accepted');
     });
     expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
     expect(testState.latestToolApprovalDisabled).toBe(true);
@@ -10746,7 +12764,7 @@ describe('artifact panel fullscreen', () => {
     await act(async () => {
       await expect(
         testState.latestToolApprovalOnConfirm?.('req-1', 'restore_previous'),
-      ).rejects.toThrow('permission failed');
+      ).rejects.toThrow('Approval was not accepted');
     });
     expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(false);
     await act(async () => testState.latestChatEditorProps?.onTogglePlan?.());
@@ -10782,7 +12800,7 @@ describe('artifact panel fullscreen', () => {
     act(() => testState.latestChatEditorProps?.onSelectMode?.('yolo'));
     await act(async () => {
       permission.reject(new Error('old owner failed'));
-      await expect(submission).rejects.toThrow('old owner failed');
+      await expect(submission).rejects.toThrow('Approval was not accepted');
     });
     expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(true);
     await act(async () => {
@@ -10847,11 +12865,10 @@ describe('artifact panel fullscreen', () => {
       'proceed_once',
     );
     expect(submission).toBeInstanceOf(Promise);
-    await expect(submission).rejects.toBe(failure);
+    await expect(submission).rejects.toThrow('Approval was not accepted');
     expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
       'req-1',
       'proceed_once',
-      undefined,
     );
   });
 
@@ -11195,6 +13212,78 @@ describe('artifact panel fullscreen', () => {
     );
     expect(drawerAside).not.toBeNull();
     expect(drawerAside!.contains(document.activeElement)).toBe(true);
+  });
+
+  it('returns focus to the artifacts entry when the floating drawer closes', async () => {
+    // openArtifactsListPanel records the focused trigger so the drawer's
+    // onCloseAutoFocus can return focus to it. Deleting that call leaves every
+    // suite green but drops focus to BODY on close; this pins the restore.
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [
+        {
+          id: 'report',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'report',
+          workspacePath: 'report.html',
+          clientRetained: false,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+    });
+    const { container } = renderApp();
+    await flush();
+    const entry = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-artifacts-entry]',
+    );
+    expect(entry).not.toBeNull();
+    entry!.focus();
+    expect(document.activeElement).toBe(entry);
+
+    await act(async () => {
+      entry!.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector(
+        '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+      ),
+    ).not.toBeNull();
+    expect(entry).not.toBe(document.activeElement);
+
+    // Close with the drawer's own toggle (the header entry is overlaid).
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>(
+          '[data-web-shell-portal-root] aside button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector(
+        '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+      ),
+    ).toBeNull();
+    expect(document.activeElement).toBe(entry);
   });
 
   it('keeps the dock animation suppressed across a fullscreen floating interlude', async () => {
@@ -13434,6 +15523,86 @@ describe('App /send', () => {
     expect(editorCommit).not.toHaveBeenCalled();
   });
 
+  it('refuses a new /send child while paused without clearing the draft', async () => {
+    overloadPauseStub.paused = true;
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = '/send independent work';
+
+    await clickSubmit(container);
+
+    expect(mockWorkspace.client.sendToSubSession).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('/send independent work');
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+  });
+
+  it('still allows /send to an explicitly selected target while paused', async () => {
+    overloadPauseStub.paused = true;
+    mockWorkspace.client.sendToSubSession.mockResolvedValue({
+      sessionId: 'target-session',
+    });
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/send --session-id target-session hello';
+
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(
+        mockWorkspace.client.sendToSubSession,
+      ).toHaveBeenCalledExactlyOnceWith(
+        'session-1',
+        { prompt: 'hello', targetSessionId: 'target-session' },
+        'client-1',
+      );
+    });
+    expect(editorCommit).toHaveBeenCalledOnce();
+  });
+
+  it('turns a real /send overload into a reactive warning and pause', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    mockWorkspace.client.sendToSubSession.mockRejectedValue(
+      new DaemonHttpError(
+        503,
+        {
+          error: 'System overloaded (cpu_load)',
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.8,
+          eventLoopLagP99Ms: 24,
+        },
+        'System overloaded (cpu_load)',
+      ),
+    );
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = '/send independent work';
+
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(toasts).toEqual([['warning', 'System overloaded (cpu_load)']]);
+    });
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('/send independent work');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(testState.latestArtifactPanelProps?.overloadPaused).toBe(true);
+  });
+
   it('offers a stable selector for a colliding workspace name and honors the lock', async () => {
     const { container } = renderApp({ lockedWorkspaceCwd: callerCwd });
     await flush();
@@ -13698,6 +15867,7 @@ beforeEach(() => {
   mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
   mockConnection.standaloneSession = undefined;
   testState.ownerVersion = 0;
+  testState.workspaceRuntime = undefined;
   testState.recoveryVersion = 0;
   testState.workspaceEventSignals = {
     artifactsVersion: 0,
@@ -13926,9 +16096,11 @@ beforeEach(() => {
   testState.latestTodoPanelOnOpen = null;
   testState.latestTasksStatusProps = null;
   testState.latestAskUserQuestionOnError = null;
+  testState.latestAskUserQuestionOnConfirm = null;
   testState.latestAskUserQuestionOnAskDetails = null;
   testState.latestBackgroundTasksRefreshTrigger = null;
   testState.backgroundTasks = [];
+  testState.sessionScheduledTasks = undefined;
   testState.latestMonitorDetailsOnOpen = null;
   testState.settings = [];
   testState.settingsLoading = false;
@@ -13944,6 +16116,10 @@ beforeEach(() => {
   testState.latestSettingsPresentation = undefined;
   testState.latestModelManagement = null;
   testState.latestScheduledTasksProps = null;
+  overloadPauseStub.paused = false;
+  overloadPauseStub.pollOverloaded = false;
+  overloadPauseStub.loadAdmission = undefined;
+  overloadPauseStub.refusalMessage = undefined;
   testState.latestPrWatchesProps = null;
   testState.latestGoalsProps = null;
   testState.latestArtifactLibraryProps = null;
@@ -14117,8 +16293,14 @@ beforeEach(() => {
   mockWorkspaceActions.suggestWorkspacePaths.mockReset();
   mockWorkspaceActions.pickWorkspaceDirectory.mockReset();
   mockWorkspaceActions.listScheduledTasks.mockReset();
+  mockWorkspaceActions.listScheduledTasks.mockResolvedValue([]);
   mockWorkspaceActions.updateScheduledTask.mockReset();
   mockWorkspaceActions.deleteScheduledTask.mockReset();
+  mockWorkspaceActions.runScheduledTask.mockReset();
+  mockWorkspaceActions.assertScheduledTaskOwnerSelection.mockReset();
+  mockWorkspaceActions.assertScheduledTaskOwnerSelection.mockResolvedValue(
+    undefined,
+  );
   mockWorkspaceActions.deleteModel.mockReset();
   mockWorkspaceActions.deleteModel.mockResolvedValue(undefined);
   mockMcp.initialize.mockClear();
@@ -18461,6 +20643,168 @@ describe('App session callbacks', () => {
     ]);
   });
 
+  it.each([{ completion: false }, { completion: true }])(
+    'publishes branch success only after switch completion: $completion',
+    async ({ completion: result }) => {
+      const switchCompletion = deferred<boolean>();
+      mockSessionActions.branchSession.mockResolvedValue({
+        sessionId: 'branch-1',
+        displayName: 'Historical branch',
+        switchStarted: true,
+        switchCompleted: switchCompletion.promise,
+      });
+      renderApp();
+      await flush();
+
+      const request =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+      expect(request).toBeInstanceOf(Promise);
+      const expectedStatus = [
+        expect.objectContaining({
+          type: 'status',
+          text: expect.stringContaining('Historical branch') as string,
+        }),
+      ];
+      expect(mockStore.dispatch).not.toHaveBeenCalledWith(expectedStatus);
+
+      switchCompletion.resolve(result);
+      await act(async () => {
+        await request;
+      });
+      if (result) {
+        expect(mockStore.dispatch).toHaveBeenCalledExactlyOnceWith(
+          expectedStatus,
+        );
+      } else {
+        expect(mockStore.dispatch).not.toHaveBeenCalledWith(expectedStatus);
+        expect(
+          sessionCatalogController.invalidateWorkspace,
+        ).toHaveBeenCalledWith('/tmp/project');
+      }
+    },
+  );
+
+  it.each([
+    { scenario: 'switch is refused', switchStarted: true, completion: false },
+    {
+      scenario: 'switch is aborted and never starts',
+      switchStarted: false,
+      completion: false,
+    },
+    { scenario: 'switch completes', switchStarted: true, completion: true },
+  ])(
+    'surfaces branch source warnings when the $scenario',
+    async ({ switchStarted, completion }) => {
+      const switchCompletion = deferred<boolean>();
+      mockSessionActions.branchSession.mockResolvedValue({
+        sessionId: 'branch-1',
+        displayName: 'Historical branch',
+        switchStarted,
+        ...(switchStarted ? { switchCompleted: switchCompletion.promise } : {}),
+        sourceWarnings: ['Session sources could not be copied.'],
+      });
+      const onToast = vi.fn();
+      renderApp({ onToast });
+      await flush();
+
+      const request =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+      switchCompletion.resolve(completion);
+      await act(async () => {
+        await request;
+      });
+
+      expect(onToast).toHaveBeenCalledWith(
+        'warning',
+        'Session sources could not be copied.',
+      );
+      const switched = [
+        expect.objectContaining({
+          type: 'status',
+          text: expect.stringContaining('Historical branch') as string,
+        }),
+      ];
+      if (completion) {
+        expect(mockStore.dispatch).toHaveBeenCalledWith(switched);
+      } else {
+        expect(mockStore.dispatch).not.toHaveBeenCalledWith(switched);
+      }
+    },
+  );
+
+  it.each([
+    [
+      'worktree is unsupported',
+      () =>
+        Promise.resolve({
+          v: 2,
+          workspaceCwd: '/tmp/project',
+          branch: 'main',
+          worktreeSupported: false,
+        }),
+    ],
+    ['worktree preflight fails', () => Promise.reject(new Error('offline'))],
+  ])(
+    'returns and awaits the fallback branch request when %s',
+    async (_scenario, preflight) => {
+      Object.assign(mockWorkspace.capabilities, {
+        features: ['session_branch_worktree'],
+        workspaces: [
+          {
+            id: 'primary',
+            cwd: '/tmp/project',
+            primary: true,
+            trusted: true,
+          },
+        ],
+      });
+      const workspaceGit = vi.fn(preflight);
+      mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+        workspaceGit,
+        workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      }));
+      const branch = deferred<{
+        sessionId: string;
+        displayName: string;
+        switchStarted: boolean;
+      }>();
+      mockSessionActions.branchSession.mockReturnValue(branch.promise);
+      renderApp();
+      await flush();
+
+      const request = testState.latestMessageListProps?.onBranchSession?.(
+        'checkpoint-fallback',
+      );
+      expect(request).toBeInstanceOf(Promise);
+      if (!(request instanceof Promise)) {
+        throw new Error('Expected the pending branch request');
+      }
+      let settled = false;
+      void request.then(() => {
+        settled = true;
+      });
+      await act(async () => {
+        await vi.waitFor(() => {
+          expect(mockSessionActions.branchSession).toHaveBeenCalledWith({
+            atRecordId: 'checkpoint-fallback',
+          });
+        });
+        await Promise.resolve();
+      });
+      expect(settled).toBe(false);
+
+      branch.resolve({
+        sessionId: 'branch-fallback',
+        displayName: 'Fallback branch',
+        switchStarted: false,
+      });
+      await act(async () => {
+        await request;
+      });
+      expect(settled).toBe(true);
+    },
+  );
+
   it('does not report a concurrent branch request as a failure', async () => {
     const branch = deferred<{
       sessionId: string;
@@ -18519,6 +20863,9 @@ describe('App session callbacks', () => {
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
       expect.objectContaining({ type: 'status' }),
     ]);
+    expect(sessionCatalogController.invalidateWorkspace).toHaveBeenCalledWith(
+      '/tmp/project',
+    );
   });
 
   it('refreshes the source catalog after a late worktree activation failure', async () => {
@@ -18564,6 +20911,52 @@ describe('App session callbacks', () => {
       'error',
       'The branched session was created, but its worktree could not be opened automatically. Reopen it from the session list.',
     );
+  });
+
+  it('refreshes the source catalog after a published worktree overload', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    let rejectBranch!: (error: unknown) => void;
+    mockSessionActions.branchSession.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectBranch = reject;
+      }),
+    );
+    const { rerender } = renderApp();
+    await flush();
+
+    let request: void | Promise<void>;
+    act(() => {
+      request =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/tmp/other-project';
+      rerender();
+    });
+    await act(async () => {
+      rejectBranch(
+        new DaemonHttpError(
+          503,
+          {
+            error: 'System overloaded (cpu_load)',
+            code: 'system_overloaded',
+            sessionId: 'branch-1',
+            loadRatio: 2.8,
+            eventLoopLagP99Ms: 27,
+          },
+          'System overloaded (cpu_load)',
+        ),
+      );
+      await request;
+    });
+
+    expect(sessionCatalogController.invalidateWorkspace).toHaveBeenCalledWith(
+      '/tmp/project',
+    );
+    expect(
+      sessionCatalogController.invalidateWorkspace,
+    ).not.toHaveBeenCalledWith('/tmp/other-project');
   });
 
   it('reloads the transcript when a historical checkpoint becomes stale', async () => {
@@ -18729,6 +21122,9 @@ describe('App session callbacks', () => {
       user: 0,
       workspace: 0,
     });
+    expect(testState.latestChatEditorProps?.composerIntegrations).toBe(
+      DAEMON_COMPOSER_INTEGRATIONS,
+    );
   });
 
   it('keeps primary Voice model reads and writes on legacy routes', async () => {
@@ -19519,9 +21915,18 @@ describe('App session callbacks', () => {
         sessionId: 'session-1',
         sessionName: 'Session One',
         workspaceCwd: '/tmp/project',
-        items: ['title', 'environment', 'rightPanel', 'artifacts'],
+        items: [
+          'title',
+          'environment',
+          'rightPanel',
+          'scheduledTasks',
+          'artifacts',
+        ],
         environmentPanelOpen: false,
         rightPanelOpen: false,
+        artifactCount: 0,
+        artifactsTabActive: false,
+        onOpenArtifacts: expect.any(Function),
         onEnvironmentPanelOpenChange: expect.any(Function),
         onRightPanelOpenChange: expect.any(Function),
       }),
@@ -44551,6 +46956,76 @@ describe('App session callbacks', () => {
     expect(testState.latestSessionOverviewProps?.manageLiveState).toBe(false);
   });
 
+  it('clears a removed current session without allocating during overload', async () => {
+    overloadPauseStub.paused = true;
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.({
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+      });
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+    expect(
+      container.querySelector('[data-testid="session-overview-panel"]'),
+    ).not.toBeNull();
+  });
+
+  it('clears a removed standalone session during pause without a workspace cwd', async () => {
+    overloadPauseStub.paused = true;
+    mockConnection.sessionId = 'standalone-old';
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(testState.latestSessionOverviewProps).not.toBeNull();
+    await act(async () => {
+      await testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.({
+        sessionId: 'standalone-old',
+        workspaceCwd: '',
+      });
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+  });
+
   it('clears a legacy current session without a connection workspace cwd', async () => {
     mockConnection.workspaceCwd = '';
     mockWorkspace.capabilities = {
@@ -44815,6 +47290,34 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="session-overview-panel"]'),
     ).not.toBeNull();
+  });
+
+  it('leaves the Session Overview during overload without creating a new task', async () => {
+    overloadPauseStub.paused = true;
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    onSessionIdChange.mockClear();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="panel-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(onSessionIdChange).not.toHaveBeenCalledWith(undefined);
   });
 
   it('starts a new session when leaving the Session Overview with Back', async () => {
@@ -46872,7 +49375,6 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
       'req-1',
       'proceed_once',
-      undefined,
     );
   });
 
@@ -46946,7 +49448,6 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
       'req-1',
       'proceed_once',
-      undefined,
     );
   });
 
@@ -49887,6 +52388,29 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="inline-panel"]'),
     ).not.toBeNull();
+  });
+
+  it('keeps an explicitly opened scheduled-tasks page when its rail entry is omitted', async () => {
+    const { container } = renderApp(
+      { sidebar: { primaryNav: { items: ['newTask'] } } },
+      undefined,
+      false,
+      true,
+    );
+    await flush();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="scheduled-tasks-page"]'),
+    ).not.toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-active-page'),
+    ).toBe('scheduledTasks');
+    expect(window.location.pathname).toBe('/scheduled-tasks');
   });
 
   it('dismisses the Scheduled Tasks page when an approval becomes pending', async () => {
@@ -57800,6 +60324,160 @@ describe('App workflow history entry', () => {
   });
 });
 
+it('gates the scheduled-task entry on the host environment section with live data', async () => {
+  testState.messages = [
+    {
+      id: 'scheduled-config-activity',
+      role: 'tool_group',
+      tools: [
+        {
+          callId: 'scheduled-config-create',
+          toolName: 'cron_create',
+          status: 'completed',
+          args: {
+            cron: '*/5 * * * *',
+            prompt: 'Check the release pipeline',
+            recurring: true,
+          },
+          rawOutput: {
+            returnDisplay: 'Created scheduled task (id: cron-config-visible)',
+          },
+        },
+      ],
+    },
+  ];
+  testState.sessionScheduledTasks = [
+    {
+      id: 'cron-config-visible',
+      source: 'cron',
+      cronExpr: '*/5 * * * *',
+      prompt: 'Check the release pipeline',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_000,
+      expiresAt: null,
+      lastFiredAt: null,
+      nextRunAt: Date.now() + 60_000,
+    },
+  ];
+
+  const excludedHeader = vi.fn(() => null);
+  const excluded = renderApp({
+    environmentPanel: { items: ['environment'] },
+    renderChatHeader: excludedHeader,
+  });
+  await vi.waitFor(async () => {
+    await flush();
+    expect(
+      excludedHeader.mock.calls.some(
+        ([props]) => props.scheduledTaskCount === 1,
+      ),
+    ).toBe(true);
+  });
+  expect(
+    excludedHeader.mock.lastCall?.[0].onOpenScheduledTasks,
+  ).toBeUndefined();
+  excluded.unmount();
+
+  const includedHeader = vi.fn(() => null);
+  const included = renderApp({
+    environmentPanel: { items: ['scheduledTasks'] },
+    renderChatHeader: includedHeader,
+  });
+  await vi.waitFor(async () => {
+    await flush();
+    expect(
+      includedHeader.mock.calls.some(
+        ([props]) => props.scheduledTaskCount === 1,
+      ),
+    ).toBe(true);
+  });
+  expect(includedHeader.mock.lastCall?.[0].onOpenScheduledTasks).toEqual(
+    expect.any(Function),
+  );
+  await act(async () => {
+    includedHeader.mock.lastCall?.[0].onOpenScheduledTasks?.();
+  });
+  await flush();
+  const manageAll = Array.from(
+    included.container.querySelectorAll<HTMLButtonElement>('button'),
+  ).find((button) => button.textContent === 'Manage all');
+  expect(manageAll).toBeDefined();
+  await act(async () => {
+    manageAll?.click();
+  });
+  await flush();
+  expect(testState.latestScheduledTasksProps).not.toBeNull();
+});
+
+it('does not offer an unreachable scheduled-task opener in the cockpit', async () => {
+  testState.settings = [sessionWorkflowSetting()];
+  testState.messages = [
+    {
+      id: 'cockpit-scheduled-config-activity',
+      role: 'tool_group',
+      tools: [
+        {
+          callId: 'cockpit-scheduled-config-create',
+          toolName: 'cron_create',
+          status: 'completed',
+          args: {
+            cron: '*/5 * * * *',
+            prompt: 'Check the release pipeline',
+            recurring: true,
+          },
+          rawOutput: {
+            returnDisplay:
+              'Created scheduled task (id: cockpit-cron-config-visible)',
+          },
+        },
+      ],
+    },
+  ];
+  testState.sessionScheduledTasks = [
+    {
+      id: 'cockpit-cron-config-visible',
+      source: 'cron',
+      cronExpr: '*/5 * * * *',
+      prompt: 'Check the release pipeline',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_000,
+      expiresAt: null,
+      lastFiredAt: null,
+      nextRunAt: Date.now() + 60_000,
+    },
+  ];
+  window.history.replaceState(null, '', '/');
+  const renderChatHeader = vi.fn(() => null);
+  const { container } = renderApp({
+    environmentPanel: { items: ['scheduledTasks'] },
+    renderChatHeader,
+  });
+  await flush();
+  await act(async () => {
+    renderChatHeader.mock.lastCall?.[0].onOpenScheduledTasks?.();
+  });
+  await vi.waitFor(async () => {
+    await flush();
+    expect(
+      container.querySelector('[data-testid="environment-scheduled-task"]'),
+    ).not.toBeNull();
+  });
+  window.history.pushState(null, '', '/?view=cockpit');
+  act(() => window.dispatchEvent(new PopStateEvent('popstate')));
+  await flush();
+  expect(
+    container.querySelector('[data-testid="cockpit-page"]'),
+  ).not.toBeNull();
+  expect(
+    container.querySelector('[data-testid="environment-scheduled-task"]'),
+  ).toBeNull();
+  expect(
+    container.querySelector('[data-web-shell-scheduled-tasks-entry]'),
+  ).toBeNull();
+});
+
 describe('App manual-run orchestration (scheduled tasks)', () => {
   // Drives App's real runTaskManually / enqueueManualRun / tryFireBoundRun via
   // the onRunPrompt prop the (captured) ScheduledTasksDialog mock receives.
@@ -57811,6 +60489,8 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       prompt: string,
       sessionId: string | null,
       workspaceCwd?: string,
+      isStale?: () => boolean,
+      beforeTaskDispatch?: () => void | Promise<void>,
     ) => Promise<void>
   > {
     mockConnection.goalState ??= {
@@ -58212,6 +60892,748 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     });
   });
 
+  it.each([{ deleted: true }, { deleted: false }])(
+    'R21 scheduling replay checks confirmed deletion ($deleted)',
+    async ({ deleted }) => {
+      admitOnSend();
+      const restore = deferred<void>();
+      const { container, rerender } = renderApp();
+      await flush();
+      const run = await openRunHandler(container);
+      mockSessionActions.loadSession.mockImplementationOnce(async () => {
+        mockConnection.sessionId = 'bound-session';
+        mockConnection.catchingUp = true;
+        await restore.promise;
+      });
+      let stale = false;
+      let runError: unknown;
+      let runRecordings = 0;
+
+      act(() => {
+        void run('do the thing', 'bound-session', undefined, () => stale).then(
+          () => {
+            runRecordings += 1;
+          },
+          (error) => {
+            runError = error;
+          },
+        );
+      });
+      await flush();
+      stale = deleted;
+      await act(async () => {
+        mockConnection.catchingUp = false;
+        rerender({});
+        restore.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      if (deleted) {
+        expect((runError as Error | undefined)?.name).toBe('AbortError');
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        expect(runRecordings).toBe(0);
+      } else {
+        expect(runError).toBeUndefined();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+        expect(runRecordings).toBe(1);
+      }
+    },
+  );
+
+  it.each([
+    {
+      title: 'A-B-A navigation',
+      steps: [
+        {
+          sessionId: 'other-session',
+          workspaceCwd: '/repo/owner',
+          catchingUp: true,
+        },
+        {
+          sessionId: 'bound-session',
+          workspaceCwd: '/repo/owner',
+          catchingUp: false,
+        },
+      ],
+    },
+    {
+      title: 'a workspace change',
+      steps: [
+        {
+          sessionId: 'bound-session',
+          workspaceCwd: '/repo/other',
+          catchingUp: false,
+        },
+      ],
+    },
+  ])(
+    'cancels a first binding during $title before restore',
+    async ({ steps }) => {
+      const restore = deferred<void>();
+      const { container, rerender } = renderApp();
+      await flush();
+      const run = await openRunHandler(container);
+      mockSessionActions.loadSession.mockImplementationOnce(
+        async () => restore.promise,
+      );
+      let runError: unknown;
+      act(() => {
+        void run('do the thing', 'bound-session', '/repo/owner').catch(
+          (error) => {
+            runError = error;
+          },
+        );
+      });
+      await flush();
+
+      for (const step of steps) {
+        testState.ownerVersion += 1;
+        await act(async () => {
+          mockConnection.sessionId = step.sessionId;
+          mockConnection.workspaceCwd = step.workspaceCwd;
+          mockConnection.catchingUp = step.catchingUp;
+          rerender({});
+          await Promise.resolve();
+        });
+      }
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      await act(async () => {
+        restore.resolve();
+        await Promise.resolve();
+      });
+
+      await vi.waitFor(() => {
+        expect((runError as Error | undefined)?.name).toBe('AbortError');
+      });
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reads the latest runtime during an incomplete first restore', async () => {
+    const restore = deferred<void>();
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    mockSessionActions.loadSession.mockImplementationOnce(
+      async () => restore.promise,
+    );
+    let runError: unknown;
+    let records = 0;
+    act(() => {
+      void run('do the thing', 'bound-session', '/repo/owner').then(
+        () => {
+          records += 1;
+        },
+        (error) => {
+          runError = error;
+        },
+      );
+    });
+    await flush();
+
+    await act(async () => {
+      testState.workspaceRuntime = {
+        ...mockWorkspace,
+        client: Object.create(mockWorkspace.client) as never,
+      };
+      mockConnection.sessionId = 'bound-session';
+      mockConnection.workspaceCwd = '/repo/owner';
+      mockConnection.catchingUp = false;
+      rerender({});
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect((runError as Error | undefined)?.name).toBe('AbortError');
+    });
+    expect(isScheduledTaskCancellation(runError)).toBe(true);
+    expect(records).toBe(0);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    await act(async () => {
+      restore.resolve();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      nextSessionId: 'bound-session',
+      nextWorkspaceCwd: '/repo/owner',
+      admitted: true,
+    },
+    {
+      nextSessionId: 'other-session',
+      nextWorkspaceCwd: '/repo/owner',
+      admitted: false,
+    },
+    {
+      nextSessionId: 'bound-session',
+      nextWorkspaceCwd: '/repo/other',
+      admitted: false,
+    },
+    {
+      nextSessionId: 'bound-session',
+      nextWorkspaceCwd: '/repo/owner',
+      viaOtherSession: true,
+      admitted: false,
+    },
+    {
+      nextSessionId: 'bound-session',
+      nextWorkspaceCwd: '/repo/owner',
+      runtimeChanged: true,
+      admitted: false,
+    },
+    {
+      nextSessionId: 'bound-session',
+      nextWorkspaceCwd: '/repo/owner',
+      runtimeChanged: true,
+      replaceOwner: false,
+      admitted: false,
+    },
+  ])(
+    'follows a re-attached SDK owner only within the original session/workspace ($admitted)',
+    async ({
+      nextSessionId,
+      nextWorkspaceCwd,
+      viaOtherSession,
+      runtimeChanged,
+      replaceOwner,
+      admitted,
+    }) => {
+      admitOnSend();
+      const restore = deferred<void>();
+      const { container, rerender } = renderApp();
+      await flush();
+      const run = await openRunHandler(container);
+      mockSessionActions.loadSession.mockImplementationOnce(async () => {
+        mockConnection.sessionId = 'bound-session';
+        mockConnection.workspaceCwd = '/repo/owner';
+        mockConnection.catchingUp = true;
+        await restore.promise;
+      });
+      let runError: unknown;
+      let runRecordings = 0;
+
+      act(() => {
+        void run(
+          'do the thing',
+          'bound-session',
+          '/repo/owner',
+          () => false,
+        ).then(
+          () => {
+            runRecordings += 1;
+          },
+          (error) => {
+            runError = error;
+          },
+        );
+      });
+      await flush();
+      await act(async () => {
+        restore.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      if (viaOtherSession) {
+        await act(async () => {
+          mockConnection.sessionId = 'other-session';
+          mockConnection.workspaceCwd = '/repo/owner';
+          mockConnection.catchingUp = true;
+          rerender({});
+          await Promise.resolve();
+        });
+      }
+      if (runtimeChanged) {
+        mockWorkspace.client = Object.create(mockWorkspace.client) as never;
+      }
+      if (replaceOwner !== false) testState.ownerVersion += 1;
+      await act(async () => {
+        mockConnection.sessionId = nextSessionId;
+        mockConnection.workspaceCwd = nextWorkspaceCwd;
+        mockConnection.catchingUp = false;
+        rerender({});
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      if (admitted) {
+        expect(runError).toBeUndefined();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+        expect(runRecordings).toBe(1);
+      } else {
+        await vi.waitFor(() => {
+          expect((runError as Error | undefined)?.name).toBe('AbortError');
+        });
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+        expect(runRecordings).toBe(0);
+      }
+    },
+  );
+
+  it.each([{ deleted: true }, { deleted: false }])(
+    'R21 checks deletion during unbound admission preflight ($deleted)',
+    async ({ deleted }) => {
+      admitOnSend();
+      const { container } = renderApp();
+      await flush();
+      const run = await openRunHandler(container);
+      let stale = false;
+      let outcome: unknown;
+      await act(async () => {
+        const settlement = run('unbound', null, undefined, () => stale).then(
+          () => null,
+          (error) => error,
+        );
+        stale = deleted;
+        outcome = await settlement;
+      });
+
+      if (deleted) {
+        expect((outcome as Error | null)?.message).toBe(
+          'Run was cancelled before it started',
+        );
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      } else {
+        expect(outcome).toBeNull();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      }
+    },
+  );
+
+  it.each([
+    { nextWorkspaceCwd: '/tmp/project', admitted: true },
+    { nextWorkspaceCwd: '/repo/other', admitted: false },
+  ])(
+    'rebinds a scheduled admission owner only inside the same scope ($admitted)',
+    async ({ nextWorkspaceCwd, admitted }) => {
+      const preflight = deferred<void>();
+      const onSubmitBefore = vi.fn(async () => preflight.promise);
+      const { container, rerender } = renderApp({ onSubmitBefore });
+      admitOnSend();
+      await flush();
+      const run = await openRunHandler(container);
+      let runError: unknown;
+      let records = 0;
+      await act(async () => {
+        void run('do the thing', 'session-1', undefined, () => false).then(
+          () => {
+            records += 1;
+          },
+          (error) => {
+            runError = error;
+          },
+        );
+        await vi.waitFor(() => expect(onSubmitBefore).toHaveBeenCalledOnce());
+      });
+
+      testState.ownerVersion += 1;
+      await act(async () => {
+        mockConnection.workspaceCwd = nextWorkspaceCwd;
+        rerender({});
+        await Promise.resolve();
+      });
+      await act(async () => {
+        preflight.resolve();
+        await Promise.resolve();
+      });
+
+      if (admitted) {
+        expect(runError).toBeUndefined();
+        expect(records).toBe(1);
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      } else {
+        await vi.waitFor(() =>
+          expect((runError as Error | undefined)?.name).toBe('AbortError'),
+        );
+        expect(records).toBe(0);
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('rejects a stale revalidation after its original scope is cleared', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    interface InterceptedOptions {
+      beforeAdmission?: () => void | Promise<void>;
+      beforeDispatch?: () => void | Promise<void>;
+      onAdmitted?: () => void;
+    }
+    const rawCallbacks: InterceptedOptions[] = [];
+    let admitted = 0;
+    mockSessionActions.sendPrompt.mockImplementation(
+      async (_prompt: string, options: unknown) => {
+        const opts = options as InterceptedOptions;
+        rawCallbacks.push(opts);
+        await opts.beforeAdmission?.();
+        await opts.beforeDispatch?.();
+        admitted += 1;
+        opts.onAdmitted?.();
+      },
+    );
+    const revalidation = deferred<void>();
+    const remoteRevalidation = vi.fn(async () => revalidation.promise);
+    let deleted = false;
+    let settlement!: Promise<unknown>;
+    await act(async () => {
+      settlement = run(
+        'do the thing',
+        'session-1',
+        '/tmp/project',
+        () => deleted,
+        remoteRevalidation,
+      ).catch((error) => error);
+      await vi.waitFor(() => expect(remoteRevalidation).toHaveBeenCalledOnce());
+    });
+
+    await act(async () => {
+      deleted = true;
+      mockConnection.workspaceCwd = '/repo/other';
+      deleted = false;
+      rerender({});
+      await Promise.resolve();
+    });
+    expect(rawCallbacks).toHaveLength(1);
+    revalidation.resolve();
+
+    const result = await settlement;
+    expect(isScheduledTaskCancellation(result)).toBe(true);
+    expect(admitted).toBe(0);
+  });
+
+  it('does not revive a cancelled run after owner reattachment', async () => {
+    const restore = deferred<void>();
+    const { container, rerender } = renderApp();
+    admitOnSend();
+    await flush();
+    const run = await openRunHandler(container);
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/repo/owner';
+      mockConnection.catchingUp = true;
+      await restore.promise;
+    });
+    let settlement!: Promise<unknown>;
+    act(() => {
+      settlement = run(
+        'do the thing',
+        'session-2',
+        '/repo/owner',
+        () => false,
+      ).catch((error) => error);
+    });
+    await flush();
+    testState.ownerVersion += 1;
+
+    testState.prompt = '/resume session-3';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-3', {
+        workspaceCwd: undefined,
+      });
+    });
+    const result = await settlement;
+    expect(isScheduledTaskCancellation(result)).toBe(true);
+
+    await act(async () => {
+      restore.resolve();
+      mockConnection.catchingUp = false;
+      rerender({});
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('blocks queued admission after a pending run is cancelled', async () => {
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/repo/owner';
+    });
+    const rawCallbacks: Array<{
+      beforeDispatch?: () => void | Promise<void>;
+    }> = [];
+    mockSessionActions.sendPrompt.mockImplementationOnce(
+      async (_prompt: string, options: unknown) => {
+        const opts = options as {
+          beforeDispatch?: () => void | Promise<void>;
+        };
+        rawCallbacks.push(opts);
+        try {
+          await opts.beforeDispatch?.();
+        } catch (error) {
+          if (error instanceof DOMException && error.name === 'AbortError') {
+            return { stopReason: 'cancelled' };
+          }
+          throw error;
+        }
+        return undefined;
+      },
+    );
+    const revalidation = deferred<void>();
+    const remoteRevalidation = vi.fn(async () => revalidation.promise);
+    let settlement!: Promise<unknown>;
+    act(() => {
+      settlement = run(
+        'do the thing',
+        'session-2',
+        '/repo/owner',
+        () => false,
+        remoteRevalidation,
+      ).catch((error) => error);
+    });
+    await vi.waitFor(() => expect(remoteRevalidation).toHaveBeenCalledOnce());
+
+    testState.prompt = '/resume session-3';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-3', {
+        workspaceCwd: undefined,
+      });
+    });
+    revalidation.resolve();
+
+    const result = await settlement;
+    expect(isScheduledTaskCancellation(result)).toBe(true);
+    expect(rawCallbacks).toHaveLength(1);
+  });
+
+  it('does not cancel an already-dispatched bound run when navigating before onAdmitted', async () => {
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/repo/owner';
+    });
+    const admitGate = deferred<void>();
+    let admissionStarted = false;
+    mockSessionActions.sendPrompt.mockImplementationOnce(
+      async (_prompt: string, options: unknown) => {
+        const opts = options as {
+          beforeDispatch?: () => void | Promise<void>;
+          onAdmissionStarted?: () => void;
+          onAdmitted?: (admission: { promptId: string }) => void;
+        };
+        opts.onAdmissionStarted?.();
+        admissionStarted = true;
+        await opts.beforeDispatch?.();
+        await admitGate.promise;
+        opts.onAdmitted?.({ promptId: 'prompt-in-flight' });
+        return undefined;
+      },
+    );
+
+    let firstOutcome: unknown = 'pending';
+    let firstPromise!: Promise<void>;
+    act(() => {
+      firstPromise = run('record me', 'session-2', '/repo/owner', () => false)
+        .then(() => {
+          firstOutcome = 'recorded';
+        })
+        .catch((error) => {
+          firstOutcome = error;
+        });
+    });
+    await vi.waitFor(() => expect(admissionStarted).toBe(true));
+
+    // Navigating away after the HTTP POST is already in flight must not cancel
+    // the dispatching run, and an incoming second bound run must be refused
+    // instead of killing it.
+    testState.prompt = '/resume session-3';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-3', {
+        workspaceCwd: undefined,
+      });
+    });
+    const secondOutcome = await run(
+      'incoming',
+      'session-4',
+      '/repo/owner',
+    ).catch((error) => error);
+    expect(isScheduledTaskCancellation(secondOutcome)).toBe(true);
+
+    admitGate.resolve();
+    await firstPromise;
+    expect(firstOutcome).toBe('recorded');
+  });
+
+  it('keeps a pending bound run alive when re-opening its own target session without a workspace cwd', async () => {
+    admitOnSend();
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    const initialLoad = deferred<void>();
+    mockSessionActions.loadSession
+      .mockReturnValueOnce(initialLoad.promise)
+      .mockResolvedValueOnce(undefined);
+
+    let outcome: unknown = 'pending';
+    let running!: Promise<void>;
+    act(() => {
+      running = run('keep me', 'session-2', '/repo/owner', () => false)
+        .then(() => {
+          outcome = 'admitted';
+        })
+        .catch((error) => {
+          outcome = error;
+        });
+    });
+    await vi.waitFor(() =>
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+        'session-2',
+        expect.objectContaining({ workspaceCwd: '/repo/owner' }),
+      ),
+    );
+
+    // /resume session-2 opens the exact same target session with workspaceCwd: undefined.
+    testState.prompt = '/resume session-2';
+    await clickSubmit(container);
+    await vi.waitFor(() =>
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2', {
+        workspaceCwd: undefined,
+      }),
+    );
+
+    mockConnection.sessionId = 'session-2';
+    mockConnection.workspaceCwd = '/repo/owner';
+    await act(async () => {
+      initialLoad.resolve();
+      rerender();
+      await Promise.resolve();
+    });
+    await running;
+
+    expect(outcome).toBe('admitted');
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'keep me',
+      expect.any(Object),
+    );
+  });
+
+  it('R21 binds a live stale guard to the raw dispatch hooks', async () => {
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    const options: unknown[] = [];
+    mockSessionActions.sendPrompt.mockImplementation((...args: unknown[]) => {
+      options.push(args[1]);
+      return Promise.resolve();
+    });
+    let stale = false;
+    const beforeTaskDispatch = vi.fn(async () => undefined);
+    let settlement!: Promise<unknown>;
+    await act(async () => {
+      settlement = run(
+        'unbound',
+        null,
+        undefined,
+        () => stale,
+        beforeTaskDispatch,
+      ).catch((error) => error);
+      await vi.waitFor(() =>
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1),
+      );
+    });
+    const callbacks = options[0] as Record<string, () => unknown>;
+    expect(callbacks).toMatchObject({
+      beforeDispatch: expect.any(Function),
+      onAdmissionStarted: expect.any(Function),
+    });
+
+    await expect(callbacks.beforeDispatch()).resolves.toBeUndefined();
+    expect(beforeTaskDispatch).toHaveBeenCalledOnce();
+    stale = true;
+    await expect(callbacks.beforeDispatch()).rejects.toThrow(
+      /before prompt admission/,
+    );
+    expect(callbacks.onAdmissionStarted).toThrow(/before prompt admission/);
+    await expect(settlement).resolves.toEqual(expect.any(Error));
+  });
+
+  it('R21 forwards the live stale guard through detached creation', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    const create = deferred<{ sessionId: string }>();
+    const detachedClient = {
+      sessionId: 'session-1',
+      updateMetadata: vi.fn(async () => ({})),
+      setModel: vi.fn(async () => ({})),
+      setConfigOption: vi.fn(async () => ({})),
+      close: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      client: { setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })) },
+    };
+    mockSessionActions.createSession.mockImplementationOnce(
+      async (options?: { navigationOutcome?: { bound: boolean } }) => {
+        const result = await create.promise;
+        if (options?.navigationOutcome) {
+          options.navigationOutcome.bound = false;
+        }
+        return { ...result, ...detachedClient };
+      },
+    );
+    const sendOptions: Array<Record<string, () => unknown> | undefined> = [];
+    mockSessionActions.sendDetachedPrompt.mockImplementationOnce(
+      (_session: unknown, _text: string, options?: unknown) => {
+        sendOptions.push(options as Record<string, () => unknown> | undefined);
+        return Promise.resolve({ promptId: 'detached-prompt' });
+      },
+    );
+    act(() => {
+      mockConnection.sessionId = undefined;
+      mockConnection.displayName = undefined;
+      rerender({});
+    });
+    let stale = false;
+    const beforeTaskDispatch = vi.fn(async () => undefined);
+    let settlement!: Promise<unknown>;
+    act(() => {
+      settlement = run(
+        'manual detached',
+        null,
+        undefined,
+        () => stale,
+        beforeTaskDispatch,
+      ).catch((error) => error);
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      testState.ownerVersion += 1;
+      rerender({});
+    });
+    await act(async () => {
+      create.resolve({ sessionId: 'session-1' });
+      await create.promise;
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendDetachedPrompt).toHaveBeenCalled();
+      });
+    });
+    const beforeDetachedDispatch = sendOptions[0]?.beforeDetachedDispatch;
+    expect(beforeDetachedDispatch).toEqual(expect.any(Function));
+    await expect(beforeDetachedDispatch?.()).resolves.toBeUndefined();
+    expect(beforeTaskDispatch).toHaveBeenCalledOnce();
+    stale = true;
+    await expect(beforeDetachedDispatch?.()).rejects.toThrow(
+      /before prompt admission/,
+    );
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    await expect(settlement).resolves.toEqual(expect.any(Error));
+  });
+
   it("restores a bound run's session in the workspace it is given", async () => {
     // A watch or task of another workspace: restoring its session from this
     // conversation's workspace would be refused.
@@ -58306,6 +61728,325 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     );
   });
 
+  it('cancels a pending bound run with a structured cancellation when New Chat is clicked', async () => {
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+    const run = await openRunHandler(container);
+    const restore = deferred<void>();
+    mockSessionActions.loadSession.mockReturnValueOnce(restore.promise);
+    mockSessionActions.clearSession.mockImplementationOnce(async () => {
+      restore.reject(new DOMException('Session cleared', 'AbortError'));
+    });
+
+    let settlement!: Promise<unknown>;
+    await act(async () => {
+      settlement = run('scheduled work', 'session-bound').catch(
+        (error) => error,
+      );
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+        'session-bound',
+        expect.any(Object),
+      ),
+    );
+
+    const newSessionBtn = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'new session');
+    expect(newSessionBtn).toBeDefined();
+    await act(async () => {
+      newSessionBtn?.click();
+      await Promise.resolve();
+    });
+
+    const result = await settlement;
+    expect(isScheduledTaskCancellation(result)).toBe(true);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
+  it('blocks an unbound manual run from dispatching after switching away from the initiating session', async () => {
+    mockConnection.sessionId = 'session-a';
+    mockConnection.workspaceCwd = '/tmp/project';
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    const revalidation = deferred<void>();
+    const rawOptions: Array<{ beforeDispatch?: () => void | Promise<void> }> =
+      [];
+    mockSessionActions.sendPrompt.mockImplementationOnce(
+      (_prompt: string, options: unknown) => {
+        rawOptions.push(
+          options as { beforeDispatch?: () => void | Promise<void> },
+        );
+        return new Promise<void>(() => {});
+      },
+    );
+
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = run(
+        'unbound scheduled task',
+        null,
+        undefined,
+        () => false,
+        () => revalidation.promise,
+      );
+      pending.catch(() => {});
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(rawOptions[0]?.beforeDispatch).toBeDefined());
+
+    const guard = Promise.resolve(rawOptions[0]!.beforeDispatch!());
+    guard.catch(() => {});
+
+    // Switch to another session while the unbound task's revalidation is in flight.
+    mockConnection.sessionId = 'session-b';
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+    });
+    await flush();
+    revalidation.resolve();
+
+    await expect(guard).rejects.toSatisfy(isScheduledTaskCancellation);
+
+    // Even if beforeTaskDispatch itself throws a revalidation error (e.g.
+    // owner/candidate mismatch) after the user already switched away, the
+    // rejection must still be classified as a structured cancellation so no
+    // error toast leaks into the destination session.
+    const failedRevalidation = deferred<void>();
+    mockConnection.sessionId = 'session-a';
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+    });
+    const runAgain = await openRunHandler(container);
+    const secondOptions: Array<{
+      beforeDispatch?: () => void | Promise<void>;
+    }> = [];
+    mockSessionActions.sendPrompt.mockImplementationOnce(
+      (_prompt: string, options: unknown) => {
+        secondOptions.push(
+          options as { beforeDispatch?: () => void | Promise<void> },
+        );
+        return new Promise<void>(() => {});
+      },
+    );
+    let secondPending!: Promise<void>;
+    await act(async () => {
+      secondPending = runAgain(
+        'unbound scheduled task 2',
+        null,
+        undefined,
+        () => false,
+        async () => {
+          await failedRevalidation.promise;
+          throw new DOMException('Failed to record the run', 'AbortError');
+        },
+      );
+      secondPending.catch(() => {});
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(secondOptions[0]?.beforeDispatch).toBeDefined(),
+    );
+    const secondGuard = Promise.resolve(secondOptions[0]!.beforeDispatch!());
+    secondGuard.catch(() => {});
+    mockConnection.sessionId = 'session-b';
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+    });
+    await flush();
+    failedRevalidation.resolve();
+    await expect(secondGuard).rejects.toSatisfy(isScheduledTaskCancellation);
+
+    // Unbound run started when connection.sessionId is initially undefined
+    // (e.g. /scheduled-tasks full page allocating a new session) must allow
+    // admission start before React commits the allocated session, enter
+    // beforeTaskDispatch, and then convert any revalidation rejection after
+    // switching to session-b into a structured cancellation with no toast.
+    const allocatedRevalidation = deferred<void>();
+    let enteredAllocatedRevalidation = false;
+    let admissionStartError: unknown = null;
+    mockConnection.sessionId = undefined;
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+    });
+    const runFromEmpty = await openRunHandler(container);
+    mockSessionActions.createSession.mockResolvedValueOnce({
+      sessionId: 'allocated-session',
+      workspaceCwd: '/tmp/project',
+    });
+    const thirdOptions: Array<{
+      beforeDispatch?: () => void | Promise<void>;
+      onAdmissionStarted?: () => void;
+    }> = [];
+    mockSessionActions.sendPrompt.mockImplementationOnce(
+      (_prompt: string, options: unknown) => {
+        const opts = options as {
+          beforeDispatch?: () => void | Promise<void>;
+          onAdmissionStarted?: () => void;
+        };
+        thirdOptions.push(opts);
+        try {
+          opts.onAdmissionStarted?.();
+        } catch (error) {
+          admissionStartError = error;
+          return Promise.reject(error);
+        }
+        return new Promise<void>(() => {});
+      },
+    );
+    let thirdPending!: Promise<void>;
+    await act(async () => {
+      thirdPending = runFromEmpty(
+        'unbound from empty page',
+        null,
+        undefined,
+        () => false,
+        async () => {
+          enteredAllocatedRevalidation = true;
+          await allocatedRevalidation.promise;
+          throw new DOMException('Failed to record the run', 'AbortError');
+        },
+      );
+      thirdPending.catch(() => {});
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(thirdOptions[0]?.beforeDispatch).toBeDefined(),
+    );
+    expect(admissionStartError).toBeNull();
+    const thirdGuard = Promise.resolve(thirdOptions[0]!.beforeDispatch!());
+    thirdGuard.catch(() => {});
+    await vi.waitFor(() => expect(enteredAllocatedRevalidation).toBe(true));
+    mockConnection.sessionId = 'session-b';
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+    });
+    await flush();
+    allocatedRevalidation.resolve();
+    await expect(thirdGuard).rejects.toSatisfy(isScheduledTaskCancellation);
+
+    // Clicking New Chat while POST /session is in flight (detached outcome with
+    // connection.sessionId still undefined) must cancel the detached dispatch.
+    const createForNewChat = deferred<{ sessionId: string }>();
+    mockConnection.sessionId = undefined;
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+    });
+    const runBeforeNewChat = await openRunHandler(container);
+    mockSessionActions.createSession.mockImplementationOnce(
+      async (options?: { navigationOutcome?: { bound: boolean } }) => {
+        const created = await createForNewChat.promise;
+        if (options?.navigationOutcome) {
+          options.navigationOutcome.bound = false;
+        }
+        return {
+          ...created,
+          updateMetadata: vi.fn(async () => ({})),
+          setModel: vi.fn(async () => ({})),
+          setConfigOption: vi.fn(async () => ({})),
+          close: vi.fn(async () => {}),
+          detach: vi.fn(async () => {}),
+          client: {
+            setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })),
+          },
+        };
+      },
+    );
+    let detachedGuardError: unknown = null;
+    mockSessionActions.sendDetachedPrompt.mockImplementationOnce(
+      async (_session: unknown, _text: string, options?: unknown) => {
+        const opts = options as {
+          onAdmissionStarted?: () => void;
+          beforeDetachedDispatch?: () => void | Promise<void>;
+        };
+        opts.onAdmissionStarted?.();
+        await opts.beforeDetachedDispatch?.();
+        return { promptId: 'unexpected-detached' };
+      },
+    );
+    let newChatSettlement!: Promise<unknown>;
+    await act(async () => {
+      newChatSettlement = runBeforeNewChat(
+        'unbound before new chat',
+        null,
+        undefined,
+        () => false,
+        async () => {},
+      ).catch((error) => {
+        detachedGuardError = error;
+        return error;
+      });
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(mockSessionActions.createSession).toHaveBeenCalled(),
+    );
+    const newSessionBtn = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'new session');
+    expect(newSessionBtn).toBeDefined();
+    await act(async () => {
+      newSessionBtn?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      createForNewChat.resolve({ sessionId: 'detached-after-new-chat' });
+      await createForNewChat.promise;
+    });
+    await newChatSettlement;
+    expect(isScheduledTaskCancellation(detachedGuardError)).toBe(true);
+
+    // Navigating to another session while attachSession() is still pending
+    // (before onAdmissionStarted runs) must also classify the rejection as a
+    // structured cancellation instead of leaking a raw attach error.
+    const createForSwitch = deferred<{ sessionId: string }>();
+    mockConnection.sessionId = undefined;
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+    });
+    const runBeforeSwitch = await openRunHandler(container);
+    mockSessionActions.createSession.mockImplementationOnce(async () => {
+      await createForSwitch.promise;
+      throw new DOMException(
+        'Session load superseded by a newer request',
+        'AbortError',
+      );
+    });
+    let switchSettlement!: Promise<unknown>;
+    await act(async () => {
+      switchSettlement = runBeforeSwitch(
+        'unbound before switch',
+        null,
+        undefined,
+        () => false,
+        async () => {},
+      ).catch((error) => error);
+      await Promise.resolve();
+    });
+    testState.prompt = '/resume session-b';
+    await clickSubmit(container);
+    await vi.waitFor(() =>
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+        'session-b',
+        expect.any(Object),
+      ),
+    );
+    createForSwitch.resolve({ sessionId: 'superseded-session' });
+    expect(isScheduledTaskCancellation(await switchSettlement)).toBe(true);
+  });
+
   it('does not apply the catch-up timeout while restore is pending', async () => {
     const { container } = renderApp();
     await flush();
@@ -58355,6 +62096,52 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       vi.advanceTimersByTime(1);
     });
     expect((err as Error | undefined)?.message).toMatch(/session replay/);
+  });
+
+  it('bounds waiting when the restored session never finishes loading its transcript', async () => {
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      mockConnection.sessionId = 'loading-session';
+      mockConnection.loadingTranscript = true;
+    });
+    vi.useFakeTimers();
+    let err: unknown;
+    await act(async () => {
+      void run('do the thing', 'loading-session').catch((error) => {
+        err = error;
+      });
+      await Promise.resolve();
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(29_999));
+    expect(err).toBeUndefined();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect((err as Error | undefined)?.message).toMatch(/session replay/);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('clears a pending bound run when the App unmounts', async () => {
+    const { container, unmount } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      mockConnection.sessionId = 'loading-session';
+      mockConnection.loadingTranscript = true;
+    });
+    vi.useFakeTimers();
+    let err: unknown;
+    await act(async () => {
+      void run('do the thing', 'loading-session').catch((error) => {
+        err = error;
+      });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      unmount();
+      await Promise.resolve();
+    });
+    expect((err as Error | undefined)?.name).toBe('AbortError');
   });
 
   it('"create via chat" starts a fresh session and primes the composer', async () => {
@@ -62154,6 +65941,757 @@ describe('upstream embedded transport reproduction', () => {
   });
 });
 
+describe('overload pause guards in App', () => {
+  const armOverload = () => {
+    overloadPauseStub.paused = true;
+    overloadPauseStub.pollOverloaded = true;
+    overloadPauseStub.loadAdmission = {
+      enabled: true,
+      overloaded: true,
+      reason: 'cpu_load',
+      loadRatio: 2.5,
+      eventLoopLagP99Ms: 20,
+      sampledAtMs: 1_000,
+    };
+  };
+
+  it('refuses !ls from an empty draft with one warning toast and no sendShellCommand', async () => {
+    armOverload();
+    mockConnection.sessionId = null;
+    const toasts: Array<[string, string]> = [];
+    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    await flush();
+    toasts.length = 0;
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('!ls');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('refuses a paused shell command before a session-less busy draft can queue it', async () => {
+    armOverload();
+    mockConnection.sessionId = null;
+    testState.streamingState = 'waiting';
+    const toasts: Array<[string, string]> = [];
+    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    await flush();
+    toasts.length = 0;
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('!ls');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('refuses /branch before allocating a restored branch while paused', async () => {
+    armOverload();
+    mockConnection.sessionId = 'source-session';
+    const toasts: Array<[string, string]> = [];
+    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    await flush();
+    toasts.length = 0;
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/branch feature-x');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(mockSessionActions.branchSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('refuses checkpoint activation while paused instead of guessing runtime reuse', async () => {
+    armOverload();
+    mockConnection.sessionId = 'source-session';
+    Object.assign(mockWorkspace.capabilities, {
+      features: ['session_branch_worktree'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    });
+    const workspaceGit = vi.fn().mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      worktreeSupported: true,
+    });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    toasts.length = 0;
+    workspaceGit.mockClear();
+
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(workspaceGit).not.toHaveBeenCalled();
+    expect(mockSessionActions.branchSession).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="radio"]')).toBeNull();
+    expect(toasts).toEqual([
+      ['warning', expect.stringContaining('Host load ratio 2.50')],
+    ]);
+  });
+
+  it('keeps the draft when overload begins during async preflight', async () => {
+    mockConnection.sessionId = undefined;
+    const beforeSubmit = deferred<void>();
+    const onSubmitBefore = vi.fn(() => beforeSubmit.promise);
+    const toasts: Array<[string, string]> = [];
+    const { rerender } = renderApp({
+      onSubmitBefore,
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = 'preserve this preflight draft';
+    let submitted: void | boolean | Promise<boolean | void>;
+    act(() => {
+      submitted = testState.latestChatEditorProps?.onSubmit(
+        'preserve this preflight draft',
+      );
+    });
+    await vi.waitFor(() => {
+      expect(onSubmitBefore).toHaveBeenCalledOnce();
+    });
+
+    await act(async () => {
+      armOverload();
+      rerender();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      beforeSubmit.resolve();
+      await submitted;
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('preserve this preflight draft');
+    expect(toasts).toEqual([
+      ['warning', expect.stringContaining('Host load ratio 2.50')],
+    ]);
+  });
+
+  it('refuses an ordinary first prompt while paused and preserves the draft', async () => {
+    armOverload();
+    mockConnection.sessionId = undefined;
+    const toasts: Array<[string, string]> = [];
+    const onSubmitBefore = vi.fn();
+    const { container } = renderApp({
+      onSubmitBefore,
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = 'first prompt under overload';
+    toasts.length = 0;
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSubmitBefore).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('first prompt under overload');
+    expect(toasts).toEqual([
+      ['warning', expect.stringContaining('Host load ratio 2.50')],
+    ]);
+  });
+
+  it('returns false for an ordinary first prompt while paused', async () => {
+    armOverload();
+    mockConnection.sessionId = undefined;
+    const onSubmitBefore = vi.fn();
+    const toasts: Array<[string, string]> = [];
+    renderApp({
+      onSubmitBefore,
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = 'ordinary first prompt';
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = await testState.latestChatEditorProps?.onSubmit(
+        'ordinary first prompt',
+      );
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(onSubmitBefore).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('ordinary first prompt');
+    expect(toasts).toEqual([
+      ['warning', expect.stringContaining('Host load ratio 2.50')],
+    ]);
+  });
+
+  it('keeps /fork on the existing ACP runtime while paused', async () => {
+    armOverload();
+    mockConnection.sessionId = 'source-session';
+    mockSessionActions.forkSession.mockResolvedValue({
+      launched: true,
+      description: 'write tests',
+    });
+    const toasts: Array<[string, string]> = [];
+    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    await flush();
+    toasts.length = 0;
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/fork write tests');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(true);
+    expect(mockSessionActions.forkSession).toHaveBeenCalledWith('write tests');
+    expect(toasts.every(([tone]) => tone !== 'warning')).toBe(true);
+  });
+
+  it('refuses /goal set from an empty draft with one warning toast and no noSession error', async () => {
+    armOverload();
+    mockConnection.sessionId = null;
+    const toasts: Array<[string, string]> = [];
+    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    await flush();
+    toasts.length = 0;
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit(
+        '/goal set keep tests green',
+      );
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('rejects a paused unbound manual run with an already-dispatched overload error and one warning toast', async () => {
+    armOverload();
+    mockConnection.sessionId = null;
+    mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    const props = testState.latestScheduledTasksProps;
+    const handler = props?.onRunPrompt;
+    if (!handler || !props) throw new Error('ScheduledTasksProps not captured');
+    expect(
+      props.shouldRefuseManualRun?.({
+        recurring: false,
+        sessionId: null,
+        sessionMode: 'persistent',
+      }),
+    ).toBe(true);
+    toasts.length = 0;
+
+    let caught: unknown;
+    try {
+      await handler('check status', null);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe(
+      'System overloaded — new tasks paused',
+    );
+    expect(
+      (caught as Error & { _alreadyDispatched?: boolean })._alreadyDispatched,
+    ).toBe(true);
+    // Forward the caught error to ScheduledTasksDialog's onError (reportError)
+    // as handleRunNow's catch does: _alreadyDispatched must suppress a second
+    // error-toned toast.
+    props.onError(caught, 'Failed to run task');
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+  });
+
+  it('pauses on a structured cold scheduled-task overload without an error toast', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    const onError = testState.latestScheduledTasksProps?.onError;
+    expect(onError).toBeTypeOf('function');
+
+    await act(async () => {
+      onError!(
+        new DaemonHttpError(
+          503,
+          {
+            error: 'System overloaded (cpu_load)',
+            code: 'system_overloaded',
+          },
+          'POST /scheduled-tasks/task-1/run: System overloaded (cpu_load)',
+        ),
+        'Failed to run task',
+      );
+      await Promise.resolve();
+    });
+
+    expect(toasts).toEqual([
+      [
+        'warning',
+        'POST /scheduled-tasks/task-1/run: System overloaded (cpu_load)',
+      ],
+    ]);
+    const newSession = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    );
+    expect(newSession).not.toBeNull();
+    toasts.length = 0;
+    await act(async () => {
+      newSession!.click();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(toasts).toEqual([
+      [
+        'warning',
+        'POST /scheduled-tasks/task-1/run: System overloaded (cpu_load)',
+      ],
+    ]);
+  });
+
+  it('refuses createNewSession at the App root with a warning toast while paused', async () => {
+    armOverload();
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    toasts.length = 0;
+
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    );
+    expect(btn).not.toBeNull();
+    await act(async () => {
+      btn!.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('refuses an explicit ordinary workspace creation while paused', async () => {
+    armOverload();
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    toasts.length = 0;
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-session-primary-workspace"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toEqual([
+      ['warning', expect.stringContaining('Host load ratio 2.50')],
+    ]);
+  });
+
+  it('does not let an inherited recovery retry bypass overload pause', async () => {
+    armOverload();
+    mockConnection.sessionId = 'session-1';
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.standaloneSession = {
+      creationRecovery: { state: 'absent', sessionId: 'session-1' },
+    };
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    mockWorkspace.client.getStandaloneSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        {
+          error: 'Standalone session not found',
+          code: 'standalone_session_not_found',
+        },
+        'Standalone session not found',
+      ),
+    );
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+        .find((button) => button.textContent?.trim() === 'Check status')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(
+        Array.from(
+          container.querySelectorAll<HTMLButtonElement>('button'),
+        ).some(
+          (button) =>
+            button.textContent?.trim() === 'Start a fresh conversation',
+        ),
+      ).toBe(true);
+    });
+
+    const retry = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find(
+      (button) => button.textContent?.trim() === 'Start a fresh conversation',
+    );
+    expect(retry).toBeDefined();
+    await act(async () => {
+      retry?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+  });
+
+  it('pauses creation reactively when a system_overloaded create_session notice arrives', async () => {
+    testState.notices = [
+      {
+        id: 'overload-1',
+        severity: 'error',
+        category: 'user_action',
+        operation: 'create_session',
+        code: 'system_overloaded',
+        message: 'System overloaded (cpu_load: load ratio 3.00)',
+        createdAt: Date.now(),
+      },
+    ];
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    toasts.length = 0;
+
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    );
+    expect(btn).not.toBeNull();
+    await act(async () => {
+      btn!.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toBe(
+      'System overloaded (cpu_load: load ratio 3.00)',
+    );
+  });
+
+  it.each([
+    'branch_session',
+    'fork_session',
+    'load_session',
+    'resume_session',
+  ] as const)(
+    'reactively pauses creation on a %s overload notice',
+    async (operation) => {
+      const message = `System overloaded (cpu_load: ${operation})`;
+      testState.notices = [
+        {
+          id: `overload-${operation}`,
+          severity: 'error',
+          category: 'user_action',
+          operation,
+          code: 'system_overloaded',
+          message,
+          createdAt: Date.now(),
+        },
+      ];
+      const toasts: Array<[string, string]> = [];
+      const { container } = renderApp({
+        onToast: (tone, msg) => toasts.push([tone, msg]),
+      });
+      await flush();
+      toasts.length = 0;
+
+      const btn = container.querySelector<HTMLButtonElement>(
+        '[data-testid="new-session"]',
+      );
+      // Native disabled styling is owned by WebShellSidebar and its
+      // dedicated UI tests; this lightweight sidebar mock drives App handlers.
+      expect(btn).not.toBeNull();
+      await act(async () => {
+        btn!.click();
+        await Promise.resolve();
+      });
+      await flush();
+
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+      expect(toasts).toEqual([['warning', message]]);
+    },
+  );
+
+  it('refuses @-mention from a session-less draft with one warning toast and no noSession error', async () => {
+    armOverload();
+    mentionApiSpy.mockClear();
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['agent_collaboration_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = url.includes('/agent/agents')
+        ? {
+            agents: [
+              {
+                id: 'a1',
+                name: 'helper',
+                enabled: true,
+                status: 'idle',
+                waiting: 0,
+              },
+            ],
+          }
+        : url.includes('/agent/squads')
+          ? { squads: [] }
+          : {};
+      return { ok: true, json: async () => body } as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const toasts: Array<[string, string]> = [];
+    try {
+      renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+      await flush();
+      toasts.length = 0;
+
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('@helper please review');
+        await Promise.resolve();
+      });
+      await flush();
+
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(mentionApiSpy).not.toHaveBeenCalled();
+      expect(toasts).toHaveLength(1);
+      expect(toasts[0]?.[0]).toBe('warning');
+      expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('refuses New side task while paused with one warning toast and no createSideTaskSession call', async () => {
+    armOverload();
+    mockConnection.sessionId = 'parent-session-1';
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_side_task', 'scheduled_task_session_reuse'],
+    } as typeof mockConnection.capabilities;
+    mockWorkspace.client.createSideTaskSession.mockClear();
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    toasts.length = 0;
+
+    const panelProps = testState.latestArtifactPanelProps;
+    expect(panelProps).not.toBeNull();
+    expect(panelProps?.overloadPaused).toBe(true);
+
+    await act(async () => {
+      panelProps?.onCreateSideTask?.();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockWorkspace.client.createSideTaskSession).not.toHaveBeenCalled();
+    expect(
+      testState.latestArtifactPanelProps?.tabs.some(
+        (tab) => tab.kind === 'side_task',
+      ),
+    ).toBe(false);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('guards the low-level side-task creation retry and preserves the boolean API', async () => {
+    armOverload();
+    mockConnection.sessionId = 'parent-session-1';
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_side_task'],
+    } as typeof mockConnection.capabilities;
+    mockWorkspace.client.createSideTaskSession.mockClear();
+    const toasts: Array<[string, string]> = [];
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({
+      shellRef,
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    toasts.length = 0;
+
+    let created: boolean | undefined;
+    act(() => {
+      created = shellRef.current?.createSideTask();
+    });
+    expect(created).toBe(false);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    toasts.length = 0;
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    const createSession =
+      testState.latestArtifactPanelProps?.onCreateSideTaskSession;
+    expect(createSession).toBeTypeOf('function');
+    await act(async () => {
+      let caught: unknown;
+      try {
+        await createSession?.('retry-tab', 'parent-session-1', 'Retry task');
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({ _alreadyDispatched: true });
+      testState.latestArtifactPanelProps?.onError?.(
+        caught,
+        'sideTask.createFailed',
+      );
+    });
+
+    expect(mockWorkspace.client.createSideTaskSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+  });
+
+  it('pins live-session reuse and per-run refusal in the one-shot predicate', async () => {
+    armOverload();
+    mockConnection.sessionId = 'live-session';
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+
+    const predicate =
+      testState.latestScheduledTasksProps?.shouldRefuseManualRun;
+    expect(predicate).toBeTypeOf('function');
+    const unbound = {
+      recurring: false,
+      sessionId: null,
+      sessionMode: 'persistent' as const,
+    };
+    expect(predicate?.(unbound)).toBe(false);
+    expect(predicate?.({ ...unbound, sessionId: 'live-session' })).toBe(false);
+    expect(predicate?.({ ...unbound, sessionId: 'another-live-session' })).toBe(
+      true,
+    );
+    mockConnection.status = 'disconnected';
+    expect(predicate?.({ ...unbound, sessionId: 'live-session' })).toBe(true);
+    mockConnection.status = 'connected';
+    mockConnection.loadingTranscript = true;
+    expect(predicate?.({ ...unbound, sessionId: 'live-session' })).toBe(true);
+    mockConnection.loadingTranscript = false;
+    expect(predicate?.({ ...unbound, sessionMode: 'per_run' })).toBe(true);
+
+    mockConnection.sessionId = null;
+    expect(predicate?.(unbound)).toBe(true);
+  });
+});
+
 describe('App workspace artifact library wiring (R2-1 & R2-4)', () => {
   it('gates the sidebar Artifacts entry on workspace_artifact_library, mounts the full page, and reconciles /artifacts when capability is absent (R2-4)', async () => {
     const { container, rerender, unmount } = renderApp();
@@ -62430,5 +66968,132 @@ describe('App workspace artifact library wiring (R2-1 & R2-4)', () => {
     });
     await flush();
     expect(onToast).toHaveBeenCalledWith('error', 'session deleted mid-jump');
+  });
+});
+
+describe('App main chat ChatSurface convergence (slice 2f.3)', () => {
+  it('renders main chat through ChatSurface, routes AskUserQuestion submit and dismiss, and preserves single-report permission diagnostics', async () => {
+    const onToast = vi.fn();
+    testState.blocks = [
+      makePendingPermissionBlock({
+        requestId: 'ask-main-1',
+        toolName: 'ask_user_question',
+        rawInput: {
+          questions: [{ question: 'Choose', options: [{ label: 'Alpha' }] }],
+        },
+        options: [
+          {
+            optionId: 'allow-once',
+            label: 'Submit',
+            raw: { kind: 'allow_once' },
+          },
+          {
+            optionId: 'reject-once',
+            label: 'Ignore',
+            raw: { kind: 'reject_once' },
+          },
+        ],
+      }),
+    ];
+    mockSessionActions.submitPermission.mockResolvedValue(true);
+    const { container, rerender } = renderApp({ onToast });
+    await flush();
+
+    // Main chat renders through ChatSurface with the display:contents class.
+    const surface = container.querySelector('[data-testid="chat-surface"]');
+    expect(surface).not.toBeNull();
+    expect(surface?.className).toContain('chatSurface');
+
+    // AskUserQuestion submit routes through ChatSurface -> controller.respondQuestion.
+    await act(async () => {
+      const accepted = await testState.latestAskUserQuestionOnConfirm?.(
+        'ask-main-1',
+        'allow-once',
+        { '0': 'Alpha' },
+      );
+      expect(accepted).toBe(true);
+    });
+    expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
+      'ask-main-1',
+      'allow-once',
+      { '0': 'Alpha' },
+    );
+
+    // AskUserQuestion dismiss routes through controller.respondApproval.
+    testState.blocks = [
+      makePendingPermissionBlock({
+        requestId: 'ask-main-2',
+        toolName: 'ask_user_question',
+        rawInput: {
+          questions: [{ question: 'Choose', options: [{ label: 'Beta' }] }],
+        },
+        options: [
+          {
+            optionId: 'allow-once',
+            label: 'Submit',
+            raw: { kind: 'allow_once' },
+          },
+          {
+            optionId: 'reject-once',
+            label: 'Ignore',
+            raw: { kind: 'reject_once' },
+          },
+        ],
+      }),
+    ];
+    rerender();
+    await flush();
+    await act(async () => {
+      const accepted = await testState.latestAskUserQuestionOnConfirm?.(
+        'ask-main-2',
+        'reject-once',
+      );
+      expect(accepted).toBe(true);
+    });
+    expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
+      'ask-main-2',
+      'reject-once',
+    );
+
+    // Failed ToolApproval preserves the original daemon error in a single toast
+    // and re-arms via rejection; mode-lock surfaces localized mode.changePending.
+    onToast.mockClear();
+    mockConnection.currentMode = 'plan';
+    mockConnection.planExecutionMode = 'yolo';
+    testState.blocks = [makePlanPermissionBlock()];
+    rerender();
+    await flush();
+    const transportErr = new Error('daemon says: plan conflict');
+    mockSessionActions.respondToPermission.mockRejectedValueOnce(transportErr);
+    await act(async () => {
+      await expect(
+        testState.latestToolApprovalOnConfirm?.('req-1', 'restore_previous'),
+      ).rejects.toThrow('Approval was not accepted');
+    });
+    expect(onToast).toHaveBeenCalledTimes(1);
+    expect(onToast).toHaveBeenCalledWith('error', 'daemon says: plan conflict');
+
+    onToast.mockClear();
+    const modeDeferred = deferred<{
+      mode: string;
+      planExecutionMode: string;
+    }>();
+    mockSessionActions.setApprovalMode.mockReturnValueOnce(
+      modeDeferred.promise,
+    );
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectMode?.('yolo');
+      await expect(
+        testState.latestToolApprovalOnConfirm?.('req-1', 'restore_previous'),
+      ).rejects.toThrow('Approval was not accepted');
+    });
+    expect(onToast).toHaveBeenCalledTimes(1);
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'A mode change or plan confirmation is pending. Try again when it finishes.',
+    );
+    await act(async () => {
+      modeDeferred.resolve({ mode: 'plan', planExecutionMode: 'yolo' });
+    });
   });
 });

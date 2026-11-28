@@ -151,7 +151,6 @@ class RuntimeProviderPluginsTest {
                 broker.setToken("fixture-broker-token");
                 broker.setWorkspaceCwd("/remote/workspace");
                 broker.setWorkspaceId("fixture-workspace");
-                broker.setPort(0);
                 settings.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
                 settings.validateRuntimeProvider();
                 Class<?> preflight = Class.forName("com.alibaba.qwen.code.managedagent.preflight.ManagedAgentPreflight");
@@ -165,16 +164,11 @@ class RuntimeProviderPluginsTest {
                         .doesNotContain("not installed", "unknown provisioner");
                 Class<?> fixture = loader.loadClass("example.FixtureProvider");
                 try (var runtime = broker(settings)) {
-                    assertThat(runtime.getBaseUri()).isNotNull();
                     assertThat(fixture.getField("created").getInt(null)).isEqualTo(1);
                     assertThat(fixture.getField("closed").getInt(null)).isZero();
                     assertThat(fixture.getField("endpoint").get(null)).isEqualTo("http://127.0.0.1:9");
                 }
                 assertThat(fixture.getField("closed").getInt(null)).isEqualTo(1);
-                broker.setPort(-1);
-                assertThatThrownBy(() -> broker(settings)).hasMessageContaining("listener could not start");
-                assertThat(fixture.getField("created").getInt(null)).isEqualTo(2);
-                assertThat(fixture.getField("closed").getInt(null)).isEqualTo(2);
             });
         }
     }

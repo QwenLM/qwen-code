@@ -21,6 +21,7 @@ import { randomUUID } from 'node:crypto';
 import {
   appendFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -76,6 +77,7 @@ const ACP_INITIALIZE_TIMEOUT_MS = 60_000;
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
 let daemon: ChildProcess;
+let daemonStderr = '';
 let homeDir = '';
 let port = 0;
 let base = '';
@@ -229,6 +231,10 @@ beforeAll(async () => {
       },
     },
   );
+  daemonStderr = '';
+  daemon.stderr!.on('data', (chunk: Buffer) => {
+    daemonStderr += chunk.toString();
+  });
   // Read stdout until we see the listening line + parse the port.
   port = await new Promise<number>((resolve, reject) => {
     let buf = '';
@@ -453,6 +459,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_tasks',
       'session_agents',
       'session_agent_trace',
+      'scheduled_task_owner_selection',
       'scheduled_task_gate',
       'autofix_pr_watches',
       'session_monitor_tool_correlation',
@@ -1606,5 +1613,75 @@ describe('qwen serve — archive coordinator over real HTTP', () => {
     ]);
     expect(existsSync(activePath)).toBe(true);
     expect(existsSync(archivedPath)).toBe(false);
+  });
+
+  it('warns and unlinks a dangling sidecar symlink on real HTTP delete', async () => {
+    // Wait for the boot-time retention sweep to finish before planting the
+    // dangling symlink so the preserve warning below can only come from
+    // POST /sessions/delete, not from the background startup sweep.
+    await expect
+      .poll(() => daemonStderr, { timeout: 10_000 })
+      .toMatch(
+        /retention candidates|worktree retention (?:preserved state|paused)/,
+      );
+
+    const sessionId = randomUUID();
+    const activePath = writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u-1', null, `delete dangling ${sessionId}`),
+    ]);
+    const sidecarPath = activePath.replace(/\.jsonl$/, '.worktree.json');
+    symlinkSync(
+      path.join(homeDir, 'missing-delete-sidecar-target'),
+      sidecarPath,
+    );
+
+    const stderrStart = daemonStderr.length;
+    const result = await client.deleteSessionsData([sessionId]);
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(result.errors).toEqual([]);
+    expect(existsSync(activePath)).toBe(false);
+    expect(lstatSync(sidecarPath, { throwIfNoEntry: false })).toBeUndefined();
+    await expect
+      .poll(() => daemonStderr.slice(stderrStart), { timeout: 5_000 })
+      .toContain(
+        `worktree cleanup preserved checkout action=delete session="${sessionId}" reason="unreadable sidecar (unsafe sidecar file type)"`,
+      );
+  });
+
+  it('logs worktree sidecar unlink failures to daemon stderr on real HTTP delete', async () => {
+    await expect
+      .poll(() => daemonStderr, { timeout: 10_000 })
+      .toMatch(
+        /retention candidates|worktree retention (?:preserved state|paused)/,
+      );
+
+    const sessionId = randomUUID();
+    const activePath = writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u-1', null, `delete eisdir ${sessionId}`),
+    ]);
+    const sidecarPath = activePath.replace(/\.jsonl$/, '.worktree.json');
+    // A directory at the sidecar path makes unlinkSync fail on every platform
+    // (EISDIR / EPERM), even under root or Windows.
+    mkdirSync(sidecarPath);
+
+    try {
+      const stderrStart = daemonStderr.length;
+      const result = await client.deleteSessionsData([sessionId]);
+
+      expect(result.removed).toEqual([sessionId]);
+      expect(result.errors).toEqual([]);
+      expect(existsSync(activePath)).toBe(false);
+      expect(lstatSync(sidecarPath, { throwIfNoEntry: false })).toBeDefined();
+      await expect
+        .poll(() => daemonStderr.slice(stderrStart), { timeout: 5_000 })
+        .toMatch(
+          new RegExp(
+            `qwen serve: worktree sidecar not removed: .*${sessionId}\\.worktree\\.json`,
+          ),
+        );
+    } finally {
+      rmSync(sidecarPath, { recursive: true, force: true });
+    }
   });
 });

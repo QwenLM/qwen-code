@@ -7127,9 +7127,9 @@ export function useDaemonPromptStatus(): DaemonPromptStatus {
   return promptStatus;
 }
 
-export function useDaemonPromptSettled(
+function useDaemonPromptSettledSubscription(
   listener: DaemonPromptSettledListener | undefined,
-): void {
+): DaemonPromptSettlementSubscribe | undefined {
   const subscribe = useContext(DaemonPromptSettlementContext);
   const listenerRef = useRef(listener);
   listenerRef.current = listener;
@@ -7137,11 +7137,24 @@ export function useDaemonPromptSettled(
     () => subscribe?.((event) => listenerRef.current?.(event)),
     [subscribe],
   );
+  return subscribe;
+}
+
+export function useDaemonPromptSettled(
+  listener: DaemonPromptSettledListener | undefined,
+): void {
+  const subscribe = useDaemonPromptSettledSubscription(listener);
   if (listener !== undefined && !subscribe) {
     throw new Error(
       'useDaemonPromptSettled must be used within DaemonSessionProvider',
     );
   }
+}
+
+export function useOptionalDaemonPromptSettled(
+  listener: DaemonPromptSettledListener | undefined,
+): void {
+  useDaemonPromptSettledSubscription(listener);
 }
 
 export function useDaemonConnection(): DaemonConnectionState {

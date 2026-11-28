@@ -141,7 +141,7 @@ export async function removeTasksForSessions(
     throw error;
   }
   const targets = new Set(sessionIds.map(cronTaskSessionDeletionId));
-  const removedIds: string[] = [];
+  const removedDeletionIds: string[] = [];
   await updateCronTasks(
     projectRoot,
     (tasks) => {
@@ -151,11 +151,11 @@ export async function removeTasksForSessions(
           !targets.has(cronTaskSessionDeletionId(task.sessionId))
         )
           return true;
-        removedIds.push(task.id);
+        removedDeletionIds.push(JSON.stringify([task.sessionId, task.id]));
         return false;
       });
       return next.length === tasks.length ? tasks : next;
     },
-    { ...options, deletionIds: () => [...removedIds, ...targets] },
+    { ...options, deletionIds: () => [...removedDeletionIds, ...targets] },
   );
 }

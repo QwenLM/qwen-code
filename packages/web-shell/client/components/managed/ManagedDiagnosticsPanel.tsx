@@ -394,6 +394,7 @@ export function ManagedDiagnosticsPanel({
   clientId,
   running,
   revision,
+  initialTab = 'context',
   onClose,
   restoreFocus,
   onOpenChild,
@@ -403,12 +404,13 @@ export function ManagedDiagnosticsPanel({
   clientId: string;
   running: boolean;
   revision?: string;
+  initialTab?: ManagedDiagnosticsTab;
   onClose(): void;
   restoreFocus(): void;
   onOpenChild?(sessionId: string): void;
 }) {
   const t = useManagedDiagnosticsText();
-  const [tab, setTab] = useState<ManagedDiagnosticsTab>('context');
+  const [tab, setTab] = useState<ManagedDiagnosticsTab>(initialTab);
   const [statisticsKind, setStatisticsKind] = useState<
     'model' | 'tools' | 'files' | 'skills'
   >('model');

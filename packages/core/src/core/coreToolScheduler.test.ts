@@ -56,6 +56,7 @@ import { SkillTool } from '../tools/skill.js';
 import { captureFixedPolicyHookStopReporter } from '../omni/policy/fixed-policy-hook-stop.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { SyntheticOutputTool } from '../tools/syntheticOutput.js';
 import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
 import { createMemoryScopedAgentConfig } from '../memory/memory-scoped-agent-config.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
@@ -16568,6 +16569,30 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(await send(invalid('c2'))).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
     // Turn 3: same bad params — should trigger directive
     expect(await send(invalid('c3'))).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('counts malformed structured output retries across different payloads', async () => {
+    const send = createRetryScheduler([
+      new SyntheticOutputTool({
+        type: 'object',
+        properties: { docs: { type: 'object' } },
+      }),
+    ]);
+    const malformed = (id: string, field: string) =>
+      makeRequest(id, ToolNames.STRUCTURED_OUTPUT, {
+        docs: `{"${field}":1,}`,
+      });
+
+    const first = await send(malformed('c1', 'private_first'));
+    expect(first).toContain('not valid JSON at position');
+    expect(first).not.toContain('private_first');
+    expect(first).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+    expect(await send(malformed('c2', 'private_second'))).not.toContain(
+      RETRY_LOOP_STOP_DIRECTIVE,
+    );
+    expect(await send(malformed('c3', 'private_third'))).toContain(
+      RETRY_LOOP_STOP_DIRECTIVE,
+    );
   });
 
   it.each([

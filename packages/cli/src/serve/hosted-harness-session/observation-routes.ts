@@ -24,7 +24,7 @@ import type {
   HostedSession,
 } from './session-state.js';
 
-async function eventEnvelope(
+export async function eventEnvelope(
   session: HostedSession,
   event: ManagedSessionEvent,
   streamedDeltaIds: Set<string>,

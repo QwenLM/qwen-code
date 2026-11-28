@@ -498,6 +498,34 @@ describe('merged session catalog pagination', () => {
     pending.forEach((resolve) => resolve(undefined));
     await Promise.resolve();
     expect(read).toHaveBeenCalledTimes(2);
+    expect(read.mock.calls[0]?.[2]).toMatchObject({
+      signal: controller.signal,
+    });
+  });
+
+  it('disables prompt-time sidecar writes when listing persisted-only / untrusted secondary workspaces', async () => {
+    const item = summary(0);
+    await persist(item);
+    const chatsDir = path.join(
+      new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+      'chats',
+    );
+    const sidecarPath = path.join(
+      chatsDir,
+      `${item.sessionId}.prompt-time.json`,
+    );
+    const { bridge } = bridgeFor([]);
+
+    const page = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { size: 1 },
+      { runtimeBaseDir, paginateMerged: true, mergeLive: false },
+    );
+    expect(page.sessions[0]?.lastUserPromptAt).toBe(item.createdAt);
+    await expect(fs.stat(sidecarPath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   it('paginates persisted and live-only rows without dropping or duplicating merged rows', async () => {

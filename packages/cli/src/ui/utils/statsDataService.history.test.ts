@@ -226,7 +226,7 @@ describe('stats cross-session transcript reconstruction', () => {
 
       expect(data.report.models['qwen-max']?.totalTokens).toBe(2100);
       expect(data.report.totalRequests).toBe(3);
-      expect(data.report.sessionCount).toBe(2);
+      expect(data.report.sessionCount).toBe(1);
     } finally {
       vi.useRealTimers();
       if (originalHome === undefined) delete process.env['HOME'];
@@ -313,7 +313,7 @@ describe('stats cross-session transcript reconstruction', () => {
       );
       expect(data.report.models['qwen-max']?.totalTokens).toBe(350);
       expect(data.report.totalRequests).toBe(3);
-      expect(data.report.sessionCount).toBe(2);
+      expect(data.report.sessionCount).toBe(1);
     } finally {
       vi.useRealTimers();
       if (originalHome === undefined) delete process.env['HOME'];
@@ -475,7 +475,7 @@ describe('stats cross-session transcript reconstruction', () => {
       const data = await loadStatsData('today', current, sessionId, projectB);
       expect(data.report.models['qwen-max']?.totalTokens).toBe(1100);
       expect(data.report.totalRequests).toBe(2);
-      expect(data.report.sessionCount).toBe(2);
+      expect(data.report.sessionCount).toBe(1);
     } finally {
       vi.useRealTimers();
       if (previousHome === undefined) delete process.env['HOME'];
@@ -498,7 +498,7 @@ describe('stats cross-session transcript reconstruction', () => {
 
     expect(data.report.models['qwen-max']?.totalTokens).toBe(1105);
     expect(data.report.totalRequests).toBe(3);
-    expect(data.report.sessionCount).toBe(3);
+    expect(data.report.sessionCount).toBe(2);
     expect(live?.runScoped).toBe(true);
 
     const records = fs
@@ -666,7 +666,7 @@ describe('stats cross-session transcript reconstruction', () => {
       const second = await loadStatsData('all', live, B, home);
       for (const data of [first, second]) {
         expect(data.report.models['qwen-max']?.totalTokens).toBe(1105);
-        expect(data.report.sessionCount).toBe(3);
+        expect(data.report.sessionCount).toBe(2);
       }
       expect(directorySpy).not.toHaveBeenCalled();
     } finally {

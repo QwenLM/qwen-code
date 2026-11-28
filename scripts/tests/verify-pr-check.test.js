@@ -10,9 +10,13 @@ import {
   accessSync,
   chmodSync,
   constants,
+  cpSync,
+  existsSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   truncateSync,
@@ -20,7 +24,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -30,6 +34,7 @@ import {
   checkMutationCoverage,
   checkTrustClassification,
   containerNonceErrors,
+  executionApprovalErrors,
   isFilesystemRoot,
 } from '../../scripts/verify-pr-check.mjs';
 
@@ -54,6 +59,40 @@ const GATE_RECORD = JSON.stringify({
 });
 const APPROVAL =
   'https://github.com/QwenLM/qwen-code/pull/17185#issuecomment-1234567890';
+
+function commentApproval(overrides = {}) {
+  return {
+    mode: 'waived',
+    source: 'comment',
+    by: 'maintainer',
+    basis: 'maintainer-comment',
+    permission: 'admin',
+    approval: APPROVAL,
+    comment: {
+      id: 1234567890,
+      bodySha256: 'a'.repeat(64),
+    },
+    head: HEAD,
+    round: 1,
+    registrationNonce: 'a2a2a24d-91c8-4c4b-9f87-2f62968a105a',
+    reason: 'Java battery needs the host JDK',
+    ...overrides,
+  };
+}
+
+function localTrustApproval(overrides = {}) {
+  return {
+    mode: 'waived',
+    source: 'local-trust',
+    by: 'maintainer',
+    basis: 'own-pr',
+    permission: 'admin',
+    head: HEAD,
+    round: 1,
+    reason: 'why',
+    ...overrides,
+  };
+}
 
 function validFiles(overrides = {}) {
   return {
@@ -103,6 +142,32 @@ function makeArtifactDir(files, evidence = []) {
     }
   }
   return dir;
+}
+
+function prepareArtifactWitness(dir, snapshot, root = null) {
+  const pr = snapshot.pr ?? snapshot.number;
+  const name = `pr${pr}-verify-20261123-000000`;
+  const context = JSON.stringify({
+    repo: snapshot.repo,
+    pr,
+    baseRefOid: snapshot.baseRefOid ?? '0'.repeat(40),
+    headRefOid: snapshot.headRefOid,
+  });
+  if (
+    root &&
+    dirname(dirname(dir)) === root &&
+    basename(dir).startsWith(`pr${pr}-verify-`)
+  ) {
+    writeFileSync(join(dir, 'context.json'), context);
+    return { dir, clone: root };
+  }
+  const clone = mkdtempSync(join(tmpdir(), 'verify-pr-prepared-host-'));
+  tmpDirs.push(clone);
+  const prepared = join(clone, 'tmp', name);
+  mkdirSync(dirname(prepared), { recursive: true });
+  cpSync(dir, prepared, { recursive: true });
+  writeFileSync(join(prepared, 'context.json'), context);
+  return { dir: prepared, clone };
 }
 
 describe('checkArtifacts', () => {
@@ -594,7 +659,7 @@ describe('checkBoundary', () => {
 
   // R10-20: a gate record whose only marker is a self-chosen container=
   // string carries no observed boundary, so it cannot back a container claim.
-  it('refuses a container declaration backed by a declared-only record', () => {
+  it('refuses a declared-only record with the prepare-first recovery', () => {
     const declaredOnly = JSON.stringify({
       gate: 'require-isolation',
       passed: true,
@@ -606,8 +671,10 @@ describe('checkBoundary', () => {
       checkBoundary(
         JSON.stringify({ mode: 'container', detail: 'my-laptop' }),
         declaredOnly,
-      ).errors.join('\n'),
-    ).toMatch(/no observed boundary marker/);
+      ).errors,
+    ).toEqual([
+      'boundary-gate.json records no observed boundary marker (/.dockerenv or /run/.containerenv): a declared container= string alone is not an observed boundary; for host/VM execution keep the delivered head/round registration, choose --execution host|vm explicitly, and rerun prepare with its approved approval arguments BEFORE the battery; never hand-write the declaration',
+    ]);
     // A record with no observed field at all is refused too.
     expect(
       checkBoundary(
@@ -1090,6 +1157,13 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
       encoding: 'utf8',
       env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
     });
+  const hostFile = (name, text) => {
+    const root = mkdtempSync(join(tmpdir(), 'verify-pr-check-host-'));
+    tmpDirs.push(root);
+    const path = join(root, name);
+    writeFileSync(path, text);
+    return path;
+  };
 
   it('downgrades an absent declaration to a warning under QWEN_VERIFY_CONTEXT', () => {
     const dir = makeArtifactDir(validFiles({ boundary: undefined }), [
@@ -1423,19 +1497,207 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     expect(foreign.stdout).toMatch(
       /approval permalink cites torvalds\/linux#1, not this round's QwenLM\/qwen-code#17185/,
     );
-    // The matching permalink passes end to end.
-    writeFileSync(
-      join(dir, 'boundary.json'),
-      JSON.stringify({
-        mode: 'waived',
-        by: 'maintainer',
-        approval: APPROVAL,
-        reason: 'Java battery needs the host JDK',
-      }),
+    // The matching permalink passes only against prepare's host-held approval
+    // and its digest, not against the approval-shaped artifact alone.
+    const approval = commentApproval();
+    writeFileSync(join(dir, 'boundary.json'), JSON.stringify(approval));
+    const trustedText = JSON.stringify({
+      repo: 'QwenLM/qwen-code',
+      pr: 17185,
+      headRefOid: HEAD,
+      executionApproval: approval,
+    });
+    writeFileSync(hostSnapshot, trustedText);
+    const prepared = prepareArtifactWitness(dir, JSON.parse(trustedText));
+    const matching = spawnSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '--context',
+        hostSnapshot,
+        '--context-root',
+        prepared.clone,
+        '--context-sha256',
+        createHash('sha256').update(trustedText).digest('hex'),
+        prepared.dir,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+      },
     );
-    const matching = withContext(hostSnapshot);
     expect(matching.status).toBe(0);
     expect(matching.stdout).toContain('ok: verdict=merge-ready');
+  });
+
+  it.each([{ source: 'comment' }, { source: 'local-trust' }])(
+    'binds a $source host approval to the actual PR directory across same-head branches',
+    ({ source }) => {
+      const approval =
+        source === 'comment'
+          ? commentApproval({
+              approval:
+                'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-1234567890',
+            })
+          : localTrustApproval();
+      const setup = (
+        directoryPr,
+        artifactContext,
+        artifactRepo = 'QwenLM/qwen-code',
+      ) => {
+        const base = mkdtempSync(join(tmpdir(), 'verify-pr-known-pr-'));
+        tmpDirs.push(base);
+        const clone = join(base, 'clone');
+        const dir = join(
+          clone,
+          'tmp',
+          `pr${directoryPr}-verify-20261123-000000`,
+        );
+        mkdirSync(join(dir, 'evidence'), { recursive: true });
+        writeFileSync(
+          join(dir, 'report.md'),
+          `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** host, maintainer-approved waiver.\n`,
+        );
+        writeFileSync(join(dir, 'verdict.txt'), 'merge-ready\n');
+        writeFileSync(
+          join(dir, 'assertions.json'),
+          JSON.stringify({ pass: 4, fail: 0, total: 4 }),
+        );
+        writeFileSync(join(dir, 'boundary.json'), JSON.stringify(approval));
+        writeFileSync(join(dir, 'evidence', '01-ab.png'), 'png');
+        if (artifactContext) {
+          writeFileSync(
+            join(dir, 'context.json'),
+            JSON.stringify({
+              repo: artifactRepo,
+              pr: directoryPr,
+              baseRefName: 'main',
+              headRefName: 'shared-branch',
+              headRefOid: HEAD,
+            }),
+          );
+        }
+        const trustedText = JSON.stringify({
+          repo: 'QwenLM/qwen-code',
+          pr: 42,
+          baseRefName: 'main',
+          headRefName: 'shared-branch',
+          headRefOid: HEAD,
+          author: { login: 'maintainer' },
+          isCrossRepository: true,
+          executionApproval: approval,
+        });
+        const host = join(base, 'host.json');
+        writeFileSync(host, trustedText);
+        return { clone, dir, host, trustedText };
+      };
+      const check = ({ clone, dir, host, trustedText }) =>
+        spawnSync(
+          process.execPath,
+          [
+            SCRIPT,
+            '--context',
+            host,
+            '--context-root',
+            clone,
+            '--context-sha256',
+            createHash('sha256').update(trustedText).digest('hex'),
+            dir,
+          ],
+          {
+            encoding: 'utf8',
+            env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+          },
+        );
+
+      const control = check(setup(42, true));
+      expect(control.status, control.stdout).toBe(0);
+      const missingContext = check(setup(42, false));
+      expect(missingContext.status, missingContext.stdout).toBe(1);
+      expect(missingContext.stdout).toContain(
+        'artifact context.json must provide the same repo and PR coordinates',
+      );
+      const coordinateFree = setup(42, true);
+      writeFileSync(join(coordinateFree.dir, 'context.json'), '{}');
+      const noCoordinates = check(coordinateFree);
+      expect(noCoordinates.status, noCoordinates.stdout).toBe(1);
+      expect(noCoordinates.stdout).toContain(
+        'artifact context.json must provide the same repo and PR coordinates',
+      );
+      const invalidPr = setup(42, true);
+      const artifactContext = JSON.parse(
+        readFileSync(join(invalidPr.dir, 'context.json'), 'utf8'),
+      );
+      writeFileSync(
+        join(invalidPr.dir, 'context.json'),
+        JSON.stringify({ ...artifactContext, pr: '43', number: 42 }),
+      );
+      const invalidPrResult = check(invalidPr);
+      expect(invalidPrResult.status, invalidPrResult.stdout).toBe(1);
+      expect(invalidPrResult.stdout).toContain(
+        'artifact context.json must provide the same repo and PR coordinates',
+      );
+      const unnamed = setup(42, true);
+      const unnamedDir = join(unnamed.clone, 'tmp', 'round');
+      renameSync(unnamed.dir, unnamedDir);
+      const unnamedResult = check({ ...unnamed, dir: unnamedDir });
+      expect(unnamedResult.status, unnamedResult.stdout).toBe(1);
+      expect(unnamedResult.stdout).toContain(
+        "does not name a PR in prepare's pr<N>-verify-* form",
+      );
+      for (const artifactRepo of ['fork/qwen-code', 'QwenLM/fork']) {
+        const crossRepo = check(setup(42, true, artifactRepo));
+        expect(crossRepo.status, crossRepo.stdout).toBe(1);
+        expect(crossRepo.stdout).toContain(
+          'artifact context.json identifies another repository',
+        );
+      }
+      for (const artifactContext of [false, true]) {
+        const cross = check(setup(43, artifactContext));
+        expect(cross.status, cross.stdout).toBe(1);
+        expect(cross.stdout).toMatch(
+          /pr43-verify-.* names PR 43, but the trusted host snapshot is for QwenLM\/qwen-code#42/,
+        );
+
+        const aliased = setup(43, artifactContext);
+        const alias = join(aliased.clone, 'tmp', 'pr42-verify-20261123-000000');
+        symlinkSync('pr43-verify-20261123-000000', alias, 'dir');
+        for (const roundDir of [alias, `${alias}/`]) {
+          const crossThroughAlias = check({ ...aliased, dir: roundDir });
+          expect(crossThroughAlias.status, crossThroughAlias.stdout).toBe(1);
+          expect(crossThroughAlias.stdout).toMatch(
+            /artifact directory .* must be a real directory, not a symbolic link or other non-directory, when --context supplies trusted PR coordinates; pass the resolved artifact directory path/,
+          );
+        }
+      }
+    },
+  );
+
+  it('keeps legacy snapshots outside the new artifact witness requirement', () => {
+    const dir = makeArtifactDir(validFiles(), ['01-ab-cells.png']);
+    writeFileSync(
+      join(dir, 'context.json'),
+      JSON.stringify({ repo: 'fork/other', pr: '43', number: 42 }),
+    );
+    const trustedText = JSON.stringify({
+      repo: 'QwenLM/qwen-code',
+      pr: 17185,
+      headRefOid: HEAD,
+    });
+    const hostSnapshot = hostFile('legacy-snapshot.json', trustedText);
+    const result = spawnSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '--context',
+        hostSnapshot,
+        '--context-sha256',
+        createHash('sha256').update(trustedText).digest('hex'),
+        dir,
+      ],
+      { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
+    );
+    expect(result.status, result.stdout + result.stderr).toBe(0);
   });
 
   // prepare's snapshot carries `number` (gh's field name), not `pr`, and
@@ -1475,29 +1737,130 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     );
   });
 
-  // The artifact directory is PR-writable: its own context.json must NOT
-  // supply the coordinates that judge its waiver. Without --context the
-  // check stays shape-only, exactly as the failure path documents.
-  it('does not take coordinates from the artifact context.json', () => {
+  // The artifact directory is PR-writable: even a fully coherent approval in
+  // both artifact files supplies no trusted coordinates or preflight approval.
+  it('refuses a waiver whose only approval is inside artifact context.json', () => {
+    const approval = commentApproval();
     const dir = makeArtifactDir(
       validFiles({
-        boundary: JSON.stringify({
-          mode: 'waived',
-          by: 'maintainer',
-          approval: 'https://github.com/torvalds/linux/issues/1#issuecomment-1',
-          reason: 'why',
-        }),
+        boundary: JSON.stringify(approval),
         report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** host, maintainer-approved waiver.\n`,
       }),
       ['01-ab-cells.png'],
     );
     writeFileSync(
       join(dir, 'context.json'),
-      JSON.stringify({ repo: 'QwenLM/qwen-code', pr: 17185, headRefOid: HEAD }),
+      JSON.stringify({
+        repo: 'QwenLM/qwen-code',
+        pr: 17185,
+        headRefOid: HEAD,
+        executionApproval: approval,
+      }),
     );
     const result = run(dir);
-    expect(result.status).toBe(0);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toMatch(/needs the host-held --context snapshot/);
     expect(result.stdout).not.toMatch(/approval permalink cites/);
+
+    // Supplying a real host file and exact digest does not help when the trust
+    // record itself is removed from that file.
+    const untrustedText = JSON.stringify({
+      repo: 'QwenLM/qwen-code',
+      pr: 17185,
+      headRefOid: HEAD,
+    });
+    const hostSnapshot = hostFile('host-without-approval.json', untrustedText);
+    const removingTrust = spawnSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '--context',
+        hostSnapshot,
+        '--context-sha256',
+        createHash('sha256').update(untrustedText).digest('hex'),
+        dir,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+      },
+    );
+    expect(removingTrust.status).toBe(1);
+    expect(removingTrust.stdout).toMatch(/has no executionApproval object/);
+  });
+
+  it('accepts VM only with genuine matching host records and refuses both missing authority forms', () => {
+    for (const approval of [
+      commentApproval({
+        mode: 'vm',
+        attestation: 'nothing mounted, no host credentials',
+      }),
+      localTrustApproval({
+        mode: 'vm',
+        attestation: 'nothing mounted, no host credentials',
+      }),
+    ]) {
+      const dir = makeArtifactDir(
+        validFiles({
+          boundary: JSON.stringify(approval),
+          boundaryGate: undefined,
+          report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** attested VM, no host mounts or credentials.\n`,
+        }),
+        ['01-ab-cells.png'],
+      );
+      const noContext = run(dir);
+      expect(noContext.status, approval.source).toBe(1);
+      expect(noContext.stdout).toMatch(/needs the host-held --context/);
+      const trustedText = JSON.stringify({
+        repo: 'QwenLM/qwen-code',
+        pr: 17185,
+        headRefOid: HEAD,
+        author: { login: 'maintainer' },
+        isCrossRepository: true,
+        executionApproval: approval,
+      });
+      const prepared = prepareArtifactWitness(dir, JSON.parse(trustedText));
+      const hostSnapshot = hostFile(
+        `host-${approval.source}.json`,
+        trustedText,
+      );
+      const noDigest = spawnSync(
+        process.execPath,
+        [
+          SCRIPT,
+          '--context',
+          hostSnapshot,
+          '--context-root',
+          prepared.clone,
+          prepared.dir,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+        },
+      );
+      expect(noDigest.status, approval.source).toBe(1);
+      expect(noDigest.stdout).toMatch(/needs --context-sha256/);
+      const accepted = spawnSync(
+        process.execPath,
+        [
+          SCRIPT,
+          '--context',
+          hostSnapshot,
+          '--context-root',
+          prepared.clone,
+          '--context-sha256',
+          createHash('sha256').update(trustedText).digest('hex'),
+          prepared.dir,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+        },
+      );
+      expect(accepted.status, `${approval.source}: ${accepted.stdout}`).toBe(0);
+      expect(accepted.stdout).toContain('ok: verdict=merge-ready');
+    }
   });
 });
 
@@ -1681,6 +2044,192 @@ describe('waiver approval coordinates', () => {
   });
 });
 
+describe('executionApproval host binding', () => {
+  const verified = {
+    contextProvided: true,
+    contextDigestVerified: true,
+  };
+  const snapshot = (executionApproval) => ({
+    repo: 'QwenLM/qwen-code',
+    number: 17185,
+    headRefOid: HEAD,
+    author: { login: 'maintainer' },
+    isCrossRepository: true,
+    executionApproval,
+  });
+
+  it('accepts matching comment and local-trust records including same-repository trust', () => {
+    const comment = commentApproval();
+    expect(
+      executionApprovalErrors(
+        JSON.stringify(comment),
+        snapshot(comment),
+        verified,
+      ),
+    ).toEqual([]);
+    expect(checkBoundary(JSON.stringify(comment)).errors).toEqual([]);
+    for (const [cross, basis] of [
+      [true, 'own-pr'],
+      [false, 'same-repository'],
+    ]) {
+      const local = localTrustApproval({ basis });
+      const context = {
+        ...snapshot(local),
+        isCrossRepository: cross,
+        ...(basis === 'same-repository'
+          ? { author: { login: 'colleague' } }
+          : {}),
+      };
+      expect(
+        executionApprovalErrors(JSON.stringify(local), context, verified),
+      ).toEqual([]);
+      // Without the CLI's authority, this is only a shape check and has no
+      // comment URL to validate; executionApprovalErrors above is the gate.
+      expect(checkBoundary(JSON.stringify(local)).errors).toEqual([]);
+    }
+  });
+
+  it('rejects an unsupported source even with otherwise valid comment approval evidence', () => {
+    const unsupported = commentApproval({ source: 'ci-lane' });
+    expect(
+      executionApprovalErrors(
+        JSON.stringify(unsupported),
+        snapshot(unsupported),
+        verified,
+      ),
+    ).toEqual([
+      'executionApproval source must be local-trust or comment, with its matching basis',
+    ]);
+  });
+
+  it('rejects a local-trust basis with otherwise valid comment approval evidence', () => {
+    const mismatched = commentApproval({ basis: 'own-pr' });
+    expect(
+      executionApprovalErrors(
+        JSON.stringify(mismatched),
+        snapshot(mismatched),
+        verified,
+      ),
+    ).toEqual([
+      'comment executionApproval needs basis maintainer-comment, an approval permalink, numeric comment.id, 64-hex comment.bodySha256 and its registrationNonce',
+    ]);
+  });
+
+  it('requires a host context and a verified digest even for an old valid waiver', () => {
+    const legacy = {
+      mode: 'waived',
+      by: 'maintainer',
+      approval: APPROVAL,
+      reason: 'why',
+    };
+    expect(executionApprovalErrors(JSON.stringify(legacy), null)).toEqual([
+      expect.stringMatching(/host-held --context/),
+    ]);
+    expect(
+      executionApprovalErrors(JSON.stringify(legacy), snapshot(null), {
+        contextProvided: true,
+        contextDigestVerified: false,
+      }),
+    ).toEqual([expect.stringMatching(/--context-sha256/)]);
+    expect(
+      executionApprovalErrors(JSON.stringify(legacy), snapshot(null), verified),
+    ).toEqual([expect.stringMatching(/no executionApproval object/)]);
+  });
+
+  it('rejects declaration tampering and a moved head', () => {
+    const original = localTrustApproval();
+    const context = snapshot(original);
+    expect(
+      executionApprovalErrors(
+        JSON.stringify({ ...original, round: 2 }),
+        context,
+        verified,
+      ),
+    ).toEqual([
+      expect.stringMatching(/differs from the host-held executionApproval/),
+    ]);
+    expect(
+      executionApprovalErrors(
+        JSON.stringify(original),
+        { ...context, headRefOid: 'c'.repeat(40) },
+        verified,
+      ),
+    ).toEqual([expect.stringMatching(/mode\/head does not match/)]);
+  });
+
+  it('accepts a local-trust VM with its attestation in both authority checks', () => {
+    const vm = localTrustApproval({
+      mode: 'vm',
+      attestation: 'nothing mounted, no host credentials',
+    });
+    expect(
+      executionApprovalErrors(JSON.stringify(vm), snapshot(vm), verified),
+    ).toEqual([]);
+    expect(checkBoundary(JSON.stringify(vm)).errors).toEqual([]);
+  });
+
+  it('requires local-trust VM attestation at both authority layers', () => {
+    const missing = localTrustApproval({ mode: 'vm' });
+    expect(
+      executionApprovalErrors(
+        JSON.stringify(missing),
+        snapshot(missing),
+        verified,
+      ),
+    ).toEqual([expect.stringMatching(/VM attestation/)]);
+    expect(checkBoundary(JSON.stringify(missing)).errors).toEqual([
+      expect.stringMatching(/mode vm needs a non-empty attestation/),
+    ]);
+  });
+
+  it('rejects invalid permission and non-40-hex approval heads explicitly', () => {
+    for (const bad of [
+      localTrustApproval({ permission: 'read' }),
+      localTrustApproval({ head: 'abc123' }),
+    ]) {
+      expect(
+        executionApprovalErrors(JSON.stringify(bad), snapshot(bad), verified),
+      ).toEqual([expect.stringMatching(/valid round and permission/)]);
+    }
+  });
+
+  it('rejects local trust by another fork even when artifact and record agree', () => {
+    const local = localTrustApproval();
+    const forged = { ...snapshot(local), author: { login: 'someone-else' } };
+    expect(
+      executionApprovalErrors(JSON.stringify(local), forged, verified),
+    ).toEqual([
+      expect.stringMatching(/local-trust executionApproval does not match/),
+    ]);
+  });
+
+  it('validates the comment record instead of only comparing JSON', () => {
+    for (const bad of [
+      commentApproval({
+        comment: { id: 0, bodySha256: 'a'.repeat(64) },
+      }),
+      commentApproval({ comment: { id: 1234567890, bodySha256: 'bad' } }),
+      commentApproval({ registrationNonce: 'not-a-registration' }),
+    ]) {
+      expect(
+        executionApprovalErrors(JSON.stringify(bad), snapshot(bad), verified),
+      ).toEqual([expect.stringMatching(/comment executionApproval needs/)]);
+    }
+    const malformed = localTrustApproval({ round: 0 });
+    expect(
+      executionApprovalErrors(
+        JSON.stringify(malformed),
+        snapshot(malformed),
+        verified,
+      ),
+    ).toEqual([expect.stringMatching(/valid round and permission/)]);
+  });
+
+  it('does not add host requirements to container declarations', () => {
+    expect(executionApprovalErrors(validFiles().boundary, null)).toEqual([]);
+  });
+});
+
 // The wholly-<…> arm catches any copied template, not only the skill's
 // named tokens.
 describe('generic placeholder arm', () => {
@@ -1777,9 +2326,9 @@ describe('round-10 witnesses', () => {
     expect(result.errors.join('\n')).not.toMatch(/boundary\.json is missing/);
   });
 
-  // R10-2: the directory name no longer supplies the PR number; a snapshot
-  // without a number yields null coordinates even in a pr999-verify dir.
-  it('does not take the PR number from the artifact directory name', () => {
+  // R10-2: the directory name never supplies trusted identity. A host/VM
+  // approval without a trusted PR number is refused even in a pr999-verify dir.
+  it('requires the trusted PR number instead of taking it from the artifact directory name', () => {
     const root = mkdtempSync(join(tmpdir(), 'verify-pr-r10-'));
     tmpDirs.push(root);
     const dir = join(root, 'pr999-verify-x');
@@ -1793,34 +2342,150 @@ describe('round-10 witnesses', () => {
       join(dir, 'assertions.json'),
       '{"pass":1,"fail":0,"total":1}',
     );
-    writeFileSync(
-      join(dir, 'boundary.json'),
-      JSON.stringify({
-        mode: 'waived',
-        by: 'maintainer',
-        approval:
-          'https://github.com/QwenLM/qwen-code/pull/999#issuecomment-123',
-        reason: 'why',
-      }),
-    );
+    const approval = commentApproval({
+      approval: 'https://github.com/QwenLM/qwen-code/pull/999#issuecomment-123',
+      comment: { id: 123, bodySha256: 'a'.repeat(64) },
+      reason: 'why',
+    });
+    writeFileSync(join(dir, 'boundary.json'), JSON.stringify(approval));
     writeFileSync(join(dir, 'evidence/01-x.png'), 'png');
     const snap = join(root, 'snap.json');
-    writeFileSync(
-      snap,
-      JSON.stringify({ repo: 'QwenLM/qwen-code', headRefOid: HEAD }),
-    );
-    const res = spawnSync(process.execPath, [SCRIPT, '--context', snap, dir], {
-      encoding: 'utf8',
-      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    const trustedText = JSON.stringify({
+      repo: 'QwenLM/qwen-code',
+      headRefOid: HEAD,
+      executionApproval: approval,
     });
-    // No number in the snapshot → shape-only, with the downgrade disclosed;
-    // the directory name pr999 must NOT satisfy the comparison.
-    expect(res.status).toBe(0);
+    writeFileSync(snap, trustedText);
+    const res = spawnSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '--context',
+        snap,
+        '--context-sha256',
+        createHash('sha256').update(trustedText).digest('hex'),
+        dir,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+      },
+    );
+    // The digest, approval body, head and directory shape are all valid. Only
+    // the trusted number is absent; pr999 must not fill that identity gap.
+    expect(res.status).toBe(1);
     expect(res.stdout).toMatch(
-      /approval target was not compared against this PR/,
+      /needs trusted repo and positive PR coordinates in --context/,
     );
     expect(res.stdout).not.toMatch(/approval permalink cites/);
+    expect(res.stdout).not.toMatch(/--context-sha256 matching/);
   });
+
+  it.each([{ source: 'comment' }, { source: 'local-trust' }])(
+    'fails closed when a $source approval has missing trusted coordinates, including aliases',
+    ({ source }) => {
+      const approval =
+        source === 'comment'
+          ? commentApproval({
+              approval:
+                'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-1234567890',
+            })
+          : localTrustApproval();
+      const setup = (directoryPr, coordinates) => {
+        const base = mkdtempSync(join(tmpdir(), 'verify-pr-missing-coords-'));
+        tmpDirs.push(base);
+        const clone = join(base, 'clone');
+        const dir = join(
+          clone,
+          'tmp',
+          `pr${directoryPr}-verify-20261123-000000`,
+        );
+        mkdirSync(join(dir, 'evidence'), { recursive: true });
+        writeFileSync(
+          join(dir, 'report.md'),
+          `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** host, maintainer-approved waiver.\n`,
+        );
+        writeFileSync(join(dir, 'verdict.txt'), 'merge-ready\n');
+        writeFileSync(
+          join(dir, 'assertions.json'),
+          JSON.stringify({ pass: 4, fail: 0, total: 4 }),
+        );
+        writeFileSync(join(dir, 'boundary.json'), JSON.stringify(approval));
+        writeFileSync(join(dir, 'evidence', '01-ab.png'), 'png');
+        const trustedText = JSON.stringify({
+          ...coordinates,
+          headRefOid: HEAD,
+          author: { login: 'maintainer' },
+          isCrossRepository: true,
+          executionApproval: approval,
+        });
+        const host = join(base, 'host.json');
+        writeFileSync(host, trustedText);
+        return { base, clone, dir, host, trustedText };
+      };
+      const check = ({ dir, clone, host, trustedText }) =>
+        spawnSync(
+          process.execPath,
+          [
+            SCRIPT,
+            '--context',
+            host,
+            '--context-root',
+            clone,
+            '--context-sha256',
+            createHash('sha256').update(trustedText).digest('hex'),
+            dir,
+          ],
+          {
+            encoding: 'utf8',
+            env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+          },
+        );
+
+      for (const coordinates of [
+        { pr: 42 },
+        { repo: 'QwenLM/qwen-code' },
+        {},
+        { repo: 'not-a-slug', pr: 42 },
+        { repo: 'QwenLM/qwen-code', pr: 0 },
+        { repo: ['QwenLM/qwen-code'], pr: 42 },
+        { repo: { slug: 'QwenLM/qwen-code' }, pr: 42 },
+      ]) {
+        const round = setup(43, coordinates);
+        const cross = check(round);
+        expect(cross.status, cross.stdout).toBe(1);
+        expect(cross.stdout).toMatch(
+          /needs trusted repo and positive PR coordinates in --context/,
+        );
+        expect(cross.stdout).not.toMatch(/--context-sha256 matching/);
+
+        const alias = join(round.clone, 'tmp', 'pr42-verify-20261123-000000');
+        symlinkSync('pr43-verify-20261123-000000', alias, 'dir');
+        for (const roundDir of [alias, `${alias}/`]) {
+          const replay = check({ ...round, dir: roundDir });
+          expect(replay.status, replay.stdout).toBe(1);
+          expect(replay.stdout).toMatch(
+            /needs trusted repo and positive PR coordinates in --context/,
+          );
+        }
+      }
+
+      const controlFixture = setup(42, {
+        repo: 'QwenLM/qwen-code',
+        pr: 42,
+      });
+      const control = check({
+        ...controlFixture,
+        ...prepareArtifactWitness(
+          controlFixture.dir,
+          { repo: 'QwenLM/qwen-code', pr: 42, headRefOid: HEAD },
+          controlFixture.clone,
+        ),
+      });
+      expect(control.status, control.stdout).toBe(0);
+      expect(control.stdout).toContain('ok: verdict=merge-ready');
+    },
+  );
 
   // R10-49 (false negative): a Methodology heading and Boundary disclosure
   // that live only inside a code fence are a copied template, not the round's
@@ -2302,7 +2967,7 @@ describe('round-14 witnesses', () => {
   const setup = () => {
     const root = mkdtempSync(join(tmpdir(), 'verify-pr-r14-'));
     tmpDirs.push(root);
-    const dir = join(root, 'tmp', 'pr7-verify-20261115-000000');
+    const dir = join(root, 'tmp', 'pr17185-verify-20261115-000000');
     mkdirSync(join(dir, 'evidence'), { recursive: true });
     writeFileSync(join(dir, 'report.md'), validFiles({}).report);
     writeFileSync(join(dir, 'verdict.txt'), 'merge-ready\n');
@@ -2312,12 +2977,7 @@ describe('round-14 witnesses', () => {
     );
     writeFileSync(
       join(dir, 'boundary.json'),
-      JSON.stringify({
-        mode: 'waived',
-        by: 'maintainer',
-        approval: APPROVAL,
-        reason: 'why',
-      }),
+      JSON.stringify(commentApproval({ reason: 'why' })),
     );
     writeFileSync(join(dir, 'evidence/01-x.png'), 'png');
     const sibling = join(root, 'tmp', 'verify-context', 'pr7.json');
@@ -2361,19 +3021,29 @@ describe('round-14 witnesses', () => {
       expect(refused.stderr).toMatch(
         /must not point inside the PR-writable worktree/,
       );
-      // A host-held copy outside the named root is accepted (shape-only).
+      // A host-held copy outside the named root is accepted when its approval
+      // matches and the digest binds the bytes prepare wrote.
       const outside = join(root, '..', `host-snap-${Date.now()}.json`);
-      writeFileSync(
-        outside,
-        JSON.stringify({
-          repo: 'QwenLM/qwen-code',
-          pr: 17185,
-          headRefOid: HEAD,
-        }),
-      );
+      const trustedText = JSON.stringify({
+        repo: 'QwenLM/qwen-code',
+        pr: 17185,
+        headRefOid: HEAD,
+        executionApproval: commentApproval({ reason: 'why' }),
+      });
+      writeFileSync(outside, trustedText);
+      const prepared = prepareArtifactWitness(dir, JSON.parse(trustedText));
       const accepted = spawnSync(
         process.execPath,
-        [SCRIPT, '--context', outside, '--context-root', root, dir],
+        [
+          SCRIPT,
+          '--context',
+          outside,
+          '--context-root',
+          prepared.clone,
+          '--context-sha256',
+          createHash('sha256').update(trustedText).digest('hex'),
+          prepared.dir,
+        ],
         { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
       );
       expect(accepted.status).toBe(0);
@@ -2652,9 +3322,12 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
       join(dir, 'harness.log'),
       'x'.repeat(65 * 1024 * 1024) + `\ncontainer-nonce: ${NONCE}\n`,
     );
-    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
-      /hit its resource bound/,
-    );
+    const message = containerNonceErrors(boundary, gateWith(), dir).join('\n');
+    expect(message).toMatch(/hit its resource bound/);
+    expect(message).toMatch(/--execution host\|vm/);
+    expect(message).toMatch(/BEFORE the battery/);
+    expect(message).toMatch(/never hand-write the declaration/);
+    expect(message).not.toMatch(/declare mode:"waived"/);
   });
 
   // R4-4: directories count against the entry cap, so a planted forest of empty
@@ -2742,11 +3415,16 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
     );
   });
 
-  it('names maintainer approval for a waiver, not a free bypass (D17-2)', () => {
+  it('names prepare-authored host/VM approval before the battery (D17-2)', () => {
     const dir = dirWithLog(null);
     const message = containerNonceErrors(boundary, gateWith(), dir).join('\n');
-    expect(message).toMatch(/maintainer's approval/);
-    expect(message).toMatch(/not a free bypass/);
+    expect(message).toMatch(
+      /keep the current head\/round in-flight registration/,
+    );
+    expect(message).not.toMatch(/release any in-flight registration/);
+    expect(message).toMatch(/--execution host\|vm/);
+    expect(message).toMatch(/BEFORE the battery/);
+    expect(message).toMatch(/never hand-write the declaration/);
   });
 
   it('exempts the ci-lane record and non-container modes', () => {
@@ -3098,6 +3776,53 @@ describe('R17-1 / R2-1 trust-boundary witnesses', () => {
         dir,
       ]);
       expect(res.status).toBe(0);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a genuine host-held approval without a context digest through the CLI',
+    () => {
+      const { base, clone, dir } = cloneLayout('verify-pr-approval-digest-');
+      const approval = localTrustApproval();
+      writeFileSync(join(dir, 'boundary.json'), JSON.stringify(approval));
+      const host = join(base, 'genuine-host-approval.json');
+      const trustedText = JSON.stringify({
+        repo: 'QwenLM/qwen-code',
+        pr: 7,
+        headRefOid: HEAD,
+        author: { login: 'maintainer' },
+        isCrossRepository: true,
+        executionApproval: approval,
+      });
+      writeFileSync(host, trustedText);
+      const prepared = prepareArtifactWitness(
+        dir,
+        JSON.parse(trustedText),
+        clone,
+      );
+
+      const noDigest = run([
+        '--context',
+        host,
+        '--context-root',
+        clone,
+        prepared.dir,
+      ]);
+      expect(noDigest.status, noDigest.stdout + noDigest.stderr).toBe(1);
+      expect(noDigest.stdout).toMatch(
+        /boundary\.json mode waived needs --context-sha256 matching the host snapshot's bytes/,
+      );
+
+      const control = run([
+        '--context',
+        host,
+        '--context-sha256',
+        sha256(trustedText),
+        '--context-root',
+        clone,
+        prepared.dir,
+      ]);
+      expect(control.status).toBe(0, control.stdout);
     },
   );
 
@@ -3834,6 +4559,1276 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     expect(cliNullTc.status).toBe(1);
     expect(cliNullTc.stderr).toMatch(
       /trustClassification must be a JSON object/,
+    );
+
+    // 8g. Hardware-isolated provider-vm uses mode:"vm" + backend:"provider-vm"
+    // certified by --execution-record, not preflight executionApproval; an
+    // unrecorded provider-vm declaration is still refused fail-closed.
+    const providerDir = join(clone, 'tmp', 'pr17185-verify-20261124-030000');
+    mkdirSync(join(providerDir, 'evidence'), { recursive: true });
+    const providerRec = makeExecRecord({
+      backend: 'provider-vm',
+      backendVersion: 'aliyun-ecs-2014-05-26',
+      platform: 'aliyun-cn-hangzhou',
+      contextDigest: ctxSha,
+      providerLifecycle: {
+        allocationId: 'i-bp1test001',
+        freshDiskId: 'd-bp1test001',
+        boundRunId: 'fc-run-01',
+        boundHeadRefOid: HEAD,
+        terminationState: 'terminated',
+        diskDeleted: true,
+      },
+    });
+    const providerRecText = JSON.stringify(providerRec, null, 2);
+    const providerRecPath = join(base, 'provider-execution-record.json');
+    writeFileSync(providerRecPath, providerRecText);
+    const providerFiles = validFiles({
+      report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n\n## Methodology\n\n**Boundary.** Disposable Aliyun provider-vm (hardware-isolated).\n`,
+      boundary: JSON.stringify(
+        makeMicrovmBoundary(providerRec, providerRecText),
+      ),
+      boundaryGate: null,
+    });
+    writeFileSync(join(providerDir, 'report.md'), providerFiles.report);
+    writeFileSync(join(providerDir, 'verdict.txt'), providerFiles.verdict);
+    writeFileSync(
+      join(providerDir, 'assertions.json'),
+      providerFiles.assertions,
+    );
+    writeFileSync(join(providerDir, 'boundary.json'), providerFiles.boundary);
+    writeFileSync(join(providerDir, 'evidence', '01-ab-cells.png'), 'png');
+
+    const providerOk = run([
+      '--context-root',
+      clone,
+      ...anchor,
+      '--execution-record',
+      providerRecPath,
+      '--execution-record-sha256',
+      sha256(providerRecText),
+      providerDir,
+    ]);
+    expect(providerOk.status, providerOk.stdout + providerOk.stderr).toBe(0);
+    expect(providerOk.stdout).toMatch(/ok: verdict=merge-ready/);
+
+    const providerUnrecorded = run([
+      '--context-root',
+      clone,
+      ...anchor,
+      providerDir,
+    ]);
+    expect(providerUnrecorded.status).toBe(1);
+    expect(providerUnrecorded.stdout).toMatch(
+      /requires a host-held --execution-record/,
+    );
+
+    // 8h. Attested mode:"vm" (without backend:"provider-vm") contradicts a
+    // non-provider-vm host --execution-record, symmetrically with mode:"waived".
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'vm',
+          by: 'wenshao',
+          reason: 'manual VM round',
+          attestation: 'nothing mounted, no host credentials',
+          approval:
+            'https://github.com/QwenLM/qwen-code/pull/17185#issuecomment-1',
+        }),
+        null,
+        {
+          coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 17185 },
+          executionRecord: boundRec,
+        },
+      ).errors.join('\n'),
+    ).toMatch(/boundary\.json mode vm contradicts a host --execution-record/);
+
+    // 8i. A parent-directory symlink aliasing <clone>/tmp under another name
+    // must not downgrade derived trustRoot/execTrustRoot when --context-root
+    // is omitted: in-clone --context and --execution-record stay refused.
+    const aliasParent = join(base, 'alias');
+    symlinkSync(join(clone, 'tmp'), aliasParent);
+    const aliasedDir = join(aliasParent, basename(dir));
+    const inCloneCtx = join(clone, 'tmp', 'verify-context', 'pr17185.json');
+    mkdirSync(dirname(inCloneCtx), { recursive: true });
+    writeFileSync(inCloneCtx, ctxText);
+    const inCloneRec = join(clone, 'forged-exec-record.json');
+    writeFileSync(inCloneRec, boundRecText);
+
+    const aliasedCtxRefused = run([
+      '--context',
+      inCloneCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      aliasedDir,
+    ]);
+    expect(aliasedCtxRefused.status).toBe(1);
+    expect(aliasedCtxRefused.stderr).toMatch(
+      /--context must not point inside the PR-writable worktree/,
+    );
+
+    const aliasedRecRefused = run([
+      '--context',
+      hostCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      inCloneRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      aliasedDir,
+    ]);
+    expect(aliasedRecRefused.status).toBe(1);
+    expect(aliasedRecRefused.stderr).toMatch(
+      /--execution-record must not point inside the PR-writable worktree/,
+    );
+
+    // 8j. When <clone>/tmp itself is a symlink to an external directory not
+    // named "tmp", both the clone root and the external container stay enclosed.
+    const symlinkedClone = join(base, 'clone-symlink-tmp');
+    const externalArtifacts = join(base, 'outside-artifacts');
+    mkdirSync(symlinkedClone, { recursive: true });
+    mkdirSync(join(externalArtifacts, 'verify-context'), { recursive: true });
+    symlinkSync(externalArtifacts, join(symlinkedClone, 'tmp'));
+    const symRoundDir = join(
+      symlinkedClone,
+      'tmp',
+      'pr17185-verify-20261124-031500',
+    );
+    mkdirSync(join(symRoundDir, 'evidence'), { recursive: true });
+    writeFileSync(join(symRoundDir, 'report.md'), validFiles().report);
+    writeFileSync(join(symRoundDir, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(
+      join(symRoundDir, 'assertions.json'),
+      validFiles().assertions,
+    );
+    writeFileSync(
+      join(symRoundDir, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(symRoundDir, 'evidence', '01-ab-cells.png'), 'png');
+    const cloneRootCtx = join(symlinkedClone, 'forged-ctx.json');
+    writeFileSync(cloneRootCtx, ctxText);
+    const cloneRootRec = join(symlinkedClone, 'forged-rec.json');
+    writeFileSync(cloneRootRec, boundRecText);
+    const siblingCtx = join(
+      symlinkedClone,
+      'tmp',
+      'verify-context',
+      'pr17185.json',
+    );
+    writeFileSync(siblingCtx, ctxText);
+    for (const [label, args] of [
+      [
+        'clone-root context',
+        [
+          '--context',
+          cloneRootCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          hostRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          symRoundDir,
+        ],
+      ],
+      [
+        'clone-root execution-record',
+        [
+          '--context',
+          hostCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          cloneRootRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          symRoundDir,
+        ],
+      ],
+      [
+        'symlinked-tmp sibling context',
+        [
+          '--context',
+          siblingCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          hostRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          symRoundDir,
+        ],
+      ],
+    ]) {
+      const res = run(args);
+      expect(res.status, `${label}: ${res.stdout}${res.stderr}`).toBe(1);
+      expect(res.stderr, label).toMatch(/must not point inside/);
+    }
+
+    // 8k. Container mode unconditionally rejects contradictory executionClass,
+    // and checkArtifacts rejects mismatched prTrust between trustClassification
+    // and execution-record.json.
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'container',
+          detail: 'img',
+          executionClass: 'hardware-isolated',
+        }),
+        validFiles().boundaryGate,
+      ).errors.join('\n'),
+    ).toMatch(/mode container cannot declare executionClass/);
+    const mismatchedTrustRec = makeExecRecord({
+      prTrust: 'local-owner',
+      contextDigest: ctxSha,
+    });
+    const mismatchedTrustRecText = JSON.stringify(mismatchedTrustRec);
+    const mismatchedTrustResult = checkArtifacts({
+      files: validFiles({
+        boundary: JSON.stringify(
+          makeMicrovmBoundary(mismatchedTrustRec, mismatchedTrustRecText),
+        ),
+        boundaryGate: null,
+      }),
+      evidence: ['01-ab-cells.png'],
+      expectedHead: HEAD,
+      coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 17185 },
+      executionRecordText: mismatchedTrustRecText,
+      executionRecordSha256: sha256(mismatchedTrustRecText),
+      expectedContextSha256: ctxSha,
+      trustClassification: {
+        prTrust: 'external',
+        executionClass: 'hardware-isolated',
+        escalationReasons: [],
+        headRefOid: HEAD,
+      },
+    });
+    expect(mismatchedTrustResult.errors.join('\n')).toMatch(
+      /execution-record\.json prTrust .* does not match host trustClassification\.prTrust/,
+    );
+
+    // 8l. Nested symlink (<clone>/sub/alias -> <clone>/tmp -> <external-box>)
+    // still encloses both the clone root and the external container when
+    // --context-root is omitted.
+    mkdirSync(join(symlinkedClone, 'sub'), { recursive: true });
+    symlinkSync(
+      join(symlinkedClone, 'tmp'),
+      join(symlinkedClone, 'sub', 'alias'),
+    );
+    const nestedRoundDir = join(
+      symlinkedClone,
+      'sub',
+      'alias',
+      basename(symRoundDir),
+    );
+    for (const [label, ctxCandidate] of [
+      ['nested clone-root context', cloneRootCtx],
+      ['nested external-box sibling context', siblingCtx],
+    ]) {
+      const res = run([
+        '--context',
+        ctxCandidate,
+        '--context-sha256',
+        ctxSha,
+        '--execution-record',
+        hostRec,
+        '--execution-record-sha256',
+        boundRecSha,
+        nestedRoundDir,
+      ]);
+      expect(res.status, `${label}: ${res.stdout}${res.stderr}`).toBe(1);
+      expect(res.stderr, label).toMatch(/must not point inside/);
+    }
+
+    // 8m. Host --context with preflight executionApproval contradicts a PR-side
+    // rewrite of boundary.json to mode:"container".
+    expect(
+      executionApprovalErrors(
+        JSON.stringify({ mode: 'container', detail: 'forged' }),
+        {
+          headRefOid: HEAD,
+          executionApproval: {
+            mode: 'waived',
+            source: 'local-trust',
+            basis: 'own-pr',
+            by: 'wenshao',
+            permission: 'admin',
+            head: HEAD,
+            round: 1,
+            reason: 'host round',
+          },
+        },
+        { contextProvided: true, contextDigestVerified: true },
+      ).join('\n'),
+    ).toMatch(/contradicts boundary\.json mode container/);
+
+    // 8n. On case-insensitive filesystems (macOS/Windows), casing variants of
+    // the PR clone path cannot bypass in-clone --context / --execution-record
+    // refusals.
+    if (process.platform === 'darwin' || process.platform === 'win32') {
+      const mixedClone = join(base, 'MixedCaseClone');
+      const mixedDir = join(
+        mixedClone,
+        'tmp',
+        'pr17185-verify-20261124-032000',
+      );
+      mkdirSync(join(mixedDir, 'evidence'), { recursive: true });
+      mkdirSync(join(mixedClone, 'tmp', 'verify-context'), { recursive: true });
+      writeFileSync(join(mixedDir, 'report.md'), validFiles().report);
+      writeFileSync(join(mixedDir, 'verdict.txt'), validFiles().verdict);
+      writeFileSync(join(mixedDir, 'assertions.json'), validFiles().assertions);
+      writeFileSync(
+        join(mixedDir, 'boundary.json'),
+        JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+      );
+      writeFileSync(join(mixedDir, 'evidence', '01-ab-cells.png'), 'png');
+      const mixedCtx = join(
+        mixedClone,
+        'tmp',
+        'verify-context',
+        'pr17185.json',
+      );
+      writeFileSync(mixedCtx, ctxText);
+      const mixedRec = join(mixedClone, 'forged-rec.json');
+      writeFileSync(mixedRec, boundRecText);
+
+      const flippedCtx = mixedCtx.replace('MixedCaseClone', 'mixedcaseclone');
+      const flippedRec = mixedRec.replace('MixedCaseClone', 'mixedcaseclone');
+      const caseCtxRes = run([
+        '--context',
+        flippedCtx,
+        '--context-sha256',
+        ctxSha,
+        '--execution-record',
+        hostRec,
+        '--execution-record-sha256',
+        boundRecSha,
+        mixedDir,
+      ]);
+      expect(caseCtxRes.status).toBe(1);
+      expect(caseCtxRes.stderr).toMatch(/must not point inside/);
+
+      const caseRecRes = run([
+        '--context',
+        hostCtx,
+        '--context-sha256',
+        ctxSha,
+        '--execution-record',
+        flippedRec,
+        '--execution-record-sha256',
+        boundRecSha,
+        mixedDir,
+      ]);
+      expect(caseRecRes.status).toBe(1);
+      expect(caseRecRes.stderr).toMatch(/must not point inside/);
+
+      // Uppercase TMP on a symlinked <clone>/tmp -> <external-box> still encloses clone.
+      const upperTmpRes = run([
+        '--context',
+        cloneRootCtx,
+        '--context-sha256',
+        ctxSha,
+        '--execution-record',
+        hostRec,
+        '--execution-record-sha256',
+        boundRecSha,
+        join(symlinkedClone, 'TMP', basename(symRoundDir)),
+      ]);
+      expect(upperTmpRes.status).toBe(1);
+      expect(upperTmpRes.stderr).toMatch(/must not point inside/);
+    }
+
+    // 8o. Trailing "/.", intermediate "sub/..", and "/evidence/.." cannot evade
+    // tmp-container trust root derivation on a symlinked <clone>/tmp.
+    mkdirSync(join(externalArtifacts, 'sub'), { recursive: true });
+    for (const [label, trickyDir] of [
+      ['trailing dot', `${symRoundDir}/.`],
+      [
+        'intermediate sub/..',
+        join(symlinkedClone, 'tmp', 'sub', '..', basename(symRoundDir)),
+      ],
+      ['trailing evidence/..', `${symRoundDir}/evidence/..`],
+      ['nested alias trailing dot', `${nestedRoundDir}/.`],
+    ]) {
+      const res = run([
+        '--context',
+        cloneRootCtx,
+        '--context-sha256',
+        ctxSha,
+        '--execution-record',
+        hostRec,
+        '--execution-record-sha256',
+        boundRecSha,
+        trickyDir,
+      ]);
+      expect(res.status, `${label}: ${res.stdout}${res.stderr}`).toBe(1);
+      expect(res.stderr, label).toMatch(/must not point inside/);
+    }
+
+    // 8p. Legitimate cross-depth symlink/.. path resolves consistently under OS
+    // semantics without lexical path.join/resolve split-brain.
+    const deepBase = join(base, 'deep-tree');
+    const deepSub = join(deepBase, 'sub');
+    const deepRealRound = join(
+      deepBase,
+      'real',
+      'pr17185-verify-20261124-033000',
+    );
+    mkdirSync(deepSub, { recursive: true });
+    mkdirSync(join(deepRealRound, 'evidence'), { recursive: true });
+    writeFileSync(join(deepRealRound, 'report.md'), validFiles().report);
+    writeFileSync(join(deepRealRound, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(
+      join(deepRealRound, 'assertions.json'),
+      validFiles().assertions,
+    );
+    writeFileSync(
+      join(deepRealRound, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(deepRealRound, 'evidence', '01-ab-cells.png'), 'png');
+    const crossLink = join(base, 'cross-depth-link');
+    symlinkSync(deepSub, crossLink);
+    const crossDepthRes = run([
+      '--context',
+      hostCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      `${crossLink}/../real/${basename(deepRealRound)}`,
+    ]);
+    expect(
+      crossDepthRes.status,
+      crossDepthRes.stdout + crossDepthRes.stderr,
+    ).toBe(0);
+
+    // 8q. Host executionApproval also contradicts microvm and provider-vm modes.
+    for (const [label, boundary] of [
+      ['microvm', { mode: 'microvm', backend: 'firecracker' }],
+      ['provider-vm', { mode: 'vm', backend: 'provider-vm' }],
+    ]) {
+      expect(
+        executionApprovalErrors(
+          JSON.stringify(boundary),
+          {
+            headRefOid: HEAD,
+            executionApproval: {
+              mode: 'waived',
+              source: 'local-trust',
+              basis: 'own-pr',
+              by: 'wenshao',
+              permission: 'admin',
+              head: HEAD,
+              round: 1,
+              reason: 'host round',
+            },
+          },
+          { contextProvided: true, contextDigestVerified: true },
+        ).join('\n'),
+        label,
+      ).toMatch(/contradicts boundary\.json mode/);
+    }
+
+    // 8r. Leaf-symlink round directory cannot bypass realArtifactDirectory via
+    // trailing "/." or "/evidence/..", and a <clone>/tmp/<symlink-round> or
+    // nested <clone>/tmp/sub/<round> or <clone>/tmp/link/../<round> still
+    // encloses the clone root for --context and --execution-record.
+    const leafAlias = join(base, 'pr99-verify-20261124-033500');
+    symlinkSync(deepRealRound, leafAlias);
+    for (const [label, candidateDir] of [
+      ['leaf symlink + /.', `${leafAlias}/.`],
+      ['leaf symlink + /evidence/..', `${leafAlias}/evidence/..`],
+    ]) {
+      const res = run([
+        '--context',
+        hostCtx,
+        '--context-sha256',
+        ctxSha,
+        '--execution-record',
+        hostRec,
+        '--execution-record-sha256',
+        boundRecSha,
+        candidateDir,
+      ]);
+      expect(res.status, `${label}: ${res.stdout}${res.stderr}`).toBe(1);
+      expect(res.stdout, label).toMatch(/must be a real directory/);
+    }
+
+    const deepClone = join(base, 'deep-clone');
+    const deepSubRound = join(
+      deepClone,
+      'tmp',
+      'sub',
+      'pr17185-verify-20261124-034000',
+    );
+    mkdirSync(join(deepSubRound, 'evidence'), { recursive: true });
+    writeFileSync(join(deepSubRound, 'report.md'), validFiles().report);
+    writeFileSync(join(deepSubRound, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(
+      join(deepSubRound, 'assertions.json'),
+      validFiles().assertions,
+    );
+    writeFileSync(
+      join(deepSubRound, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(deepSubRound, 'evidence', '01-ab-cells.png'), 'png');
+    const deepCloneCtx = join(deepClone, 'forged-ctx.json');
+    writeFileSync(deepCloneCtx, ctxText);
+    const deepSubRes = run([
+      '--context',
+      deepCloneCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      deepSubRound,
+    ]);
+    expect(deepSubRes.status).toBe(1);
+    expect(deepSubRes.stderr).toMatch(/must not point inside/);
+
+    // <clone>/tmp/<symlink-round> -> <external-round> even with head-only ctx
+    const symChildClone = join(base, 'sym-child-clone');
+    mkdirSync(join(symChildClone, 'tmp'), { recursive: true });
+    const symChildLink = join(
+      symChildClone,
+      'tmp',
+      'pr17185-verify-20261124-034500',
+    );
+    symlinkSync(deepRealRound, symChildLink);
+    const symChildHeadOnlyCtx = join(symChildClone, 'head-only.json');
+    writeFileSync(symChildHeadOnlyCtx, JSON.stringify({ headRefOid: HEAD }));
+    const symChildRes = run(['--context', symChildHeadOnlyCtx, symChildLink]);
+    expect(symChildRes.status).toBe(1);
+    expect(symChildRes.stderr).toMatch(/must not point inside/);
+
+    // <clone>/tmp/link/../pr17185-verify-... where link -> <clone>/other/sub
+    const splitClone = join(base, 'split-clone');
+    const splitTarget = join(
+      splitClone,
+      'other',
+      'pr17185-verify-20261124-035000',
+    );
+    mkdirSync(join(splitClone, 'tmp'), { recursive: true });
+    mkdirSync(join(splitClone, 'other', 'sub'), { recursive: true });
+    mkdirSync(join(splitTarget, 'evidence'), { recursive: true });
+    writeFileSync(join(splitTarget, 'report.md'), validFiles().report);
+    writeFileSync(join(splitTarget, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(
+      join(splitTarget, 'assertions.json'),
+      validFiles().assertions,
+    );
+    writeFileSync(
+      join(splitTarget, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(splitTarget, 'evidence', '01-ab-cells.png'), 'png');
+    symlinkSync(
+      join(splitClone, 'other', 'sub'),
+      join(splitClone, 'tmp', 'link'),
+    );
+    const splitCloneCtx = join(splitClone, 'forged-ctx.json');
+    writeFileSync(splitCloneCtx, ctxText);
+    const splitRes = run([
+      '--context',
+      splitCloneCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      `${join(splitClone, 'tmp', 'link')}/../${basename(splitTarget)}`,
+    ]);
+    expect(splitRes.status).toBe(1);
+    expect(splitRes.stderr).toMatch(/must not point inside/);
+
+    // 8s. Host --context with executionApproval refuses missing boundary.json
+    // even when boundaryText is empty/null.
+    expect(
+      executionApprovalErrors(
+        null,
+        {
+          headRefOid: HEAD,
+          executionApproval: {
+            mode: 'waived',
+            source: 'local-trust',
+            basis: 'own-pr',
+            by: 'wenshao',
+            permission: 'admin',
+            head: HEAD,
+            round: 1,
+            reason: 'host round',
+          },
+        },
+        { contextProvided: true, contextDigestVerified: true },
+      ).join('\n'),
+    ).toMatch(/boundary\.json is missing or empty/);
+
+    // 8t. Parent-level symlink inside <clone>/tmp (<clone>/tmp/sub-link/pr*),
+    // evidence-symlink/.. alias, and <clone>/tmp/pr* -> plain-dir all fail closed.
+    const r7Clone = join(base, 'r7-clone');
+    mkdirSync(join(r7Clone, 'tmp'), { recursive: true });
+    symlinkSync(dirname(deepRealRound), join(r7Clone, 'tmp', 'sub-link'));
+    const r7CloneCtx = join(r7Clone, 'forged-ctx.json');
+    writeFileSync(r7CloneCtx, ctxText);
+    const r7SubLinkRes = run([
+      '--context',
+      r7CloneCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      join(r7Clone, 'tmp', 'sub-link', basename(deepRealRound)),
+    ]);
+    expect(r7SubLinkRes.status).toBe(1);
+    expect(r7SubLinkRes.stderr).toMatch(/must not point inside/);
+
+    const evAlias = join(base, 'pr99-verify-ev-fake');
+    symlinkSync(join(deepRealRound, 'evidence'), evAlias);
+    const r7EvAliasRes = run([
+      '--context',
+      hostCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      `${evAlias}/..`,
+    ]);
+    expect(r7EvAliasRes.status).toBe(1);
+    expect(r7EvAliasRes.stdout).toMatch(/must be a real directory/);
+
+    const plainTarget = join(base, 'plain-round-target');
+    mkdirSync(join(plainTarget, 'evidence'), { recursive: true });
+    writeFileSync(join(plainTarget, 'report.md'), validFiles().report);
+    writeFileSync(join(plainTarget, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(
+      join(plainTarget, 'assertions.json'),
+      validFiles().assertions,
+    );
+    writeFileSync(
+      join(plainTarget, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(plainTarget, 'evidence', '01-ab-cells.png'), 'png');
+    const toPlainLink = join(r7Clone, 'tmp', 'pr17185-verify-20261124-035500');
+    symlinkSync(plainTarget, toPlainLink);
+    const r7NoCoordCtx = join(r7Clone, 'head-only.json');
+    writeFileSync(r7NoCoordCtx, JSON.stringify({ headRefOid: HEAD }));
+    const r7ToPlainRes = run(['--context', r7NoCoordCtx, toPlainLink]);
+    expect(r7ToPlainRes.status).toBe(1);
+    expect(r7ToPlainRes.stderr).toMatch(/must not point inside/);
+
+    // 8u. Outer ancestor directories named "tmp" (e.g. .qwen/tmp/<worktree>/tmp/pr*)
+    // do not poison trust roots for host snapshots outside the inner worktree.
+    const outerWrap = join(base, 'outer-qwen');
+    const nestedWtRound = join(
+      outerWrap,
+      'tmp',
+      'wt',
+      'tmp',
+      'pr17185-verify-20261124-035600',
+    );
+    mkdirSync(join(nestedWtRound, 'evidence'), { recursive: true });
+    writeFileSync(join(nestedWtRound, 'report.md'), validFiles().report);
+    writeFileSync(join(nestedWtRound, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(
+      join(nestedWtRound, 'assertions.json'),
+      validFiles().assertions,
+    );
+    writeFileSync(
+      join(nestedWtRound, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(nestedWtRound, 'evidence', '01-ab-cells.png'), 'png');
+    const outerHostCtx = join(outerWrap, 'host-ctx.json');
+    writeFileSync(outerHostCtx, ctxText);
+    const outerHostRes = run([
+      '--context',
+      outerHostCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      nestedWtRound,
+    ]);
+    expect(outerHostRes.status, outerHostRes.stdout + outerHostRes.stderr).toBe(
+      0,
+    );
+
+    // 8v. Even with publisherOwnsBoundary ($QWEN_VERIFY_CONTEXT), supplying a
+    // host --execution-record does not excuse a missing boundary.json.
+    const missingBoundaryWithExec = checkArtifacts({
+      files: validFiles({ boundary: null, boundaryGate: null }),
+      evidence: ['01-ab-cells.png'],
+      expectedHead: HEAD,
+      coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 17185 },
+      publisherOwnsBoundary: true,
+      executionRecordText: boundRecText,
+      executionRecordSha256: boundRecSha,
+      expectedContextSha256: ctxSha,
+    });
+    expect(missingBoundaryWithExec.errors.join('\n')).toMatch(
+      /boundary\.json is missing/,
+    );
+
+    // 8w. A symlink target containing its own "tmp" segment (<clone>/tmp[/link]
+    // -> <outside>/fake/tmp) or a trailing "<round>/tmp/.." detour inside the
+    // PR-writable artifact dir cannot evict the source PR clone's <clone>/tmp.
+    const fakeOutsideTmp = join(base, 'outside-fake', 'tmp');
+    const fakeOutsideRound = join(
+      fakeOutsideTmp,
+      'pr17185-verify-20261124-040000',
+    );
+    mkdirSync(join(fakeOutsideRound, 'evidence'), { recursive: true });
+    writeFileSync(join(fakeOutsideRound, 'report.md'), validFiles().report);
+    writeFileSync(join(fakeOutsideRound, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(
+      join(fakeOutsideRound, 'assertions.json'),
+      validFiles().assertions,
+    );
+    writeFileSync(
+      join(fakeOutsideRound, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(fakeOutsideRound, 'evidence', '01-ab-cells.png'), 'png');
+
+    const r8CloneA = join(base, 'r8-clone-a');
+    mkdirSync(r8CloneA, { recursive: true });
+    symlinkSync(fakeOutsideTmp, join(r8CloneA, 'tmp'));
+    const r8CloneACtx = join(r8CloneA, 'forged-ctx.json');
+    writeFileSync(r8CloneACtx, ctxText);
+    const r8aRes = run([
+      '--context',
+      r8CloneACtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      join(r8CloneA, 'tmp', basename(fakeOutsideRound)),
+    ]);
+    expect(r8aRes.status).toBe(1);
+    expect(r8aRes.stderr).toMatch(/must not point inside/);
+
+    const r8CloneB = join(base, 'r8-clone-b');
+    mkdirSync(join(r8CloneB, 'tmp'), { recursive: true });
+    symlinkSync(fakeOutsideTmp, join(r8CloneB, 'tmp', 'link'));
+    const r8CloneBCtx = join(r8CloneB, 'forged-ctx.json');
+    writeFileSync(r8CloneBCtx, ctxText);
+    const r8CloneBRec = join(r8CloneB, 'forged-rec.json');
+    writeFileSync(r8CloneBRec, boundRecText);
+    for (const [label, args] of [
+      [
+        'symlink target tmp + in-clone context',
+        [
+          '--context',
+          r8CloneBCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          hostRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          join(r8CloneB, 'tmp', 'link', basename(fakeOutsideRound)),
+        ],
+      ],
+      [
+        'symlink target tmp + in-clone execution-record',
+        [
+          '--context',
+          hostCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          r8CloneBRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          join(r8CloneB, 'tmp', 'link', basename(fakeOutsideRound)),
+        ],
+      ],
+    ]) {
+      const res = run(args);
+      expect(res.status, `${label}: ${res.stdout}${res.stderr}`).toBe(1);
+      expect(res.stderr, label).toMatch(/must not point inside/);
+    }
+
+    // Trailing "/tmp/.." inside the PR-writable round dir cannot evict <clone>/tmp.
+    mkdirSync(join(symRoundDir, 'tmp'), { recursive: true });
+    const r8cRes = run([
+      '--context',
+      cloneRootCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      `${symRoundDir}/tmp/..`,
+    ]);
+    expect(r8cRes.status).toBe(1);
+    expect(r8cRes.stderr).toMatch(/must not point inside/);
+
+    // 8x. On macOS, the canonicalized /private/tmp/pr* spelling triggers the
+    // same root-level tmp/ refusal as /tmp/pr* even for host contexts outside
+    // /private.
+    if (process.platform === 'darwin' && existsSync('/private/tmp')) {
+      const privRound = join(
+        '/private/tmp',
+        `pr17185-verify-20261124-r8-${process.pid}`,
+      );
+      try {
+        mkdirSync(join(privRound, 'evidence'), { recursive: true });
+        writeFileSync(join(privRound, 'report.md'), validFiles().report);
+        writeFileSync(join(privRound, 'verdict.txt'), validFiles().verdict);
+        writeFileSync(
+          join(privRound, 'assertions.json'),
+          validFiles().assertions,
+        );
+        writeFileSync(
+          join(privRound, 'boundary.json'),
+          JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+        );
+        writeFileSync(join(privRound, 'evidence', '01-ab-cells.png'), 'png');
+        const privRes = run([
+          '--context',
+          hostCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          hostRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          privRound,
+        ]);
+        expect(privRes.status).toBe(1);
+        expect(privRes.stderr).toMatch(/contains every path/);
+      } finally {
+        rmSync(privRound, { recursive: true, force: true });
+      }
+    }
+
+    // 8y. Dead-end decoy/tmp/.. (both before a symlink hop and without symlinks),
+    // <clone>/tmp -> /tmp, and <clone>/tmp -> canonicalDir(/sub) still enclose
+    // the source PR clone root.
+    const r9Clone = join(base, 'r9-clone');
+    mkdirSync(join(r9Clone, 'tmp', 'decoy', 'tmp'), { recursive: true });
+    symlinkSync(dirname(deepRealRound), join(r9Clone, 'tmp', 'decoy', 'link'));
+    const r9CloneCtx = join(r9Clone, 'forged-ctx.json');
+    writeFileSync(r9CloneCtx, ctxText);
+    const r9CloneRec = join(r9Clone, 'forged-rec.json');
+    writeFileSync(r9CloneRec, boundRecText);
+    for (const [label, args] of [
+      [
+        'decoy/tmp/.. before symlink + in-clone context',
+        [
+          '--context',
+          r9CloneCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          hostRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          `${join(r9Clone, 'tmp', 'decoy', 'tmp')}/../link/${basename(deepRealRound)}`,
+        ],
+      ],
+      [
+        'decoy/tmp/.. before symlink + in-clone execution-record',
+        [
+          '--context',
+          hostCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          r9CloneRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          `${join(r9Clone, 'tmp', 'decoy', 'tmp')}/../link/${basename(deepRealRound)}`,
+        ],
+      ],
+    ]) {
+      const res = run(args);
+      expect(res.status, `${label}: ${res.stdout}${res.stderr}`).toBe(1);
+      expect(res.stderr, label).toMatch(/must not point inside/);
+    }
+
+    // Zero-symlink <clone>/tmp/../decoy/tmp/../pr* still encloses <clone>.
+    const r9NoSymClone = join(base, 'r9-nosym-clone');
+    const r9NoSymRound = join(
+      r9NoSymClone,
+      'decoy',
+      'pr17185-verify-20261124-041000',
+    );
+    mkdirSync(join(r9NoSymClone, 'tmp'), { recursive: true });
+    mkdirSync(join(r9NoSymClone, 'decoy', 'tmp'), { recursive: true });
+    mkdirSync(join(r9NoSymRound, 'evidence'), { recursive: true });
+    writeFileSync(join(r9NoSymRound, 'report.md'), validFiles().report);
+    writeFileSync(join(r9NoSymRound, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(
+      join(r9NoSymRound, 'assertions.json'),
+      validFiles().assertions,
+    );
+    writeFileSync(
+      join(r9NoSymRound, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(r9NoSymRound, 'evidence', '01-ab-cells.png'), 'png');
+    const r9NoSymCtx = join(r9NoSymClone, 'forged-ctx.json');
+    writeFileSync(r9NoSymCtx, ctxText);
+    const r9NoSymRes = run([
+      '--context',
+      r9NoSymCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      `${join(r9NoSymClone, 'tmp')}/../decoy/tmp/../${basename(r9NoSymRound)}`,
+    ]);
+    expect(r9NoSymRes.status).toBe(1);
+    expect(r9NoSymRes.stderr).toMatch(/must not point inside/);
+
+    // <clone>/tmp -> <outside>/pr* (head-only context without coordinates)
+    const r9DirectTmpClone = join(base, 'r9-direct-tmp-clone');
+    mkdirSync(r9DirectTmpClone, { recursive: true });
+    symlinkSync(deepRealRound, join(r9DirectTmpClone, 'tmp'));
+    const r9DirectHeadCtx = join(r9DirectTmpClone, 'head-only.json');
+    writeFileSync(r9DirectHeadCtx, JSON.stringify({ headRefOid: HEAD }));
+    const r9DirectRes = run([
+      '--context',
+      r9DirectHeadCtx,
+      join(r9DirectTmpClone, 'tmp'),
+    ]);
+    expect(r9DirectRes.status).toBe(1);
+    expect(r9DirectRes.stderr).toMatch(/must not point inside/);
+
+    // <clone>/tmp -> /tmp hosting /tmp/<subwork>/pr* still encloses <clone>.
+    if (existsSync('/tmp')) {
+      const r9SysSub = join('/tmp', `r9-syssub-${process.pid}`);
+      const r9SysRound = join(r9SysSub, 'pr17185-verify-20261124-041500');
+      const r9SysClone = join(base, 'r9-sys-clone');
+      try {
+        mkdirSync(join(r9SysRound, 'evidence'), { recursive: true });
+        writeFileSync(join(r9SysRound, 'report.md'), validFiles().report);
+        writeFileSync(join(r9SysRound, 'verdict.txt'), validFiles().verdict);
+        writeFileSync(
+          join(r9SysRound, 'assertions.json'),
+          validFiles().assertions,
+        );
+        writeFileSync(
+          join(r9SysRound, 'boundary.json'),
+          JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+        );
+        writeFileSync(join(r9SysRound, 'evidence', '01-ab-cells.png'), 'png');
+        mkdirSync(r9SysClone, { recursive: true });
+        symlinkSync('/tmp', join(r9SysClone, 'tmp'));
+        const r9SysCloneCtx = join(r9SysClone, 'forged-ctx.json');
+        writeFileSync(r9SysCloneCtx, ctxText);
+        const r9SysRes = run([
+          '--context',
+          r9SysCloneCtx,
+          '--context-sha256',
+          ctxSha,
+          '--execution-record',
+          hostRec,
+          '--execution-record-sha256',
+          boundRecSha,
+          join(r9SysClone, 'tmp', basename(r9SysSub), basename(r9SysRound)),
+        ]);
+        expect(r9SysRes.status).toBe(1);
+        expect(r9SysRes.stderr).toMatch(/must not point inside/);
+      } finally {
+        rmSync(r9SysSub, { recursive: true, force: true });
+      }
+    }
+
+    // 8z. Zero-symlink "<clone>/tmp/pr*/.." landing on <clone>/tmp itself
+    // still encloses <clone>, and uppercase PR<N>-verify-* cannot evade
+    // cross-PR or clone trust-root checks on case-insensitive filesystems.
+    const r10Clone = join(base, 'r10-tmpself-clone');
+    const r10Tmp = join(r10Clone, 'tmp');
+    const r10Child = join(r10Tmp, 'pr17185-verify-20261124-042000');
+    mkdirSync(join(r10Tmp, 'evidence'), { recursive: true });
+    mkdirSync(r10Child, { recursive: true });
+    writeFileSync(join(r10Tmp, 'report.md'), validFiles().report);
+    writeFileSync(join(r10Tmp, 'verdict.txt'), validFiles().verdict);
+    writeFileSync(join(r10Tmp, 'assertions.json'), validFiles().assertions);
+    writeFileSync(
+      join(r10Tmp, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    writeFileSync(join(r10Tmp, 'evidence', '01-ab-cells.png'), 'png');
+    const r10CloneCtx = join(r10Clone, 'forged-ctx.json');
+    writeFileSync(r10CloneCtx, ctxText);
+    const r10SelfRes = run([
+      '--context',
+      r10CloneCtx,
+      '--context-sha256',
+      ctxSha,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      `${r10Child}/..`,
+    ]);
+    expect(r10SelfRes.status).toBe(1);
+    expect(r10SelfRes.stderr).toMatch(/must not point inside/);
+
+    if (process.platform === 'darwin' || process.platform === 'win32') {
+      const upperRound = join(
+        r10Clone,
+        'tmp',
+        'PR99999-verify-20261124-042500',
+      );
+      mkdirSync(join(upperRound, 'evidence'), { recursive: true });
+      writeFileSync(join(upperRound, 'report.md'), validFiles().report);
+      writeFileSync(join(upperRound, 'verdict.txt'), validFiles().verdict);
+      writeFileSync(
+        join(upperRound, 'assertions.json'),
+        validFiles().assertions,
+      );
+      writeFileSync(
+        join(upperRound, 'boundary.json'),
+        JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+      );
+      writeFileSync(join(upperRound, 'evidence', '01-ab-cells.png'), 'png');
+      const upperCrossPrRes = run([
+        '--context',
+        hostCtx,
+        '--context-sha256',
+        ctxSha,
+        '--execution-record',
+        hostRec,
+        '--execution-record-sha256',
+        boundRecSha,
+        upperRound,
+      ]);
+      expect(upperCrossPrRes.status).toBe(1);
+      expect(upperCrossPrRes.stdout).toMatch(/names PR 99999/);
+
+      const upperTrustRes = run([
+        '--context',
+        r10CloneCtx,
+        '--context-sha256',
+        ctxSha,
+        '--execution-record',
+        hostRec,
+        '--execution-record-sha256',
+        boundRecSha,
+        upperRound,
+      ]);
+      expect(upperTrustRes.status).toBe(1);
+      expect(upperTrustRes.stderr).toMatch(/must not point inside/);
+    }
+  });
+
+  describe('POSIX backslash artifact path resolution (R7-1)', () => {
+    const runCheck = (args) =>
+      spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
+
+    function makeBackslashFixture() {
+      const baseDir = mkdtempSync(join(tmpdir(), 'verify-pr-check-r71-'));
+      const files = validFiles();
+      const reportMd = [
+        `findings — verified head \`${HEAD}\` on local-trust host round.`,
+        '',
+        '## Findings',
+        '- Synthetic POSIX backslash-ancestor witness.',
+        '',
+        '## Not covered',
+        '- Container lane.',
+        '',
+        '## Methodology',
+        '**Boundary.** Waived host execution disclosed per policy.',
+        '',
+      ].join('\n');
+      const approval = localTrustApproval({
+        by: 'octocat',
+        reason: 'R7-1 POSIX backslash path test',
+      });
+      const boundaryRaw = JSON.stringify(approval);
+      const artifactCtxRaw = JSON.stringify({
+        repo: 'QwenLM/qwen-code',
+        pr: 123,
+        headRefOid: HEAD,
+      });
+      const hostCtxPath = join(baseDir, 'host-context.json');
+      const hostCtxRaw = JSON.stringify({
+        repo: 'QwenLM/qwen-code',
+        pr: 123,
+        headRefOid: HEAD,
+        baseRefOid: 'b'.repeat(40),
+        author: { login: 'octocat' },
+        isCrossRepository: false,
+        executionApproval: approval,
+      });
+      writeFileSync(hostCtxPath, hostCtxRaw);
+      const ctxSha = createHash('sha256').update(hostCtxRaw).digest('hex');
+      const populateRound = (roundDir) => {
+        mkdirSync(join(roundDir, 'evidence'), { recursive: true });
+        writeFileSync(join(roundDir, 'report.md'), reportMd);
+        writeFileSync(join(roundDir, 'verdict.txt'), 'findings\n');
+        writeFileSync(join(roundDir, 'assertions.json'), files.assertions);
+        writeFileSync(join(roundDir, 'boundary.json'), boundaryRaw);
+        writeFileSync(join(roundDir, 'context.json'), artifactCtxRaw);
+        writeFileSync(join(roundDir, 'evidence', '01-ab-cells.png'), 'png');
+      };
+      return { baseDir, hostCtxPath, hostCtxRaw, ctxSha, populateRound };
+    }
+
+    it.skipIf(process.platform === 'win32')(
+      'accepts artifact paths under a POSIX ancestor containing a backslash',
+      () => {
+        const { baseDir, hostCtxPath, ctxSha, populateRound } =
+          makeBackslashFixture();
+        try {
+          const roundDir = join(
+            baseDir,
+            'a\\b',
+            'tmp',
+            'pr123-verify-20261127-010000',
+          );
+          populateRound(roundDir);
+          const res = runCheck([
+            '--context',
+            hostCtxPath,
+            '--context-sha256',
+            ctxSha,
+            roundDir,
+          ]);
+          expect(res.stderr).not.toMatch(
+            /could not resolve artifact directory/,
+          );
+          expect(res.status).toBe(0);
+        } finally {
+          rmSync(baseDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'still refuses a --context planted inside a POSIX backslash clone root',
+      () => {
+        const { baseDir, hostCtxRaw, ctxSha, populateRound } =
+          makeBackslashFixture();
+        try {
+          const cloneWithBs = join(baseDir, 'a\\b');
+          const roundDir = join(
+            cloneWithBs,
+            'tmp',
+            'pr123-verify-20261127-010000',
+          );
+          populateRound(roundDir);
+          const inCloneCtx = join(cloneWithBs, 'planted-context.json');
+          writeFileSync(inCloneCtx, hostCtxRaw);
+          const plantedRes = runCheck([
+            '--context',
+            inCloneCtx,
+            '--context-sha256',
+            ctxSha,
+            roundDir,
+          ]);
+          expect(plantedRes.status).toBe(1);
+          expect(plantedRes.stderr).toMatch(/must not point inside/);
+        } finally {
+          rmSync(baseDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'preserves a trailing backslash on a POSIX artifact leaf directory',
+      () => {
+        const { baseDir, hostCtxPath, ctxSha, populateRound } =
+          makeBackslashFixture();
+        try {
+          const trailingBsRound = join(
+            baseDir,
+            'trail-clone',
+            'tmp',
+            'pr123-verify-20261127-010001\\',
+          );
+          populateRound(trailingBsRound);
+          const trailingRes = runCheck([
+            '--context',
+            hostCtxPath,
+            '--context-sha256',
+            ctxSha,
+            trailingBsRound,
+          ]);
+          expect(trailingRes.stderr).not.toMatch(
+            /could not resolve artifact directory/,
+          );
+          expect(trailingRes.status).toBe(0);
+        } finally {
+          rmSync(baseDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'resolves a POSIX ancestor ending with backslash and relative symlink target containing backslash',
+      () => {
+        const { baseDir, hostCtxPath, ctxSha, populateRound } =
+          makeBackslashFixture();
+        try {
+          const ancEndRound = join(
+            baseDir,
+            'anc\\',
+            'tmp',
+            'pr123-verify-20261127-010002',
+          );
+          populateRound(ancEndRound);
+          const ancEndRes = runCheck([
+            '--context',
+            hostCtxPath,
+            '--context-sha256',
+            ctxSha,
+            ancEndRound,
+          ]);
+          expect(ancEndRes.stderr).not.toMatch(
+            /could not resolve artifact directory/,
+          );
+          expect(ancEndRes.status).toBe(0);
+
+          const symClone = join(baseDir, 'sym-holder');
+          mkdirSync(symClone, { recursive: true });
+          symlinkSync('../anc\\/tmp', join(symClone, 'tmp'));
+          const symRes = runCheck([
+            '--context',
+            hostCtxPath,
+            '--context-sha256',
+            ctxSha,
+            join(symClone, 'tmp', 'pr123-verify-20261127-010002'),
+          ]);
+          expect(symRes.stderr).not.toMatch(
+            /could not resolve artifact directory/,
+          );
+          expect(symRes.status).toBe(0);
+        } finally {
+          rmSync(baseDir, { recursive: true, force: true });
+        }
+      },
     );
   });
 });
