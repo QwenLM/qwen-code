@@ -37,6 +37,14 @@ describe('splitCompoundCommandSegments', () => {
   )('keeps the CR target behind %s', (_title, command, expected) => {
     expect(splitCompoundCommandSegments(command)).toEqual(expected);
   });
+
+  it('preserves default rule splitting inside backtick substitutions', () => {
+    expect(
+      splitCompoundCommandSegments('echo `cd /tmp && rm -rf victim`').map(
+        (segment) => segment.command,
+      ),
+    ).toEqual(['echo `cd /tmp', 'rm -rf victim`']);
+  });
 });
 
 // The predicate a subagent's declaration filter applies to each deny entry,

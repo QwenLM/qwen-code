@@ -528,6 +528,10 @@ describe('extractShellOperations', () => {
     ['df -hT / 2>&1', []],
     ['df -hT / 1>&2', []],
     ['df -hT / >&2', []],
+    ['echo hi >& 2', []],
+    ['echo hi 2>& 1', []],
+    ['cat <& 0', []],
+    ['echo hi > 2', [write(`${CWD}/2`)]],
     ['df -hT / 2>&-', []],
     ['df -hT / >&-', []],
     ['cat <&0', []],
@@ -564,8 +568,10 @@ describe('extractShellOperations', () => {
     expect(ops(command)).toEqual([write(`${CWD}/${file}`)]);
   });
 
-  it('>&$VAR keeps the literal write: it may name a file', () => {
-    expect(ops('printf TXT >&$OUT')).toEqual([write(`${CWD}/&$OUT`)]);
+  it('>&$VAR keeps an unresolved write: it may name a file', () => {
+    expect(ops('printf TXT >&$OUT')).toEqual([
+      { ...write(`${CWD}/&$OUT`), pathUnknown: true },
+    ]);
   });
 
   // Only a whole number or `-` is a descriptor; anything else names a file.
@@ -613,8 +619,20 @@ describe('extractShellOperations', () => {
     ['tee >&-2', [write(`${CWD}/&-2`)]],
     ['tee 2>&-2', [write(`${CWD}/&-2`)]],
     ['cat <&-2', [read(`${CWD}/&-2`)]],
-    ['tee >&-$HOME/.bashrc', [write(`${CWD}/&-$HOME/.bashrc`)]],
-    ['tee >&-{a,b}', [write(`${CWD}/&-{a,b}`)]],
+    [
+      'tee >&-$HOME/.bashrc',
+      sorted([
+        { ...write(`${CWD}/&-$HOME/.bashrc`), pathUnknown: true },
+        { ...write(`${CWD}/$HOME/.bashrc`), pathUnknown: true },
+      ]),
+    ],
+    [
+      'tee >&-{a,b}',
+      sorted([
+        { ...write(`${CWD}/&-{a,b}`), pathUnknown: true },
+        { ...write(`${CWD}/{a,b}`), pathUnknown: true },
+      ]),
+    ],
     ['my-tool >&-notes.txt', [write(`${CWD}/&-notes.txt`)]],
     ['rm -- >&--x', [write(`${CWD}/&--x`)]],
     ['printf X >&->&"-x"', [write(`${CWD}/-x`), write(`${CWD}/&->&-x`)]],
@@ -949,6 +967,162 @@ describe('extractShellOperationsAcrossCommand', () => {
     expect(across(command)).toEqual(expected);
   });
 
+  it('does not let a case arm steal the surrounding cwd', () => {
+    expect(
+      across("(cd .qwen; case a in a) :;; esac; printf '{}' > settings.json)"),
+    ).toEqual([uncertainWrite(REPO_SETTINGS)]);
+  });
+
+  it.each(['time', '!'])(
+    'does not let a %s-prefixed case arm steal the surrounding cwd',
+    (prefix) => {
+      expect(
+        across(
+          `(cd .qwen; ${prefix} case a in a) :;; esac; printf '{}' > settings.json)`,
+        ),
+      ).toEqual([uncertainWrite(REPO_SETTINGS)]);
+    },
+  );
+
+  it('does not treat a command-substitution suffix as a comment', () => {
+    expect(across("sh -c 'echo $(pwd)#1; rm .qwen/settings.json'")).toEqual([
+      edit(REPO_SETTINGS),
+    ]);
+  });
+
+  it('extracts operations from a multi-command substitution', () => {
+    expect(across('echo $(true; rm .qwen/settings.json)')).toEqual([
+      edit(REPO_SETTINGS),
+    ]);
+  });
+
+  it('extracts operations from a backtick command substitution', () => {
+    expect(across('echo `true; rm .qwen/settings.json`')).toEqual([
+      edit(REPO_SETTINGS),
+    ]);
+  });
+
+  it.each([
+    'if false; then { cd /tmp; }; fi; printf x > .qwen/settings.json',
+    "echo ${x:- #}; cd .qwen; printf '{}' > settings.json",
+  ])('keeps unmodelled execution structure fail-closed: %s', (command) => {
+    expect(across(command)).toEqual([uncertainWrite(REPO_SETTINGS)]);
+  });
+
+  it('does not clear structural cwd uncertainty with an absolute cd', () => {
+    expect(
+      across(
+        'if false; then { cd /tmp; }; fi; cd /repo/.qwen; printf x > settings.json',
+      ),
+    ).toEqual([uncertainWrite(REPO_SETTINGS)]);
+  });
+
+  it('does not exempt a relative write via an unrelated absolute argument', () => {
+    expect(across('cd $D; printf /repo/settings.json > settings.json')).toEqual(
+      [uncertainWrite('/repo/settings.json')],
+    );
+  });
+
+  it('does not resolve cd from an earlier HOME assignment', () => {
+    expect(across("HOME=/repo/.qwen; cd; printf '{}' > settings.json")).toEqual(
+      [uncertainWrite('/repo/settings.json')],
+    );
+  });
+
+  it('does not resolve cd from an earlier CDPATH assignment', () => {
+    expect(
+      across("CDPATH=/elsewhere; cd .qwen; printf '{}' > settings.json"),
+    ).toEqual([uncertainWrite('/repo/settings.json')]);
+  });
+
+  it('keeps a pipeline boundary across an empty newline segment', () => {
+    expect(
+      across("true |\ncd /tmp\nprintf '{}' > .qwen/settings.json"),
+    ).toEqual([uncertainWrite(REPO_SETTINGS)]);
+  });
+
+  it('pairs a subshell whose closing segment is unmodelled', () => {
+    expect(
+      across(
+        '(cd .qwen; echo a > b; if true; then :; fi); echo z > settings.json',
+      ),
+    ).toContainEqual(write('/repo/settings.json'));
+  });
+
+  it('walks command substitutions in wrapper positional arguments', () => {
+    expect(across("bash -c 'true' $(rm -rf /tmp/a)")).toContainEqual(
+      edit('/tmp/a'),
+    );
+  });
+
+  it('extracts a negated simple command', () => {
+    expect(across('! rm -rf .qwen/settings.json')).toEqual([
+      edit(REPO_SETTINGS),
+    ]);
+  });
+
+  it.each(['eval "cd .qwen"', 'source ./env.sh', '. ./env.sh'])(
+    'does not certify cwd after a current-shell dynamic command: %s',
+    (prefix) => {
+      expect(across(`${prefix}; printf '{}' > settings.json`)).toEqual([
+        uncertainWrite('/repo/settings.json'),
+      ]);
+    },
+  );
+
+  it.each([
+    'HOME=/repo; cd ~',
+    'export HOME=/repo; cd',
+    'unset HOME; cd',
+    'HOME=.qwen >/dev/null; cd',
+  ])('does not resolve a mutated HOME target: %s', (prefix) => {
+    expect(across(`${prefix}; printf '{}' > settings.json`)).toEqual([
+      uncertainWrite('/repo/settings.json'),
+    ]);
+  });
+
+  it('marks a tilde write unknown after HOME changes', () => {
+    const writes = across('HOME=.qwen; echo {} > ~/settings.json');
+    expect(writes).toHaveLength(1);
+    expect(writes[0]!.pathUnknown).toBe(true);
+  });
+
+  it('keeps HOME uncertainty after a pipeline-final mutation', () => {
+    const writes = across('true | HOME=.qwen; echo {} > ~/settings.json');
+    expect(writes).toHaveLength(1);
+    expect(writes[0]!.pathUnknown).toBe(true);
+  });
+
+  it('seeds nested substitutions with HOME uncertainty', () => {
+    expect(across('HOME=.qwen; echo "$(cd; echo x > settings.json)"')).toEqual([
+      uncertainWrite('/repo/settings.json'),
+    ]);
+  });
+
+  it.each<[string, ShellOperation['virtualTool']]>([
+    ['mv a.txt $OUT', 'write_file'],
+    ['cp a.txt $OUT', 'write_file'],
+    ["sed -i 's/a/b/' $CFG", 'edit'],
+    ['truncate -s0 $CFG', 'edit'],
+    ['ln -s a $D', 'write_file'],
+    ['tee $OUT', 'write_file'],
+  ])('emits an unresolved destination for %s', (command, virtualTool) => {
+    const destinations = across(command).filter(
+      (op) => op.virtualTool === virtualTool && op.filePath?.includes('$'),
+    );
+    expect(destinations).toHaveLength(1);
+    expect(destinations[0]!.pathUnknown).toBe(true);
+  });
+
+  it.each(['cat <(rm -rf /tmp/b)', 'command >(rm -rf /tmp/b)'])(
+    'walks process substitution without inventing operand paths: %s',
+    (command) => {
+      const operations = across(command);
+      expect(operations).toContainEqual(edit('/tmp/b'));
+      expect(operations.some((op) => op.filePath?.includes('(rm'))).toBe(false);
+    },
+  );
+
   // A backgrounded `cd` runs in a subshell, so the parent's cwd is untouched
   // and the next segment's relative write lands in the *original* directory —
   // which is exactly where a protected settings file lives. Attributing the
@@ -1006,6 +1180,17 @@ describe('extractShellOperationsAcrossCommand', () => {
     const deep = 'bash -lc "bash -lc \\"bash -lc \'bash -lc echo > x.txt\'\\""';
     expect(() => across(deep)).not.toThrow();
   });
+
+  it('keeps substitutions visible beyond the wrapper depth cap', () => {
+    let deep = 'echo $(rm -rf /tmp/depth-cap)';
+    for (let index = 0; index < 6; index++) {
+      deep = `bash -lc ${JSON.stringify(deep)}`;
+    }
+    expect(across(deep)).toContainEqual({
+      ...edit('/tmp/depth-cap'),
+      pathUnknown: true,
+    });
+  });
 });
 
 describe('line continuations before a `$` construct', () => {
@@ -1060,10 +1245,103 @@ describe('ANSI-C bytes that are not valid UTF-8', () => {
     [String.raw`cat $'\xc3'`, '/repo/\udcc3'],
     [String.raw`cat $'\uD800'`, '/repo/\udced\udca0\udc80'],
     [String.raw`cat $'\U00110000'`, '/repo/\udcf4\udc90\udc80\udc80'],
-  ])('keeps one character per byte: %s', (command, path) => {
-    expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
-      read(path),
+  ])(
+    'keeps one character per byte but marks the path unresolved: %s',
+    (command, path) => {
+      expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+        { ...read(path), pathUnknown: true },
+      ]);
+    },
+  );
+  it('does not pair a raw lone high surrogate with a decoded invalid byte', () => {
+    const command = 'cat \uD800' + String.raw`$'\xff'`;
+    expect(extractShellOperations(command, '/repo')).toEqual([
+      { ...read('/repo/\uDC00\uDCFF'), pathUnknown: true },
     ]);
+  });
+
+  it('does not pair a raw lone high surrogate across a wrapper byte boundary', () => {
+    const command = "sh -c 'cat \uD800'" + String.raw`$'\xff'`;
+    expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+      { ...read('/repo/\uDC00\uDCFF'), pathUnknown: true },
+    ]);
+  });
+
+  it.each([
+    [
+      'a double-quoted wrapper payload',
+      String.raw`bash -c "printf ok > $'\\xff'"`,
+      'write_file',
+    ],
+    [
+      'a double-quoted payload with an expansion',
+      String.raw`bash -c "printf $VALUE > $'\\xff'"`,
+      'write_file',
+    ],
+    [
+      'a backslash between raw surrogate fragments',
+      'cat ' + String.fromCharCode(0xd800, 0x5c, 0xdcff),
+      'read_file',
+    ],
+    [
+      'a hex-quoted wrapper payload',
+      String.raw`sh -c $'printf ok > $\x27\xff\x27'`,
+      'write_file',
+    ],
+    [
+      'an octal-quoted wrapper payload',
+      String.raw`sh -c $'printf ok > $\047\xff\047'`,
+      'write_file',
+    ],
+    ['raw surrogates separated by quotes', "cat '\uD800'\uDCFF", 'read_file'],
+    [
+      'a raw redirect target separated by quotes',
+      "printf ok > '\uD800'\uDCFF",
+      'write_file',
+    ],
+  ])(
+    'keeps an undecodable path unresolved through %s',
+    (_label, command, tool) => {
+      const operations = extractShellOperationsAcrossCommand(command, '/repo');
+      expect(operations).toHaveLength(1);
+      expect(operations[0]).toMatchObject({
+        virtualTool: tool,
+        pathUnknown: true,
+      });
+    },
+  );
+
+  it('marks a redirect-only undecodable target unresolved', () => {
+    expect(extractShellOperations(String.raw`> $'\xff'`, '/repo')).toEqual([
+      { ...write('/repo/\udcff'), pathUnknown: true },
+    ]);
+  });
+
+  it('keeps an undecodable argument unresolved after .. normalization', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        String.raw`cat $'\xff'/../etc/passwd`,
+        '/repo',
+      ),
+    ).toEqual([{ ...read('/repo/etc/passwd'), pathUnknown: true }]);
+  });
+
+  it('keeps later relative writes uncertain after an undecodable cd', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        String.raw`cd $'\xff'/../dir; cat > settings.json`,
+        '/repo',
+      ),
+    ).toEqual([uncertainWrite('/repo/dir/settings.json')]);
+  });
+
+  it('keeps absolute-looking writes uncertain after an undecodable cd', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        String.raw`cd $'\xff'/..; cat > /repo/victim.txt`,
+        '/repo',
+      ),
+    ).toEqual([uncertainWrite('/repo/victim.txt', false)]);
   });
 });
 
@@ -1071,6 +1349,9 @@ describe('ANSI-C wrapper payloads', () => {
   it.each([
     [String.raw`cat $'\xc3\xa9'`, [read('/repo/é')]],
     [String.raw`cat $'\xc3'$'\xa9'`, [read('/repo/é')]],
+    ["sh -c 'cat 😀'$'\\x41'", [read('/repo/😀A')]],
+    [String.raw`cat \😀`, [read('/repo/😀')]],
+    ["cat '😀'", [read('/repo/😀')]],
     [String.raw`cat $'a\c\\tb'`, [read('/repo/a\x1ctb')]],
     [String.raw`cat $'\c?'`, [read('/repo/\x7f')]],
     [String.raw`cat $'\x3e'/etc/passwd`, [read('/repo/>/etc/passwd')]],
@@ -1118,6 +1399,21 @@ describe('ANSI-C wrapper payloads', () => {
     expect(across(command)).toEqual([write('/etc/motd')]);
   });
 
+  it('keeps a protected write visible beside an undecodable wrapper argument', () => {
+    expect(
+      across(String.raw`sh -c $'echo {} > .qwen/settings.json; cat \xff'`),
+    ).toEqual([
+      write(REPO_SETTINGS),
+      { ...read('/repo/\udcff'), pathUnknown: true },
+    ]);
+  });
+
+  it('extracts writes from a multi-word payload carrying an undecodable byte', () => {
+    expect(
+      across(String.raw`sh -c $'printf x > secrets/real_file \xff'`),
+    ).toEqual([write('/repo/secrets/real_file')]);
+  });
+
   it('treats a decoded operator as data, not a redirect', () => {
     // `$'\x3e'` decodes to `>` and is a `>` argument to `cat`: the read of
     // the file named `>` plus the real write, not a phantom write to `>`.
@@ -1126,6 +1422,64 @@ describe('ANSI-C wrapper payloads', () => {
       write('/tmp/t'),
     ]);
   });
+});
+
+describe('unresolved redirect targets', () => {
+  it.each([
+    String.raw`D=sub; sh -c "printf {} > \"$D\"/../.qwen/settings.json"`,
+    String.raw`sh -c 'printf {} > "$OUTPUT"'`,
+    String.raw`printf ok > "😀$OUT"/../.qwen/settings.json`,
+    String.raw`printf ok > dir/"$OUT"`,
+    String.raw`printf ok > "$(pwd)/out"`,
+    'printf ok > `pwd`/out',
+    String.raw`printf '>'>"$OUT"`,
+    String.raw`cd sub > "$OUT"`,
+  ])('keeps an expanding redirect visible: %s', (command) => {
+    const operations = across(command);
+    expect(operations).toHaveLength(1);
+    expect(operations[0]).toMatchObject({
+      virtualTool: 'write_file',
+      pathUnknown: true,
+    });
+  });
+
+  it.each(['>', '1>', '>>', '2>', '2>>', '&>', '&>>', '>|', '2>|', '<'])(
+    'keeps an unresolved %s target in both token layouts',
+    (operator) => {
+      for (const space of ['', ' ']) {
+        expect(across(`unknown-command ${operator}${space}"$OUT"`)).toEqual([
+          {
+            virtualTool: operator === '<' ? 'read_file' : 'write_file',
+            filePath: '/repo/$OUT',
+            pathUnknown: true,
+          },
+        ]);
+      }
+    },
+  );
+
+  it.each([
+    [String.raw`'$OUT'`, '$OUT'],
+    [String.raw`\$OUT`, '$OUT'],
+    [String.raw`"\$OUT"`, '$OUT'],
+    [String.raw`$'\x24OUT'`, '$OUT'],
+    [String.raw`$'\x60OUT'`, '`OUT'],
+    [String.raw`dir/'$OUT'`, 'dir/$OUT'],
+    [String.raw`😀'$OUT'`, '😀$OUT'],
+    [String.raw`'$OUT'/../.qwen/settings.json`, '.qwen/settings.json'],
+  ])('keeps a literal target known: %s', (target, file) => {
+    expect(across(`printf ok > ${target}`)).toEqual([write(`/repo/${file}`)]);
+  });
+
+  it.each([
+    String.raw`printf "$VALUE" > .qwen/settings.json`,
+    String.raw`printf "$VALUE>">.qwen/settings.json`,
+  ])(
+    'does not attribute argument expansion to a static redirect: %s',
+    (command) => {
+      expect(across(command)).toEqual([write(REPO_SETTINGS)]);
+    },
+  );
 });
 
 describe('quoted and decoded tilde targets', () => {
@@ -1179,5 +1533,727 @@ describe('quoted and decoded tilde targets', () => {
     expect(across('cd "~/x" ; cat > y')).toEqual([
       uncertainWrite('/repo/~/x/y'),
     ]);
+  });
+});
+
+describe('shell syntax ownership', () => {
+  it.each<[string, ShellOperation]>([
+    ['tee >(cat) .qwen/settings.json', write(REPO_SETTINGS)],
+    ['tee $(printf source) .qwen/settings.json', write(REPO_SETTINGS)],
+    ['cat <(printf x) .qwen/settings.json', read(REPO_SETTINGS)],
+    ['cp $(printf source) .qwen/settings.json', write(REPO_SETTINGS)],
+  ])('keeps the operand after a word substitution: %s', (command, expected) => {
+    expect(across(command)).toContainEqual(expected);
+  });
+
+  it.each(['!(', "'", '"'])(
+    'ignores group syntax in a comment: %s',
+    (comment) => {
+      expect(across(`cd .qwen # ${comment}\nprintf x > settings.json`)).toEqual(
+        [write(REPO_SETTINGS)],
+      );
+    },
+  );
+
+  it('does not treat a quote-spliced case command as a keyword', () => {
+    expect(across("ca''se; printf x > marker")).toEqual([
+      write('/repo/marker'),
+    ]);
+  });
+
+  it('does not execute the elements of an array assignment', () => {
+    expect(across('args=(tee .qwen/settings.json)')).toEqual([]);
+  });
+
+  it('does not certify cwd across an unmodelled case arm', () => {
+    expect(
+      across('case x in x) cd .qwen;; esac; printf x > settings.json'),
+    ).toEqual([
+      expect.objectContaining({
+        virtualTool: 'write_file',
+        cwdUnknown: true,
+        pathMayDependOnCwd: true,
+      }),
+    ]);
+  });
+
+  it.each(["'-p'", '"-p"', String.raw`\-p`, "-''p", "$'-p'", "'--'"])(
+    'does not treat a quoted time option as syntax: %s',
+    (option) => {
+      expect(
+        across(`time ${option} cd .qwen; printf x > settings.json`),
+      ).toEqual([write('/repo/settings.json')]);
+    },
+  );
+});
+
+describe('short option value ownership', () => {
+  it.each(['cp', 'mv', 'install', 'ln'])(
+    'does not reinterpret %s suffix text as a target directory',
+    (command) => {
+      for (const suffix of ['-S.tmp', '-St', '-bS.t']) {
+        expect(across(`${command} ${suffix} a b`)).toContainEqual(
+          write('/repo/b'),
+        );
+      }
+    },
+  );
+
+  it('keeps the destination after an option value within a cluster', () => {
+    expect(across('cp -rS.tmp a b')).toContainEqual(write('/repo/b'));
+  });
+
+  it.each(['-S -t', '-rS -t', '--suffix -t'])(
+    'does not reinterpret the next suffix operand as a target flag: %s',
+    (option) => {
+      expect(across(`cp ${option} a b`)).toContainEqual(write('/repo/b'));
+    },
+  );
+
+  it.each([
+    'cp -Zt .qwen /tmp/payload',
+    'cp --backup -t .qwen /tmp/payload',
+    'cp --copy-contents -t .qwen /tmp/payload',
+    'mv -Zt .qwen /tmp/payload',
+    'install -Ct .qwen /tmp/payload',
+    'ln -bt .qwen /tmp/payload',
+  ])('keeps boolean flags from consuming a target option: %s', (command) => {
+    const source = command.startsWith('mv ')
+      ? edit('/tmp/payload')
+      : read('/tmp/payload');
+    expect(across(command)).toEqual([source, write('/repo/.qwen/payload')]);
+  });
+
+  it('keeps the real target-directory cluster precise', () => {
+    expect(across('cp -rt .qwen /tmp/payload')).toEqual([
+      read('/tmp/payload'),
+      write('/repo/.qwen/payload'),
+    ]);
+  });
+});
+
+describe('prefixed directory changes', () => {
+  it.each([
+    'A=1',
+    'A="a b"',
+    'A+=1',
+    'A[0]=1',
+    'command',
+    'command -p',
+    'command --',
+    'builtin',
+    'builtin --',
+    'A=1 command',
+    'time',
+    'time -p',
+  ])('tracks the current shell directory through %s cd', (prefix) => {
+    expect(across(`${prefix} cd .qwen && printf '{}' > settings.json`)).toEqual(
+      [write(REPO_SETTINGS)],
+    );
+  });
+
+  it.each(['A=1', 'command', 'builtin'])(
+    'keeps argument marks aligned after %s',
+    (prefix) => {
+      expect(
+        across(`${prefix} cd $'\\x7e'; printf '{}' > settings.json`),
+      ).toEqual([uncertainWrite('/repo/~/settings.json')]);
+    },
+  );
+
+  it.each(['command -v cd', 'command -V cd'])(
+    'does not treat command lookup as a directory change: %s',
+    (command) => {
+      expect(across(`${command}; printf '{}' > settings.json`)).toEqual([
+        write('/repo/settings.json'),
+      ]);
+    },
+  );
+
+  it.each(['A=1 time cd .qwen', 'command time cd .qwen'])(
+    'does not treat a non-executed time prefix as a directory change: %s',
+    (command) => {
+      expect(across(`${command}; printf '{}' > settings.json`)).toEqual([
+        write('/repo/settings.json'),
+      ]);
+    },
+  );
+
+  it.each(["'time'", '"time"', String.raw`\time`, "$'time'", "ti''me"])(
+    'does not treat a non-reserved time spelling as a directory change: %s',
+    (prefix) => {
+      expect(across(`${prefix} cd .qwen; printf '{}' > settings.json`)).toEqual(
+        [write('/repo/settings.json')],
+      );
+    },
+  );
+
+  it.each([
+    'time -- cd .qwen',
+    'time -p -- cd .qwen',
+    '! time -- cd .qwen',
+    '! ! time -- cd .qwen',
+    '! time -p -- cd .qwen',
+    'time time cd .qwen',
+    'time -p time cd .qwen',
+  ])('does not certify a version-dependent time cwd: %s', (command) => {
+    expect(across(`${command}; printf '{}' > settings.json`)).toEqual([
+      {
+        ...write('/repo/settings.json'),
+        cwdUnknown: true,
+        pathMayDependOnCwd: true,
+      },
+    ]);
+  });
+});
+
+describe('compound process cwd scopes', () => {
+  it.each(["'f'()", "f''()", "'f name'()", "function 'f'", 'f-name()'])(
+    'keeps a quoted or non-identifier function definition local: %s',
+    (header) => {
+      expect(across(`${header} { cd .qwen; }; printf x > outer`)).toEqual([
+        write('/repo/outer'),
+      ]);
+    },
+  );
+
+  it.each<Row>([
+    [
+      'function definition body',
+      'f() { cd .qwen; }; printf x > outer',
+      [write('/repo/outer')],
+    ],
+    [
+      'keyword function definition body',
+      'function f { cd .qwen; }; printf x > outer',
+      [write('/repo/outer')],
+    ],
+    [
+      'spaced function definition header',
+      'f ( ) { cd .qwen; }; printf x > outer',
+      [write('/repo/outer')],
+    ],
+    [
+      'function definition with a subshell body',
+      'f() (cd .qwen); printf x > outer',
+      [write('/repo/outer')],
+    ],
+    [
+      'function containing a case arm',
+      'f() { case x in x) printf x; cd .qwen;; esac; }; printf x > outer',
+      [write('/repo/outer')],
+    ],
+    [
+      'subshell',
+      '(command cd .qwen); printf x > outer',
+      [write('/repo/outer')],
+    ],
+    [
+      'subshell body',
+      '(command cd .qwen; printf x > inner); printf x > outer',
+      [write('/repo/.qwen/inner'), write('/repo/outer')],
+    ],
+    [
+      'nested subshells',
+      '(cd .qwen; (cd nested; printf x > inner); printf x > middle); printf x > outer',
+      [
+        write('/repo/.qwen/nested/inner'),
+        write('/repo/.qwen/middle'),
+        write('/repo/outer'),
+      ],
+    ],
+    [
+      'pipeline left',
+      'A=1 cd .qwen | cat; printf x > outer',
+      [write('/repo/outer')],
+    ],
+    [
+      'pipeline right',
+      'printf x | command cd .qwen; printf x > outer',
+      [uncertainWrite('/repo/outer')],
+    ],
+    [
+      'pipeline brace body',
+      '{ cd .qwen; printf x > inner; } | cat; printf x > outer',
+      [write('/repo/.qwen/inner'), write('/repo/outer')],
+    ],
+    [
+      'foreground brace body',
+      '{ command cd .qwen; printf x > inner; }; printf x > outer',
+      [write('/repo/.qwen/inner'), write('/repo/.qwen/outer')],
+    ],
+    [
+      'background brace body',
+      '{ command cd .qwen; printf x > inner; } & wait; printf x > outer',
+      [write('/repo/.qwen/inner'), write('/repo/outer')],
+    ],
+    [
+      'background conditional list',
+      'cd .qwen && printf x > inner & wait; printf x > outer',
+      [write('/repo/.qwen/inner'), write('/repo/outer')],
+    ],
+    [
+      'brace group redirect',
+      '{ cd .qwen; printf x > inner; } > before; printf x > outer',
+      [
+        write('/repo/before'),
+        write('/repo/.qwen/inner'),
+        write('/repo/.qwen/outer'),
+      ],
+    ],
+    [
+      'subshell group redirect',
+      '(cd .qwen; printf x > inner) > before; printf x > outer',
+      [write('/repo/before'), write('/repo/.qwen/inner'), write('/repo/outer')],
+    ],
+  ])('keeps %s cwd ownership', (_title, command, expected) => {
+    expect(across(command)).toEqual(expected);
+  });
+
+  it('keeps over-budget group paths uncertain', () => {
+    const command = '( '.repeat(101) + 'printf x > marker' + ' )'.repeat(101);
+    expect(across(command)).toEqual([
+      { ...uncertainWrite('/repo/marker'), pathUnknown: true },
+    ]);
+  });
+});
+
+describe('wrapper payload expansion', () => {
+  it.each([
+    String.raw`bash -c "printf x > '$D'settings.json"`,
+    String.raw`bash -c "printf x > '$D''settings.json'"`,
+    String.raw`bash -c "printf x > '$D'\settings.json"`,
+  ])('does not certify a quote-spliced outer expansion: %s', (command) => {
+    const writes = across(command).filter(
+      (op) => op.virtualTool === 'write_file',
+    );
+    expect(writes).toHaveLength(1);
+    expect(writes[0]!.pathUnknown).toBe(true);
+  });
+
+  it('keeps an outer expansion uncertain inside a quote-removed literal path', () => {
+    const command = String.raw`bash -c "printf x > '$HOME/.bashrc'"' '`;
+    expect(across(command)).toEqual([
+      { ...write('/repo/$HOME/.bashrc'), pathUnknown: true },
+    ]);
+  });
+
+  it('keeps operators visible after an expansion beside a produced backslash', () => {
+    const command = String.raw`bash -c "cat \\$HOME"'; > ~/.bashrc'`;
+    expect(across(command)).toContainEqual(
+      write(`${os.homedir().replace(/\\/g, '/')}/.bashrc`),
+    );
+  });
+
+  it.each([
+    [String.raw`bash -c "printf x > '$'"`, '/repo/$'],
+    [String.raw`bash -c "printf x > $'notes'"`, '/repo/notes'],
+  ])('keeps non-expanding dollar syntax literal: %s', (command, path) => {
+    expect(across(command)).toEqual([write(path)]);
+  });
+
+  it('does not mark a literal dollar path when only a different value expands', () => {
+    const command = String.raw`bash -c "printf $VALUE > '\$OUT'"`;
+    expect(across(command)).toEqual([write('/repo/$OUT')]);
+  });
+  it('does not match only a prefix of a literal variable name', () => {
+    const command = String.raw`bash -c "printf $HOME > '\$HOMELESS'"`;
+    expect(across(command)).toEqual([write('/repo/$HOMELESS')]);
+  });
+
+  it('does not leak wrapper expansion state into a later analysis', () => {
+    across(String.raw`bash -c "printf x > '$HOME/.bashrc'"' '`);
+    expect(across(String.raw`printf x > '$HOME/.bashrc'`)).toEqual([
+      write('/repo/$HOME/.bashrc'),
+    ]);
+  });
+
+  it('keeps an escaped expansion uncertain through coalesced quote removal', () => {
+    const writes = across(String.raw`sh -c "cat > \\$TARGET"`).filter(
+      (op) => op.virtualTool === 'write_file',
+    );
+    expect(writes).toHaveLength(1);
+    expect(writes[0]!.pathUnknown).toBe(true);
+  });
+});
+
+describe('assignment syntax in directory changes', () => {
+  it.each(["A[0'']=1", 'A["0"]=1', 'A[$I]=1', 'A[0]+=1'])(
+    'tracks cd after an assignment with a subscript: %s',
+    (prefix) => {
+      expect(across(`${prefix} cd .qwen; printf x > settings.json`)).toEqual([
+        write(REPO_SETTINGS),
+      ]);
+    },
+  );
+
+  it.each(["'A=1'", "'A'=1", String.raw`A\=1`, "A''=1", "''A=1", "$''A=1"])(
+    'does not treat a quoted command word as an assignment: %s',
+    (prefix) => {
+      expect(
+        across(`${prefix} cd /elsewhere; printf '{}' > .qwen/settings.json`),
+      ).toEqual([write(REPO_SETTINGS)]);
+    },
+  );
+
+  it.each([
+    'HOME=. cd',
+    'HOME+=. cd',
+    'CDPATH=/elsewhere cd .qwen',
+    'CDPATH+=/elsewhere cd .qwen',
+  ])('does not guess a cwd affected by temporary variables: %s', (command) => {
+    expect(across(`${command}; printf '{}' > .qwen/settings.json`)).toEqual([
+      uncertainWrite(REPO_SETTINGS),
+    ]);
+  });
+});
+
+describe('find starting-point uncertainty', () => {
+  it.each(['./$D', './*'])(
+    'keeps the marks on a find starting point: %s',
+    (target) => {
+      expect(across(`find ${target} -name x`)).toEqual([
+        {
+          ...dir(`/repo/${target.slice(2)}`),
+          pathUnknown: true,
+          ...(target === './*' ? { pathGlobOnly: true } : {}),
+        },
+      ]);
+    },
+  );
+
+  it.each(['$D', '"$D"', '-H $D', '-L "$D"', '-P $D'])(
+    'keeps a variable-only starting point: %s',
+    (target) => {
+      expect(across(`find ${target} -name x`)).toEqual([
+        { ...dir('/repo/$D'), pathUnknown: true },
+      ]);
+    },
+  );
+
+  it('does not drop an unresolved starting point beside a literal one', () => {
+    expect(across('find src $D -name x')).toEqual([
+      dir('/repo/src'),
+      { ...dir('/repo/$D'), pathUnknown: true },
+    ]);
+  });
+
+  it('retains default and literal starting points', () => {
+    expect(across('find -name x')).toEqual([dir('/repo')]);
+    expect(across('find src -name x')).toEqual([dir('/repo/src')]);
+    expect(across("find '$D' -name x")).toEqual([dir('/repo/$D')]);
+    expect(across('find 123 -name x')).toEqual([dir('/repo/123')]);
+  });
+});
+
+describe('output destinations that are not files', () => {
+  it.each([
+    'curl -o - https://example.com',
+    'wget -O - https://example.com/f.gz',
+    'wget -qO- https://example.com/f.gz',
+  ])('does not invent a download write: %s', (command) => {
+    expect(
+      ops(command).filter((op) => op.virtualTool === 'write_file'),
+    ).toEqual([]);
+  });
+
+  it('keeps a URL-shaped output value as the file curl actually writes', () => {
+    expect(
+      ops('curl -o https://example.com/out file:///etc/hosts'),
+    ).toContainEqual(write(`${CWD}/https:/example.com/out`));
+  });
+
+  it('reads an output value attached inside a short-flag cluster', () => {
+    expect(ops('wget -qO/tmp/file.gz https://example.com/f.gz')).toContainEqual(
+      write('/tmp/file.gz'),
+    );
+  });
+
+  it('does not invent a patch edit for stdout', () => {
+    expect(
+      ops('patch -o - input.patch').filter((op) => op.virtualTool === 'edit'),
+    ).toEqual([edit(`${CWD}/input.patch`)]);
+  });
+});
+
+describe('shell-expanded write paths', () => {
+  it.each([
+    "printf '{}' > .qwen/setting{s..s}.json",
+    "printf '{}' > .qwen/settings.j@(son)",
+    'touch .qwen/setting{s..s}.json',
+    'sort -o $OUT in.txt',
+    'sort --output=$OUT in.txt',
+    'cp -t $D settings.json',
+    'mv --target-directory=$D settings.json',
+    'curl -o $OUT https://example.com',
+    'wget -O $OUT https://example.com',
+    'patch -o $OUT input.patch',
+  ])('keeps the expanded destination uncertain: %s', (command) => {
+    const uncertainWrites = across(command).filter(
+      (op) =>
+        (op.virtualTool === 'write_file' || op.virtualTool === 'edit') &&
+        op.pathUnknown,
+    );
+    expect(uncertainWrites).toHaveLength(1);
+  });
+
+  it.each([
+    ['.qwen/setting{s..s}.json', '/repo/.qwen/setting{s..s}.json'],
+    ['.qwen/settings.j@(son)', '/repo/.qwen/settings.j@(son)'],
+  ])('keeps a quoted expansion literal: %s', (target, path) => {
+    expect(across(`printf '{}' > '${target}'`)).toEqual([write(path)]);
+  });
+
+  it('does not mistake an awk program for a brace-expanded filename', () => {
+    expect(across("awk '{print $1}' f")).toEqual([read('/repo/f')]);
+  });
+
+  it('keeps a quoted output-flag value literal', () => {
+    expect(across("sort -o '$OUT' in.txt")).toContainEqual(write('/repo/$OUT'));
+  });
+});
+
+describe('argument marks survive the env-assignment strip', () => {
+  // `tokens` and `bares` are index-parallel. Dropping a leading assignment from
+  // only one of them gave every later argument the previous word's marks, so a
+  // destination bash resolves at runtime was certified as a literal path.
+  it.each(['cat dir/$OUT', 'X=1 cat dir/$OUT', 'X=1 Y=2 cat dir/$OUT'])(
+    'keeps the expanded read uncertain: %s',
+    (command) => {
+      expect(ops(command)).toEqual([
+        {
+          virtualTool: 'read_file',
+          filePath: `${CWD}/dir/$OUT`,
+          pathUnknown: true,
+        },
+      ]);
+    },
+  );
+
+  it.each(['cp dir/$OUT /tmp/y', 'X=1 cp dir/$OUT /tmp/y'])(
+    'marks the expanded source and not the literal destination: %s',
+    (command) => {
+      expect(ops(command)).toEqual([
+        {
+          virtualTool: 'read_file',
+          filePath: `${CWD}/dir/$OUT`,
+          pathUnknown: true,
+        },
+        write('/tmp/y'),
+      ]);
+    },
+  );
+
+  it('leaves a fully literal prefixed command known', () => {
+    expect(ops('X=1 cat /tmp/safe')).toEqual([read('/tmp/safe')]);
+  });
+});
+
+describe('paths a handler derives from an argument stay uncertain', () => {
+  // A flag value is a substring of its argument and a `-t` destination is a
+  // join, so neither string is ever an element of `args`. Matching finished
+  // paths against whole arguments dropped the mark for those spellings.
+  it.each([
+    'sort -o .qwen/$OUT in.txt',
+    'sort -o.qwen/$OUT in.txt',
+    'sort --output=.qwen/$OUT in.txt',
+  ])('marks the output flag in every spelling: %s', (command) => {
+    const writes = ops(command).filter((op) => op.virtualTool === 'write_file');
+    expect(writes).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: `${CWD}/.qwen/$OUT`,
+        pathUnknown: true,
+      },
+    ]);
+  });
+
+  it.each([
+    ['curl -o.qwen/$OUT https://example.com', 'curl'],
+    ['wget -O.qwen/$OUT https://example.com', 'wget'],
+  ])('marks an attached download destination: %s', (command) => {
+    const writes = ops(command).filter((op) => op.virtualTool === 'write_file');
+    expect(writes).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: `${CWD}/.qwen/$OUT`,
+        pathUnknown: true,
+      },
+    ]);
+  });
+
+  it.each([
+    'cp -t out/$D file',
+    'cp -tout/$D file',
+    'cp --target-directory=out/$D file',
+    'mv -t out/$D file',
+    'install -t out/$D file',
+  ])('marks a joined target-directory destination: %s', (command) => {
+    const writes = ops(command).filter((op) => op.virtualTool === 'write_file');
+    expect(writes).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: `${CWD}/out/$D/file`,
+        pathUnknown: true,
+      },
+    ]);
+  });
+
+  it.each([
+    ['cp -t out/x? file', `${CWD}/out/x?/file`],
+    ['mv --target-directory=out/{a,b} f', `${CWD}/out/{a,b}/f`],
+    ['cp -t out/$D/.. file', `${CWD}/out/file`],
+    ['cp -t .qwe? settings.json', `${CWD}/.qwe?/settings.json`],
+  ])(
+    'retains target-directory uncertainty before path normalization: %s',
+    (command, filePath) => {
+      const writes = ops(command).filter(
+        (op) => op.virtualTool === 'write_file',
+      );
+      expect(writes).toEqual([
+        { virtualTool: 'write_file', filePath, pathUnknown: true },
+      ]);
+    },
+  );
+
+  it.each([
+    'sort -o/tmp/safe in.txt',
+    'sort -o /tmp/safe in.txt',
+    'curl -o/tmp/safe https://example.com',
+  ])('leaves a literal derived destination known: %s', (command) => {
+    const writes = ops(command).filter((op) => op.virtualTool === 'write_file');
+    expect(writes).toEqual([write('/tmp/safe')]);
+  });
+
+  it('leaves a literal target-directory destination known', () => {
+    const writes = ops('cp -t /tmp/safe file').filter(
+      (op) => op.virtualTool === 'write_file',
+    );
+    expect(writes).toEqual([write('/tmp/safe/file')]);
+  });
+});
+
+describe('unquoted pathname globbing is an expansion', () => {
+  // A glob character is marked bare rather than as expansion syntax, so a
+  // predicate that read only the expansion mark certified `> settings.jso?`
+  // at a name bash never opens.
+  it.each([
+    "printf '{}' > .qwen/settings.jso?",
+    "printf '{}' > .qwen/[s]ettings.json",
+    "printf '{}' > .qwen/settings.json*",
+  ])('keeps a globbed redirect target uncertain: %s', (command) => {
+    expect(across(command)).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath:
+          '/repo/.qwen/' + command.split('> ')[1]!.replace('.qwen/', ''),
+        pathUnknown: true,
+      },
+    ]);
+  });
+
+  it('keeps a globbed read argument visible without forcing unresolved-path review', () => {
+    expect(ops('cat .qwen/settings.jso?')).toEqual([
+      {
+        ...read(`${CWD}/.qwen/settings.jso?`),
+        pathUnknown: true,
+        pathGlobOnly: true,
+      },
+    ]);
+  });
+
+  it('escalates the segment after a globbed cd', () => {
+    expect(across('cd .qwen/sub? && echo x > settings.json')).toEqual([
+      uncertainWrite('/repo/.qwen/sub?/settings.json'),
+    ]);
+  });
+
+  it.each([
+    ['cat "foo*"', 'foo*'],
+    ["cat 'foo*'", 'foo*'],
+    [String.raw`cat esc\*.txt`, 'esc*.txt'],
+    ['cat data.csv', 'data.csv'],
+  ])('leaves a quoted or escaped glob literal: %s', (command, file) => {
+    expect(ops(command)).toEqual([read(`${CWD}/${file}`)]);
+  });
+
+  it('leaves an ordinary redirect known', () => {
+    expect(across('echo hi > log.txt')).toEqual([write('/repo/log.txt')]);
+  });
+});
+
+describe('R17 shell structure regressions', () => {
+  it.each<[string, ShellOperation]>([
+    ['echo "$(true ")"; echo hi > .qwen/settings.json)"', write(REPO_SETTINGS)],
+    ['echo $(cat "/tmp/a)")', read('/tmp/a)')],
+    [
+      'echo $(case x in x) cat /etc/shadow;; esac)',
+      {
+        ...read('/etc/shadow'),
+        cwdUnknown: true,
+        pathMayDependOnCwd: false,
+      },
+    ],
+    ['printf x 2>& 2> .qwen/settings.json', write(REPO_SETTINGS)],
+    ["echo hi '>'>& out.txt", write('/repo/out.txt')],
+    ["bash -lc 'echo hi' > .qwen/settings.json", write(REPO_SETTINGS)],
+    ['cd <(true); echo x > .qwen/settings.json', uncertainWrite(REPO_SETTINGS)],
+    ['cp -t /tmp/x <(echo hi)', write('/tmp/x/63')],
+    [
+      String.raw`( true ) \| cd /tmp ; printf '{}' > .qwen/settings.json`,
+      uncertainWrite(REPO_SETTINGS),
+    ],
+    [
+      'cd() { :; }; cd /tmp; echo x > .qwen/settings.json',
+      uncertainWrite(REPO_SETTINGS),
+    ],
+    ['!"" cd tmp; echo x > .qwen/settings.json', write(REPO_SETTINGS)],
+    [
+      String.raw`cd .qwen \|\| cd /tmp; echo x > settings.json`,
+      uncertainWrite('/repo/.qwen/settings.json'),
+    ],
+    [
+      String.raw`echo \${x; cd .qwen; printf '{}' > settings.json`,
+      write('/repo/.qwen/settings.json'),
+    ],
+    ['f() { cd .qwen; }; f; printf x > outer', uncertainWrite('/repo/outer')],
+  ])(
+    'preserves the real path or explicit uncertainty: %s',
+    (command, expected) => {
+      expect(across(command)).toEqual([expected]);
+    },
+  );
+
+  it.each([
+    'eval "HOME=/etc"; cd /tmp; cat > ~/passwd',
+    "HOME=/repo bash -c 'echo x > ~/.qwen/settings.json'",
+  ])(
+    'marks HOME changes unknown instead of using the process home: %s',
+    (command) => {
+      const writes = across(command);
+      expect(writes).toHaveLength(1);
+      expect(writes[0]!.pathUnknown).toBe(true);
+    },
+  );
+
+  it('does not leak a self-contained conditional test into cwd uncertainty', () => {
+    expect(across('[[ -f a ]] && printf x > outer')).toEqual([
+      write('/repo/outer'),
+    ]);
+  });
+
+  it('does not charge substitutions to the wrapper uncertainty depth', () => {
+    let command = 'cat /etc/passwd';
+    for (let index = 0; index < 5; index++) {
+      command = `$(${command})`;
+    }
+    expect(across(command)).toEqual([read('/etc/passwd')]);
+  });
+
+  it('fails closed on an unclosed substitution', () => {
+    expect(across('echo "$(cat /etc/passwd"')).toContainEqual({
+      virtualTool: 'edit',
+      pathUnknown: true,
+    });
   });
 });

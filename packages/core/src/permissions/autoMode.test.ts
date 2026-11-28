@@ -28,6 +28,7 @@ import {
   shouldRunAutoModeForCall,
 } from './autoMode.js';
 import { clearSessionCommits } from './destructive-commands.js';
+import { classifyAction } from './classifier.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { Config } from '../config/config.js';
@@ -550,6 +551,15 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     expect(forcesReview('git status')).toBe(false);
   });
 
+  it.each([
+    "(cd .qwen; case a in a) :;; esac; printf '{}' > settings.json)",
+    "sh -c 'echo $(pwd)#1; rm .qwen/settings.json'",
+    'echo $(true; rm .qwen/settings.json)',
+    "echo ${x:- #}; cd .qwen; printf '{}' > settings.json",
+  ])('reviews writes through unmodelled shell structure: %s', (command) => {
+    expect(forcesReview(command)).toBe(true);
+  });
+
   it('returns true for nested wrappers writing protected paths after `cd`', () => {
     // Regression guard: without `extractShellOperationsAcrossCommand` doing
     // cross-segment cd tracking AND recursive wrapper unwrapping, this payload
@@ -559,6 +569,15 @@ describe('shouldForceAutoModeReviewForAllow', () => {
       true,
     );
   });
+
+  it.each(['A=1', 'A+=1', 'A[0]=1', 'command', 'builtin', 'time', 'time -p'])(
+    'reviews a protected write after %s cd',
+    (prefix) => {
+      expect(
+        forcesReview(`${prefix} cd .qwen && printf '{}' > settings.json`),
+      ).toBe(true);
+    },
+  );
 
   it('returns true for relative writes after an unresolved dynamic `cd`', () => {
     // If cwd is dynamic, the apparent resolved path is only a guess. Route
@@ -873,6 +892,154 @@ describe('evaluateAutoMode — fast-path gating', () => {
       { skipClassifierReason: 'total_denial' },
     );
     expect(decision).toEqual({ via: 'fallback', reason: 'total_denial' });
+  });
+
+  it('routes undecodable shell paths to manual fallback without the classifier', async () => {
+    vi.mocked(classifyAction).mockClear();
+    const decision = await evaluate({
+      toolName: ToolNames.SHELL,
+      command: String.raw`printf x > $'\xff'`,
+      cwd,
+    });
+    expect(decision).toEqual({
+      via: 'fallback',
+      reason: 'safety_check',
+      requiresHumanDecision: true,
+      message: expect.stringMatching(/manual approval/),
+    });
+    expect(classifyAction).not.toHaveBeenCalled();
+  });
+
+  it.each([ToolNames.SHELL, ToolNames.MONITOR])(
+    'routes an unresolved %s redirect to manual fallback without the classifier',
+    async (toolName) => {
+      vi.mocked(classifyAction).mockClear();
+      const decision = await evaluate({
+        toolName,
+        command: String.raw`sh -c 'printf {} > "$OUTPUT"'`,
+        cwd,
+      });
+      expect(decision).toEqual({
+        via: 'fallback',
+        reason: 'safety_check',
+        requiresHumanDecision: true,
+        message: expect.stringMatching(/manual approval/),
+      });
+      expect(classifyAction).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    "printf '{}' > .qwen/setting{s..s}.json",
+    "printf '{}' > .qwen/settings.j@(son)",
+    'touch .qwen/setting{s..s}.json',
+    'sort -o $OUT in.txt',
+    'cp -t $D settings.json',
+    'cp -t out/x? file',
+    'mv --target-directory=out/{a,b} f',
+    'cp -t out/$D/.. file',
+    'cp -t .qwe? settings.json',
+    'cd $D; printf x > out.txt',
+    'printf x | cd .qwen; printf x > out.txt',
+  ])('routes an expanded write to manual fallback: %s', async (command) => {
+    vi.mocked(classifyAction).mockClear();
+    const decision = await evaluate({
+      toolName: ToolNames.SHELL,
+      command,
+      cwd,
+    });
+    expect(decision).toEqual({
+      via: 'fallback',
+      reason: 'safety_check',
+      requiresHumanDecision: true,
+      message: expect.stringMatching(/manual approval/),
+    });
+    expect(classifyAction).not.toHaveBeenCalled();
+  });
+
+  it('routes an escaped wrapper expansion to manual fallback', async () => {
+    vi.mocked(classifyAction).mockClear();
+    const decision = await evaluate({
+      toolName: ToolNames.SHELL,
+      command: String.raw`sh -c "cat > \\$TARGET"`,
+      cwd,
+    });
+    expect(decision).toEqual({
+      via: 'fallback',
+      reason: 'safety_check',
+      requiresHumanDecision: true,
+      message: expect.stringMatching(/manual approval/),
+    });
+    expect(classifyAction).not.toHaveBeenCalled();
+  });
+
+  it.each([ToolNames.SHELL, ToolNames.MONITOR])(
+    'keeps an outer %s path expansion at the human approval floor',
+    async (toolName) => {
+      vi.mocked(classifyAction).mockClear();
+      const decision = await evaluate({
+        toolName,
+        command: String.raw`bash -c "printf x > '$HOME/.bashrc'"' '`,
+        cwd,
+      });
+      expect(decision).toEqual({
+        via: 'fallback',
+        reason: 'safety_check',
+        requiresHumanDecision: true,
+        message: expect.stringMatching(/manual approval/),
+      });
+      expect(classifyAction).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the unresolved-path floor when a permission rule also forces ask', async () => {
+    const decision = await evaluate(
+      {
+        toolName: ToolNames.SHELL,
+        command: String.raw`printf x > "$OUT"`,
+        cwd,
+      },
+      { pmForcedAsk: true },
+    );
+    expect(decision).toEqual({
+      via: 'fallback',
+      reason: 'safety_check',
+      requiresHumanDecision: true,
+      message: expect.stringMatching(/manual approval/),
+    });
+  });
+
+  it('does not force a cwd floor for an absolute-only write', async () => {
+    vi.mocked(classifyAction).mockClear();
+    const decision = await evaluate({
+      toolName: ToolNames.SHELL,
+      command: 'cd $D; printf x > /tmp/out.txt',
+      cwd,
+    });
+    expect(decision.via).toBe('classifier');
+    expect(classifyAction).toHaveBeenCalledOnce();
+  });
+
+  it('lets an ordinary read-only glob reach the classifier', async () => {
+    vi.mocked(classifyAction).mockClear();
+    const decision = await evaluate({
+      toolName: ToolNames.SHELL,
+      command: 'grep -rn foo src/*.ts',
+      cwd,
+    });
+    expect(decision.via).toBe('classifier');
+    expect(classifyAction).toHaveBeenCalledOnce();
+  });
+
+  it('does not treat a literal dollar in a redirect as unresolved', async () => {
+    vi.mocked(classifyAction).mockClear();
+    const decision = await evaluate({
+      toolName: ToolNames.SHELL,
+      command: String.raw`printf ok > '$OUT'`,
+      cwd,
+    });
+    expect(decision.via).toBe('classifier');
+    expect(classifyAction).toHaveBeenCalledOnce();
   });
 
   // ─── New tests for external write fallback ───

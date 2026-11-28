@@ -784,17 +784,44 @@ export function decodeAnsiCBytes(bytes: number[]): string {
   return text;
 }
 
+export function concatAnsiCText(prefix: string, decoded: string): string {
+  const first = decoded.charCodeAt(0);
+  if (first >= 0xdc00 && first <= 0xdfff) {
+    const previous = prefix.charCodeAt(prefix.length - 1);
+    if (previous >= 0xd800 && previous <= 0xdbff) {
+      // A raw high surrogate must not hide an undecodable byte by pairing.
+      prefix = prefix.slice(0, -1) + String.fromCharCode(previous + 0x400);
+    }
+  }
+  return prefix + decoded;
+}
+
+/** True when a string cannot round-trip through Node's UTF-8 path encoding. */
+export function hasUnpairedSurrogate(text: string): boolean {
+  return /[\uD800-\uDFFF]/u.test(text);
+}
+
 /**
  * Decode a whole ANSI-C word body. A NUL ends the word bash builds:
  * `$'--\0x'` is the word `--`; the rest of the segment is dropped.
  */
 function decodeAnsiCWord(body: string): string {
   const bytes: number[] = [];
+  let text = '';
+  const flush = () => {
+    text = concatAnsiCText(text, decodeAnsiCBytes(bytes));
+    bytes.length = 0;
+  };
   for (let index = 0; index < body.length; index++) {
     const escape = decodeAnsiCEscape(body, index);
     if (!escape) {
       const literal = String.fromCodePoint(body.codePointAt(index)!);
-      for (const byte of Buffer.from(literal)) bytes.push(byte);
+      if (hasUnpairedSurrogate(literal)) {
+        flush();
+        text = concatAnsiCText(text, literal);
+      } else {
+        for (const byte of Buffer.from(literal)) bytes.push(byte);
+      }
       index += literal.length - 1;
       continue;
     }
@@ -802,23 +829,38 @@ function decodeAnsiCWord(body: string): string {
     for (const byte of escape.bytes) bytes.push(byte);
     index += escape.length - 1;
   }
-  return decodeAnsiCBytes(bytes);
+  flush();
+  return text;
 }
 
 /**
  * The word a token denotes once the shell removes its quoting, so `'--'`,
  * `"--"`, `\--`, `$'--'`, `$'\x2d\x2d'` and `-'-'` all read as `--`.
  * Expansion syntax stays literal text and sets `hasExpansion`; such a word
- * is not a resolved terminator. Returns null on an unterminated quote.
+ * is not a resolved terminator. Undecodable bytes remain in the decoded text
+ * so operation extraction stays visible; the path layer marks them unknown.
+ * Returns null on an unterminated quote.
  * Locale quoting `$"…"` does NOT decode ANSI-C escapes (bash runs a program
  * literally named `x2dx2d` for `$"\x2d\x2d"`), so it reads like a
  * double-quoted word.
  */
 function shellWordQuoteRemoval(
   token: string,
+  expandedWords?: Set<string>,
 ): { text: string; hasExpansion: boolean } | null {
   let out = '';
   let hasExpansion = false;
+  const expandedAt: number[] = [];
+  const recordExpansion = (at: number) => {
+    hasExpansion = true;
+    if (
+      /^(?:\$(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-]|\{|\()|`)/.test(
+        token.slice(at),
+      )
+    ) {
+      expandedAt.push(out.length);
+    }
+  };
   let i = 0;
   const n = token.length;
   while (i < n) {
@@ -826,7 +868,7 @@ function shellWordQuoteRemoval(
     if (ch === "'") {
       const close = token.indexOf("'", i + 1);
       if (close === -1) return null;
-      out += token.slice(i + 1, close);
+      out = concatAnsiCText(out, token.slice(i + 1, close));
       i = close + 1;
       continue;
     }
@@ -835,8 +877,9 @@ function shellWordQuoteRemoval(
         i += 2;
         continue;
       }
-      out += token[i + 1];
-      i += 2;
+      const literal = String.fromCodePoint(token.codePointAt(i + 1)!);
+      out = concatAnsiCText(out, literal);
+      i += 1 + literal.length;
       continue;
     }
     // `\`+newline is removed before the shell lexes, so `$\<newline>'…'` is
@@ -857,7 +900,7 @@ function shellWordQuoteRemoval(
         j++;
       }
       if (j >= n) return null;
-      out += decodeAnsiCWord(body);
+      out = concatAnsiCText(out, decodeAnsiCWord(body));
       i = j + 1;
       continue;
     }
@@ -874,7 +917,7 @@ function shellWordQuoteRemoval(
         if (c === '\\' && i + 1 < n) {
           const next = token[i + 1]!;
           if (next === '$' || next === '`' || next === '"' || next === '\\') {
-            out += next;
+            out = concatAnsiCText(out, next);
             i += 2;
             continue;
           }
@@ -882,13 +925,14 @@ function shellWordQuoteRemoval(
             i += 2;
             continue;
           }
-          out += c;
+          out = concatAnsiCText(out, c);
           i++;
           continue;
         }
-        if (c === '$' || c === '`') hasExpansion = true;
-        out += c;
-        i++;
+        if (c === '$' || c === '`') recordExpansion(i);
+        const literal = String.fromCodePoint(token.codePointAt(i)!);
+        out = concatAnsiCText(out, literal);
+        i += literal.length;
       }
       if (!closed) return null;
       continue;
@@ -898,33 +942,51 @@ function shellWordQuoteRemoval(
         i = dollarAt;
         continue;
       }
-      hasExpansion = true;
-      out += ch;
+      recordExpansion(i);
+      out = concatAnsiCText(out, ch);
       i++;
       continue;
     }
     if (ch === '`') {
-      hasExpansion = true;
-      out += ch;
+      recordExpansion(i);
+      out = concatAnsiCText(out, ch);
       i++;
       continue;
     }
-    out += ch;
-    i++;
+    const literal = String.fromCodePoint(token.codePointAt(i)!);
+    out = concatAnsiCText(out, literal);
+    i += literal.length;
+  }
+  if (expandedWords && expandedAt.length > 0) {
+    let offset = 0;
+    let expansion = 0;
+    while (offset < out.length && expansion < expandedAt.length) {
+      const next = takeLeadingToken(out.slice(offset));
+      if (!next) {
+        expandedWords.add(out.slice(offset));
+        break;
+      }
+      const start = out.indexOf(next.token, offset);
+      const end = start + next.token.length;
+      if (expandedAt[expansion]! < end) {
+        expandedWords.add(
+          shellWordQuoteRemoval(next.token)?.text ?? next.token,
+        );
+        while (expansion < expandedAt.length && expandedAt[expansion]! < end)
+          expansion++;
+      }
+      offset = end;
+    }
   }
   return { text: out, hasExpansion };
 }
 
-/**
- * The word the shell hands a consumer: quote removal plus ANSI-C decoding
- * when the whole word is static. A word carrying an expansion keeps its
- * quote-stripped spelling.
- */
-function resolveShellWord(token: string): string {
-  const removed = shellWordQuoteRemoval(token);
-  return removed !== null && !removed.hasExpansion
-    ? removed.text
-    : stripSymmetricQuotes(token).value;
+/** Quote removal applies around expansions too; their syntax stays literal. */
+function resolveShellWord(token: string, expandedWords?: Set<string>): string {
+  return (
+    shellWordQuoteRemoval(token, expandedWords)?.text ??
+    stripSymmetricQuotes(token).value
+  );
 }
 
 /**
@@ -1012,7 +1074,10 @@ function restAfterOptionTerminator(rest: string): string | null {
   return takeLeadingToken(terminator.rest) ? terminator.rest : null;
 }
 
-export function stripShellWrapper(command: string): string {
+export function stripShellWrapper(
+  command: string,
+  expandedWords?: Set<string>,
+): string {
   const trimmed = trimBashEdgeSeparators(command);
   let rest = trimmed;
 
@@ -1057,7 +1122,7 @@ export function stripShellWrapper(command: string): string {
       // operators and paths inside it stay visible to the callers.
       const innerCommand = shellWrapperCommandConsumesRest(wrapperToken.token)
         ? value
-        : resolveShellWord(commandToken.token);
+        : resolveShellWord(commandToken.token, expandedWords);
       if (!quote && shellWrapperCommandConsumesRest(wrapperToken.token)) {
         return markerRest.trimStart() || trimmed;
       }
@@ -1112,7 +1177,9 @@ function unresolvedWrapperAlternatePayload(command: string): string | null {
       if (removed === null || !removed.hasExpansion) return null;
       const next = takeLeadingToken(payload.rest);
       if (!next) return null;
-      return resolveShellWord(next.token) || null;
+      const expandedWords = new Set<string>();
+      const resolved = resolveShellWord(next.token, expandedWords);
+      return expandedWords.size > 0 ? `sh -c ${next.token}` : resolved || null;
     }
     const normalized = getNormalizedShellToken(token.token);
     if (!isShellWrapperFlagToken(normalized)) return null;
@@ -2142,14 +2209,24 @@ export function normalizeMonitorCommand(
     analysisCommand,
     ...(normalizedInnerArgsSuffix ? [normalizedInnerArgsSuffix] : []),
   ];
+  const expandedWords = new Set<string>();
+  stripShellWrapper(command, expandedWords);
   const safetyCommand =
-    wrapperTokens && !payloadUnresolved && safetyParts.length > 0
-      ? safetyParts.join(' ').trim()
-      : payloadUnresolved
-        ? [safetyParts.join(' ').trim(), alternatePayload ?? '']
-            .filter(Boolean)
-            .join(' ')
-        : analysisCommand;
+    expandedWords.size > 0
+      ? [
+          safetyParts.join(' ').trim(),
+          command.trim(),
+          payloadUnresolved ? (alternatePayload ?? '') : '',
+        ]
+          .filter(Boolean)
+          .join('\n')
+      : wrapperTokens && !payloadUnresolved && safetyParts.length > 0
+        ? safetyParts.join(' ').trim()
+        : payloadUnresolved
+          ? [safetyParts.join(' ').trim(), alternatePayload ?? '']
+              .filter(Boolean)
+              .join('\n')
+          : analysisCommand;
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
     normalizedInnerArgsSuffix !== rawInnerArgsSuffix;
