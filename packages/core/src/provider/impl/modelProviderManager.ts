@@ -60,6 +60,8 @@ export interface CreateModelProviderManagerOptions {
   modelTransportManager: ModelTransportManager;
   /** 会话 cwd：仅作锚点构造材料透传，供其求解项目级 settings。 */
   projectPath?: string;
+  /** 已解析设置给出的项目信任快照；缺省时拒绝读取项目 provider。 */
+  projectSettingsTrusted?: boolean;
   /** 进程级 settings 服务：供锚点与 Custom Provider 的偏好存储使用。 */
   settingsService: SettingsService;
   /** 偏好写入后回调，携带该模型写入前后的完整偏好；会话装配方据此转发变更事件。 */
@@ -113,6 +115,7 @@ export class ModelProviderManager implements ModelProvider {
     this.localProviders = loadProjectCustomProviderConfigs(
       options.settingsService,
       options.projectPath,
+      options.projectSettingsTrusted ?? false,
     ).map(
       (config) =>
         new CustomModelProvider({

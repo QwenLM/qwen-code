@@ -153,6 +153,7 @@ describe('ModelProviderManager config routing', () => {
         { protocol: OPENAI_CHAT_COMPLETIONS, stream: vi.fn() },
       ]),
       settingsService,
+      projectSettingsTrusted: true,
     });
     manager.setMainModel(model('example'));
     expect((await manager.getMainModel()).source).toBe('qoder');
@@ -829,12 +830,14 @@ describe('ModelProviderManager 会话 provider 查询隔离', () => {
       userProviders: [],
       modelTransportManager,
       settingsService,
+      projectSettingsTrusted: true,
     });
     key = 'new';
     const second = new ModelProviderManager({
       userProviders: [],
       modelTransportManager,
       settingsService,
+      projectSettingsTrusted: true,
     });
     expect(await first.getModel('local/old')).toBeDefined();
     expect(await first.getModel('local/new')).toBeUndefined();
@@ -907,6 +910,7 @@ function lifecycleFixture(modelKey = 'example') {
       { protocol: OPENAI_CHAT_COMPLETIONS, stream: vi.fn() },
     ]),
     settingsService,
+    projectSettingsTrusted: true,
   });
   // 检查 manager 真正自建的实例，不以外部贡献伪装内部生命周期。
   const providers = Reflect.get(

@@ -1734,6 +1734,7 @@ export class Config implements AgentLoopContext {
       userProviders: this.modelProviders,
       modelTransportManager: this.modelTransportManager,
       projectPath: params.cwd,
+      projectSettingsTrusted: params.loadedSettings.isTrusted,
       settingsService: this.settingsService,
       onModelConfigChange: (model, next, previous) =>
         this.emitModelConfigChanges(model.key, next, previous),
@@ -5895,6 +5896,32 @@ export class Config implements AgentLoopContext {
     // its own TrustChanged listener; MCP, hooks, and skills are
     // reloaded directly here since Config owns them.
     if (isTrusted) {
+      if (this.loadedSettings.isTrusted) {
+        void (async () => {
+          if (
+            this.customProvidersDisposed ||
+            this.customProviderAccessMode === 'disabled'
+          ) {
+            return;
+          }
+          const providers = this.loadedSettings.merged.providers;
+          // Trust can be granted before provider access is initialized.
+          if (
+            providers &&
+            Object.keys(providers).length > 0 &&
+            !this.canUseCustomProviders()
+          ) {
+            await this.ensureCustomProvidersAccess();
+          }
+          if (this.customProvidersDisposed) return;
+          await this.replaceCustomProviderSettings(providers);
+        })().catch((e) => {
+          runLogger.error(
+            '[Config] Failed to refresh custom providers after trust change:',
+            e,
+          );
+        });
+      }
       this.mcpClientManager?.initialize()?.catch((e) => {
         runLogger.error(
           '[Config] Failed to start MCP servers after trust change:',

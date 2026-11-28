@@ -173,15 +173,17 @@ function mergeProviderSettingsTexts(
  * 项目级 CustomProviderConfig 读取：按会话 cwd 读 project + local 两档
  * settings 的 providers 块（local 覆盖 project），只返回配置，不创建实例。
  * 工作区是 home 目录时不读项目层；文件缺失/损坏/读取异常只 warn 留空，
- * 不在装配期抛错。
+ * 不在装配期抛错。信任判定由已解析设置的调用方传入，避免装配期重新 resolve
+ * 触发环境加载、迁移或写入等副作用。
  */
 export function loadProjectCustomProviderConfigs(
   settingsService: SettingsService,
   cwd = process.cwd(),
+  isTrusted = false,
 ): CustomProviderConfig[] {
   try {
     const storage = new Storage(cwd);
-    if (storage.isWorkspaceHomeDir()) return [];
+    if (storage.isWorkspaceHomeDir() || !isTrusted) return [];
     const sources = settingsService.getProjectSettingsSources(
       storage.getWorkspaceSettingsPath(),
       storage.getWorkspaceLocalSettingsPath(),
