@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
+
 from qwen_code_sdk.errors import AbortError, ControlRequestTimeoutError
 from qwen_code_sdk.json_lines import parse_json_line
 from qwen_code_sdk.query import Query
@@ -136,6 +138,51 @@ async def _start_query(transport: FakeTransport) -> Query:
         lambda: any(payload.get("type") == "user" for payload in transport.writes)
     )
     return query
+
+
+@pytest.mark.asyncio
+async def test_initialize_carries_the_control_request_budget() -> None:
+    # The CLI bounds its deferred initialize reply below the client's budget,
+    # so the payload must carry it rather than leaving the CLI to assume 60 s.
+    transport = FakeTransport()
+    earliest_deadline = time.time() * 1000 + 30_000
+    query = Query(
+        transport=transport,  # type: ignore[arg-type]
+        options=QueryOptions(
+            timeout=TimeoutOptions(
+                can_use_tool=0.05,
+                control_request=30.0,
+                stream_close=0.05,
+            )
+        ),
+        prompt="hello",
+        session_id=VALID_UUID,
+    )
+    await query._ensure_started()
+
+    init_request = await _wait_for_request(transport, "initialize")
+    timeout = init_request["request"]["timeout"]
+    assert timeout["controlRequest"] == 30_000
+    assert (
+        earliest_deadline
+        <= timeout["controlRequestDeadlineUnixMs"]
+        <= time.time() * 1000 + 30_000
+    )
+
+    transport.push(
+        {
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": init_request["request_id"],
+                "response": {},
+            },
+        }
+    )
+    await _wait_for(
+        lambda: any(payload.get("type") == "user" for payload in transport.writes)
+    )
+    await query.close()
 
 
 @pytest.mark.asyncio

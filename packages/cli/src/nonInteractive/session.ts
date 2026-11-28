@@ -27,6 +27,7 @@ import type {
   CLIMessage,
   CLIUserMessage,
   CLIControlRequest,
+  CLIControlInitializeRequest,
   CLIControlResponse,
   ControlCancelRequest,
 } from './types.js';
@@ -58,6 +59,59 @@ import {
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 const EOF_MEMORY_WAIT_TIMEOUT_MS = 5_000;
+
+// Both shipped SDKs abandon an initialize control request after 60 s
+// (`DEFAULT_CONTROL_REQUEST_TIMEOUT` in the TypeScript SDK,
+// `control_request = 60.0` in the Python SDK). The deferred reply is a
+// readiness signal, so bounding it below that budget is what keeps a slow
+// config initialization (MCP discovery can be configured up to 300 s per
+// server) from failing the handshake on the client while the CLI keeps
+// initializing.
+export const SDK_INITIALIZE_REPLY_TIMEOUT_MS = 55_000;
+
+// How long before the client's own deadline the reply is given up, so the
+// reply is written while the client still has the request pending.
+export const SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS = 5_000;
+
+// `setTimeout` stores its delay in a signed 32-bit int, so any larger value
+// fires on the next tick instead of at the requested deadline.
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/**
+ * The deadline for the deferred initialize reply, derived from the budget the
+ * client actually declared for this request: it abandons the initialize
+ * control request at `timeout.controlRequest`, which the payload carries since
+ * it is consumer-configurable (a client may lower it to 30 s or raise it for
+ * slow MCP discovery). An absolute deadline lets local SDK clients include
+ * startup and dispatch time in the budget. Older clients only send a duration.
+ */
+export const sdkInitializeReplyTimeoutMs = (
+  declaredBudget: number | undefined,
+  deadlineUnixMs?: number,
+): number => {
+  if (
+    declaredBudget === undefined ||
+    !Number.isFinite(declaredBudget) ||
+    declaredBudget <= 0
+  ) {
+    return SDK_INITIALIZE_REPLY_TIMEOUT_MS;
+  }
+  const remaining =
+    deadlineUnixMs !== undefined && Number.isFinite(deadlineUnixMs)
+      ? Math.max(0, Math.min(declaredBudget, deadlineUnixMs - Date.now()))
+      : declaredBudget;
+  const margin = Math.min(
+    SDK_INITIALIZE_REPLY_TIMEOUT_MARGIN_MS,
+    remaining / 2,
+  );
+  return Math.min(remaining - margin, MAX_TIMER_DELAY_MS);
+};
+
+// An initialization that outlived its reply keeps running -- it may still
+// finish and serve prompts -- so failing the session there would leave a
+// permanently rejected readiness gate. All later callers must settle, and a
+// process-exit path must not hang while it is still false.
+export const SDK_INITIALIZE_ABANDONED_SHUTDOWN_TIMEOUT_MS = 5_000;
 
 interface MonitorStartedQueueItem {
   task_id: string;
@@ -109,6 +163,7 @@ class Session {
   private initializationPromise: Promise<void> | null = null;
   private initializationResolve: (() => void) | null = null;
   private initializationReject: ((error: Error) => void) | null = null;
+  private sdkInitializeReply: Promise<void> | null = null;
 
   constructor(
     config: Config,
@@ -392,7 +447,7 @@ class Session {
 
       if (request.request.subtype === 'initialize') {
         // Start SDK mode initialization (fire-and-forget from loop perspective)
-        void this.initializeSdkMode(request);
+        this.sdkInitializeReply = this.initializeSdkMode(request);
         return;
       }
 
@@ -413,15 +468,56 @@ class Session {
   }
 
   /**
+   * Lets the caller acknowledge initialize before its reply deadline. The
+   * readiness gate still waits for real config and MCP initialization.
+   */
+  private async awaitConfigInitializationWithReplyTimeout(
+    options: ConfigInitializeOptions,
+    replyTimeoutMs: number,
+  ): Promise<{ readonly deferred: boolean }> {
+    const initPromise = this.ensureConfigInitialized(options).then(
+      () => {
+        this.completeInitialization();
+        return { ok: true as const };
+      },
+      (error: unknown) => {
+        const failure =
+          error instanceof Error ? error : new Error(String(error));
+        this.failInitialization(failure);
+        return { ok: false as const, failure };
+      },
+    );
+    let timeoutId: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<false>((resolve) => {
+      timeoutId = setTimeout(() => resolve(false), replyTimeoutMs);
+    });
+    try {
+      const outcome = await Promise.race([initPromise, timedOut]);
+      if (outcome !== false) {
+        if (!outcome.ok) {
+          throw outcome.failure;
+        }
+        return { deferred: false };
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    return { deferred: true };
+  }
+
+  /**
    * SDK mode initialization flow
    * Dispatches initialize request and initializes config with MCP support
    */
   private async initializeSdkMode(request: CLIControlRequest): Promise<void> {
     this.ensureInitializationPromise();
     try {
-      // Dispatch the initialize request first
-      // This registers SDK MCP servers in the control context
-      await this.dispatcher?.dispatch(request, true);
+      // Handle the initialize request first: it registers the SDK MCP servers
+      // and stages the SDK-only config that `ensureConfigInitialized` consumes.
+      // Its reply is withheld until config initialization finishes, so clients
+      // can treat `initialize` as a readiness signal instead of an ack.
+      const initResponse = await this.dispatcher?.dispatch(request, true, true);
 
       // Get sendSdkMcpMessage callback from SdkMcpController
       // This callback is used by McpClientManager to send MCP messages
@@ -429,12 +525,34 @@ class Session {
       const sendSdkMcpMessage =
         this.dispatcher?.sdkMcpController.createSendSdkMcpMessage();
 
-      // Initialize config with SDK MCP message support
-      await this.ensureConfigInitialized({ sendSdkMcpMessage });
-
-      // Initialization complete!
-      this.completeInitialization();
+      // Initialize config with SDK MCP message support. The reply deadline
+      // follows the budget the client declared for the initialize request
+      // itself, so a lowered (or raised) `timeout.controlRequest` is honored
+      // instead of being overridden by the SDK's default.
+      const timeout = (request.request as CLIControlInitializeRequest).timeout;
+      const deadline = await this.awaitConfigInitializationWithReplyTimeout(
+        { sendSdkMcpMessage },
+        sdkInitializeReplyTimeoutMs(
+          timeout?.controlRequest,
+          timeout?.controlRequestDeadlineUnixMs,
+        ),
+      );
+      // A deferred initialization still answers the request with the success
+      // frame its controller produced. Sending it is what lets the client
+      // start sending prompts; the readiness gate above serves them only once
+      // initialization finishes.
+      this.dispatcher?.sendSuccess(request.request_id, initResponse ?? {});
+      if (deadline.deferred) {
+        debugLogger.debug(
+          `[Session] Deferred initialize reply sent before config initialization finished for request ${request.request_id}.`,
+        );
+      }
     } catch (error) {
+      // The deferred initialize reply would otherwise never arrive.
+      this.dispatcher?.sendError(
+        request.request_id,
+        error instanceof Error ? error.message : String(error),
+      );
       debugLogger.error('[Session] SDK mode initialization failed:', error);
       this.failInitialization(
         error instanceof Error ? error : new Error(String(error)),
@@ -907,14 +1025,37 @@ class Session {
    * Wait for all pending work to complete before shutdown
    */
   private async waitForAllPendingWork(): Promise<void> {
-    // 1. Wait for initialization to complete (or fail)
+    // 1. Give the SDK reply its full window before bounding shutdown. If
+    // readiness still times out, release queued work waiting on the same gate.
+    let abandonedTimeoutId: NodeJS.Timeout | undefined;
     try {
-      await this.waitForInitialization();
+      await this.sdkInitializeReply;
+      const waitForInitialization = this.waitForInitialization().then(
+        () => true,
+      );
+      const initialized = await (this.sdkInitializeReply
+        ? Promise.race([
+            waitForInitialization,
+            new Promise<boolean>((resolve) => {
+              abandonedTimeoutId = setTimeout(
+                () => resolve(false),
+                SDK_INITIALIZE_ABANDONED_SHUTDOWN_TIMEOUT_MS,
+              );
+            }),
+          ])
+        : waitForInitialization);
+      if (!initialized) {
+        this.failInitialization(
+          new Error('Session initialization did not settle before shutdown'),
+        );
+      }
     } catch (error) {
       debugLogger.error(
         '[Session] Initialization error during shutdown:',
         error,
       );
+    } finally {
+      clearTimeout(abandonedTimeoutId);
     }
 
     // 2. Wait for all control request handlers using dispatcher's tracking

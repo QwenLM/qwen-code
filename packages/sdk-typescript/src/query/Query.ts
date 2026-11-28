@@ -17,6 +17,7 @@ import type {
   SDKUserMessage,
   CLIControlRequest,
   CLIControlResponse,
+  CLIControlInitializeRequest,
   ControlCancelRequest,
   PermissionSuggestion,
   WireSDKMcpServerConfig,
@@ -339,6 +340,16 @@ export class Query implements AsyncIterable<SDKMessage> {
     return externalServers;
   }
 
+  private initializeTimeoutPayload(): CLIControlInitializeRequest['timeout'] {
+    const { canUseTool, controlRequest = DEFAULT_CONTROL_REQUEST_TIMEOUT } =
+      this.options.timeout ?? {};
+    return {
+      ...(canUseTool !== undefined ? { canUseTool } : {}),
+      controlRequest,
+      controlRequestDeadlineUnixMs: Date.now() + controlRequest,
+    };
+  }
+
   private async initialize(): Promise<void> {
     try {
       logger.debug('Initializing Query');
@@ -354,9 +365,7 @@ export class Query implements AsyncIterable<SDKMessage> {
         ControlRequestType.INITIALIZE,
         {
           hooks: null,
-          timeout: this.options.timeout?.canUseTool
-            ? { canUseTool: this.options.timeout.canUseTool }
-            : undefined,
+          timeout: this.initializeTimeoutPayload(),
           sdkMcpServers:
             Object.keys(sdkMcpServersForCli).length > 0
               ? sdkMcpServersForCli

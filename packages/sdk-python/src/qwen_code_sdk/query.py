@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import AsyncIterable, Mapping, MutableMapping
 from dataclasses import dataclass, replace
 from types import TracebackType
@@ -128,7 +129,20 @@ class Query:
 
     async def _initialize(self) -> None:
         try:
-            payload: dict[str, Any] = {"hooks": None}
+            timeout = self._options.timeout
+            timeout.validate_control_request_serializable()
+            control_request_ms = timeout.control_request_milliseconds()
+            deadline_unix_ms = time.time() * 1000 + control_request_ms
+            payload: dict[str, Any] = {
+                "hooks": None,
+                # The CLI bounds its deferred initialize reply below this
+                # budget, so it must carry the caller's value rather than
+                # leaving the CLI to assume the default.
+                "timeout": {
+                    "controlRequest": control_request_ms,
+                    "controlRequestDeadlineUnixMs": deadline_unix_ms,
+                },
+            }
             if self._options.mcp_servers:
                 payload["mcpServers"] = self._options.mcp_servers
             if self._options.agents:
