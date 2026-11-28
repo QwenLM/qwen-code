@@ -27,7 +27,7 @@ The decomposition moved responsibilities out of the god classes, but nothing sto
 
 A single verification test, `ClassSizeRatchetTest` (in the `architecture` package next to `ModuleArchitectureTest`), walks the production source trees of `persistence/src/main/java` and `runtime-broker/src/main/java`, counts source lines per top-level class, and enforces four rules against a pin resource, `class-size-ratchet.properties`:
 
-1. **Global ceiling.** No class exceeds `GLOBAL_MAX_LINES` (2,309 currently; 4,216 in the original design baseline). This is the "agreed size ratchet" of the acceptance criteria, seeded at the then-current largest class and tightened as decompositions land. It only ever lowers.
+1. **Global ceiling.** No class exceeds `GLOBAL_MAX_LINES` (2,309 currently; 4,216 in the original design baseline). This is the "agreed size ratchet" of the acceptance criteria, seeded at the then-current largest class and tightened as decompositions land. Apart from the explicitly documented import-only exception, it only ever lowers.
 2. **Per-class ceiling.** Every class listed in the pin must have at most its pinned line count. Each entry is seeded at the class's size when pinned and lowered only by reviewed edits, so a pinned class cannot exceed its ceiling (a class that has since shrunk retains headroom up to its pin until that pin is manually tightened).
 3. **Large classes must be pinned.** Any class at or above `LARGE_CLASS_THRESHOLD` (800 lines) that is not in the pin fails. A class therefore cannot silently grow into a large one; crossing 800 lines forces a conscious pin at its then-current size.
 4. **No stale pins.** Every pin entry must map to an existing production class. Deleting or renaming a class forces its pin to be pruned, keeping the pin honest.
@@ -37,7 +37,7 @@ Line counts count newline characters, matching `wc -l`; `package-info.java` and 
 ### Thresholds and why
 
 - **`LARGE_CLASS_THRESHOLD = 800`.** A round cutoff covering all current large aggregates and facades, and a threshold for making size growth explicit. Reaching 800 lines triggers a review of the class's size and ownership rather than being treated as an arbitrary architectural defect. Unpinned classes below 800 lines are free to change without tripping the gate, so ordinary edits to small helpers do not require pin updates; classes that were pinned and later shrank below 800 lines remain capped by their pin until removed.
-- **`GLOBAL_MAX_LINES = 2309`.** This is the current maximum, matching `ToolPublicationDataStore` and its per-class pin; the next-largest actual class is `JdbcRuntimeBindingRepository` at 2,131 lines. It remains the backstop for every class, pinned or new, and tightens as classes are decomposed.
+- **`GLOBAL_MAX_LINES = 2309`.** This is the current maximum, matching `ToolPublicationDataStore` and its per-class pin; the next-largest actual class is `JdbcManagedExtensionRecordStore` at 2,129 lines. It remains the backstop for every class, pinned or new, and tightens as classes are decomposed.
 - **Scope is exactly `persistence` + `runtime-broker`.** These are the two modules the acceptance criteria name. The `runtime-*` provider modules (`runtime-http`/`host`/`local`/`external`/`ssh`/`static`) are separate top-level modules and out of scope; `contracts`, `control-plane`, `adapters`, and `server` are likewise not ratcheted here.
 
 ### Ratchet discipline

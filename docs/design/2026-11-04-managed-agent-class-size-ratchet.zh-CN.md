@@ -27,7 +27,7 @@
 
 单个 verification 测试 `ClassSizeRatchetTest`（置于 `architecture` 包、与 `ModuleArchitectureTest` 并列）遍历 `persistence/src/main/java` 与 `runtime-broker/src/main/java` 的生产源码树，按顶层类统计源码行数，并对照 pin 资源 `class-size-ratchet.properties` 强制四条规则：
 
-1. **全局上限。** 任何类不得超过 `GLOBAL_MAX_LINES`（当前 2,309；原始设计基线为 4,216）。这就是验收标准里的"约定体量棘轮"，以当时的最大类作种子，随分解持续收窄，只降不升。
+1. **全局上限。** 任何类不得超过 `GLOBAL_MAX_LINES`（当前 2,309；原始设计基线为 4,216）。这就是验收标准里的"约定体量棘轮"，以当时的最大类作种子，随分解持续收窄；除明确记录的纯 import 例外外，只降不升。
 2. **按类上限。** pin 中列出的每个类，行数不得超过其钉住值。每条条目在类入 pin 时按当时行数作种子，且仅通过经评审的编辑下调，故被钉住的类不能超过其上限（之后缩小且尚未手动收紧 pin 的类，在收紧前仍保留到其上限之间的余量）。
 3. **大类必须入 pin。** 任何达到或超过 `LARGE_CLASS_THRESHOLD`（800 行）却不在 pin 中的类都会失败。因此一个类无法悄悄长成大类；跨过 800 行就强制按其当时行数显式入 pin。
 4. **无失效 pin。** 每条 pin 必须对应一个存在的生产类。删除或重命名一个类就强制剪掉它的 pin，保持 pin 诚实。
@@ -37,7 +37,7 @@
 ### 阈值及其理由
 
 - **`LARGE_CLASS_THRESHOLD = 800`。** 覆盖当前所有大聚合与门面的整数阈值，用于显式审视类增长。达到 800 行意味着需要评审该类的大小与职责，并非说 800 行本身就是架构缺陷。未入 pin 且低于 800 行的类可自由改动而不会触发门禁，故对小 helper 的普通编辑无需更新 pin；曾入 pin、之后缩小到 800 行以下的类在移出 pin 前仍受各自 pin 上限约束。
-- **`GLOBAL_MAX_LINES = 2309`。** 这是当前最大值，与 `ToolPublicationDataStore` 的实际行数及其按类 pin 一致；当前次大类是 `JdbcRuntimeBindingRepository` 的 2,131 行。它仍是所有类（无论是否入 pin）的兜底，并随类分解而下调。
+- **`GLOBAL_MAX_LINES = 2309`。** 这是当前最大值，与 `ToolPublicationDataStore` 的实际行数及其按类 pin 一致；当前次大类是 `JdbcManagedExtensionRecordStore` 的 2,129 行。它仍是所有类（无论是否入 pin）的兜底，并随类分解而下调。
 - **范围恰为 `persistence` + `runtime-broker`。** 这是验收标准点名的两个模块。`runtime-*` provider 模块（`runtime-http`/`host`/`local`/`external`/`ssh`/`static`）是独立顶层模块、不在范围；`contracts`、`control-plane`、`adapters`、`server` 同样不在此棘轮之列。
 
 ### 棘轮纪律
