@@ -19,6 +19,7 @@ import {
 } from './hosted-harness-session.test-helper.js';
 import {
   mockApprovalTurn,
+  mockPublicShellApproval,
   sleep,
   statsOf,
   statusOf,
@@ -36,11 +37,14 @@ import supertest from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { type ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
-import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import * as approvalContinuation from './hosted-approval-continuation.js';
 import { isHostedDurableMcpOwner } from './hosted-mcp-session.js';
-import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import {
+  HostedWorkspaceBroker,
+  HostedWorkspaceBrokerRejection,
+} from './hosted-workspace-broker.js';
 import { MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST } from './managed-extension-profile.js';
 import { ManagedExtensionRuntime } from './managed-extension-runtime.js';
 import {
@@ -63,6 +67,7 @@ describe('idle suspension', () => {
     deadlineMs?: number,
     toolProfile = 'hosted-workspace-files/1',
     definition: Record<string, unknown> = {},
+    promptFields: Record<string, unknown> = {},
   ): Promise<string> {
     const created = await headers(supertest(server).post('/session'))
       .send({
@@ -83,6 +88,7 @@ describe('idle suspension', () => {
         promptId: PROMPT_ID,
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
         ...(deadlineMs === undefined ? {} : { deadlineMs }),
+        ...promptFields,
       })
       .expect(202);
     return clientId;
@@ -1042,17 +1048,31 @@ describe('idle suspension', () => {
     }
   });
 
-  it('parks a recoverable approval and resumes it through cold recovery', async () => {
+  it('parks a recoverable approval, releases placement, and resumes through cold recovery', async () => {
     state.wakeDispatch = true;
     state.actionParking = true;
+    state.suspensionPlacementRelease = true;
     state.wakeStamps.length = 0;
     state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
     const park = vi.spyOn(HostedApprovalWaiters.prototype, 'park');
     mockApprovalTurn();
     try {
-      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const server = await app(true, 'pod-a', true, { idleSuspendMs: 150 });
       // The Turn deadline lands before the 60s approval expiry.
-      const clientId = await promptApproval(server, undefined, 30_000);
+      const clientId = await promptApproval(
+        server,
+        undefined,
+        30_000,
+        'hosted-workspace-files/1',
+        {
+          managedSessionStore: { ...store(), writerToken: 'a'.repeat(32) },
+          harnessPlacement: {
+            instanceId: 'pod-a',
+            bootId: BOOT_ID,
+            placementEpoch: 1,
+          },
+        },
+      );
       await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
         timeout: 5000,
       });
@@ -1064,6 +1084,12 @@ describe('idle suspension', () => {
         },
         { timeout: 5000 },
       );
+      expect(state.ownershipReleases).toHaveLength(1);
+      expect(state.ownershipReleases[0]).toMatchObject({
+        instanceId: 'pod-a',
+        bootId: BOOT_ID,
+        placementEpoch: 1,
+      });
 
       const journal = await LocalJsonlManagedSessionJournalStore.read({
         transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
@@ -1097,7 +1123,15 @@ describe('idle suspension', () => {
       const loaded = await headers(
         supertest(server).post(`/session/${SESSION_ID}/load`),
       )
-        .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+        .send({
+          managedSessionStore: { ...store(), writerToken: 'a'.repeat(32) },
+          harnessPlacement: {
+            instanceId: 'pod-a',
+            bootId: BOOT_ID,
+            placementEpoch: 2,
+          },
+          driveRuntimeRecovery: true,
+        })
         .expect(200);
       await headers(
         supertest(server).post(
@@ -1149,6 +1183,7 @@ describe('idle suspension', () => {
     } finally {
       state.wakeDispatch = false;
       state.actionParking = false;
+      state.suspensionPlacementRelease = false;
       state.approvalSelections.clear();
     }
   });
@@ -1218,6 +1253,55 @@ describe('idle suspension', () => {
 
   // Stage 1 pre-check (#18149): image-only Prompts may park only if a
   // cold-recovered Turn still hands the model its original image.
+  it('posts the park marker of an ingested Turn between the seal and the placement release', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.suspensionPlacementRelease = true;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    try {
+      const server = await app(true, 'pod-a', true, { idleSuspendMs: 150 });
+      const clientId = await promptApproval(
+        server,
+        undefined,
+        30_000,
+        'hosted-workspace-files/1',
+        {
+          managedSessionStore: { ...store(), writerToken: 'a'.repeat(32) },
+          harnessPlacement: {
+            instanceId: 'pod-a',
+            bootId: BOOT_ID,
+            placementEpoch: 1,
+          },
+        },
+        { eventDelivery: { mode: 'ingest', turnId: 'turn_ingest' } },
+      );
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+
+      expect(state.ownershipTransitions).toEqual([
+        'quiesce',
+        'seal',
+        'ingest:parked',
+        'release',
+      ]);
+      expect(state.ingestRequests[0]).toMatchObject({
+        turnId: 'turn_ingest',
+        promptId: PROMPT_ID,
+      });
+      expect(state.ingestRequests.at(-1)).toMatchObject({ end: 'parked' });
+    } finally {
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.suspensionPlacementRelease = false;
+      state.approvalSelections.clear();
+    }
+  });
+
   it('resumes a parked approval with the original image still in its history', async () => {
     state.wakeDispatch = true;
     state.actionParking = true;
@@ -2043,7 +2127,7 @@ describe('idle suspension', () => {
     }
   });
 
-  it('counts why a Shell-profile approval cannot park', async () => {
+  it('counts why a team-lead approval cannot park', async () => {
     state.wakeDispatch = true;
     state.actionParking = true;
     state.wakeStamps.length = 0;
@@ -2054,13 +2138,13 @@ describe('idle suspension', () => {
       const clientId = await promptAndIdleInApproval(
         server,
         undefined,
-        'hosted-workspace-shell/1',
+        'hosted-workspace-team-lead/1',
       );
       expect(state.wakeStamps).toEqual([]);
       const stats = statsOf(server);
       expect(stats.cleanSuspensions).toBe(0);
       // The wait idled through several suspension attempts but counts once.
-      expect(stats.parkRefusals).toEqual({ shell_profile: 1 });
+      expect(stats.parkRefusals).toEqual({ team_lead_profile: 1 });
       await endResidentApproval(server, clientId);
     } finally {
       state.wakeDispatch = false;
@@ -2071,168 +2155,46 @@ describe('idle suspension', () => {
 
   // Decision 8 (#18149): public-children Shell waits already park, so their
   // continuation is pinned for every outcome, both after a park and after the
-  // Harness dies in the wait.
+  // Harness dies in the wait. S8a brings version-0 public Shell Sessions to
+  // the same continuation.
   const publicShellSession = {
     toolProfile: 'hosted-workspace-shell/1',
     captureBytes: 1024 * 1024,
     publicChildAgentsVersion: 1,
   };
-
-  async function mockPublicShellApproval(background = false) {
-    mockApprovalTurn();
-    const prepareV3 = vi
-      .spyOn(HostedWorkspaceBroker.prototype, 'prepareV3')
-      .mockResolvedValue({
-        executionCallId: 'shell-execution',
-        runtimeBindingId: 'binding',
-        bindingGeneration: '1',
-      });
-    const manifest = await LocalManagedSessionResourceStore.create({
-      runtimeBaseDir: state.root,
-      sessionKey: {
-        tenantId: 'tenant',
-        workspaceId: 'workspace',
-        sessionId: SESSION_ID,
+  // Without tool publication the definition pins no captureBytes, so the
+  // Session runs the older Shell lane: a deferred prepare, and output admitted
+  // through the Session's own publisher.
+  const publicShellLaneSession = {
+    toolProfile: 'hosted-workspace-shell/1',
+    publicChildAgentsVersion: 1,
+  };
+  const shellSessions = {
+    'public-children': {
+      publication: publicShellSession,
+      Shell: publicShellLaneSession,
+    },
+    'version-0': {
+      publication: {
+        toolProfile: 'hosted-workspace-shell/1',
+        captureBytes: 1024 * 1024,
       },
-    }).publish(
-      'managed-tool-result-manifest',
-      Buffer.from(
-        JSON.stringify({
-          toolResult: 'managed-tool-result/1',
-          type: 'manifest',
-          tenantId: 'tenant',
-          sessionId: SESSION_ID,
-          turnId: PROMPT_ID,
-          executionCallId: 'shell-execution',
-          callId: 'park-shell-call',
-          invocationDigest: 'digest',
-          bindingGeneration: '1',
-          captureId: randomUUID(),
-          revision: 1,
-          executionStatus: 'success',
-          exitCode: 0,
-          signal: null,
-          captureScope: 'process_pipes',
-          capturePolicy: 'complete_required',
-          captureStatus: 'complete',
-          captureReason: null,
-          upstreamTruncated: false,
-          contents: ['stdout', 'stderr'].map((streamId) => ({
-            streamId,
-            role: streamId,
-            mimeType: 'application/octet-stream',
-            state: 'sealed',
-            byteLength: 0,
-            digest: createHash('sha256').update('').digest('hex'),
-            missingRanges: [],
-            body: { pages: [] },
-          })),
-        }),
-      ),
-    );
-    const envelope = {
-      executionStatus: 'success' as const,
-      responseParts: [{ text: 'touched' }],
-      capture: background
-        ? {
-            manifest: null,
-            captureStatus: 'detached' as const,
-            captureReason: null,
-            previewTruncated: false,
-            deliveryStatus: 'pending' as const,
-          }
-        : {
-            manifest,
-            captureStatus: 'complete' as const,
-            captureReason: null,
-            previewTruncated: false,
-            deliveryStatus: 'pending' as const,
-          },
-    };
-    const executeV3 = vi
-      .spyOn(HostedWorkspaceBroker.prototype, 'executeV3')
-      .mockResolvedValue(envelope);
-    vi.spyOn(
-      HostedWorkspaceBroker.prototype,
-      'acknowledgeV3',
-    ).mockResolvedValue();
-    state.publicationRequest.mockImplementation(
-      async (
-        resourceStore: LocalManagedSessionResourceStore,
-        route: string,
-        body: unknown,
-      ) => {
-        if (route === '/grants') return { state: 'OPEN' };
-        if (route.endsWith('/finished')) return { result: envelope };
-        if (route.endsWith('/admissions/prepare'))
-          return resourceStore.publish(
-            'managed-tool-outcome',
-            Buffer.from(JSON.stringify(body)),
-          );
-        throw new Error('Unexpected publication route ' + route);
-      },
-    );
-    state.model.mockImplementation(
-      async ({ toolTurn, resumeFromToolResults, signal }) => {
-        if (resumeFromToolResults)
-          return { text: 'resumed', model: 'test-model' };
-        const call = {
-          name: 'run_shell_command',
-          callId: 'park-shell-call',
-          args: background
-            ? { command: 'npm run dev', is_background: true }
-            : { command: 'touch notes.txt' },
-          isClientInitiated: false,
-          prompt_id: PROMPT_ID,
-        };
-        // The production model pins this route before every public-children
-        // request; the saved plan is readable as public Shell only with it.
-        toolTurn!.setChildModelRoute!('test-model', {
-          authType: 'openai',
-          endpointDigest: 'a'.repeat(64),
-          providerPin: 'b'.repeat(64),
-        });
-        await toolTurn!.execute(
-          [call],
-          [
-            {
-              functionCall: {
-                id: call.callId,
-                name: call.name,
-                args: call.args,
-              },
-            },
-          ],
-          'test-model',
-          signal,
-        );
-        throw new Error('The waiting Turn unexpectedly continued.');
-      },
-    );
-    // A background Shell registers its output publisher before it asks.
-    if (background)
-      vi.spyOn(
-        HostedWorkspaceBroker.prototype,
-        'registerPublisher',
-      ).mockResolvedValue('1');
-    const saved = vi.spyOn(
-      approvalContinuation,
-      'findHostedApprovalContinuation',
-    );
-    return { prepareV3, executeV3, saved };
-  }
+      Shell: { toolProfile: 'hosted-workspace-shell/1' },
+    },
+  } as const;
 
   async function promptPublicShellApproval(
     server: Server,
     approvalTimeoutMs = 60_000,
     definition: Record<string, unknown> = {},
+    session: Record<string, unknown> = publicShellSession,
   ): Promise<string> {
     const created = await headers(supertest(server).post('/session'))
       .send({
         sessionId: SESSION_ID,
         sessionScope: 'thread',
         managedSessionStore: store(),
-        ...publicShellSession,
+        ...session,
         ...definition,
         approvalMode: 'default',
         approvalTimeoutMs,
@@ -2253,13 +2215,15 @@ describe('idle suspension', () => {
 
   async function savedShellCall(
     saved: Awaited<ReturnType<typeof mockPublicShellApproval>>['saved'],
+    shellLane = false,
   ) {
     const continuation = (await saved.mock.results[0]!.value) as Awaited<
       ReturnType<typeof approvalContinuation.findHostedApprovalContinuation>
     >;
     const call = continuation!.plan.calls[0]!;
     expect(call.call.name).toBe('run_shell_command');
-    expect(call.publicationId).toEqual(expect.any(String));
+    // The Shell lane has no publication, and its plan says so explicitly.
+    expect(call.publicationId).toEqual(shellLane ? null : expect.any(String));
     return { call, input: continuation!.inputs[0]!.input };
   }
 
@@ -2274,135 +2238,201 @@ describe('idle suspension', () => {
       },
     });
 
-  it.each(
-    (['park', 'Harness death'] as const).flatMap((interruption) =>
-      (['allow', 'deny', 'expiry', 'mode change'] as const).map(
-        (outcome) => [outcome, interruption] as const,
-      ),
-    ),
-  )(
-    'settles a public-children Shell approval through %s after a %s',
-    async (outcome, interruption) => {
-      const parks = interruption === 'park';
-      state.wakeDispatch = parks;
-      state.actionParking = parks;
-      state.wakeStamps.length = 0;
-      state.approvalSelections.set(SESSION_ID, {
-        mode: 'default',
-        revision: 0,
-      });
-      const { prepareV3, executeV3, saved } = await mockPublicShellApproval();
-      const wait = parks
-        ? undefined
-        : vi
-            .spyOn(HostedApprovalWaiters.prototype, 'wait')
-            .mockRejectedValueOnce(
-              new HostedToolRecoveryRequiredError(
-                'approval writer interrupted',
-              ),
-            );
-      try {
-        const original = await app(
-          true,
-          undefined,
-          true,
-          parks ? { idleSuspendMs: 150 } : undefined,
-        );
-        const clientId = await promptPublicShellApproval(
-          original,
-          outcome === 'expiry' ? 1_500 : 60_000,
-        );
-        let server = original;
-        if (parks) {
-          await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
-            timeout: 5000,
-          });
-          await vi.waitFor(
-            async () => {
-              expect((await statusOf(original, clientId)).status).toBe(404);
-            },
-            { timeout: 5000 },
+  // Prompts an approval on `session` and takes its wait away from this
+  // Harness: by a park, or by a Harness death that leaves the Turn to cold
+  // recovery. Returns the Harness that serves the load.
+  async function interruptApproval(
+    interruption: 'park' | 'Harness death',
+    session: Record<string, unknown>,
+    approvalTimeoutMs = 60_000,
+  ): Promise<Server> {
+    const parks = interruption === 'park';
+    state.wakeDispatch = parks;
+    state.actionParking = parks;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    const wait = parks
+      ? undefined
+      : vi
+          .spyOn(HostedApprovalWaiters.prototype, 'wait')
+          .mockRejectedValueOnce(
+            new HostedToolRecoveryRequiredError('approval writer interrupted'),
           );
-          expect(state.wakeStamps[0]).toMatchObject({
-            parkedTurn: { promptId: PROMPT_ID },
-          });
-          expect(statsOf(original).parkRefusals).toEqual({});
-        } else {
-          await vi.waitFor(
-            async () => {
-              expect((await statusOf(original, clientId)).body).toMatchObject({
-                hasActivePrompt: false,
-                recoveryBlocked: true,
-              });
-            },
-            { timeout: 5000 },
-          );
-          await (
-            wakeDeps.last as { session: { managed: ManagedSession } }
-          ).session.managed.close();
-          wait!.mockRestore();
-          server = await app(true);
-        }
-        if (outcome === 'expiry') await sleep(2_000);
-        if (outcome === 'mode change')
-          state.approvalSelections.set(SESSION_ID, {
-            mode: 'yolo',
-            revision: 1,
-          });
-        const loaded = await headers(
-          supertest(server).post(`/session/${SESSION_ID}/load`),
-        )
-          .send({
-            managedSessionStore: store(),
-            ...publicShellSession,
-            driveRuntimeRecovery: true,
-          })
-          .expect(200);
-        const resumedClient = loaded.body.clientId as string;
-        const requestId = (await readSessionJournal()).events.findLast(
-          (event) =>
-            event.kind === 'action.changed' &&
-            event.payload['state'] === 'requested',
-        )!.payload['requestId'] as string;
-        if (outcome === 'allow' || outcome === 'deny')
-          await headers(
-            supertest(server).post(
-              `/session/${SESSION_ID}/actions/${requestId}/resolve`,
-            ),
-          )
-            .set('X-Qwen-Client-Id', resumedClient)
-            .send({
-              optionId: outcome,
-              inputRevision: 1,
-              policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
-            })
-            .expect(200);
+    try {
+      const original = await app(
+        true,
+        undefined,
+        true,
+        parks ? { idleSuspendMs: 150 } : undefined,
+      );
+      const clientId = await promptPublicShellApproval(
+        original,
+        approvalTimeoutMs,
+        {},
+        session,
+      );
+      if (parks) {
+        await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+          timeout: 5000,
+        });
         await vi.waitFor(
           async () => {
-            expect((await statusOf(server, resumedClient)).body).toMatchObject({
-              hasActivePrompt: false,
-              recoveryBlocked: false,
-            });
+            expect((await statusOf(original, clientId)).status).toBe(404);
           },
           { timeout: 5000 },
         );
+        expect(state.wakeStamps[0]).toMatchObject({
+          parkedTurn: { promptId: PROMPT_ID },
+        });
+        expect(statsOf(original).parkRefusals).toEqual({});
+        return original;
+      }
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(original, clientId)).body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: true,
+          });
+        },
+        { timeout: 5000 },
+      );
+      await (
+        wakeDeps.last as { session: { managed: ManagedSession } }
+      ).session.managed.close();
+      return await app(true);
+    } finally {
+      wait?.mockRestore();
+    }
+  }
 
-        if (!parks) expect(state.wakeStamps).toEqual([]);
-        const executes = outcome === 'allow' || outcome === 'mode change';
-        if (executes) {
-          const { call } = await savedShellCall(saved);
-          expect(prepareV3).toHaveBeenCalledOnce();
-          expect(prepareV3).toHaveBeenCalledWith(
-            call.runtimeCallId,
-            call.argsDigest,
-            call.requestDigest,
-            call.publicationId,
-            PROMPT_ID,
-          );
-          expect(executeV3).toHaveBeenCalledOnce();
-        } else {
-          expect(prepareV3).not.toHaveBeenCalled();
-          expect(executeV3).not.toHaveBeenCalled();
+  // Cold-loads the interrupted Turn and answers its wait; resolves once the
+  // resumed Turn has settled.
+  async function decideAfterLoad(
+    server: Server,
+    session: Record<string, unknown>,
+    outcome: 'allow' | 'deny' | 'expiry' | 'mode change' = 'allow',
+  ): Promise<{ resumedClient: string; requestId: string }> {
+    if (outcome === 'expiry') await sleep(2_000);
+    if (outcome === 'mode change')
+      state.approvalSelections.set(SESSION_ID, { mode: 'yolo', revision: 1 });
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({
+        managedSessionStore: store(),
+        ...session,
+        driveRuntimeRecovery: true,
+      })
+      .expect(200);
+    const resumedClient = loaded.body.clientId as string;
+    const requestId = (await readSessionJournal()).events.findLast(
+      (event) =>
+        event.kind === 'action.changed' &&
+        event.payload['state'] === 'requested',
+    )!.payload['requestId'] as string;
+    if (outcome === 'allow' || outcome === 'deny')
+      await headers(
+        supertest(server).post(
+          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', resumedClient)
+        .send({
+          optionId: outcome,
+          inputRevision: 1,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+        })
+        .expect(200);
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, resumedClient)).body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      },
+      { timeout: 5000 },
+    );
+    return { resumedClient, requestId };
+  }
+
+  // The decision prepared the saved reservation once, on the Session's lane,
+  // and started it once.
+  async function expectSavedShellPrepare(
+    mocks: Awaited<ReturnType<typeof mockPublicShellApproval>>,
+    shellLane: boolean,
+  ): Promise<Record<string, unknown>> {
+    const { call, input } = await savedShellCall(mocks.saved, shellLane);
+    if (shellLane) {
+      expect(mocks.prepareV3).not.toHaveBeenCalled();
+      expect(mocks.prepare).toHaveBeenCalledOnce();
+      expect(mocks.prepare).toHaveBeenCalledWith(
+        call.runtimeCallId,
+        call.requestDigest,
+        managedToolDigest(input),
+        PROMPT_ID,
+      );
+      expect(mocks.execute).toHaveBeenCalledOnce();
+    } else {
+      expect(mocks.prepareV3).toHaveBeenCalledOnce();
+      expect(mocks.prepareV3).toHaveBeenCalledWith(
+        call.runtimeCallId,
+        call.argsDigest,
+        call.requestDigest,
+        call.publicationId,
+        PROMPT_ID,
+      );
+      expect(mocks.executeV3).toHaveBeenCalledOnce();
+    }
+    return input;
+  }
+
+  // The reloaded resident suspends on its own; let it go before the next
+  // test reads the shared wake stamps.
+  async function awaitResumedSuspension(server: Server, client: string) {
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, client)).status).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+  }
+
+  it.each(
+    (['public-children', 'version-0'] as const).flatMap((version) =>
+      (['publication', 'Shell'] as const).flatMap((lane) =>
+        (['park', 'Harness death'] as const).flatMap((interruption) =>
+          (['allow', 'deny', 'expiry', 'mode change'] as const).map(
+            (outcome) => [version, outcome, interruption, lane] as const,
+          ),
+        ),
+      ),
+    ),
+  )(
+    'settles a %s Shell approval through %s after a %s on the %s lane',
+    async (version, outcome, interruption, lane) => {
+      const shellLane = lane === 'Shell';
+      const session = shellSessions[version][lane];
+      const mocks = await mockPublicShellApproval(false, shellLane);
+      try {
+        const server = await interruptApproval(
+          interruption,
+          session,
+          outcome === 'expiry' ? 1_500 : 60_000,
+        );
+        const { resumedClient, requestId } = await decideAfterLoad(
+          server,
+          session,
+          outcome,
+        );
+        if (interruption === 'Harness death')
+          expect(state.wakeStamps).toEqual([]);
+        if (outcome === 'allow' || outcome === 'mode change')
+          await expectSavedShellPrepare(mocks, shellLane);
+        else {
+          expect(mocks.prepareV3).not.toHaveBeenCalled();
+          expect(mocks.executeV3).not.toHaveBeenCalled();
+          expect(mocks.prepare).not.toHaveBeenCalled();
+          expect(mocks.execute).not.toHaveBeenCalled();
         }
         const journal = await readSessionJournal();
         const requested = journal.events.filter(
@@ -2430,18 +2460,10 @@ describe('idle suspension', () => {
         expect(settled[0].payload['outcome']).toBe(
           outcome === 'expiry' ? 'cancelled' : 'completed',
         );
-        // The reloaded resident suspends on its own; let it go before the
-        // next test reads the shared wake stamps.
-        if (parks)
-          await vi.waitFor(
-            async () => {
-              expect((await statusOf(server, resumedClient)).status).toBe(404);
-            },
-            { timeout: 5000 },
-          );
+        if (interruption === 'park')
+          await awaitResumedSuspension(server, resumedClient);
       } finally {
-        wait?.mockRestore();
-        saved.mockRestore();
+        mocks.saved.mockRestore();
         state.wakeDispatch = false;
         state.actionParking = false;
         state.approvalSelections.clear();
@@ -2449,100 +2471,55 @@ describe('idle suspension', () => {
     },
   );
 
-  it('parks a public-children background Shell approval and starts its one process after the Allow', async () => {
+  it('keeps a Shell approval beside a Monitor call resident as unsupported_tool', async () => {
     state.wakeDispatch = true;
     state.actionParking = true;
     state.wakeStamps.length = 0;
     state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
-    const { prepareV3, executeV3, saved } = await mockPublicShellApproval(true);
+    const { saved } = await mockPublicShellApproval();
+    // A Monitor registers its output publisher before it asks.
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'registerPublisher',
+    ).mockResolvedValue('1');
+    state.model.mockImplementation(async ({ toolTurn, signal }) => {
+      const calls = [
+        { name: 'run_shell_command', args: { command: 'touch notes.txt' } },
+        { name: 'monitor', args: { command: 'tail -f notes.txt' } },
+      ].map((call, index) => ({
+        ...call,
+        callId: `mixed-call-${index}`,
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      }));
+      await toolTurn!.execute(
+        calls,
+        calls.map((call) => ({
+          functionCall: { id: call.callId, name: call.name, args: call.args },
+        })),
+        'test-model',
+        signal,
+      );
+      throw new Error('The waiting Turn unexpectedly continued.');
+    });
+    const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
     try {
       const server = await app(true, undefined, true, { idleSuspendMs: 150 });
-      const clientId = await promptPublicShellApproval(server);
-      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+      const clientId = await promptPublicShellApproval(
+        server,
+        60_000,
+        {},
+        shellSessions['version-0'].publication,
+      );
+      await vi.waitFor(() => expect(waiting).toHaveBeenCalled(), {
         timeout: 5000,
       });
-      await vi.waitFor(
-        async () => {
-          expect((await statusOf(server, clientId)).status).toBe(404);
-        },
-        { timeout: 5000 },
-      );
-      expect(state.wakeStamps[0]).toMatchObject({
-        parkedTurn: { promptId: PROMPT_ID },
-      });
-      expect(statsOf(server).parkRefusals).toEqual({});
-      const { call, input } = await savedShellCall(saved);
-      expect(input['is_background']).toBe(true);
-      expect(prepareV3).not.toHaveBeenCalled();
-
-      const loaded = await headers(
-        supertest(server).post(`/session/${SESSION_ID}/load`),
-      )
-        .send({
-          managedSessionStore: store(),
-          ...publicShellSession,
-          driveRuntimeRecovery: true,
-        })
-        .expect(200);
-      const resumedClient = loaded.body.clientId as string;
-      const requestId = (await readSessionJournal()).events.findLast(
-        (event) =>
-          event.kind === 'action.changed' &&
-          event.payload['state'] === 'requested',
-      )!.payload['requestId'] as string;
-      await headers(
-        supertest(server).post(
-          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
-        ),
-      )
-        .set('X-Qwen-Client-Id', resumedClient)
-        .send({
-          optionId: 'allow',
-          inputRevision: 1,
-          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
-        })
-        .expect(200);
-      await vi.waitFor(
-        async () => {
-          expect((await statusOf(server, resumedClient)).body).toMatchObject({
-            hasActivePrompt: false,
-            recoveryBlocked: false,
-          });
-        },
-        { timeout: 5000 },
-      );
-      expect(prepareV3).toHaveBeenCalledOnce();
-      expect(prepareV3).toHaveBeenCalledWith(
-        call.runtimeCallId,
-        call.argsDigest,
-        call.requestDigest,
-        call.publicationId,
-        PROMPT_ID,
-      );
-      expect(executeV3).toHaveBeenCalledOnce();
-      const journal = await readSessionJournal();
-      // Every child_run record belongs to the one reserved execution: the
-      // resume admitted no second process.
-      const childRunOperations = journal.events
-        .filter(
-          (event) =>
-            event.kind === 'domain.committed' &&
-            event.payload['domain'] === 'child_run',
-        )
-        .map((event) => event.payload['operationId'] as string);
-      expect(childRunOperations).toContain('shell-execution');
-      expect(new Set(childRunOperations.map((id) => id.split(':')[0]))).toEqual(
-        new Set(['shell-execution']),
-      );
-      const settled = journal.events.filter(
-        (event) => event.kind === 'turn.settled',
-      );
-      expect(settled).toHaveLength(1);
-      expect(settled[0].payload['outcome']).toBe('completed');
-      // The started background Shell keeps the Session resident, so close it
-      // before the next test reads the shared wake stamps.
-      await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+      await sleep(500);
+      expect(state.wakeStamps).toEqual([]);
+      expect(statsOf(server).parkRefusals).toEqual({ unsupported_tool: 1 });
+      await endResidentApproval(server, clientId);
     } finally {
+      waiting.mockRestore();
       saved.mockRestore();
       state.wakeDispatch = false;
       state.actionParking = false;
@@ -2550,11 +2527,116 @@ describe('idle suspension', () => {
     }
   });
 
-  // S5 widens decision 8: a public-children Shell Session whose extensions
-  // bring Hooks parks its Shell approval on the config-scoped Hook owner.
+  // S8a lifts the refusal by profile, so a file approval on a Shell profile
+  // parks too.
   it.each(['park', 'Harness death'] as const)(
-    'resumes a public-children Shell approval with extension Hooks after a %s',
+    'resumes a file approval on a version-0 Shell Session after a %s',
     async (interruption) => {
+      mockApprovalTurn();
+      const session = shellSessions['version-0'].Shell;
+      try {
+        const server = await interruptApproval(interruption, session);
+        const { resumedClient } = await decideAfterLoad(server, session);
+        const execute = vi.mocked(HostedWorkspaceBroker.prototype.execute);
+        expect(execute).toHaveBeenCalledOnce();
+        expect(
+          (
+            JSON.parse(execute.mock.calls[0]![1]) as {
+              input: Record<string, unknown>;
+            }
+          ).input,
+        ).toEqual({ file_path: 'notes.txt', content: 'hello' });
+        const settled = (await readSessionJournal()).events.filter(
+          (event) => event.kind === 'turn.settled',
+        );
+        expect(settled).toHaveLength(1);
+        expect(settled[0].payload['outcome']).toBe('completed');
+        if (interruption === 'park')
+          await awaitResumedSuspension(server, resumedClient);
+      } finally {
+        state.wakeDispatch = false;
+        state.actionParking = false;
+        state.approvalSelections.clear();
+      }
+    },
+  );
+
+  // Background Shell runs only on the publication lane: the Shell lane refuses
+  // `is_background` before it asks.
+  it.each(
+    (['public-children', 'version-0'] as const).flatMap((version) =>
+      (['park', 'Harness death'] as const).map(
+        (interruption) => [version, interruption] as const,
+      ),
+    ),
+  )(
+    'starts the one process of a %s background Shell approval after a %s',
+    async (version, interruption) => {
+      const session = shellSessions[version].publication;
+      const mocks = await mockPublicShellApproval(true);
+      try {
+        const server = await interruptApproval(interruption, session);
+        // No reservation exists while the approval waits.
+        expect(mocks.prepareV3).not.toHaveBeenCalled();
+        // The started process still holds the Runtime when the resumed Turn
+        // ends, so its cleanup is refused as held.
+        const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+        release.mockRejectedValueOnce(
+          new HostedWorkspaceBrokerRejection(409, 'runtime_session_held'),
+        );
+        await decideAfterLoad(server, session);
+        expect(release).toHaveBeenCalledOnce();
+        const input = await expectSavedShellPrepare(mocks, false);
+        expect(input['is_background']).toBe(true);
+        const journal = await readSessionJournal();
+        // Every child_run record belongs to the one reserved execution: the
+        // resume admitted no second process.
+        const childRunOperations = journal.events
+          .filter(
+            (event) =>
+              event.kind === 'domain.committed' &&
+              event.payload['domain'] === 'child_run',
+          )
+          .map((event) => event.payload['operationId'] as string);
+        expect(childRunOperations).toContain('shell-execution');
+        expect(
+          new Set(childRunOperations.map((id) => id.split(':')[0])),
+        ).toEqual(new Set(['shell-execution']));
+        const settled = journal.events.filter(
+          (event) => event.kind === 'turn.settled',
+        );
+        expect(settled).toHaveLength(1);
+        expect(settled[0].payload['outcome']).toBe('completed');
+        // The resumed Turn's cleanup debt stays owed while the process runs.
+        expect(
+          journal.events
+            .filter((event) => event.kind === 'hosted.cleanup')
+            .map((event) => event.payload['state']),
+        ).toEqual(['owed']);
+        // The started background Shell keeps the Session resident, so close
+        // it before the next test reads the shared wake stamps.
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+      } finally {
+        mocks.saved.mockRestore();
+        state.wakeDispatch = false;
+        state.actionParking = false;
+        state.approvalSelections.clear();
+      }
+    },
+  );
+
+  // S5 widens decision 8: a public Shell Session whose extensions bring Hooks
+  // parks its Shell approval on the config-scoped Hook owner.
+  it.each(
+    (['public-children', 'version-0'] as const).flatMap((version) =>
+      (['park', 'Harness death'] as const).map(
+        (interruption) => [version, interruption] as const,
+      ),
+    ),
+  )(
+    'resumes a %s Shell approval with extension Hooks after a %s',
+    async (version, interruption) => {
+      const session = shellSessions[version].publication;
       const parks = interruption === 'park';
       state.wakeDispatch = parks;
       state.actionParking = parks;
@@ -2698,6 +2780,7 @@ describe('idle suspension', () => {
           original,
           60_000,
           definition,
+          session,
         );
         let server = original;
         if (parks) {
@@ -2735,7 +2818,7 @@ describe('idle suspension', () => {
         )
           .send({
             managedSessionStore: store(),
-            ...publicShellSession,
+            ...session,
             ...definition,
             ...(parks
               ? { passiveManagedRuntimeRecovery: true }

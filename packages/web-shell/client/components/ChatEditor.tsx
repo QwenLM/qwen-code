@@ -115,8 +115,7 @@ import type {
   WebShellUnavailableModelTooltipMount,
 } from '../unavailableModels';
 import { appendUnavailableComposerModels } from '../utils/composerModels';
-import { VoiceButton, type VoiceButtonHandle } from '../voice/VoiceButton';
-import { LiveVoiceButton } from '../live/LiveVoiceButton';
+import type { VoiceButtonHandle } from '../voice/VoiceButton';
 import type {
   VoiceStatusRevision,
   VoiceWorkspaceTarget,
@@ -127,10 +126,8 @@ import {
   gitBranchAriaLabel,
 } from './GitBranchIndicator';
 import { GitModePopover, type SessionGitIntent } from './GitModePopover';
-import {
-  BranchPickerPopover,
-  type BranchPickerPreservedState,
-} from './BranchPickerPopover';
+import type { BranchPickerPreservedState } from './BranchPickerPopover';
+import type { ComposerIntegrations } from './composer/composer-integrations';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
   ArrowDownIcon,
@@ -192,6 +189,7 @@ import {
   type ToolbarDropdownItem,
 } from './toolbarDropdown';
 import styles from './ChatEditor.module.css';
+import popoverStyles from './GitModePopover.module.css';
 
 const MAX_DROP_DIALOG_ROWS = 100;
 
@@ -420,6 +418,7 @@ interface ChatEditorProps {
   composerTagIcons?: WebShellComposerTagIconMap;
   voiceTarget?: VoiceWorkspaceTarget;
   voiceStatusRevision?: VoiceStatusRevision;
+  composerIntegrations?: ComposerIntegrations;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** Click a pasted image in the composer to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
@@ -1108,6 +1107,16 @@ function ToolbarPopover({
   }, [open, submenuOpen, mobileSheet]);
 
   const hasCheckItems = hasRichItems || showCheck;
+  const pickerHeader = pickerContext && modelPicker?.mountHeader && (
+    <ModelPickerContent
+      key={scopeKey}
+      mount={modelPicker.mountHeader}
+      context={pickerContext}
+      overlayRoot={overlayRoot}
+      revision={modelPicker}
+      className={styles.modelPickerContent}
+    />
+  );
   const dropdownItems = (
     <div
       className={`${styles.dropdownList} ${
@@ -1118,6 +1127,7 @@ function ToolbarPopover({
             : ''
       } ${searchable ? styles.dropdownListConstrained : ''}`}
     >
+      {mobileSheet && pickerHeader}
       {visibleItems.map((item) => (
         <ToolbarDropdownRow
           key={JSON.stringify([scopeKey, item.id])}
@@ -1166,7 +1176,9 @@ function ToolbarPopover({
       aria-label={searchLabel}
       placeholder={searchLabel}
       autoComplete="off"
-      className={touchSearchField ? 'h-11 text-base md:text-base' : undefined}
+      className={
+        touchSearchField ? 'h-11 min-h-11 text-base md:text-base' : undefined
+      }
       autoCapitalize={touchSearchField ? 'off' : undefined}
       autoCorrect={touchSearchField ? 'off' : undefined}
       spellCheck={touchSearchField ? false : undefined}
@@ -1182,16 +1194,7 @@ function ToolbarPopover({
   ) : null;
   const searchableItems = (
     <>
-      {pickerContext && modelPicker?.mountHeader && (
-        <ModelPickerContent
-          key={scopeKey}
-          mount={modelPicker.mountHeader}
-          context={pickerContext}
-          overlayRoot={overlayRoot}
-          revision={modelPicker}
-          className={styles.modelPickerContent}
-        />
-      )}
+      {!mobileSheet && pickerHeader}
       {searchable &&
         (searchAction ? (
           <div className={styles.dropdownSearch}>
@@ -1248,7 +1251,7 @@ function ToolbarPopover({
           <div
             ref={sheetBodyRef}
             tabIndex={-1}
-            className="min-h-0 overflow-y-auto px-3 outline-none"
+            className={`min-h-0 px-3 outline-none ${submenu ? 'overflow-y-auto' : 'flex flex-col overflow-clip'}`}
             data-vaul-no-drag
           >
             {header}
@@ -1286,7 +1289,7 @@ function ToolbarPopover({
                   ref={sheetListRef}
                   tabIndex={-1}
                   data-web-shell-model-sheet-list
-                  className="absolute inset-x-3 bottom-[calc(100%+8px)] max-h-[60vh] overflow-y-auto rounded-xl border bg-popover p-2 shadow-lg outline-none"
+                  className="absolute inset-x-3 bottom-[calc(100%+8px)] flex max-h-[60vh] flex-col overflow-clip rounded-xl border bg-popover p-2 shadow-lg outline-none"
                   data-vaul-no-drag
                   onClick={(event) => event.stopPropagation()}
                 >
@@ -2092,6 +2095,7 @@ export const ChatEditor = memo(
       composerTagIcons,
       voiceTarget,
       voiceStatusRevision,
+      composerIntegrations,
       onImageIngestionNotice,
       onImagePreview,
       onAttachmentPreview,
@@ -2813,8 +2817,24 @@ export const ChatEditor = memo(
     const [mobileFocused, setMobileFocused] = useState(false);
     const [expandedEditor, setExpandedEditor] = useState(false);
     const expandedSelectionRef = useRef<[number, number]>([0, 0]);
+    const BranchPickerPopoverComponent =
+      composerIntegrations?.BranchPickerPopover;
+    const VoiceButtonComponent = composerIntegrations?.VoiceButton;
+    const LiveVoiceButtonComponent = composerIntegrations?.LiveVoiceButton;
+
     const [liveVoiceOpen, setLiveVoiceOpen] = useState(false);
     const [liveVoiceSupported, setLiveVoiceSupported] = useState(false);
+    useEffect(() => {
+      if (!VoiceButtonComponent) {
+        setVoiceActive(false);
+      }
+    }, [VoiceButtonComponent]);
+    useEffect(() => {
+      if (!LiveVoiceButtonComponent) {
+        setLiveVoiceOpen(false);
+        setLiveVoiceSupported(false);
+      }
+    }, [LiveVoiceButtonComponent]);
     useEffect(() => {
       setExpandedEditor(false);
     }, [sessionId, atWorkspaceCwd, disabled]);
@@ -2884,6 +2904,7 @@ export const ChatEditor = memo(
     const [toolbarLabelVisibility, setToolbarLabelVisibility] = useState({
       workspaceSelect: false,
       workspace: false,
+      gitBranchDetails: false,
       gitBranch: false,
       mode: false,
       plan: false,
@@ -3271,8 +3292,11 @@ export const ChatEditor = memo(
     const workspaceIndicatorVisible = Boolean(
       workspaceName && showToolbarAction('workspace'),
     );
+    const hasGitBranchControl =
+      Boolean(gitModeIntent && onGitModeIntentChange) ||
+      Boolean(BranchPickerPopoverComponent);
     const gitBranchVisible = Boolean(
-      gitBranch && showToolbarAction('gitBranch'),
+      gitBranch && showToolbarAction('gitBranch') && hasGitBranchControl,
     );
     // Both chips say where the prompt goes rather than how it runs, so a caller
     // can move them out of the toolbar without touching their availability.
@@ -3306,6 +3330,9 @@ export const ChatEditor = memo(
       isMobile || toolbarLabelVisibility.workspaceSelect;
     const showWorkspaceLabel = isMobile || toolbarLabelVisibility.workspace;
     const showGitBranchLabel = isMobile || toolbarLabelVisibility.gitBranch;
+    const showGitBranchDetails =
+      isMobile ||
+      (showGitBranchLabel && toolbarLabelVisibility.gitBranchDetails);
     const showModeLabel = toolbarLabelVisibility.mode;
     const showPlanLabel = toolbarLabelVisibility.plan;
     const showWorkflowLabel = toolbarLabelVisibility.workflow;
@@ -3341,13 +3368,14 @@ export const ChatEditor = memo(
           onNewWorkspaceOpenChange={setWorkspaceNewSubOpen}
         />
       ) : null;
-    const renderGitBranchChip = (compact: boolean) =>
+    const renderGitBranchChip = (compact: boolean, showDetails = true) =>
       gitBranch ? (
         gitModeIntent && onGitModeIntentChange ? (
           <GitModePopover
             branch={gitBranch}
             status={gitStatus}
             compact={compact}
+            showDetails={showDetails}
             intent={gitModeIntent}
             onIntentChange={onGitModeIntentChange}
             open={activeContextMenu === 'git'}
@@ -3355,8 +3383,8 @@ export const ChatEditor = memo(
             draft={gitModeDraft}
             onDraftChange={setGitModeDraft}
           />
-        ) : (
-          <BranchPickerPopover
+        ) : BranchPickerPopoverComponent ? (
+          <BranchPickerPopoverComponent
             open={activeContextMenu === 'branch'}
             onOpenChange={(open) => setContextMenuOpen('branch', open)}
             preservedStateRef={branchPickerPreservedStateRef}
@@ -3380,12 +3408,76 @@ export const ChatEditor = memo(
                 branch={gitBranch}
                 status={gitStatus}
                 compact={compact}
+                showDetails={showDetails}
                 worktree={gitWorktree}
               />
             </button>
-          </BranchPickerPopover>
-        )
+          </BranchPickerPopoverComponent>
+        ) : null
       ) : null;
+    const renderGitBranchMeasure = (
+      compact: boolean,
+      showDetails: boolean,
+      measureKey: string,
+    ) => {
+      if (!gitBranch) return null;
+      if (gitModeIntent && onGitModeIntentChange) {
+        const isBranch = gitModeIntent.mode === 'branch';
+        const isWorktree = gitModeIntent.mode === 'worktree';
+        const label = isBranch
+          ? `→ ${gitModeIntent.name}`
+          : isWorktree
+            ? t('gitMode.worktree')
+            : gitBranch;
+        return (
+          <span
+            data-toolbar-measure={measureKey}
+            className={popoverStyles.wrap}
+          >
+            <span
+              className={`${popoverStyles.chip} ${isBranch ? popoverStyles.chipBranch : ''} ${isWorktree ? popoverStyles.chipWorktree : ''} ${compact ? popoverStyles.chipCompact : ''}`}
+            >
+              <GitBranchChipContent
+                branch={label}
+                status={gitStatus}
+                compact={compact}
+                showDetails={showDetails}
+                worktree={isWorktree}
+              />
+              <svg
+                className={popoverStyles.chevron}
+                viewBox="0 1 16 16"
+                fill="currentColor"
+                width={9}
+                height={9}
+                aria-hidden="true"
+              >
+                <path d="M4.427 7.427l3.396 3.396a.25.25 0 0 0 .354 0l3.396-3.396A.25.25 0 0 0 11.396 7H4.604a.25.25 0 0 0-.177.427Z" />
+              </svg>
+            </span>
+            {(isBranch || isWorktree) && (
+              <span className={popoverStyles.clearBtn}>✕</span>
+            )}
+          </span>
+        );
+      }
+      return (
+        <span
+          data-toolbar-measure={measureKey}
+          className={`${styles.gitBranchChip} ${
+            compact ? styles.gitBranchChipCompact : ''
+          }`}
+        >
+          <GitBranchChipContent
+            branch={gitBranch}
+            status={gitStatus}
+            compact={compact}
+            showDetails={showDetails}
+            worktree={gitWorktree}
+          />
+        </span>
+      );
+    };
     const mobileVoiceActive = isMobile && voiceActive;
     const workspaceContextAvailable =
       !isSimple &&
@@ -3401,7 +3493,8 @@ export const ChatEditor = memo(
       !isSimple &&
       !mobileVoiceActive &&
       gitBranchVisible &&
-      !(gitModeIntent && onGitModeIntentChange);
+      !(gitModeIntent && onGitModeIntentChange) &&
+      Boolean(BranchPickerPopoverComponent);
 
     useEffect(() => {
       if (activeContextMenu !== 'workspace') setWorkspaceNewSubOpen(false);
@@ -3504,19 +3597,17 @@ export const ChatEditor = memo(
 
       const update = () => {
         const currentVisibility = toolbarLabelVisibilityRef.current;
-        const expansionWidth = (id: string) => {
-          const collapsed = measurements.querySelector<HTMLElement>(
-            `[data-toolbar-measure="${id}:collapsed"]`,
+        const measureWidth = (key: string) =>
+          Math.ceil(
+            measurements
+              .querySelector<HTMLElement>(`[data-toolbar-measure="${key}"]`)
+              ?.getBoundingClientRect().width ?? 0,
           );
-          const expanded = measurements.querySelector<HTMLElement>(
-            `[data-toolbar-measure="${id}:expanded"]`,
-          );
-          return Math.max(
+        const expansionWidth = (id: string) =>
+          Math.max(
             0,
-            Math.ceil(expanded?.getBoundingClientRect().width ?? 0) -
-              Math.ceil(collapsed?.getBoundingClientRect().width ?? 0),
+            measureWidth(`${id}:expanded`) - measureWidth(`${id}:collapsed`),
           );
-        };
         const items = [
           ...(!isMobile && workspaceChipInToolbar
             ? [
@@ -3537,8 +3628,20 @@ export const ChatEditor = memo(
           ...(!isMobile && gitChipInToolbar
             ? [
                 {
+                  id: 'gitBranchDetails',
+                  expansionWidth: Math.max(
+                    0,
+                    measureWidth('gitBranch:expanded') -
+                      measureWidth('gitBranch:label'),
+                  ),
+                },
+                {
                   id: 'gitBranch',
-                  expansionWidth: expansionWidth('gitBranch'),
+                  expansionWidth: Math.max(
+                    0,
+                    measureWidth('gitBranch:label') -
+                      measureWidth('gitBranch:collapsed'),
+                  ),
                 },
               ]
             : []),
@@ -3613,6 +3716,7 @@ export const ChatEditor = memo(
         const next = {
           workspaceSelect: itemVisibility.workspaceSelect ?? false,
           workspace: itemVisibility.workspace ?? false,
+          gitBranchDetails: itemVisibility.gitBranchDetails ?? false,
           gitBranch: itemVisibility.gitBranch ?? false,
           mode: itemVisibility.mode ?? false,
           plan: itemVisibility.plan ?? false,
@@ -3673,6 +3777,8 @@ export const ChatEditor = memo(
       disabled,
       gitBranch,
       gitChipInToolbar,
+      gitModeIntent,
+      gitStatus,
       isRunning,
       modelLabelReady,
       isSimple,
@@ -3721,6 +3827,7 @@ export const ChatEditor = memo(
           {(inToolbar ? gitChipInToolbar : gitBranchVisible) &&
             renderGitBranchChip(
               options?.compactGit ?? (inToolbar && !showGitBranchLabel),
+              inToolbar ? showGitBranchDetails : true,
             )}
           {!inToolbar && gitContextControl}
         </>
@@ -3750,7 +3857,9 @@ export const ChatEditor = memo(
                   },
                   shellMode: core.shellMode,
                   onLiveVoice:
-                    liveVoiceSupported && showToolbarAction('voice')
+                    liveVoiceSupported &&
+                    Boolean(LiveVoiceButtonComponent) &&
+                    showToolbarAction('voice')
                       ? () => setLiveVoiceOpen(true)
                       : undefined,
                 }
@@ -4480,47 +4589,52 @@ export const ChatEditor = memo(
               )}
             {!isSimple && toolbarSecondary}
             {modeToggle}
-            {showToolbarAction('voice') && (
-              <>
-                <LiveVoiceButton
-                  portalContainer={liveVoicePortalContainer}
-                  hideInactiveTrigger={
-                    isSimple || (isMobile && Boolean(showAddMenuAction))
-                  }
-                  open={liveVoiceOpen}
-                  onOpenChange={setLiveVoiceOpen}
-                  onSupportedChange={setLiveVoiceSupported}
-                  onRequestFocusFallback={() => {
-                    containerRef.current
-                      ?.querySelector<HTMLButtonElement>(
-                        '[data-testid="composer-add-menu-trigger"]',
-                      )
-                      ?.focus();
-                  }}
-                />
-                <span
-                  data-web-shell-simple-voice={isSimple ? '' : undefined}
-                  hidden={
-                    isSimple &&
-                    (core.hasContent || isRunning || composerPreparing) &&
-                    !voiceActive
-                  }
-                  style={{
-                    // Inline display must not override [hidden] in simple mode.
-                    display: !isSimple ? 'contents' : undefined,
-                  }}
-                >
-                  <VoiceButton
-                    ref={voiceButtonRef}
-                    disabled={disabled}
-                    onActiveChange={setVoiceActive}
-                    target={voiceTarget}
-                    statusRevision={voiceStatusRevision}
-                    onInsert={(text) => insertVoiceTextRef.current(text)}
-                  />
-                </span>
-              </>
-            )}
+            {showToolbarAction('voice') &&
+              (LiveVoiceButtonComponent || VoiceButtonComponent) && (
+                <>
+                  {LiveVoiceButtonComponent && (
+                    <LiveVoiceButtonComponent
+                      portalContainer={liveVoicePortalContainer}
+                      hideInactiveTrigger={
+                        isSimple || (isMobile && Boolean(showAddMenuAction))
+                      }
+                      open={liveVoiceOpen}
+                      onOpenChange={setLiveVoiceOpen}
+                      onSupportedChange={setLiveVoiceSupported}
+                      onRequestFocusFallback={() => {
+                        containerRef.current
+                          ?.querySelector<HTMLButtonElement>(
+                            '[data-testid="composer-add-menu-trigger"]',
+                          )
+                          ?.focus();
+                      }}
+                    />
+                  )}
+                  {VoiceButtonComponent && (
+                    <span
+                      data-web-shell-simple-voice={isSimple ? '' : undefined}
+                      hidden={
+                        isSimple &&
+                        (core.hasContent || isRunning || composerPreparing) &&
+                        !voiceActive
+                      }
+                      style={{
+                        // Inline display must not override [hidden] in simple mode.
+                        display: !isSimple ? 'contents' : undefined,
+                      }}
+                    >
+                      <VoiceButtonComponent
+                        ref={voiceButtonRef}
+                        disabled={disabled}
+                        onActiveChange={setVoiceActive}
+                        target={voiceTarget}
+                        statusRevision={voiceStatusRevision}
+                        onInsert={(text) => insertVoiceTextRef.current(text)}
+                      />
+                    </span>
+                  )}
+                </>
+              )}
             {(isMobile || isSimple) &&
               isRunning &&
               (core.hasContent || voiceActive) && (
@@ -5335,28 +5449,9 @@ export const ChatEditor = memo(
               )}
               {gitChipInToolbar && gitBranch && (
                 <>
-                  <span
-                    data-toolbar-measure="gitBranch:collapsed"
-                    className={`${styles.gitBranchChip} ${styles.gitBranchChipCompact}`}
-                  >
-                    <GitBranchChipContent
-                      branch={gitBranch}
-                      status={gitStatus}
-                      compact
-                      worktree={gitWorktree}
-                    />
-                  </span>
-                  <span
-                    data-toolbar-measure="gitBranch:expanded"
-                    className={styles.gitBranchChip}
-                  >
-                    <GitBranchChipContent
-                      branch={gitBranch}
-                      status={gitStatus}
-                      compact={false}
-                      worktree={gitWorktree}
-                    />
-                  </span>
+                  {renderGitBranchMeasure(true, false, 'gitBranch:collapsed')}
+                  {renderGitBranchMeasure(false, false, 'gitBranch:label')}
+                  {renderGitBranchMeasure(false, true, 'gitBranch:expanded')}
                 </>
               )}
               <span

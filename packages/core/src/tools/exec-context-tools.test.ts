@@ -173,6 +173,26 @@ describe('exec context tool results', () => {
     expect(outputText(result)).not.toContain('toolResults');
   });
 
+  it.each([
+    [{ hookStopReason: 'halt' }],
+    [
+      {
+        hookStopReason: 'halt',
+        error: new Error('halt'),
+        executionStatus: 'not_started' as const,
+      },
+    ],
+  ])('ends the script and carries a nested hook stop: %o', async (response) => {
+    const { run, dispatch } = setup(ToolNames.READ_FILE, response, 'read');
+    const result = await run(
+      'text("before stop"); try { await tools.read_file({}); } catch {} text("after stop"); await tools.write_file({});',
+    );
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch.mock.calls[0][0]).toBe(ToolNames.READ_FILE);
+    expect(result.hookStopReason).toBe('halt');
+    expect(outputText(result)).toBe('before stop');
+  });
+
   it('keeps nonterminal goal proposals callable without ending the script', async () => {
     const { run, dispatch } = setup(
       ToolNames.UPDATE_GOAL,
@@ -184,6 +204,24 @@ describe('exec context tool results', () => {
     );
     expect(dispatch).toHaveBeenCalledTimes(2);
     expect(result.terminateTurn).toBeUndefined();
+  });
+
+  it('keeps a skill reloadable when a hook stops the script before it can print the body', async () => {
+    const { run, registry } = setup(
+      ToolNames.SKILL,
+      { hookStopReason: 'halt' },
+      'skill instructions',
+    );
+    const clearLoadedSkills = vi.fn();
+    Object.assign(registry.getTool(ToolNames.SKILL)!, { clearLoadedSkills });
+
+    const result = await run(
+      "text((await tools.skill({skill: 'test'})).output)",
+    );
+
+    expect(result.hookStopReason).toBe('halt');
+    expect(outputText(result)).toBe('');
+    expect(clearLoadedSkills).toHaveBeenCalledOnce();
   });
 
   it('clears loaded skill tracking if cancellation prevents delivery', async () => {

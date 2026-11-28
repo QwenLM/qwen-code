@@ -32,6 +32,7 @@ class ManagedStoreDecompositionTest {
             AgentSessionAdmissions.class,
             AgentActionParking.class,
             AgentTurnExecution.class,
+            AgentTurnHandOff.class,
             AgentExecutionOperations.class,
             JournalStoreRows.class,
             JournalFencing.class,
@@ -129,7 +130,7 @@ class ManagedStoreDecompositionTest {
                 findApprovalSelections/2:- findApprovalOwners/3:- findTurnApprovalSelection/3:-
                 changeSessionApproval/9::REQUIRED:DEFAULT:false changeSessionApproval/11::REQUIRED:DEFAULT:false changeSessionApproval/12::REQUIRED:DEFAULT:false
                 changeSessionApproval/15::REQUIRED:DEFAULT:false listTurns/5:- findTurnSummary/3:-
-                findEvents/4:- findLatestEnvironmentEvents/2:- findControlEvents/3:-
+                findEvents/4:- findEventTails/1:- findLatestEnvironmentEvents/2:- findControlEvents/3:-
                 findTranscriptEvents/4:- findMessagePage/5:managedAgentTransactionManager:REQUIRED:REPEATABLE_READ:true findMessagePage/6:managedAgentTransactionManager:REQUIRED:REPEATABLE_READ:true
                 findMessageCoveredSequences/2:- findReplayWindow/2:- findReplayFloorTargets/1:-
                 advanceReplayFloor/3::REQUIRED:DEFAULT:false findMaterializationTargets/1:- materializeNextBatch/3::REQUIRED:DEFAULT:false
@@ -138,7 +139,7 @@ class ManagedStoreDecompositionTest {
                 markTurnRecoveryBlocked/6::REQUIRED:DEFAULT:false markTurnFailureRecovery/5::REQUIRED:DEFAULT:false requestRecoveryRecheck/3::REQUIRED:DEFAULT:false
                 parkTurnForRuntimeRecovery/6::REQUIRED:DEFAULT:false parkTurnForAction/4::REQUIRED:DEFAULT:false deferTurnRetry/5::REQUIRED:DEFAULT:false scheduleTurnRetry/6::REQUIRED:DEFAULT:false
                 bindHarness/5::REQUIRED:DEFAULT:false bindSessionHarness/3::REQUIRED:DEFAULT:false bindRecoveredHarness/6::REQUIRED:DEFAULT:false markSubmissionAttempted/4::REQUIRED:DEFAULT:false
-                withdrawSubmissionAttempted/4::REQUIRED:DEFAULT:false recordAdmission/6::REQUIRED:DEFAULT:false recordRecoveryAdmission/8::REQUIRED:DEFAULT:false
+                withdrawSubmissionAttempted/4::REQUIRED:DEFAULT:false recordAdmission/6::REQUIRED:DEFAULT:false recordAdmissionHandOff/8::REQUIRED:DEFAULT:false recordRecoveryAdmission/8::REQUIRED:DEFAULT:false
                 retractContinuationOutput/6::REQUIRED:DEFAULT:false retractHarnessTurnOutput/7::REQUIRED:DEFAULT:false retractHarnessTurnOutput/10::REQUIRED:DEFAULT:false
                 recordHarnessEvents/6::REQUIRED:DEFAULT:false cancelUnadmittedTurn/4::REQUIRED:DEFAULT:false cancelBeforeAdmission/4::REQUIRED:DEFAULT:false
                 failTurn/6::REQUIRED:DEFAULT:false failWorktreeInitialTurns/3::REQUIRED:DEFAULT:false failRecoveryBlockedTurn/5::REQUIRED:DEFAULT:false
@@ -159,7 +160,7 @@ class ManagedStoreDecompositionTest {
                 readSnapshotResource/5:- readOwnerResource/5:- publishAgentInstructions/4::REQUIRED:DEFAULT:false
                 publishAgentSkills/4::REQUIRED:DEFAULT:false publishInheritedExtensionResource/4::REQUIRED:DEFAULT:false publishToolResult/4::REQUIRED:DEFAULT:false
                 publishToolResult/5::REQUIRED:DEFAULT:false toolResultLimit/1:-
-                hasLiveWriter/2::REQUIRED:DEFAULT:false
+                hasLiveWriter/2::REQUIRED:DEFAULT:false authenticateEventIngest/7::REQUIRED:DEFAULT:false
                 commandKeyHash/2:- journalCorrupt/0:- journalPacks/0:-
                 """);
     }

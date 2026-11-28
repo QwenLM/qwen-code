@@ -20,9 +20,10 @@ import type { Application, Request, Response } from 'express';
 import { isWithinRoot } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_REGISTERED_WORKSPACES } from '../workspace-inputs.js';
-import type {
-  WorkspaceRegistry,
-  WorkspaceRuntime,
+import {
+  WorkspaceMemoryPathCollisionError,
+  type WorkspaceRegistry,
+  type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { getWorkspaceRuntimeCoordinatorIfSupported } from '../workspace-runtime-coordinator.js';
 import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
@@ -818,7 +819,15 @@ export function registerWorkspaceManagementRoutes(
           err instanceof Error ? err.message : String(err)
         }${canonical ? `; retained directory: ${canonical}` : ''}`,
       );
-      if (!res.headersSent) {
+      if (
+        !res.headersSent &&
+        err instanceof WorkspaceMemoryPathCollisionError
+      ) {
+        res.status(409).json({
+          error: err.message,
+          code: 'workspace_memory_path_collision',
+        });
+      } else if (!res.headersSent) {
         res.status(500).json({
           error: 'Failed to register scratch workspace',
           code: 'runtime_creation_failed',
@@ -1812,7 +1821,12 @@ export function registerWorkspaceManagementRoutes(
             err instanceof Error ? err.message : String(err)
           }`,
         );
-        if (persistenceFailed) {
+        if (err instanceof WorkspaceMemoryPathCollisionError) {
+          res.status(409).json({
+            error: err.message,
+            code: 'workspace_memory_path_collision',
+          });
+        } else if (persistenceFailed) {
           if (sendStoreCapacityError(res, err)) return;
           res.status(500).json({
             error: 'Failed to persist workspace registration',

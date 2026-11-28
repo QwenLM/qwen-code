@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.ResolvedBinding;
@@ -7,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -16,19 +18,25 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 @Repository
 public class JdbcSessionWorktreeStore
         implements SessionWorktreeStore {
-    private com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
-    @org.springframework.beans.factory.annotation.Autowired
-    public void configureWorktreeFiles(com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles value) { worktreeFiles = value; }
+    private WorktreeFiles worktreeFiles;
+    @Autowired
+    public void configureWorktreeFiles(WorktreeFiles value) { worktreeFiles = value; }
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String SELECT = "SELECT w.*, o.claim_owner, o.claim_generation, o.claim_until, o.phase, o.attempt_count"
@@ -57,7 +65,7 @@ public class JdbcSessionWorktreeStore
         this.guard = guard;
     }
 
-    public SourceLocation source(String tenant, String actor, com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection selection) {
+    public SourceLocation source(String tenant, String actor, WorkspaceSelection selection) {
         WorkspaceStorageKindGuard.requireFreshTransaction();
         SourceLocation before = readSource(tenant, actor, selection);
         if (!before.equals(readSource(tenant, actor, selection))) {
@@ -66,7 +74,7 @@ public class JdbcSessionWorktreeStore
         return before;
     }
 
-    private SourceLocation readSource(String tenant, String actor, com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection selection) {
+    private SourceLocation readSource(String tenant, String actor, WorkspaceSelection selection) {
         return readTransaction.execute(status -> {
             ResolvedBinding source = registry.resolveForRead(tenant, actor, selection);
             Path root = guard.verifiedRootForRead(source.binding());
@@ -145,16 +153,16 @@ public class JdbcSessionWorktreeStore
         if (sessions.isEmpty()) {
             return Map.of();
         }
-        var args = new java.util.ArrayList<Object>();
+        var args = new ArrayList<Object>();
         args.add(tenant);
         args.addAll(sessions);
         return descriptors(worktreeFiles, jdbc, jdbc.query(SELECT + " WHERE w.tenant_id = ? AND w.session_id IN ("
-                        + String.join(",", java.util.Collections.nCopies(sessions.size(), "?")) + ")",
+                        + String.join(",", Collections.nCopies(sessions.size(), "?")) + ")",
                 (record, index) -> row(record, index), args.toArray()));
     }
 
     static Map<String, Descriptor> descriptors(WorktreeFiles worktreeFiles, JdbcTemplate jdbc, List<Row> rows) {
-        var result = new java.util.LinkedHashMap<String, Descriptor>();
+        var result = new LinkedHashMap<String, Descriptor>();
         rows.forEach(row -> result.put(row.sessionId(), verifiedDescriptor(worktreeFiles, jdbc, row)));
         return result;
     }
@@ -334,7 +342,7 @@ public class JdbcSessionWorktreeStore
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenant);
             Row row = get(tenant, actor, workspace, id, true);
             String operation = UUID.nameUUIDFromBytes((tenant + "\0" + actor + "\0" + id + "\0" + idempotencyKey)
-                    .getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString().replace("-", "");
+                    .getBytes(StandardCharsets.UTF_8)).toString().replace("-", "");
             if (row.operationId().equals(operation) || "REMOVED".equals(row.state())) {
                 return row;
             }
@@ -390,10 +398,10 @@ public class JdbcSessionWorktreeStore
 
     private static long blockIdentity(JdbcTemplate jdbc, Row row, String code) {
         // The refused caller may roll back its own admission transaction.
-        var update = new TransactionTemplate(new org.springframework.jdbc.datasource.DataSourceTransactionManager(
-                java.util.Objects.requireNonNull(jdbc.getDataSource())));
-        update.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
-        return java.util.Objects.requireNonNull(update.execute(status -> {
+        var update = new TransactionTemplate(new DataSourceTransactionManager(
+                Objects.requireNonNull(jdbc.getDataSource())));
+        update.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        return Objects.requireNonNull(update.execute(status -> {
             jdbc.update("UPDATE ma_session_worktree SET state = 'BLOCKED', failure_code = ?, revision = revision + 1"
                             + " WHERE tenant_id = ? AND session_id = ? AND state = 'READY'", code, row.tenantId(), row.sessionId());
             return jdbc.queryForObject("SELECT revision FROM ma_session_worktree WHERE tenant_id = ? AND session_id = ?",
@@ -409,7 +417,7 @@ public class JdbcSessionWorktreeStore
                         + " FROM ma_storage_owner WHERE physical_id = ?" + (lock ? " FOR UPDATE" : ""),
                 ManagedSchemaKeys.identity(lock ? JdbcWorkspaceExecutionStore.storageKey(jdbc, binding)
                         : LocalStorageOwners.key(jdbc, binding.getTenantId(), binding.getStorageId(), false)));
-        return org.apache.commons.codec.digest.DigestUtils.sha256Hex(json(List.of(alias, owner)));
+        return DigestUtils.sha256Hex(json(List.of(alias, owner)));
     }
 
     private static String key(Row row) {
@@ -427,7 +435,7 @@ public class JdbcSessionWorktreeStore
                     result.getString(prefix + "identity_json"), result.getString(prefix + "operation_id"), result.getString(prefix + "claim_owner"),
                     result.getLong(prefix + "claim_generation"), result.getObject(prefix + "claim_until") instanceof Number claim ? claim.longValue() : null, result.getString(prefix + "phase"),
                     result.getInt(prefix + "attempt_count"), result.getLong(prefix + "revision"), result.getString(prefix + "failure_code"), result.getString(prefix + "owner_actor_key"));
-        } catch (java.io.IOException exception) {
+        } catch (IOException exception) {
             throw new IllegalStateException("Invalid Session worktree record", exception);
         }
     }
@@ -435,7 +443,7 @@ public class JdbcSessionWorktreeStore
     private static String json(Object value) {
         try {
             return JSON.writeValueAsString(value);
-        } catch (java.io.IOException exception) {
+        } catch (IOException exception) {
             throw new IllegalStateException("Invalid Session worktree identity", exception);
         }
     }

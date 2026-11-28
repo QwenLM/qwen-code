@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 
-import { act, createRef, type ComponentProps } from 'react';
+import {
+  act,
+  createRef,
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  type ComponentProps,
+} from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonWorkspaceGitStatus,
@@ -26,6 +33,7 @@ import {
   TOUCH_COMPOSER_QUERY,
 } from '../hooks/useIsTouchComposer';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import type { ComposerIntegrations } from './composer/composer-integrations';
 import styles from './ChatEditor.module.css';
 import type { VoiceButtonHandle } from '../voice/VoiceButton';
 import type {
@@ -56,31 +64,7 @@ const mockComposerCoreState = vi.hoisted(() => ({
   removeTopTag: vi.fn(),
 }));
 
-// Stand in for the branch picker so the tests can assert what the composer
-// hands it (the git status behind its action hints) without driving Radix.
-vi.mock('./BranchPickerPopover', async () => {
-  const { createElement } = await import('react');
-  return {
-    BranchPickerPopover: ({
-      children,
-      status,
-    }: {
-      children?: unknown;
-      status?: { operation?: string; unstaged?: number };
-    }) =>
-      createElement(
-        'div',
-        {
-          'data-testid': 'branch-picker',
-          'data-status-operation': status?.operation ?? undefined,
-          'data-status-unstaged': status?.unstaged ?? undefined,
-        },
-        children,
-      ),
-  };
-});
-
-// Mock useWorkspace so BranchPickerPopover can render without a real provider.
+// Mock useWorkspace for workspace-aware composer helpers without a real provider.
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   const actual =
     await importOriginal<
@@ -372,46 +356,44 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
   };
 });
 
-vi.mock('../voice/VoiceButton', async () => {
-  const React = await import('react');
-  return {
-    VoiceButton: ({
-      ref,
-      onActiveChange,
-    }: {
-      ref?: React.Ref<VoiceButtonHandle>;
-      onActiveChange?: (active: boolean) => void;
-    }) => {
-      voiceButtonState.onActiveChange = onActiveChange;
-      React.useImperativeHandle(
-        ref,
-        () => ({ flush: voiceButtonState.flush }),
-        [],
-      );
-      return <span data-testid="voice-button" />;
-    },
-  };
+const liveVoiceState = { supported: false };
+
+const TestBranchPickerPopover: NonNullable<
+  ComposerIntegrations['BranchPickerPopover']
+> = ({ children, status }) => (
+  <div
+    data-testid="branch-picker"
+    data-status-operation={status?.operation ?? undefined}
+    data-status-unstaged={status?.unstaged ?? undefined}
+  >
+    {children}
+  </div>
+);
+
+const TestVoiceButton = forwardRef<
+  VoiceButtonHandle,
+  ComponentProps<NonNullable<ComposerIntegrations['VoiceButton']>>
+>(function TestVoiceButton({ onActiveChange }, ref) {
+  voiceButtonState.onActiveChange = onActiveChange;
+  useImperativeHandle(ref, () => ({ flush: voiceButtonState.flush }), []);
+  return <span data-testid="voice-button" />;
 });
 
-const liveVoiceState = vi.hoisted(() => ({ supported: false }));
-vi.mock('../live/LiveVoiceButton', async () => {
-  const React = await import('react');
-  return {
-    LiveVoiceButton: ({
-      open,
-      onSupportedChange,
-    }: {
-      open?: boolean;
-      onSupportedChange?: (supported: boolean) => void;
-    }) => {
-      const supported = liveVoiceState.supported;
-      React.useEffect(() => {
-        onSupportedChange?.(supported);
-      }, [onSupportedChange, supported]);
-      return <span data-testid="live-voice-button" data-open={open} />;
-    },
-  };
-});
+const TestLiveVoiceButton: NonNullable<
+  ComposerIntegrations['LiveVoiceButton']
+> = ({ open, onSupportedChange }) => {
+  const supported = liveVoiceState.supported;
+  useEffect(() => {
+    onSupportedChange?.(supported);
+  }, [onSupportedChange, supported]);
+  return <span data-testid="live-voice-button" data-open={open} />;
+};
+
+const TEST_COMPOSER_INTEGRATIONS: ComposerIntegrations = {
+  BranchPickerPopover: TestBranchPickerPopover,
+  VoiceButton: TestVoiceButton,
+  LiveVoiceButton: TestLiveVoiceButton,
+};
 
 const mounted: Array<{
   root: Root;
@@ -555,6 +537,7 @@ interface ChatEditorRenderProps
   skillsLoaded?: boolean;
   reasoning?: DaemonReasoningControls;
   onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
+  composerIntegrations?: ComposerIntegrations;
 }
 
 function renderChatEditorInto(
@@ -572,6 +555,10 @@ function renderChatEditorInto(
     onComposerTagClick,
     ...chatEditorProps
   } = props;
+  const resolvedIntegrations =
+    'composerIntegrations' in props
+      ? props.composerIntegrations
+      : TEST_COMPOSER_INTEGRATIONS;
   if (composerTags) {
     mockComposerCoreState.composerTags = composerTags;
   }
@@ -600,6 +587,7 @@ function renderChatEditorInto(
               currentMode="default"
               currentModel="qwen"
               {...chatEditorProps}
+              composerIntegrations={resolvedIntegrations}
             />
           </I18nProvider>
         </WebShellCustomizationProvider>
@@ -6946,6 +6934,18 @@ describe('ChatEditor mobile composer actions', () => {
     expect(
       document.querySelector('[data-web-shell-mobile-add-menu]')!.textContent,
     ).not.toContain('Open Live Voice');
+    await clickButton('close');
+    rerenderChatEditor(container, {
+      visibleToolbarActions: ['addMenu', 'voice'],
+      composerIntegrations: undefined,
+    });
+    expect(
+      container.querySelector('[data-testid="live-voice-button"]'),
+    ).toBeNull();
+    await clickButton('Add to message');
+    expect(
+      document.querySelector('[data-web-shell-mobile-add-menu]')!.textContent,
+    ).not.toContain('Open Live Voice');
   });
 
   it('keeps stop and send reachable with a draft without clearing it', async () => {
@@ -9220,4 +9220,105 @@ describe('ChatEditor Workflow mode', () => {
       }
     },
   );
+});
+
+describe('ChatEditor composerIntegrations boundary', () => {
+  it('omits voice, live voice, and branch picker when composerIntegrations is not provided', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice', 'gitBranch'],
+      gitBranch: 'main',
+      composerIntegrations: undefined,
+    });
+
+    expect(container.querySelector('[data-testid="voice-button"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="live-voice-button"]'),
+    ).toBeNull();
+    expect(container.querySelector('[data-testid="branch-picker"]')).toBeNull();
+    expect(
+      container.querySelector('[data-toolbar-measure="gitBranch:expanded"]'),
+    ).toBeNull();
+  });
+
+  it('still renders GitModePopover when gitModeIntent is provided without BranchPickerPopover', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['gitBranch'],
+      gitBranch: 'main',
+      gitModeIntent: { mode: 'current' },
+      onGitModeIntentChange: vi.fn(),
+      composerIntegrations: undefined,
+    });
+
+    expect(container.querySelector('[data-testid="branch-picker"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="git-mode-chip"]'),
+    ).not.toBeNull();
+  });
+
+  it('injects only the voice button when only VoiceButton is provided', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice'],
+      composerIntegrations: { VoiceButton: TestVoiceButton },
+    });
+
+    expect(
+      container.querySelector('[data-testid="voice-button"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="live-voice-button"]'),
+    ).toBeNull();
+  });
+
+  it('injects only live voice when only LiveVoiceButton is provided', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice'],
+      composerIntegrations: { LiveVoiceButton: TestLiveVoiceButton },
+    });
+
+    expect(
+      container.querySelector('[data-testid="live-voice-button"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="voice-button"]')).toBeNull();
+  });
+
+  it('injects only the branch picker when only BranchPickerPopover is provided', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice', 'gitBranch'],
+      gitBranch: 'main',
+      composerIntegrations: { BranchPickerPopover: TestBranchPickerPopover },
+    });
+
+    expect(
+      container.querySelector('[data-testid="branch-picker"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="voice-button"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="live-voice-button"]'),
+    ).toBeNull();
+  });
+
+  it('resets active voice state when VoiceButton integration is removed', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice'],
+      composerIntegrations: TEST_COMPOSER_INTEGRATIONS,
+    });
+    const entry = mounted.find((item) => item.container === container)!;
+
+    act(() => voiceButtonState.onActiveChange?.(true));
+    const submitBefore = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submitBefore.disabled).toBe(false);
+
+    renderChatEditorInto(entry.root, entry.portalRoot, {
+      visibleToolbarActions: ['voice'],
+      composerIntegrations: undefined,
+    });
+
+    expect(container.querySelector('[data-testid="voice-button"]')).toBeNull();
+    const submitAfter = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submitAfter.disabled).toBe(true);
+  });
 });

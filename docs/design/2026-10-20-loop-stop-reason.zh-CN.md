@@ -3,6 +3,7 @@
 [English](2026-10-20-loop-stop-reason.md) | [简体中文](2026-10-20-loop-stop-reason.zh-CN.md)
 
 - **状态**：已在 PR 分支实现
+- **已被取代**：[移除循环检测](2026-11-25-remove-loop-detection.zh-CN.md)，显式上限与 provider 重放两种停止除外
 - **日期**：2026-10-20
 - **相关**：issue #14828（两个 PR 中的第一个）、
   [自适应工具调用上限](2026-07-17-adaptive-tool-call-cap.md)、

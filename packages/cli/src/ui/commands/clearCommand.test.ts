@@ -10,21 +10,44 @@ import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { SessionEndReason } from '@qwen-code/qwen-code-core';
 
-// Mock the telemetry service
+const { telemetryMock, persistSessionUsageMock } = vi.hoisted(() => ({
+  telemetryMock: {
+    reset: vi.fn(),
+    resetSession: vi.fn(),
+    removeSession: vi.fn(),
+    resetLiveMetrics: vi.fn(),
+    getMetrics: vi.fn(() => ({ models: {} })),
+    getLiveMetrics: vi.fn(() => ({ models: {} })),
+    getLiveMetricsForSession: vi.fn(() => undefined),
+    getSessionStartTime: vi.fn(() => new Date()),
+    getRunStartTime: vi.fn(() => new Date()),
+    getRunStartTimeForSession: vi.fn(() => undefined),
+  },
+  persistSessionUsageMock: vi.fn(),
+}));
+
+vi.mock('@qwen-code/qwen-code-core/telemetry/uiTelemetry.js', () => ({
+  uiTelemetryService: telemetryMock,
+}));
+vi.mock(
+  '@qwen-code/qwen-code-core/services/usageHistoryService.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/services/usageHistoryService.js')
+    >()),
+    persistSessionUsage: persistSessionUsageMock,
+  }),
+);
 vi.mock('@qwen-code/qwen-code-core', async () => {
   const actual = await vi.importActual('@qwen-code/qwen-code-core');
   return {
     ...actual,
-    uiTelemetryService: {
-      reset: vi.fn(),
-      getMetrics: vi.fn(() => ({ models: {} })),
-      getSessionStartTime: vi.fn(() => new Date()),
-    },
-    persistSessionUsage: vi.fn(),
+    uiTelemetryService: telemetryMock,
+    persistSessionUsage: persistSessionUsageMock,
   };
 });
 
-import type { LlmClient } from '@qwen-code/qwen-code-core';
+import type { LlmClient, SessionMetrics } from '@qwen-code/qwen-code-core';
 
 describe('clearCommand', () => {
   let mockContext: CommandContext;
@@ -197,10 +220,65 @@ describe('clearCommand', () => {
 
   it('should persist usage when session has activity before clearing', async () => {
     const core = await import('@qwen-code/qwen-code-core');
+    const liveMetrics = {
+      models: { 'test-model': { api: { totalRequests: 5 } } },
+    };
+    (
+      core.uiTelemetryService.getLiveMetrics as ReturnType<typeof vi.fn>
+    ).mockReturnValue(liveMetrics);
     (
       core.uiTelemetryService.getMetrics as ReturnType<typeof vi.fn>
     ).mockReturnValue({
-      models: { 'test-model': { api: { totalRequests: 5 } } },
+      models: { 'test-model': { api: { totalRequests: 400 } } },
+    });
+
+    await clearCommand.action!(mockContext, '');
+
+    expect(core.persistSessionUsage).toHaveBeenCalledTimes(1);
+    expect(core.persistSessionUsage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'test-session-id',
+        metrics: liveMetrics,
+      }),
+    );
+  });
+
+  it('persists the current run clock after a session switch', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-01T00:12:00Z'));
+    const core = await import('@qwen-code/qwen-code-core');
+    const runStart = new Date('2026-07-01T00:10:00Z');
+    mockContext.session.stats.sessionStartTime = new Date(
+      '2026-07-01T00:00:00Z',
+    );
+    vi.mocked(core.uiTelemetryService.getLiveMetrics).mockReturnValue({
+      models: { 'test-model': { api: { totalRequests: 1 } } },
+    } as unknown as SessionMetrics);
+    vi.mocked(core.uiTelemetryService.getRunStartTime).mockReturnValue(
+      runStart,
+    );
+
+    try {
+      await clearCommand.action!(mockContext, '');
+      const params = vi.mocked(core.persistSessionUsage).mock.calls[0]?.[0];
+      expect(params?.startTime).toEqual(runStart);
+      expect(
+        params
+          ? params.endTime.getTime() - params.startTime.getTime()
+          : undefined,
+      ).toBe(120_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('should persist a skills-only run before clearing', async () => {
+    const core = await import('@qwen-code/qwen-code-core');
+    (
+      core.uiTelemetryService.getLiveMetrics as ReturnType<typeof vi.fn>
+    ).mockReturnValue({
+      models: {},
+      skills: { totalCalls: 1 },
     });
 
     await clearCommand.action!(mockContext, '');
@@ -211,10 +289,28 @@ describe('clearCommand', () => {
   it('should not persist usage when session has no activity', async () => {
     const core = await import('@qwen-code/qwen-code-core');
     (
-      core.uiTelemetryService.getMetrics as ReturnType<typeof vi.fn>
+      core.uiTelemetryService.getLiveMetrics as ReturnType<typeof vi.fn>
     ).mockReturnValue({
       models: {},
     });
+
+    await clearCommand.action!(mockContext, '');
+
+    expect(core.persistSessionUsage).not.toHaveBeenCalled();
+  });
+
+  it('persists this run only, ignoring history a resume replayed', async () => {
+    const core = await import('@qwen-code/qwen-code-core');
+    // A resumed conversation shows its whole history in the display aggregate,
+    // but this run made no request of its own.
+    (
+      core.uiTelemetryService.getMetrics as ReturnType<typeof vi.fn>
+    ).mockReturnValue({
+      models: { 'test-model': { api: { totalRequests: 400 } } },
+    });
+    (
+      core.uiTelemetryService.getLiveMetrics as ReturnType<typeof vi.fn>
+    ).mockReturnValue({ models: {} });
 
     await clearCommand.action!(mockContext, '');
 
@@ -350,6 +446,8 @@ describe('clearCommand', () => {
               abortAll: mockAbortBackgroundShells,
             }),
             startNewSession: mockStartNewSession,
+            getSessionId: () => 'test-session-id',
+            getProjectRoot: () => '/test/project',
             getLlmClient: vi.fn().mockReturnValue({
               resetChat: mockResetChat,
             } as unknown as LlmClient),
@@ -697,6 +795,106 @@ describe('clearCommand', () => {
       expect(content).toContain('Use /tasks to inspect them, then retry.');
       expect(mockStartNewSession).not.toHaveBeenCalled();
       expect(mockResetChat).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('acp multi-session isolation', () => {
+    it('persists and resets only the clearing session without calling process-wide reset', async () => {
+      const acpLiveMetrics = {
+        models: {
+          'qwen-max': {
+            api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 20 },
+            tokens: {
+              prompt: 40,
+              candidates: 10,
+              total: 50,
+              cached: 0,
+              thoughts: 0,
+            },
+          },
+        },
+        tools: {
+          totalCalls: 0,
+          totalSuccess: 0,
+          totalFail: 0,
+          totalDurationMs: 0,
+          totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
+          byName: {},
+        },
+        files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+      } as unknown as SessionMetrics;
+      const runStart = new Date('2026-11-26T10:00:00.000Z');
+      telemetryMock.getLiveMetricsForSession.mockReturnValue(acpLiveMetrics);
+      telemetryMock.getRunStartTimeForSession.mockReturnValue(runStart);
+
+      const acpContext = createMockCommandContext({
+        executionMode: 'acp',
+        services: {
+          config: {
+            getLlmClient: () =>
+              ({
+                resetChat: mockResetChat,
+              }) as unknown as LlmClient,
+            getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+              hasRunningTasks: vi.fn().mockReturnValue(false),
+              reset: mockResetBackgroundTasks,
+              abortAll: mockAbortBackgroundTasks,
+            }),
+            getBackgroundShellRegistry: vi.fn().mockReturnValue({
+              getAll: vi.fn().mockReturnValue([]),
+              hasRunningEntries: vi.fn().mockReturnValue(false),
+              reset: mockResetBackgroundShells,
+              abortAll: mockAbortBackgroundShells,
+            }),
+            getMonitorRegistry: vi.fn().mockReturnValue({
+              getRunning: vi.fn().mockReturnValue([]),
+              hasRunningMonitors: vi.fn().mockReturnValue(false),
+              reset: mockResetMonitors,
+              abortAll: mockAbortMonitors,
+            }),
+            getWorkflowRunRegistry: vi.fn().mockReturnValue({
+              hasRunningEntries: vi.fn().mockReturnValue(false),
+              abortAll: vi.fn(),
+              reset: vi.fn(),
+            }),
+            getHookSystem: mockGetHookSystem,
+            startNewSession: mockStartNewSession,
+            getSessionId: vi.fn().mockReturnValue('acp-session-a'),
+            getProjectRoot: vi.fn().mockReturnValue('/proj/acp-a'),
+            getToolRegistry: vi.fn().mockReturnValue({
+              getAllTools: vi.fn().mockReturnValue([]),
+            }),
+            getDebugLogger: vi.fn().mockReturnValue({ warn: vi.fn() }),
+          },
+        },
+        session: {
+          startNewSession: vi.fn(),
+        },
+      });
+
+      await clearCommand.action!(acpContext, '');
+
+      expect(telemetryMock.getLiveMetricsForSession).toHaveBeenCalledWith(
+        'acp-session-a',
+      );
+      expect(persistSessionUsageMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'acp-session-a',
+          project: '/proj/acp-a',
+          metrics: acpLiveMetrics,
+        }),
+      );
+      expect(telemetryMock.resetSession).toHaveBeenCalledWith('acp-session-a');
+      expect(telemetryMock.removeSession).toHaveBeenCalledWith('acp-session-a');
+      expect(telemetryMock.resetSession).toHaveBeenCalledWith('new-session-id');
+      expect(persistSessionUsageMock.mock.invocationCallOrder[0]!).toBeLessThan(
+        telemetryMock.resetSession.mock.invocationCallOrder[0]!,
+      );
+      expect(
+        telemetryMock.resetSession.mock.invocationCallOrder[0]!,
+      ).toBeLessThan(telemetryMock.removeSession.mock.invocationCallOrder[0]!);
+      expect(telemetryMock.reset).not.toHaveBeenCalled();
+      expect(telemetryMock.resetLiveMetrics).not.toHaveBeenCalled();
     });
   });
 });

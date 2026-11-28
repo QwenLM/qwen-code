@@ -12,9 +12,12 @@ import {
   uiTelemetryService,
   SessionEndReason,
   ToolNames,
-  persistSessionUsage,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
+import {
+  flushRunUsageOnSessionSwap,
+  persistSessionUsageOnClose,
+} from '../../utils/usage-persistence.js';
 import {
   hasBlockingBackgroundWork,
   buildBackgroundWorkBlockedMessage,
@@ -79,23 +82,16 @@ export const clearCommand: SlashCommand = {
       config.getBackgroundShellRegistry().abortAll();
       resetBackgroundStateForSessionSwitch(config);
 
-      // Persist current session's usage before resetting metrics
-      const metrics = uiTelemetryService.getMetrics();
-      const hasActivity = Object.values(metrics.models).some(
-        (m) => m.api.totalRequests > 0,
-      );
-      if (hasActivity) {
-        try {
-          persistSessionUsage({
-            sessionId: config.getSessionId(),
-            startTime: context.session.stats.sessionStartTime ?? new Date(),
-            endTime: new Date(),
-            project: config.getProjectRoot(),
-            metrics,
-          });
-        } catch {
-          // Best-effort — don't block /clear
-        }
+      const previousSessionId = config.getSessionId();
+      const isAcp = context.executionMode === 'acp';
+      if (isAcp) {
+        // ACP hosts multiple sessions in one process: persist and immediately
+        // clear only this session's bucket before any await so a later error
+        // cannot double-write and sibling sessions remain untouched.
+        persistSessionUsageOnClose(config, previousSessionId);
+        uiTelemetryService.resetSession(previousSessionId);
+      } else {
+        flushRunUsageOnSessionSwap(config, previousSessionId);
       }
 
       const interactiveMods = getInteractiveModSession(config);
@@ -105,7 +101,16 @@ export const clearCommand: SlashCommand = {
       if (interactiveMods) await interactiveMods.syncSession('clear');
 
       // Reset UI telemetry metrics for the new session
-      uiTelemetryService.reset();
+      if (isAcp) {
+        if (previousSessionId && previousSessionId !== newSessionId) {
+          uiTelemetryService.removeSession(previousSessionId);
+        }
+        if (newSessionId) {
+          uiTelemetryService.resetSession(newSessionId);
+        }
+      } else {
+        uiTelemetryService.reset();
+      }
 
       // Clear loaded-skills tracking so /context doesn't show stale data
       const skillTool = config

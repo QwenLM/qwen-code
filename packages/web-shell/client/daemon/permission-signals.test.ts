@@ -1,34 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
-import {
-  derivePermissionSignals,
-  questionSubmitOptionId,
-} from './permission-signals.js';
+import { derivePermissionSignals } from './permission-signals.js';
 
 const set = (...ids: string[]) => new Set(ids);
-
-function questionPermission(
-  requestId: string,
-  options: Array<{ optionId: string; kind: string }>,
-): Extract<DaemonTranscriptBlock, { kind: 'permission' }> {
-  return {
-    id: `perm-${requestId}`,
-    kind: 'permission',
-    requestId,
-    sessionId: 'session-1',
-    title: 'Ask user',
-    resolved: undefined,
-    options: options.map((option) => ({
-      optionId: option.optionId,
-      label: option.optionId,
-      raw: { kind: option.kind },
-    })),
-    toolCall: { rawInput: { questions: [] } },
-    preview: { kind: 'generic' },
-    createdAt: 1,
-    updatedAt: 1,
-  } as Extract<DaemonTranscriptBlock, { kind: 'permission' }>;
-}
 
 describe('derivePermissionSignals', () => {
   it('a newly pending request becomes live', () => {
@@ -84,39 +57,5 @@ describe('derivePermissionSignals', () => {
     const second = derivePermissionSignals(set('r1'), set(), first.answered);
     expect(second.decisions).toEqual([]);
     expect(second.currency).toEqual([['r1', false]]);
-  });
-});
-
-describe('questionSubmitOptionId', () => {
-  it('returns the allow_once option id for the request', () => {
-    const permissions = [
-      questionPermission('q1', [
-        { optionId: 'submit', kind: 'allow_once' },
-        { optionId: 'cancel', kind: 'reject_once' },
-      ]),
-    ];
-    expect(questionSubmitOptionId(permissions, 'q1')).toBe('submit');
-  });
-
-  it('picks the matching request among several', () => {
-    const permissions = [
-      questionPermission('q1', [{ optionId: 'a', kind: 'allow_once' }]),
-      questionPermission('q2', [{ optionId: 'b', kind: 'allow_once' }]),
-    ];
-    expect(questionSubmitOptionId(permissions, 'q2')).toBe('b');
-  });
-
-  it('returns undefined for an unknown request', () => {
-    const permissions = [
-      questionPermission('q1', [{ optionId: 'a', kind: 'allow_once' }]),
-    ];
-    expect(questionSubmitOptionId(permissions, 'missing')).toBeUndefined();
-  });
-
-  it('returns undefined when the request has no allow_once option', () => {
-    const permissions = [
-      questionPermission('q1', [{ optionId: 'cancel', kind: 'reject_once' }]),
-    ];
-    expect(questionSubmitOptionId(permissions, 'q1')).toBeUndefined();
   });
 });

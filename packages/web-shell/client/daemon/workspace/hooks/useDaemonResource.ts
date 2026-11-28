@@ -49,7 +49,6 @@ export function useDaemonResource<T>(
       setState((current) => ({
         ...current,
         loading: true,
-        error: undefined,
       }));
       try {
         const data = await load();

@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { runAutoMemoryExtract } from './extract.js';
-import { getAutoMemoryRoot } from './paths.js';
+import { getAutoMemoryRoot, type ProjectMemoryOwner } from './paths.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 
@@ -22,8 +22,10 @@ vi.mock('./extractionAgentPlanner.js', () => ({
 describe('auto-memory extraction with agent planner', () => {
   let tempDir: string;
   let projectRoot: string;
+  let owner: ProjectMemoryOwner;
   const mockConfig = {
     getSessionId: () => 'session-1',
+    getProjectMemoryOwner: () => owner,
   } as Config;
 
   beforeEach(async () => {
@@ -31,8 +33,9 @@ describe('auto-memory extraction with agent planner', () => {
       path.join(os.tmpdir(), 'auto-memory-extract-agent-'),
     );
     projectRoot = path.join(tempDir, 'project');
+    owner = { cwd: path.join(tempDir, 'workspace'), memoryBaseDir: tempDir };
     await fs.mkdir(projectRoot, { recursive: true });
-    await ensureAutoMemoryScaffold(projectRoot);
+    await ensureAutoMemoryScaffold(projectRoot, undefined, owner);
     vi.clearAllMocks();
   });
 
@@ -47,7 +50,7 @@ describe('auto-memory extraction with agent planner', () => {
 
   it('uses the forked-agent execution path when config is provided', async () => {
     vi.mocked(runAutoMemoryExtractionByAgent).mockImplementation(async () => {
-      const memoryRoot = getAutoMemoryRoot(projectRoot);
+      const memoryRoot = getAutoMemoryRoot(projectRoot, owner);
       const userPath = path.join(memoryRoot, 'user', 'terse-responses.md');
       await fs.mkdir(path.dirname(userPath), { recursive: true });
       await fs.writeFile(
@@ -92,9 +95,10 @@ describe('auto-memory extraction with agent planner', () => {
       projectRoot,
       undefined,
       undefined,
+      owner,
     );
 
-    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot, owner);
     expect(docs.find((doc) => doc.type === 'user')?.body).toContain(
       'User prefers terse responses.',
     );

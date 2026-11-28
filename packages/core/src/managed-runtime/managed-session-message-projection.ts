@@ -44,6 +44,24 @@ import type {
 } from './managed-session-storage.js';
 
 /**
+ * Raised while projecting a Managed journal when the caller supplied a byte
+ * budget and the next reader-facing record would cross it. Thrown before the
+ * remaining resource bodies are read, so an all-replay budget bounds decode
+ * allocation rather than only the already-materialized record list.
+ */
+export class ManagedSessionProjectionLimitError extends Error {
+  constructor(
+    readonly measuredBytes: number,
+    readonly maxBytes: number,
+  ) {
+    super(
+      `Managed session projection exceeds ${maxBytes} bytes (measured ${measuredBytes})`,
+    );
+    this.name = 'ManagedSessionProjectionLimitError';
+  }
+}
+
+/**
  * Charged bytes (bodies plus a fixed per-entry overhead) of the verified
  * message bodies that the projections of one process keep.
  * A Harness rebuilds a Session's history from its message bodies several times
@@ -475,13 +493,21 @@ export async function readManagedSessionRecords(options: {
   readonly sessionKey: ManagedSessionKey;
   /** Bounds the projection to a frozen snapshot's byte length. */
   readonly maxBytes?: number;
+  /** Stops projection before the next body would exceed this retained size. */
+  readonly maxBodyBytes?: number;
 }): Promise<ChatRecord[]> {
   const scan = await readManagedSessionLog(options);
   const resources = LocalManagedSessionResourceStore.create({
     runtimeBaseDir: options.runtimeBaseDir,
     sessionKey: options.sessionKey,
   });
-  return projectManagedSessionRecords({ scan, resources });
+  return projectManagedSessionRecords({
+    scan,
+    resources,
+    ...(options.maxBodyBytes !== undefined
+      ? { maxBodyBytes: options.maxBodyBytes }
+      : {}),
+  });
 }
 
 /**
@@ -497,31 +523,62 @@ export async function readManagedSessionRecordsAndTitle(options: {
   readonly sessionKey: ManagedSessionKey;
   /** Bounds the projection to a frozen snapshot's byte length. */
   readonly maxBytes?: number;
+  /** Stops projection before the next body would exceed this retained size. */
+  readonly maxBodyBytes?: number;
+  readonly signal?: AbortSignal;
 }): Promise<{
   records: ChatRecord[];
   titleInfo: { title?: string; source?: 'auto' | 'manual' };
 }> {
+  options.signal?.throwIfAborted();
   const scan = await readManagedSessionLog(options);
+  options.signal?.throwIfAborted();
   const resources = LocalManagedSessionResourceStore.create({
     runtimeBaseDir: options.runtimeBaseDir,
     sessionKey: options.sessionKey,
   });
-  const records = await projectManagedSessionRecords({ scan, resources });
+  const records = await projectManagedSessionRecords({
+    scan,
+    resources,
+    ...(options.maxBodyBytes !== undefined
+      ? { maxBodyBytes: options.maxBodyBytes }
+      : {}),
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
+  });
+  options.signal?.throwIfAborted();
   let titleInfo: { title?: string; source?: 'auto' | 'manual' } = {};
   try {
     titleInfo = await projectManagedSessionTitleInfo({ scan, resources });
   } catch {
     // Reported as no title.
   }
+  options.signal?.throwIfAborted();
   return { records, titleInfo };
+}
+
+function accountProjectedBytes(
+  total: number,
+  record: ChatRecord,
+  maxBodyBytes: number | undefined,
+): number {
+  if (maxBodyBytes === undefined) return total;
+  const next = total + Buffer.byteLength(JSON.stringify(record), 'utf8');
+  if (next > maxBodyBytes) {
+    throw new ManagedSessionProjectionLimitError(next, maxBodyBytes);
+  }
+  return next;
 }
 
 /** Projects an already-verified durable journal through its resource store. */
 export async function projectManagedSessionRecords(options: {
   readonly scan: ManagedSessionJournalScan;
   readonly resources: ManagedSessionResourceStore;
+  /** Stops before reading the body that would cross this retained size. */
+  readonly maxBodyBytes?: number;
+  readonly signal?: AbortSignal;
 }): Promise<ChatRecord[]> {
-  const { scan, resources } = options;
+  const { scan, resources, maxBodyBytes, signal } = options;
+  signal?.throwIfAborted();
   if (scan.header === undefined) {
     throw new ManagedSessionRecordError(
       'session log has no Managed header, so it cannot be projected.',
@@ -529,7 +586,9 @@ export async function projectManagedSessionRecords(options: {
   }
   const records: ChatRecord[] = [];
   const checkpoints = new Map<string, number>();
+  let projectedBytes = 0;
   for (const event of scan.events) {
+    signal?.throwIfAborted();
     const branch = await readManagedBranchCheckpoint(
       event,
       resources,
@@ -540,13 +599,17 @@ export async function projectManagedSessionRecords(options: {
       checkpoints.set(event.payload['checkpointId'] as string, event.sequence);
     }
     if (branch !== undefined) {
-      records.push(
-        requireProjectedRecord(
-          branch,
-          scan.header.sessionKey.sessionId,
-          `${event.kind} event ${event.eventId} ref`,
-        ),
+      const projected = requireProjectedRecord(
+        branch,
+        scan.header.sessionKey.sessionId,
+        `${event.kind} event ${event.eventId} ref`,
       );
+      projectedBytes = accountProjectedBytes(
+        projectedBytes,
+        projected,
+        maxBodyBytes,
+      );
+      records.push(projected);
       continue;
     }
     const carried = managedSessionReaderFacingBody(event);
@@ -556,17 +619,21 @@ export async function projectManagedSessionRecords(options: {
       carried.ref,
       `${event.kind} event ${event.eventId} ref`,
     );
-    records.push(
-      requireProjectedRecord(
-        carried.inDomainEnvelope
-          ? body !== null && typeof body === 'object'
-            ? (body as { readonly record?: unknown }).record
-            : undefined
-          : body,
-        scan.header.sessionKey.sessionId,
-        `${event.kind} event ${event.eventId} ref`,
-      ),
+    const projected = requireProjectedRecord(
+      carried.inDomainEnvelope
+        ? body !== null && typeof body === 'object'
+          ? (body as { readonly record?: unknown }).record
+          : undefined
+        : body,
+      scan.header.sessionKey.sessionId,
+      `${event.kind} event ${event.eventId} ref`,
     );
+    projectedBytes = accountProjectedBytes(
+      projectedBytes,
+      projected,
+      maxBodyBytes,
+    );
+    records.push(projected);
   }
   return records;
 }

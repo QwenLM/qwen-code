@@ -13,10 +13,15 @@ import {
   GROUP_COLOR_OPTIONS,
 } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
-import { SESSION_TRANSCRIPT_MAX_INDEX_BYTES } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
+import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  resetSessionTranscriptIndexCacheForTest,
+  setSessionTranscriptCooperativeReadBudgetForTest,
+} from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { createWorktreeSessionMarkerExclusive } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { writeWorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
@@ -72,6 +77,7 @@ describe('merged session catalog pagination', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    resetSessionTranscriptIndexCacheForTest();
     abortHarness.controller = undefined;
     abortHarness.beforeRead = undefined;
     await fs.rm(directory, { recursive: true, force: true });
@@ -117,9 +123,17 @@ describe('merged session catalog pagination', () => {
 
   function bridgeFor(sessions: BridgeSessionSummary[]) {
     const list = vi.fn(() => sessions);
+    const getSessionSummary = vi.fn((sessionId: string) => {
+      const session = sessions.find((row) => row.sessionId === sessionId);
+      if (!session) throw new SessionNotFoundError(sessionId);
+      return session;
+    });
     return {
       list,
-      bridge: { listWorkspaceSessions: list } as unknown as AcpSessionBridge,
+      bridge: {
+        listWorkspaceSessions: list,
+        getSessionSummary,
+      } as unknown as AcpSessionBridge,
     };
   }
 
@@ -150,6 +164,7 @@ describe('merged session catalog pagination', () => {
         SessionService.prototype,
         'getGoalSessionPathForArchiveState',
       );
+      const ledger = vi.spyOn(SessionService.prototype, 'getPromptLedgerPath');
 
       const firstPage = await listWorkspaceSessionsForResponse(
         bridge,
@@ -163,6 +178,7 @@ describe('merged session catalog pagination', () => {
       for (const reader of [worktree, pr, artifact, goal]) {
         expect(reader.mock.calls).toEqual([[first.sessionId, 'active']]);
       }
+      expect(ledger.mock.calls).toEqual([[first.sessionId]]);
 
       const secondPage = await listWorkspaceSessionsForResponse(
         bridge,
@@ -193,6 +209,26 @@ describe('merged session catalog pagination', () => {
       expect(pr.mock.calls).toEqual([
         ...persistedReads,
         [live.sessionId, 'active'],
+      ]);
+
+      // A later request that reuses the settled projection revalidates the
+      // selected row instead of trusting the cached removal state.
+      const repeatedPage = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { ...options, cursor: firstPage.nextCursor },
+        readOptions,
+      );
+      expect(repeatedPage.sessions.map((row) => row.sessionId)).toEqual([
+        second.sessionId,
+      ]);
+      expect(worktree.mock.calls).toEqual([
+        ...persistedReads,
+        [second.sessionId, 'active'],
+      ]);
+      expect(ledger.mock.calls).toEqual([
+        [first.sessionId],
+        [second.sessionId],
       ]);
     },
   );
@@ -243,6 +279,30 @@ describe('merged session catalog pagination', () => {
       ).rejects.toThrow();
     },
   );
+
+  it('keeps prompt-time reads O(1) above the legacy 256 MiB limit', async () => {
+    const session = summary(0);
+    await persist(session);
+    const chats = path.join(
+      runtimeBaseDir,
+      'projects',
+      workspaceCwd.replace(/[^a-zA-Z0-9]/g, '-'),
+      'chats',
+    );
+    const file = path.join(chats, `${session.sessionId}.jsonl`);
+    await fs.truncate(file, 257 * 1024 * 1024);
+
+    let scannedLines = 0;
+    setSessionTranscriptCooperativeReadBudgetForTest(1, 0, () => {
+      scannedLines += 1;
+    });
+    const snapshot = await new SessionService(workspaceCwd, {
+      runtimeBaseDir,
+    }).getLastUserPromptAt(session.sessionId);
+
+    expect(snapshot).toBeUndefined();
+    expect(scannedLines).toBe(0);
+  });
 
   it('sorts archived sessions by their archived question time, not activity', async () => {
     const sessions = [summary(0), summary(1), summary(2)];
@@ -438,6 +498,34 @@ describe('merged session catalog pagination', () => {
     pending.forEach((resolve) => resolve(undefined));
     await Promise.resolve();
     expect(read).toHaveBeenCalledTimes(2);
+    expect(read.mock.calls[0]?.[2]).toMatchObject({
+      signal: controller.signal,
+    });
+  });
+
+  it('disables prompt-time sidecar writes when listing persisted-only / untrusted secondary workspaces', async () => {
+    const item = summary(0);
+    await persist(item);
+    const chatsDir = path.join(
+      new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+      'chats',
+    );
+    const sidecarPath = path.join(
+      chatsDir,
+      `${item.sessionId}.prompt-time.json`,
+    );
+    const { bridge } = bridgeFor([]);
+
+    const page = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { size: 1 },
+      { runtimeBaseDir, paginateMerged: true, mergeLive: false },
+    );
+    expect(page.sessions[0]?.lastUserPromptAt).toBe(item.createdAt);
+    await expect(fs.stat(sidecarPath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   it('paginates persisted and live-only rows without dropping or duplicating merged rows', async () => {
@@ -1693,15 +1781,61 @@ describe('merged session catalog pagination', () => {
       expect(result.sessions[0]?.needsContinuation).toBe(true);
     });
 
-    it.each([
+    describe.each([
       ['organized', { view: 'organized' as const }],
       ['metadata-filtered', { sourceType: 'default' }],
-    ] as const)('enriches the %s list path', async (_label, options) => {
-      const session = summary(0);
-      await persist(session);
-      await writeLedger(session, [inFlight]);
-      const result = await listSessions([], options);
-      expect(result.sessions[0]?.needsContinuation).toBe(true);
+    ] as const)('%s list', (_label, options) => {
+      it('returns the continuation hint on the second page', async () => {
+        const first = summary(2);
+        const second = summary(1);
+        await persist(first);
+        await persist(second);
+        await writeLedger(second, [inFlight, terminal('interrupted')]);
+
+        const firstPage = await listSessions([second], { ...options, size: 1 });
+        expect(firstPage.sessions.map((row) => row.sessionId)).toEqual([
+          first.sessionId,
+        ]);
+        expect(firstPage.sessions[0]?.needsContinuation).toBeUndefined();
+        expect(firstPage.nextCursor).toEqual(expect.any(String));
+
+        const secondPage = await listSessions([second], {
+          ...options,
+          size: 1,
+          cursor: firstPage.nextCursor,
+        });
+        expect(secondPage.sessions.map((row) => row.sessionId)).toEqual([
+          second.sessionId,
+        ]);
+        expect(secondPage.sessions[0]?.needsContinuation).toBe(true);
+        expect(secondPage.nextCursor).toBeUndefined();
+      });
+
+      it('clears the hint when a prompt starts during page enrichment', async () => {
+        const first = summary(2);
+        const second = summary(1);
+        await persist(first);
+        await persist(second);
+        const completed = [inFlight, terminal('completed')];
+        await writeLedger(second, completed);
+        const live = [second];
+        abortHarness.beforeRead = async () => {
+          abortHarness.beforeRead = undefined;
+          live[0] = { ...second, hasActivePrompt: true };
+          await writeLedger(second, [
+            ...completed,
+            { ...inFlight, promptId: 'p2', at: 3 },
+          ]);
+        };
+
+        const result = await listSessions(live, { ...options, size: 2 });
+        expect(result.sessions.map((row) => row.sessionId)).toEqual([
+          first.sessionId,
+          second.sessionId,
+        ]);
+        expect(live[0]?.hasActivePrompt).toBe(true);
+        expect(result.sessions[1]?.needsContinuation).toBeUndefined();
+      });
     });
   });
 });

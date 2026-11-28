@@ -2,7 +2,9 @@
 
 [English](2026-11-22-managed-action-parking-coverage.md) | [简体中文](2026-11-22-managed-action-parking-coverage.zh-CN.md)
 
-Status: proposal, pre-implementation design. Date: 2026-11-22. This follows the [Action parking design](2026-11-21-managed-action-parking.md) (Phase 4, merged in #18115) and is checked against `main` at `5714ee4c53`. It takes each wait shape the first increment excludes, one at a time, and answers that design's open question 4 and, except for team plan approvals, its open question 3. Tracked in #18149, whose Stages 0–5 map to the slices in §6. Code references are to that commit unless an item names another. Conclusions marked "to verify" come from reading the code, not from tests, and must be confirmed by a test before their slice is implemented.
+Status: Stages 0–5 implemented on `main` at `6aadde9b6e` (2026-11-26). Per-slice CI evidence and rollout measurements remain open (§§6–8).
+
+This design, dated 2026-11-22, follows the [Action parking design](2026-11-21-managed-action-parking.md) (Phase 4, merged in #18115). It addresses each wait shape the first increment excluded and answers that design's open question 4 and, except for team plan approvals, its open question 3. [#18149](https://github.com/QwenLM/qwen-code/issues/18149) tracks the slices in §6. Baseline code references and pre-start questions refer to `5714ee4c53` unless stated otherwise.
 
 ## 1. Problem and current state
 
@@ -147,15 +149,13 @@ This is the largest slice, delivered in two steps: monitor, loop, automation and
 
 ### 4.8 S8: `uncaptured` batches
 
-- **Shell before dispatch (S8a).** This item has the highest value: most approvals on a Shell profile are `run_shell_command`. G3 requires Shell before dispatch to build its own positive continuation and ownership evidence. The pre-start checks are confirmed by tests, checked against `main` at `7862c3eef3`:
+- **Shell before dispatch (S8a, implemented).** G3 requires positive continuation and ownership evidence for `run_shell_command` before dispatch. The initial pre-start tests were checked against `main` at `7862c3eef3`.
   - **The Broker needs no new semantics (confirmed).** A Tool v3 Shell reservation is prepared with `dispatch = false` (`RuntimeBrokerService.java:995`). Preparing again under the same key and reference returns the original reservation without dispatching it. A changed `publicationId` or payload digest under that key is refused as `runtime_idempotency_conflict` (`:1654`). After the execution settles, the same key answers with its original record.
   - **Public-children Sessions are already covered (confirmed).** Since #15171, a Session with `publicChildAgentsVersion = 1` captures Shell before dispatch. The producer skips the `shell_profile` refusal for it (`hosted-workspace-tool-turn.ts:4532`) and records each Shell call's `publicationId` (`:4620`). `resumeSavedNativeBatch` checks that identity and re-prepares the saved `runtimeCallId`, digests and `publicationId` through `prepareV3` (`:4435`, `:6081`). Park eligibility has no Shell term, so such a wait already parks. A test parks one, cold-loads it and allows it, and sees one `prepareV3` with the saved identity and one execution.
-  - **That path parks before its own G3 review (decision 8).** #15171 built it for crash recovery and #18115 made it parkable, but no design has checked it against G3's cases. S8a's G3 extension design treats it as existing evidence to validate, not as new work. Its §7 cases must pass before any deployment turns on `action-parking.enabled`, and they do not wait for the rest of S8a.
-  - **The gate's unit cases pass (confirmed).** All four outcomes complete as §7 requires, both after a park and after a Harness death. A background Shell approval also parks and resumes: after the Allow, every `child_run` record belongs to the one reserved execution, so no second process starts. The real-process MySQL 8.4 case of §7 is still owed before the switch is turned on.
-  - **What S8a still covers.** Shell-profile Sessions without public children still refuse as `shell_profile`. The reader treats a saved plan as a Shell plan only when it carries `publicChildModel` (`hosted-approval-continuation.ts:248`, `:288`), which only public children record (`hosted-workspace-tool-turn.ts:4627`). These plans therefore need another way to be recognized. Still to verify: which Sessions fall here in practice.
-  - The slice still extends the G3 contract, so write a separate G3 extension design before implementing; it extends existing evidence rather than adding Broker semantics. Dispatched Shell keeps its refusal.
+  - **G3 review (decision 8).** [The S8a design](2026-11-24-managed-shell-action-parking.md) (#18279) checked the existing public-children path on both lanes. Its matrix exercises Allow, Deny, expiry and a mode change that allows the call, after parking and after Harness death. Background Shell uses one reserved execution on the publication lane. The recorded real-process evidence is in §7.
+  - **Version-0 public Shell.** #18303 added both lanes for the `hosted-workspace-shell/1`, `/3` and `/4` profiles without public children. The reader identifies the saved plan from the Session definition and checks the Shell call's `publicationId` (a UUID on the publication lane and `null` on the older Shell lane). Team-lead waits record `team_lead_profile`. Public Shell with MCP and dispatched Shell stay excluded.
 - **Plans over 64 KiB.** Not supported yet. The P0 refusal counts show how often they occur; consider storing plans as non-inline resources only if the rate is significant.
-- **Still excluded.** `todo` batches, batches with no Runtime, unsupported tools and undigested calls keep their refusals; S8 covers only Shell before dispatch and oversize plans.
+- **Still excluded.** `todo` batches, batches with no Runtime, unsupported tools and undigested calls keep their refusals.
 - **v1/v2.** Not supported. They exist only in waits written before the upgrade, G3 already states that legacy reconstruction needs its own validation, and the benefit shrinks to zero over time.
 
 ## 5. Decisions and rationale
@@ -171,27 +171,23 @@ This is the largest slice, delivered in two steps: monitor, loop, automation and
    - Personal-memory recall context already behaves this way in the parks that ship today: it reaches only the live request and is not recalled again on resume.
    - Refusing such Turns would keep most context-injecting Hooks Sessions resident, while protecting nothing that those paths do not already expose.
    - Committing the rewritten first Prompt, as queued messages already are, would change every later Turn's history. It is follow-up work outside this design.
-8. **Public-children Shell waits keep parking, with no temporary refusal (S8a).** They already park (§4.8, confirmed), although no design has checked that path against G3.
+8. **Public-children Shell waits keep parking without a temporary refusal (S8a).** They could already park when S8a began. The [G3 extension design](2026-11-24-managed-shell-action-parking.md) completed the review of that path.
    - Parking adds no recovery path. The same cold recovery already serves a Harness that dies in the wait, so decision 1 holds.
-   - Parking does make that path run for every idle Shell approval instead of only after a crash. So its S8a cases in §7 gate `action-parking.enabled` (§8), ahead of the rest of S8a.
-   - A park-only refusal would hold the same line, but as temporary code in a default-off feature, which those cases would remove anyway. Add it only if the switch has to be turned on before they pass.
+   - Parking makes that path run for every idle Shell approval. Its S8a cases still gate enabling `action-parking.enabled` (§8). See §7 for the passing focused run and the remaining CI evidence.
 9. **S5 and S6b land together (#18236).** The waits S5 alone opens are rare (§4.5), and the target, an MCP-profile Session with both Hooks and MCP, needs S6 anyway. S6 also has to widen S5's owner term, because there the Hook owner is the MCP owner. S6a, the reclamation guard, lands first on its own.
 
 ## 6. Recommended order and measurement
 
-| Order | #18149 stage | Slice                                            | Surface                         | Depends on                     |
-| ----- | ------------ | ------------------------------------------------ | ------------------------------- | ------------------------------ |
-| 0     | 0            | P0 shared eligibility function + refusal reasons | Harness                         | —                              |
-| 1     | 1            | S1 image-only Prompts                            | Harness                         | P0                             |
-| 2     | 1            | S7 command step                                  | Harness                         | P0                             |
-| 3     | 2            | S2 background + Action                           | Harness + Store                 | P0, 3b                         |
-| 4     | 2            | S4 wake Turns (S4b channel later)                | Harness + Store                 | P0                             |
-| 5     | 3            | S3 child Sessions                                | Harness                         | P0, relay budget gap closed    |
-| 6     | 4            | S5 Hooks                                         | Harness (G3)                    | P0                             |
-| 7     | 4            | S6 MCP                                           | Harness (G3) + Broker alignment | P0, Phase 2 MCP parking        |
-| 8     | 5            | S8a Shell before dispatch                        | Harness (G3)                    | A separate G3 extension design |
+| #18149 stage | Slice                                                                   | Merged PRs             |
+| ------------ | ----------------------------------------------------------------------- | ---------------------- |
+| 0            | P0 shared eligibility, typed refusal reasons and instance metrics       | #18157, #18173         |
+| 1            | S1 image-only Prompts and S7 extension command steps                    | #18164, #18166         |
+| 2            | S2 background work + Action, S4 wake Turns and S4b channel / `pr_event` | #18187, #18194, #18203 |
+| 3            | S3 child Sessions and session-message relay wait handling               | #18224                 |
+| 4            | S6a MCP reclamation guard, then S5 Hooks and S6b MCP together           | #18234, #18236         |
+| 5            | S8a pre-start checks, G3 extension design and Shell implementation      | #18231, #18279, #18303 |
 
-The order rests on code-level estimates: small Harness-only slices first, then slices that need new G3 evidence. These estimates are not measured. Before starting S3 or a later slice, use the P0 refusal counts to see each wait shape's share of real load, together with the parent §7 measurements, and reorder by share; for example, if Shell-profile deployments dominate, S8a should move up.
+The [CLI/daemon telemetry analysis](https://github.com/QwenLM/qwen-code/issues/18149#issuecomment-7121083917) provided prioritization evidence. Hosted rollout still requires the parent design's [§7 measurements](2026-11-21-managed-action-parking.md#7-measurement-enablement-gate), including park rates and latency in the target workload.
 
 ## 7. Verification plan
 
@@ -208,6 +204,8 @@ Each slice inherits every case of parent §11 and adds:
 - **S6**: with MCP parking on and off, the Session parks only when it is on; after resume the tool definitions are equal and no dispatched MCP call is replayed. An Action-parked owner survives the reclamation job's idle sweep with its catalog intact. An owner that fell back to an activation-scoped Hook owner refuses `mcp_activation_owner` at capture, at eligibility and at each recovery entry point. A Hooks plus MCP Session on one owner parks and completes through a decision, both after a park and after its Harness dies in the wait. A bare load leaves a parked MCP batch unanswered.
 - **S8a** (public-children Shell, which already parks; decision 8): a Shell approval completes through Allow, Deny, expiry and a mode change that allows on the user's behalf, each both after a park and after its Harness dies in the wait. Allow and the mode change re-prepare the saved reservation and execute once; Deny and expiry execute zero times. A background Shell (`is_background`) approval either parks and resumes without starting a second process, or refuses with a typed reason at capture and at eligibility.
 - **Real process and MySQL 8.4**: each slice puts at least one "park → new Harness generation → decide" case into the required CI tier; H2 results cannot replace it.
+
+As of 2026-11-26, [the focused Linux/MySQL 8.4 run](https://github.com/QwenLM/qwen-code/actions/runs/45668596047/job/139397399975) passed 10 cases for public-children Shell, version-0 Shell on both lanes, and Hooks with MCP. Required-tier real-process evidence remains open for S1, S7, S2, S3, S4 and S4b. [#18410](https://github.com/QwenLM/qwen-code/pull/18410) adds separate healthy-pool handover coverage for an already parked Shell Action and was still in review on that date.
 
 ## 8. Acceptance criteria
 

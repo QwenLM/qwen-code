@@ -7,11 +7,16 @@
 import { describe, it, expect } from 'vitest';
 import {
   bodyLines,
+  buildGateSnapshot,
   buildSnapshot,
   rerunFrom,
   type PrData,
 } from './snapshot.js';
-import { REPLY_MARKER, type AutofixPrState } from './state.js';
+import {
+  REPLY_MARKER,
+  type AutofixPrGateCursor,
+  type AutofixPrState,
+} from './state.js';
 
 const HEAD = 'a'.repeat(40);
 
@@ -1170,5 +1175,95 @@ describe('buildSnapshot', () => {
       'reviews',
       'comments',
     ]);
+  });
+
+  it('keeps surfacing deferred comments and checks after buildGateSnapshot advances the gate cursor', () => {
+    const failedCheck = {
+      __typename: 'CheckRun' as const,
+      databaseId: 101,
+      name: 'lint',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      detailsUrl: 'https://github.com/o/r/actions/runs/42/job/1',
+    };
+    const deferredComment = comment('IC_deferred', 'alice', 'MEMBER');
+    const firstPr = pr(
+      {
+        comments: {
+          pageInfo: { hasPreviousPage: false },
+          nodes: [deferredComment],
+        },
+      },
+      [failedCheck],
+    );
+    const initialCursor: AutofixPrGateCursor = {
+      version: 1,
+      host: 'github.com',
+      owner: 'o',
+      repo: 'r',
+      prNumber: 7,
+      viewer: 'me',
+      prAuthor: 'me',
+      headSha: HEAD,
+      stopped: null,
+      conflictSha: null,
+      reportedCommentIds: [],
+      reportedChecks: [],
+      reportedTruncated: [],
+    };
+    const inPlaceState = state({
+      inPlace: true,
+      branch: 'feat',
+      worktreePath: '/repo',
+      watch: { every: 5, reply: true, instructions: '', task: 'aaaaaaaaaaaa' },
+      handledCommentIds: [],
+    });
+
+    // Gate wakes once and advances its cursor past both the failure and comment.
+    const firstGate = buildGateSnapshot(firstPr, initialCursor);
+    expect(firstGate.snapshot).toMatchObject({ action: 'fix' });
+    expect(firstGate.cursor.reportedCommentIds).toContain('IC_deferred');
+    expect(firstGate.cursor.reportedChecks.length).toBeGreaterThan(0);
+
+    // Next tick while the user has not answered or chose "Not now": gate stays quiet.
+    const quietGate = buildGateSnapshot(firstPr, firstGate.cursor);
+    expect(quietGate.snapshot).toBeNull();
+
+    // Prepared buildSnapshot reads state.json (not the gate cursor), so "Not now"
+    // leaves both items unhandled and ready to re-propose.
+    const snap = buildSnapshot(firstPr, inPlaceState);
+    expect(snap.action).toBe('fix');
+    expect(snap.events).toContainEqual(
+      expect.objectContaining({ type: 'ci_failed', check: 'lint' }),
+    );
+    expect(snap.events).toContainEqual(
+      expect.objectContaining({ type: 'issue_comment', id: 'IC_deferred' }),
+    );
+
+    // When a later comment arrives, gate wakes on the new comment and buildSnapshot
+    // surfaces both the earlier deferred items and the new comment together.
+    const nextPr = pr(
+      {
+        comments: {
+          pageInfo: { hasPreviousPage: false },
+          nodes: [deferredComment, comment('IC_later', 'alice', 'MEMBER')],
+        },
+      },
+      [failedCheck],
+    );
+    const secondGate = buildGateSnapshot(nextPr, quietGate.cursor);
+    expect(secondGate.snapshot).toMatchObject({
+      action: 'fix',
+      events: [
+        expect.objectContaining({ type: 'issue_comment', id: 'IC_later' }),
+      ],
+    });
+    const combinedSnap = buildSnapshot(nextPr, inPlaceState);
+    expect(combinedSnap.events).toContainEqual(
+      expect.objectContaining({ type: 'issue_comment', id: 'IC_deferred' }),
+    );
+    expect(combinedSnap.events).toContainEqual(
+      expect.objectContaining({ type: 'issue_comment', id: 'IC_later' }),
+    );
   });
 });

@@ -165,12 +165,22 @@ const state = vi.hoisted(() => ({
   runtimeObservation: false,
   backgroundActionParking: false,
   wakeActionParking: false,
+  suspensionPlacementRelease: false,
   wakeStamps: [] as unknown[],
   assertWritable: vi.fn(async () => undefined),
   toolResults: null as DurableToolResultResourceStore | null,
   publicationRequest: vi.fn(),
   storeOptions: [] as Array<Record<string, unknown>>,
+  ownershipQuiesces: [] as Array<Record<string, unknown>>,
   ownershipReleases: [] as Array<Record<string, unknown>>,
+  ownershipTransitions: [] as string[],
+  ingestRequests: [] as Array<Record<string, unknown>>,
+  ownershipReleaseFault: undefined as
+    | ((
+        request: Record<string, unknown>,
+        attempt: number,
+      ) => Promise<void> | void)
+    | undefined,
   writerRenewalStops: 0,
   setLifecycleAuthority: vi.fn(),
   modelConfig: vi.fn(),
@@ -211,7 +221,7 @@ const state = vi.hoisted(() => ({
       modelSelection?: { modelId: string; revision: number };
       modelConfig?: import('./hosted-model-config.js').HostedModelConfigReader;
       memory?: import('./hosted-memory-session.js').HostedMemorySession;
-      recallUserInput?: boolean;
+      userPrompt?: boolean;
       setLoopClassifier?: (
         classify:
           | import('./hosted-loop-session.js').HostedLoopClassifier
@@ -354,6 +364,7 @@ vi.mock(
           commit: Parameters<typeof opened.seal>[0],
           wake?: unknown,
         ) => {
+          state.ownershipTransitions.push('seal');
           if (wake) state.wakeStamps.push(wake);
           return proto.seal.call(opened, commit);
         };
@@ -365,6 +376,8 @@ vi.mock(
         supportsRuntimeObservation: () => state.runtimeObservation,
         supportsBackgroundActionParking: () => state.backgroundActionParking,
         supportsWakeActionParking: () => state.wakeActionParking,
+        supportsSuspensionPlacementRelease: () =>
+          state.suspensionPlacementRelease,
         journalStore,
         resourceStore,
         toolResultResources: state.toolResults ?? resourceStore,
@@ -390,7 +403,24 @@ vi.mock(
         stopWriterRenewal: () => {
           state.writerRenewalStops += 1;
         },
-        quiesceOwnership: async () => undefined,
+        quiesceOwnership: async (
+          placement: Record<string, unknown> & { placementEpoch: number },
+        ) => {
+          state.ownershipQuiesces.push(placement);
+          state.ownershipTransitions.push('quiesce');
+        },
+        ingestEvents: async (
+          request: Record<string, unknown> & { throughSequence: number },
+        ) => {
+          state.ingestRequests.push(request);
+          if (request['end'] !== undefined)
+            state.ownershipTransitions.push(`ingest:${String(request['end'])}`);
+          return {
+            cursor: request.throughSequence,
+            leaseRenewAfterMillis: 60_000,
+            terminal: false,
+          };
+        },
         releaseOwnership: async (
           request: Record<string, unknown> & {
             commitProof: {
@@ -400,7 +430,12 @@ vi.mock(
           },
         ) => {
           state.ownershipReleases.push(request);
-          await journal!.seal(request.commitProof);
+          state.ownershipTransitions.push('release');
+          await state.ownershipReleaseFault?.(
+            request,
+            state.ownershipReleases.length,
+          );
+          if (!journal!.writerSealed) await journal!.seal(request.commitProof);
           return {
             format: 'qwen-hosted-harness-release/1',
             state: 'RELEASED',
@@ -1056,7 +1091,13 @@ async function setupHostedTextSession() {
   });
   state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
   state.toolResults = null;
+  state.suspensionPlacementRelease = false;
+  state.ownershipQuiesces.length = 0;
   state.ownershipReleases.length = 0;
+  state.ownershipTransitions.length = 0;
+  state.ingestRequests.length = 0;
+  state.ownershipReleaseFault = undefined;
+  state.wakeStamps.length = 0;
   state.assertWritable.mockReset();
   state.assertWritable.mockResolvedValue(undefined);
   state.authorizeLifecycle.mockReset();

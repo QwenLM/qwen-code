@@ -260,7 +260,10 @@ class CronCreateInvocation extends BaseToolInvocation<
         // gate: left alone it would run the prompt at every slot.
         if (gate && created.gate !== gate) {
           try {
-            await scheduler.removeDurable(created.id);
+            await scheduler.removeDurable(
+              created.id,
+              this.config.getSessionId(),
+            );
           } catch (error) {
             throw new Error(
               `current_session_gate_unsupported: The daemon stored task ${created.id} without its gate, and removing it failed (${getErrorMessage(error)}): it runs the prompt at every slot until deleted with cron_delete.`,
@@ -272,7 +275,9 @@ class CronCreateInvocation extends BaseToolInvocation<
         }
         // The daemon writes the task and this session's scheduler installs
         // it on its next reload; carry the confirmation over to that job.
-        if (gate) scheduler.approveGate(created.id, gate);
+        if (gate) {
+          scheduler.approveGate(created.id, gate, this.config.getSessionId());
+        }
         job = { id: created.id, cronExpr: created.cron };
       } else {
         const created = durable
