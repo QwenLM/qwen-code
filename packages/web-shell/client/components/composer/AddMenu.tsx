@@ -112,6 +112,7 @@ export interface AddMenuProps {
   };
   commandsOnly?: boolean;
   simpleMode?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
 export interface AddMenuPlanControl {
@@ -388,6 +389,7 @@ export function AddMenu({
   mobileActions,
   commandsOnly = false,
   simpleMode = false,
+  onOpenChange,
 }: AddMenuProps) {
   const { t, language } = useI18n();
   const workflowDescriptionId = useId();
@@ -515,6 +517,7 @@ export function AddMenu({
       setCommandQuery('');
     }
     setOpen(nextOpen);
+    onOpenChange?.(nextOpen);
   };
 
   const handleFileInputChange = (event: ChangeEvent<HTMLInputElement>) => {

@@ -29,7 +29,7 @@ import {
 import { flushSync } from 'react-dom';
 import {
   DAEMON_APPROVAL_MODES,
-  type DaemonClient,
+  DaemonClient,
   DaemonCapabilityMissingError,
   DaemonHttpError,
   DaemonSessionClient,
@@ -49,6 +49,7 @@ import {
   QWEN_AGENT_MESSAGE_META_KEY,
   rebuildDaemonTranscriptBlockIndex,
   type CreateSessionRequest,
+  type CreateStandaloneSessionOptions,
   type DaemonApprovalMode,
   type DaemonEvent,
   type DaemonSessionContextStatus,
@@ -61,6 +62,7 @@ import {
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
   type DaemonUnrecognizedDiagnostic,
+  type RestoreStandaloneSessionRequest,
 } from '@qwen-code/sdk/daemon';
 import {
   advanceSessionRecoveryGeneration,
@@ -118,10 +120,12 @@ import {
 } from '../../components/messages/mod-rows.js';
 import { getTranslator } from '../../i18n.js';
 import {
+  daemonClientSessionContext,
   getDaemonErrorCode,
   getStandaloneConnectionState,
   isDaemonErrorExplicitlyNonRetryable,
   isSessionWriterBlockedCode,
+  isStandaloneDaemonSession,
   resolveLiveSessionWorkspaceCwd,
   resolveProviderSessionContext,
   restoreSessionContextMatches,
@@ -1006,6 +1010,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     token,
     workspaceCwd,
     sessionContext,
+    sessionAdapter,
     sessionId,
     clientId,
     sessionSourceType,
@@ -1032,10 +1037,29 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const workspace = useOptionalDaemonWorkspace();
   const availability = useDaemonAvailability();
   const availabilityController = useDaemonAvailabilityController();
+  const hasSessionAdapter = sessionAdapter !== undefined;
+  const sessionAdapterRef = useRef(sessionAdapter);
+  sessionAdapterRef.current = sessionAdapter;
+  const adapterOwnedSessionsRef = useRef(new WeakSet<DaemonSessionClient>());
   const availabilityRef = useRef(availabilityController);
   availabilityRef.current = availabilityController;
   const resolvedBaseUrl = baseUrl ?? workspace?.baseUrl;
   const resolvedToken = token ?? workspace?.token;
+  const resolveSessionClient = useCallback(() => {
+    const adapter = sessionAdapterRef.current;
+    return (
+      workspaceClientRef.current ??
+      (adapter
+        ? adapter.createClient(
+            { baseUrl: resolvedBaseUrl!, token: resolvedToken },
+            DaemonClient,
+          )
+        : createDaemonClient({
+            baseUrl: resolvedBaseUrl!,
+            token: resolvedToken,
+          }))
+    );
+  }, [resolvedBaseUrl, resolvedToken]);
   const sessionContextResolution = useMemo(() => {
     try {
       return {
@@ -1407,7 +1431,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         event.sessionId,
         event.promptId,
       );
-      if (publishedPromptSettlementsRef.current.has(key)) return;
+      if (publishedPromptSettlementsRef.current.has(key)) return false;
       publishedPromptSettlementsRef.current.add(key);
       const listeners = [...promptSettlementListenersRef.current];
       queueMicrotask(() => {
@@ -1423,6 +1447,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
         }
       });
+      return true;
     },
     [],
   );
@@ -1952,6 +1977,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       restoreSessionId === sessionRef.current?.sessionId &&
       sessionRef.current === skipNextCleanupDetachSessionRef.current;
     const effectPendingSessionLoad = pendingSessionLoadRef.current;
+    const adapterOwnedSessions = adapterOwnedSessionsRef.current;
     let runnerSession = sessionRef.current;
     let generatedUiSubscriptionOwner: DaemonSessionClient | undefined;
     let unsubscribeGeneratedUiRevocation: (() => void) | undefined;
@@ -2080,9 +2106,31 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         await Promise.resolve();
         if (disposed) return;
       }
-      const client =
-        workspaceClientRef.current ??
-        createDaemonClient({ baseUrl: resolvedBaseUrl!, token: resolvedToken });
+      const client = resolveSessionClient();
+      const restoreStandaloneSession = async (
+        id: string,
+        request: RestoreStandaloneSessionRequest,
+        requestClientId: string | undefined,
+        resume = false,
+      ) => {
+        const adapter = sessionAdapterRef.current;
+        if (!adapter) {
+          const restore = resume
+            ? DaemonSessionClient.resumeStandalone
+            : DaemonSessionClient.loadStandalone;
+          return restore(client, id, request, requestClientId);
+        }
+        const loaded = await adapter.load(
+          client,
+          id,
+          request,
+          requestClientId,
+          DaemonSessionClient,
+        );
+        adapterOwnedSessions.add(loaded);
+        await loaded.hydrateReplaySnapshot(abort.signal);
+        return loaded;
+      };
       let session: DaemonSessionClient | undefined;
       let capabilities:
         | Awaited<ReturnType<DaemonClient['capabilities']>>
@@ -2655,19 +2703,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             if (restoreSessionId) {
               if (effectSessionContext?.kind === 'standalone') {
-                nextSession = shouldResumeRequestedSession
-                  ? await DaemonSessionClient.resumeStandalone(
-                      client,
-                      restoreSessionId,
-                      restoreRequest,
-                      requestClientId,
-                    )
-                  : await DaemonSessionClient.loadStandalone(
-                      client,
-                      restoreSessionId,
-                      restoreRequest,
-                      requestClientId,
-                    );
+                nextSession = await restoreStandaloneSession(
+                  restoreSessionId,
+                  restoreRequest,
+                  requestClientId,
+                  shouldResumeRequestedSession,
+                );
               } else if (shouldResumeRequestedSession) {
                 nextSession = await DaemonSessionClient.resume(
                   client,
@@ -2694,8 +2735,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             } else if (reconnectSessionId) {
               nextSession =
                 effectSessionContext?.kind === 'standalone'
-                  ? await DaemonSessionClient.loadStandalone(
-                      client,
+                  ? await restoreStandaloneSession(
                       reconnectSessionId,
                       restoreRequest,
                       requestClientId,
@@ -2711,7 +2751,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     );
             } else if (effectSessionContext?.kind === 'standalone') {
               standaloneCreateAttempted = true;
-              nextSession = await DaemonSessionClient.createStandalone(client, {
+              const createOptions: CreateStandaloneSessionOptions = {
                 ...(modelServiceId !== undefined ? { modelServiceId } : {}),
                 ...(createSessionRequestRef.current?.approvalMode !== undefined
                   ? {
@@ -2720,7 +2760,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       ),
                     }
                   : {}),
-              });
+              };
+              const adapter = sessionAdapterRef.current;
+              nextSession = adapter
+                ? await adapter.create(
+                    client,
+                    createOptions,
+                    DaemonSessionClient,
+                  )
+                : await DaemonSessionClient.createStandalone(
+                    client,
+                    createOptions,
+                  );
+              if (adapter) adapterOwnedSessions.add(nextSession);
               standaloneCreateAttempted = false;
             } else {
               if (effectSessionContext?.kind === 'live') {
@@ -2750,12 +2802,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               );
             }
             if (disposed || abort.signal.aborted) {
-              void detachDaemonClient({
-                baseUrl: resolvedBaseUrl!,
-                token: resolvedToken,
-                sessionId: nextSession.sessionId,
-                clientId: nextSession.clientId,
-              }).catch((err) =>
+              const detachPromise = adapterOwnedSessions.has(nextSession)
+                ? nextSession.detach()
+                : detachDaemonClient({
+                    baseUrl: resolvedBaseUrl!,
+                    token: resolvedToken,
+                    sessionId: nextSession.sessionId,
+                    clientId: nextSession.clientId,
+                  });
+              void detachPromise.catch((err) =>
                 console.warn('[DaemonSessionProvider] detach failed:', err),
               );
               return;
@@ -2951,14 +3006,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           );
           const activeProductSessionContext =
             activeStandaloneState !== undefined ||
+            isStandaloneDaemonSession(activeSession.session) ||
             activeSessionContextRef.current?.kind === 'standalone'
               ? ({ kind: 'standalone' } as const)
               : activeSessionContextRef.current?.kind === 'live'
                 ? activeSessionContextRef.current
-                : {
-                    kind: 'workspace' as const,
-                    cwd: activeSession.workspaceCwd,
-                  };
+                : daemonClientSessionContext(activeSession);
+          if (!activeProductSessionContext) {
+            throw new Error(
+              'The session did not identify its workspace or standalone context',
+            );
+          }
           turnNotifications.remember(
             activeSession,
             activeProductSessionContext,
@@ -2970,7 +3028,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             confirmedGeneratedUiWorkspace.current = {
               provider: generatedUiProviderRef.current,
               requestedCwd: activeWorkspaceCwdRef.current,
-              cwd: activeSession.workspaceCwd,
+              cwd: activeProductSessionContext.cwd,
             };
           }
           // Buffered SSE events can arrive before the connected render binds
@@ -4034,7 +4092,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             clearPendingTranscriptEvents();
             // Keep the visible transcript until the replacement snapshot loads.
             resyncSnapshotPending = true;
-            activeSession.setLastEventId(0);
+            if (!sessionAdapterRef.current) activeSession.setLastEventId(0);
             reconnectSessionId = activeSession.sessionId;
             resyncRequested = true;
             nextSseConnectReason = 'state_resync';
@@ -5357,7 +5415,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
     void run();
     return () => {
-      const session = runnerSession;
+      const isUnmounting = !mountedRef.current;
+      const session = isUnmounting
+        ? (sessionRef.current ?? runnerSession)
+        : runnerSession;
       if (session) trajectoryLiveStore.invalidate(session, 'stream_closed');
       disposed = true;
       unsubscribeGeneratedUiRevocation?.();
@@ -5381,7 +5442,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         contextErrorPreservedSessionRef.current = undefined;
         contextErrorPreservedProductContextRef.current = undefined;
       }
-      const isUnmounting = !mountedRef.current;
       if (ownsCurrentSession || ownsEmptyState) {
         if (!keepSessionForNextEffect || isUnmounting || !session) {
           trajectoryLiveStore.clear();
@@ -5418,25 +5478,33 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       if (isUnmounting) {
         detachPendingRestoredSession(pendingSessionLoadRef.current);
       }
+      const adapterOwnedSession =
+        session !== undefined && adapterOwnedSessions.has(session);
       if (
         ownsCurrentSession &&
         (!keepSessionForNextEffect || isUnmounting) &&
-        session.clientId
+        (adapterOwnedSession || session.clientId)
       ) {
-        void detachDaemonClient({
-          baseUrl: resolvedBaseUrl!,
-          token: resolvedToken,
-          sessionId: session.sessionId,
-          clientId: session.clientId,
-        }).catch((err) => {
-          const state = findDaemonAvailability(
-            resolvedBaseUrl!,
-            resolvedToken,
-          )?.getSnapshot();
-          if (state === undefined || state === 'available') {
+        if (adapterOwnedSession) {
+          void session.detach().catch((err) => {
             console.warn('[DaemonSessionProvider] detach failed:', err);
-          }
-        });
+          });
+        } else {
+          void detachDaemonClient({
+            baseUrl: resolvedBaseUrl!,
+            token: resolvedToken,
+            sessionId: session.sessionId,
+            clientId: session.clientId,
+          }).catch((err) => {
+            const state = findDaemonAvailability(
+              resolvedBaseUrl!,
+              resolvedToken,
+            )?.getSnapshot();
+            if (state === undefined || state === 'available') {
+              console.warn('[DaemonSessionProvider] detach failed:', err);
+            }
+          });
+        }
       }
       if (ownsCurrentSession && (!keepSessionForNextEffect || isUnmounting)) {
         sessionRef.current = undefined;
@@ -5452,8 +5520,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     turnNotifications,
     resolvedBaseUrl,
     resolvedToken,
+    resolveSessionClient,
     resolveGeneratedUiScope,
     sessionEffectContext,
+    hasSessionAdapter,
     sessionContextResolutionError,
     modelServiceId,
     sessionScope,
@@ -5676,6 +5746,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const actions = useMemo<DaemonSessionActions>(
     () =>
       createDaemonSessionActions({
+        getSessionAdapter: () => sessionAdapterRef.current,
         getClient: () => workspaceClientRef.current,
         getPromptStatus: () => promptStatusRef.current,
         store,
@@ -5770,20 +5841,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             client,
             request,
             requestClientId,
-          ).then((owner) =>
-            turnNotifications.remember(owner, {
-              kind: 'workspace',
-              cwd: owner.workspaceCwd,
-            }),
-          );
+          ).then((owner) => {
+            const ownerContext = daemonClientSessionContext(owner);
+            return ownerContext
+              ? turnNotifications.remember(owner, ownerContext)
+              : owner;
+          });
         },
         createDetachedStandaloneSession: (overrides) => {
-          const client =
-            workspaceClientRef.current ??
-            createDaemonClient({
-              baseUrl: resolvedBaseUrl!,
-              token: resolvedToken,
-            });
+          const adapter = sessionAdapterRef.current;
+          const client = resolveSessionClient();
           const approvalMode = resolveStandaloneApprovalMode(
             overrides?.approvalMode ??
               createSessionRequestRef.current?.approvalMode,
@@ -5792,16 +5859,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             overrides?.modelServiceId ??
             createSessionRequestRef.current?.modelServiceId;
           const startupConfig = overrides?.startupConfig;
-          return DaemonSessionClient.createStandalone(client, {
+          const createOptions: CreateStandaloneSessionOptions = {
             ...(startupConfig
               ? { startupConfig }
               : modelServiceId !== undefined
                 ? { modelServiceId }
                 : {}),
             ...(approvalMode !== undefined ? { approvalMode } : {}),
-          }).then((owner) =>
-            turnNotifications.remember(owner, { kind: 'standalone' }),
-          );
+          };
+          const created = adapter
+            ? adapter.create(client, createOptions, DaemonSessionClient)
+            : DaemonSessionClient.createStandalone(client, createOptions);
+          return created.then((owner) => {
+            if (adapter) adapterOwnedSessionsRef.current.add(owner);
+            return turnNotifications.remember(owner, { kind: 'standalone' });
+          });
         },
         restoreDetachedWorktreeSession: (sessionId, workspaceCwd) => {
           const client =
@@ -5867,6 +5939,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           liveJournalRepairRef.current = undefined;
         },
         onGeneratedUiInvalidated: invalidateGeneratedUi,
+        onPromptSettled: publishPromptSettlement,
         onPromptAdmitted: (owner, admission) => {
           bindPrompt(
             locallyBoundPromptIdsRef.current,
@@ -5926,7 +5999,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       clientId,
       legacyClientIdDependency,
       resolvedBaseUrl,
+      publishPromptSettlement,
       resolvedToken,
+      resolveSessionClient,
       restartEventStreamOnPrompt,
       settleAdmittedPrompt,
       turnNotifications,
@@ -6369,6 +6444,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   >(() => {
     if (
       !appSession ||
+      (appSession.restoreStrategy !== undefined &&
+        appSession.restoreStrategy.kind !== 'workspace') ||
+      !appSession.workspaceCwd ||
       !generatedUiClientId ||
       connection.status !== 'connected' ||
       connection.sessionId !== appSession.sessionId ||

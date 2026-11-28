@@ -36,6 +36,7 @@ import type {
   PendingSessionLoad,
   SettledPrompt,
 } from './types';
+import type { WebShellSessionAdapter } from './session-adapter';
 
 describe('Generated UI action invalidation', () => {
   it('revokes the cleared session before waiting for detach', async () => {
@@ -8472,6 +8473,7 @@ function createActionsHarness(
     hasSessionActivePrompt?: () => boolean;
     manualSessionClearRef?: { current: boolean };
     onPromptAdmitted?: ReturnType<typeof vi.fn>;
+    onPromptSettled?: ReturnType<typeof vi.fn>;
     onContinuationAdmitted?: ReturnType<typeof vi.fn>;
     onPromptRemoved?: ReturnType<typeof vi.fn>;
     onGeneratedUiInvalidated?: ReturnType<typeof vi.fn>;
@@ -8482,6 +8484,7 @@ function createActionsHarness(
     settleRestoredActivePrompt?: ReturnType<typeof vi.fn>;
     restartEventStream?: ReturnType<typeof vi.fn>;
     session?: ReturnType<typeof createMockSession>;
+    getSessionAdapter?: () => WebShellSessionAdapter | undefined;
     setAttachSessionNonce?: ReturnType<typeof vi.fn>;
     setRestoreSessionId?: ReturnType<typeof vi.fn>;
     setRestoreSessionContext?: ReturnType<typeof vi.fn>;
@@ -8532,6 +8535,7 @@ function createActionsHarness(
   const actions = createDaemonSessionActions({
     store: store as never,
     sessionRef,
+    getSessionAdapter: opts.getSessionAdapter,
     activePromptsRef,
     settledPromptsRef,
     pendingSessionLoadRef,
@@ -8576,6 +8580,7 @@ function createActionsHarness(
     addNotice: opts.addNotice ?? vi.fn(),
     clearLiveJournalRepair: opts.clearLiveJournalRepair,
     onPromptAdmitted: opts.onPromptAdmitted,
+    onPromptSettled: opts.onPromptSettled,
     onContinuationAdmitted: opts.onContinuationAdmitted,
     onPromptRemoved: opts.onPromptRemoved,
     onGeneratedUiInvalidated: opts.onGeneratedUiInvalidated,
@@ -10356,6 +10361,167 @@ describe('sendPrompt idempotent admission auto-retry', () => {
       expect(store.appendLocalUserMessage).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('retains a failed adapter submission without replaying it and separates admission from turn settlement', async () => {
+    const session = Object.assign(createMockSession('sa-prompt'), {
+      restoreStrategy: { kind: 'standalone' as const },
+      waitForEventStream: vi.fn().mockResolvedValue(undefined),
+    });
+    const submitPrompt = vi.fn<WebShellSessionAdapter['submitPrompt']>();
+    const sessionAdapter: WebShellSessionAdapter = {
+      createClient: () => session.client as unknown as DaemonClient,
+      create: async () => session as unknown as DaemonSessionClient,
+      load: async () => session as unknown as DaemonSessionClient,
+      submitPrompt,
+    };
+    const addNotice = vi.fn();
+    const onPromptSettled = vi.fn(() => true);
+    const { actions, activePromptsRef, store } = createActionsHarness({
+      session,
+      getSessionAdapter: () => sessionAdapter,
+      addNotice,
+      onPromptSettled,
+      connection: {
+        status: 'connected',
+        sessionId: 'sa-prompt',
+        sessionContext: { kind: 'standalone' },
+      },
+    });
+
+    const onAdmissionStarted = vi.fn();
+    submitPrompt.mockRejectedValueOnce(new Error('Failed to fetch'));
+    await expect(
+      actions.sendPrompt('keep this prompt', {
+        idempotencyKey: 'idem-adapter-admission',
+        onAdmissionStarted,
+      }),
+    ).rejects.toThrow('Failed to fetch');
+    expect(onAdmissionStarted).toHaveBeenCalledOnce();
+    expect(submitPrompt).toHaveBeenCalledOnce();
+    expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
+      'keep this prompt',
+      [],
+      undefined,
+      [],
+    );
+    submitPrompt.mockClear();
+    store.appendLocalUserMessage.mockClear();
+    addNotice.mockClear();
+
+    const failing = createDeferred<void>();
+    submitPrompt.mockResolvedValueOnce({
+      promptId: 'p-fail',
+      completion: failing.promise,
+    });
+    const failedTurn = actions.sendPrompt('hello', {
+      idempotencyKey: 'idem-adapter',
+    });
+    await vi.waitFor(() =>
+      expect(activePromptsRef.current.get('sa-prompt')?.reject).toBeDefined(),
+    );
+    failing.reject(new Error('stream interrupted'));
+
+    await expect(failedTurn).rejects.toThrow('stream interrupted');
+    expect(onPromptSettled).toHaveBeenCalledWith(
+      expect.objectContaining({ promptId: 'p-fail', outcome: 'failed' }),
+    );
+    expect(submitPrompt).toHaveBeenCalledTimes(1);
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'send_prompt' }),
+    );
+
+    const hanging = createDeferred<void>();
+    submitPrompt.mockResolvedValueOnce({
+      promptId: 'p-ok',
+      completion: hanging.promise,
+    });
+    const okTurn = actions.sendPrompt('follow up');
+    await vi.waitFor(() =>
+      expect(activePromptsRef.current.get('sa-prompt')?.resolve).toBeDefined(),
+    );
+    activePromptsRef.current
+      .get('sa-prompt')
+      ?.resolve?.({ stopReason: 'end_turn' });
+
+    await expect(okTurn).resolves.toEqual({ stopReason: 'end_turn' });
+    hanging.reject(new Error('late close'));
+    await Promise.resolve();
+    expect(onPromptSettled).toHaveBeenCalledTimes(1);
+
+    const cancelled = Promise.withResolvers<void>();
+    submitPrompt.mockResolvedValueOnce({
+      promptId: 'p-cancelled',
+      completion: cancelled.promise,
+    });
+    const cancelledTurn = actions.sendPrompt('stop this turn');
+    await vi.waitFor(() =>
+      expect(activePromptsRef.current.get('sa-prompt')?.promptId).toBe(
+        'p-cancelled',
+      ),
+    );
+    activePromptsRef.current.get('sa-prompt')!.controller.abort();
+    await expect(cancelledTurn).resolves.toEqual({ stopReason: 'cancelled' });
+    expect(onPromptSettled).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        promptId: 'p-cancelled',
+        outcome: 'cancelled',
+      }),
+    );
+    cancelled.resolve();
+
+    const queued = Promise.withResolvers<void>();
+    submitPrompt.mockResolvedValueOnce({
+      promptId: 'p-queued',
+      completion: queued.promise,
+    });
+    await expect(actions.submitPrompt('queued prompt')).resolves.toEqual({
+      promptId: 'p-queued',
+    });
+    store.dispatch.mockClear();
+    queued.resolve();
+    await vi.waitFor(() =>
+      expect(onPromptSettled).toHaveBeenLastCalledWith(
+        expect.objectContaining({ promptId: 'p-queued', outcome: 'completed' }),
+      ),
+    );
+    expect(store.dispatch).toHaveBeenCalledWith({
+      type: 'assistant.done',
+      reason: 'end_turn',
+    });
+  });
+
+  it('detaches an adapter session at admission while its turn is still pending', async () => {
+    const session = Object.assign(createMockSession('sa-detached'), {
+      restoreStrategy: { kind: 'standalone' as const },
+    });
+    const completion = createDeferred<void>();
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({
+      addNotice,
+      getSessionAdapter: () => ({
+        createClient: () => session.client as unknown as DaemonClient,
+        create: async () => session as unknown as DaemonSessionClient,
+        load: async () => session as unknown as DaemonSessionClient,
+        submitPrompt: async () => ({
+          promptId: 'p-detached',
+          completion: completion.promise,
+        }),
+      }),
+    });
+
+    const result = actions.sendDetachedPrompt(
+      session as unknown as DaemonSessionClient,
+      'continue after navigation',
+    );
+    try {
+      await vi.waitFor(() => expect(session.detach).toHaveBeenCalledOnce());
+      await expect(result).resolves.toEqual({ promptId: 'p-detached' });
+      expect(addNotice).not.toHaveBeenCalled();
+    } finally {
+      completion.resolve(undefined);
     }
   });
 });

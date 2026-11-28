@@ -35,7 +35,7 @@ final class AutomationScheduleQueries {
                         + " ON a.tenant_id = w.tenant_id AND a.workspace_id = w.workspace_id"
                         + " WHERE w.tenant_id = ? AND w.workspace_kind = 'ROOT'"
                         + " AND a.actor_id = ? AND a.role IN ('READER', 'OPERATOR', 'OWNER')"
-                        + " UNION ALL SELECT CONCAT(c.tenant_id, '!'), CONCAT(c.workspace_id, '!')"
+                        + " UNION SELECT CONCAT(c.tenant_id, '!'), CONCAT(c.workspace_id, '!')"
                         + " FROM ma_workspace c JOIN readable_workspace p"
                         + " ON c.tenant_id = " + unsuffixedTenant("p.tenant_identity")
                         + " AND " + ManagedSchemaJdbcTemplate.binaryIdentity("c.parent_workspace_id", h2)
