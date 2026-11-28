@@ -139,13 +139,20 @@ final class RuntimeExecutionDispatcher {
 
     void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload) {
-        beginDispatch(context, prepared, payload, null);
+        beginDispatch(context, prepared, payload, null, null);
     }
 
     void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant) {
         beginDispatch(context, prepared, payload, grant, null);
+    }
+
+    void beginDispatch(SessionContext context,
+            ToolExecutionRecord prepared, Map<String, Object> payload,
+            RuntimePublicationGrant grant, String requestDigest, String toolName) {
+        beginDispatch(context, prepared, payload, grant,
+                VerifiedDispatchPayload.of(requestDigest, toolName));
     }
 
     void beginDispatch(SessionContext context,

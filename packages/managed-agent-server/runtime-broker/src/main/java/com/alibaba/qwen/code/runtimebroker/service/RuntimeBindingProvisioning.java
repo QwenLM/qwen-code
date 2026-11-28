@@ -913,10 +913,10 @@ final class RuntimeBindingProvisioning {
             return failed(conflict("runtime_broker_recovery_blocked", "Saved Runtime recovery is unavailable"));
         }
         if (expectedVersion != null
-                && (record.getVersion() != expectedVersion
+                && (expectedVersion < 0 || record.getVersion() != expectedVersion
                         || !externalRecoveryEligible(record))) {
             return failed(conflict("runtime_broker_recovery_blocked",
-                    "Recovery snapshot is stale or unsettled"));
+                    expectedVersion < 0 ? "Invalid recovery snapshot" : "Recovery snapshot is stale or unsettled"));
         }
         if (!lookupOnly && record.getState() != RuntimeBindingRecord.State.LOST && retirementOwns(record)) {
             return CompletableFuture.completedFuture(record);

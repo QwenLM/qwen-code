@@ -28,7 +28,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.TerminalHoldAdmission;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.BindingContext;
@@ -1057,12 +1056,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                     && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
                         }
-                        // The digest was just computed and compared to the
-                        // receipt and the payload parsed and shape-checked
-                        // above; classify from those locals instead of
-                        // hashing and parsing the same bytes a second time.
-                        VerifiedDispatchPayload verifiedPayload =
-                                VerifiedDispatchPayload.of(digest, toolName);
                         if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
                                 && !WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())
                                 && (v3 || record.getReference().containsKey("runtimeProtocol")
@@ -1115,7 +1108,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                                 admitBackgroundProcess(context, current, family);
                                             }
                                             executionDispatcher.beginDispatch(context, current, payload,
-                                                    grant, verifiedPayload);
+                                                    grant, digest, toolName);
                                             ToolExecutionRecord latest = executionRepository
                                                     .findByExecutionCallId(executionId);
                                             return latest == null ? current : latest;
@@ -1126,7 +1119,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                         }
                         if (shouldDriveDispatch(record)) {
                             executionDispatcher.beginDispatch(context, record, payload,
-                                    null, verifiedPayload);
+                                    null, digest, toolName);
                         }
                         ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
                         return CompletableFuture.completedFuture(latest == null ? record : latest);
@@ -1796,8 +1789,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                         "Runtime Session is not acquirable");
             }
             RuntimeSessionRecord expected = stored;
-            return mapFailure(safeStage(() -> transport.acquire(
-                    binding.lease(), session)),
+            return mapFailure(safeStage(() -> transport.acquire(binding.lease(), session)),
                     "runtime_session_acquire_failed",
                     "Runtime Session acquisition failed")
                     .handle((ignored, error) -> {
@@ -1838,12 +1830,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     /** 已核原 endpoint 的宿主专用入口；快照版本过期或工具未决时不得进入恢复。 */
     public CompletionStage<RuntimeBindingRecord> recoverExternalWorkspaceBinding(
             String bindingId, long expectedGeneration, long expectedVersion) {
-        if (expectedVersion < 0) {
-            return failed(conflict("runtime_broker_recovery_blocked",
-                    "Invalid recovery snapshot"));
-        }
-        return bindingProvisioning.recoverBinding(
-                bindingId, expectedGeneration, false, expectedVersion);
+        return bindingProvisioning.recoverBinding(bindingId, expectedGeneration, false, expectedVersion);
     }
 
     private RuntimeSessionRecord requireAcquireSessionRecord(SessionContext context) {
