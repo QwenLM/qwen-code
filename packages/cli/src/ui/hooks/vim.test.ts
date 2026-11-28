@@ -225,6 +225,40 @@ describe('useVim hook', () => {
     mockVimContext.setVimMode.mockClear();
   });
 
+  describe('Ctrl+X passthrough for the external editor', () => {
+    const ctrlX = (): Key => ({
+      ...makeKey('\x18', 'x'),
+      ctrl: true,
+    });
+
+    it('lets Ctrl+X through in INSERT mode', () => {
+      const { result } = renderVimHook();
+      act(() => {
+        result.current.handleInput(makeKey('i', 'i'));
+      });
+
+      let handled = true;
+      act(() => {
+        handled = result.current.handleInput(ctrlX());
+      });
+
+      expect(handled).toBe(false);
+      expect(mockBuffer.handleInput).not.toHaveBeenCalled();
+    });
+
+    it('lets Ctrl+X through in NORMAL mode', () => {
+      const { result } = renderVimHook();
+
+      let handled = true;
+      act(() => {
+        handled = result.current.handleInput(ctrlX());
+      });
+
+      expect(handled).toBe(false);
+      expect(mockBuffer.handleInput).not.toHaveBeenCalled();
+    });
+  });
+
   describe('keys delivered before the next render', () => {
     const renderBuffer = (initialText: string) =>
       renderHook(() => {

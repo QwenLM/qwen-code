@@ -74,6 +74,8 @@ Commands for adjusting interface appearance and work environment.
 | `/statusline <text>` | Generate a command-mode [status line](./status-line.md) via agent                                                                                                                 | `/statusline show model and git branch`                                           |
 | `/terminal-setup`    | Configure terminal keybindings for multiline input                                                                                                                                | `/terminal-setup`                                                                 |
 
+Vim mode does not intercept Ctrl+X, so the external editor shortcut keeps working in both INSERT and NORMAL modes.
+
 ### 1.3 Language Settings
 
 Commands specifically for controlling interface and output language.

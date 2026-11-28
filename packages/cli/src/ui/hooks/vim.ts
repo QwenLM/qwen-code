@@ -1178,6 +1178,14 @@ export function useVim(
         return false;
       }
 
+      // Ctrl+X is the external-editor binding in InputPrompt; never consume it.
+      if (
+        normalizedKey.ctrl &&
+        (normalizedKey.name === 'x' || normalizedKey.sequence === '\x18')
+      ) {
+        return false;
+      }
+
       const s = stateRef.current;
 
       // ── INSERT mode ──
