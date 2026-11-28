@@ -28,17 +28,11 @@ const root = join(__dirname, '..');
 const scriptPath = relative(root, fileURLToPath(import.meta.url));
 const generatedCliDir = join(root, 'packages/cli/src/generated');
 const cliGitCommitFile = join(generatedCliDir, 'git-commit.ts');
-const generatedCoreDir = join(root, 'packages/core/src/generated');
-const coreGitCommitFile = join(generatedCoreDir, 'git-commit.ts');
 let gitCommitInfo = 'N/A';
 let cliVersion = 'UNKNOWN';
 
 if (!existsSync(generatedCliDir)) {
   mkdirSync(generatedCliDir, { recursive: true });
-}
-
-if (!existsSync(generatedCoreDir)) {
-  mkdirSync(generatedCoreDir, { recursive: true });
 }
 
 try {
@@ -68,4 +62,3 @@ export const CLI_VERSION = '${cliVersion}';
 `;
 
 writeFileSync(cliGitCommitFile, fileContent);
-writeFileSync(coreGitCommitFile, fileContent);
