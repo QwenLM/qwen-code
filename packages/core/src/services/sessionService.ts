@@ -520,6 +520,11 @@ export interface SessionServiceOptions {
   runtimeBaseDir?: string;
 }
 
+interface SessionLoadOptions {
+  /** Propagate transcript read errors other than ENOENT. */
+  throwOnNonEnoentError?: boolean;
+}
+
 /**
  * Complete conversation reconstructed from ChatRecords.
  * Used for resuming sessions and API compatibility.
@@ -3771,12 +3776,13 @@ export class SessionService {
    */
   private async readAllRecords(
     filePath: string,
-    onIncompleteRead?: () => void,
+    options: SessionLoadOptions & { onIncompleteRead: () => void },
   ): Promise<ChatRecord[]> {
     try {
-      return await jsonl.read<ChatRecord>(filePath, { onIncompleteRead });
+      return await jsonl.read<ChatRecord>(filePath, options);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        if (options.throwOnNonEnoentError) throw error;
         debugLogger.error('Error reading session file:', error);
       }
       return [];
@@ -3819,8 +3825,9 @@ export class SessionService {
    */
   async loadSession(
     sessionId: string,
+    options: SessionLoadOptions = {},
   ): Promise<ResumedSessionData | undefined> {
-    return this.loadSessionFromState(sessionId, 'active');
+    return this.loadSessionFromState(sessionId, 'active', options);
   }
 
   private async readArtifactLibraryState(sessionId: string) {
@@ -4462,7 +4469,7 @@ export class SessionService {
    */
   async loadArchivedSession(
     sessionId: string,
-    options: { maxBytes: number },
+    options: SessionLoadOptions & { maxBytes: number },
   ): Promise<ResumedSessionData | undefined> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return undefined;
@@ -4487,19 +4494,23 @@ export class SessionService {
       }
       return undefined;
     }
-    return this.loadSessionFromState(sessionId, 'archived', stats);
+    return this.loadSessionFromState(sessionId, 'archived', options, stats);
   }
 
   private async loadSessionFromState(
     sessionId: string,
     state: SessionArchiveState,
+    { throwOnNonEnoentError }: SessionLoadOptions,
     stats?: fs.Stats,
   ): Promise<ResumedSessionData | undefined> {
     const filePath = this.getSessionFilePath(sessionId, state);
 
     let sourceReadComplete = true;
-    const records = await this.readAllRecords(filePath, () => {
-      sourceReadComplete = false;
+    const records = await this.readAllRecords(filePath, {
+      throwOnNonEnoentError,
+      onIncompleteRead: () => {
+        sourceReadComplete = false;
+      },
     });
     if (records.length === 0) {
       return;
