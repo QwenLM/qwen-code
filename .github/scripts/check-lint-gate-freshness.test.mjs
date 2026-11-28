@@ -58,6 +58,7 @@ test('pins the gate file list', () => {
   assert.deepEqual(GATE_FILES, [
     'scripts/lint.js',
     'scripts/lint-scope.js',
+    'scripts/lib/entry-point.js',
     'eslint.config.js',
     'eslint.legacy-filenames.mjs',
     'eslint.legacy-core-barrel-imports.mjs',
@@ -66,6 +67,31 @@ test('pins the gate file list', () => {
     '.github/workflows/ci.yml',
     '.github/scripts/check-lint-gate-freshness.mjs',
   ]);
+});
+
+test('the default gate scan detects a base-side entry-point change', async () => {
+  const file = 'scripts/lib/entry-point.js';
+  const fetchJson = fakeFetch([
+    [
+      `/repos/QwenLM/qwen-code/commits?path=${encodeURIComponent(file)}`,
+      commitsResponse('a'.repeat(40)),
+    ],
+    ['/repos/QwenLM/qwen-code/commits?', []],
+    [
+      `/repos/QwenLM/qwen-code/compare/${'a'.repeat(40)}...`,
+      { status: 'diverged' },
+    ],
+  ]);
+  const stale = await findStaleGateFiles({
+    repo: BASE_OPTS.repo,
+    baseRef: BASE_OPTS.baseRef,
+    headSha: BASE_OPTS.headSha,
+    fetchJson,
+  });
+  assert.deepEqual(
+    stale.map((entry) => entry.file),
+    [file],
+  );
 });
 
 test('passes when the branch contains the base-side gate change', async () => {
