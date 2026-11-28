@@ -8061,83 +8061,80 @@ describe('review model canary routing', () => {
         '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
         'default-model|default|https://default.example.com/v1|default-key',
     );
-  });
 
-  // The canary gateway is the CN MaaS endpoint, reachable only from the CN
-  // self-hosted pool. Fork-PR reviews route to GitHub-hosted runners (see
-  // runs-on), which time out on TCP connect to it — measured 2026-11-28 on
-  // runs 46091896299 / 46091914221. The endpoint override must therefore keep
-  // the default cohort on any non-self-hosted runner, or a fork-PR review
-  // spends its whole transport-retry budget on a gateway that can never
-  // answer. A model-only canary (no canary URL) is unaffected: the default
-  // gateway is reachable everywhere.
-  it('gates the canary endpoint to the self-hosted pool', () => {
-    const start = run.indexOf('canary_percent_effective() {');
-    const notice = run.indexOf('echo "::notice title=Review model::');
-    const args = run.indexOf('MODEL_ARGS=()', notice);
-    const end = run.indexOf('\nfi', args) + '\nfi'.length;
-    const helperStart = run.indexOf('openai_base_host() {');
-    expect(helperStart).toBeGreaterThan(-1);
-    const helperEnd = run.indexOf('\n}', helperStart) + '\n}'.length;
-    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}`;
-
-    const serve = (runnerEnv, canaryUrl, canaryKey) =>
-      execFileSync(
-        'bash',
-        [
-          '-c',
-          `set -euo pipefail\n${block}\nprintf '%s' "$OPENAI_MODEL|$REVIEW_COHORT|$OPENAI_BASE_URL|$OPENAI_API_KEY"`,
-        ],
-        {
-          encoding: 'utf8',
-          env: {
-            ...process.env,
-            REVIEW_MODEL_DEFAULT: 'default-model',
-            REVIEW_MODEL_CANARY: 'canary-model',
-            REVIEW_MODEL_CANARY_PERCENT: '10',
-            // 12300 % 10 = 0 is inside the 10% split, so the bucket alone
-            // would select the canary — only the runner gate can hold it back.
-            PR_NUMBER: '12300',
-            OPENAI_BASE_URL: 'https://default.example.com/v1',
-            OPENAI_API_KEY: 'default-key',
-            REVIEW_BASE_URL_CANARY: canaryUrl ?? '',
-            REVIEW_API_KEY_CANARY: canaryKey ?? '',
-            RUNNER_ENVIRONMENT: runnerEnv,
-          },
-        },
-      );
-
-    const hostedFallback =
-      '::warning::canary endpoint is served only to the self-hosted pool; this runner cannot reach it, falling back to the default cohort.\n' +
-      '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
-      'default-model|default|https://default.example.com/v1|default-key';
-
-    // The fix itself: a fully-configured canary pair on a GitHub-hosted
-    // runner degrades to the default cohort instead of dialing the
-    // unreachable gateway.
+    // The endpoint override is gated to the self-hosted pool: the canary
+    // gateway (CN MaaS) is unreachable from GitHub-hosted runners, the lane
+    // fork-PR reviews route to (2026-11-28, runs 46091896299 / 46091914221).
+    // A fully-configured pair on a hosted runner keeps the default cohort,
+    // and the warning records the runner.environment it resolved. The
+    // self-hosted apply is the first row above; these rows name the class as
+    // the seventh argument so one harness covers every runner class.
     expect(
-      serve('github-hosted', 'https://canary.example.com/v1', 'canary-key'),
-    ).toBe(hostedFallback);
-
-    // Fail-closed: an unset/unknown runner class also keeps the default,
-    // never the canary endpoint.
-    expect(serve('', 'https://canary.example.com/v1', 'canary-key')).toBe(
-      hostedFallback,
+      serve(
+        'canary-model',
+        '10',
+        '12300',
+        'https://canary.example.com/v1',
+        'canary-key',
+        undefined,
+        'github-hosted',
+      ),
+    ).toBe(
+      "::warning::canary endpoint is served only to the self-hosted pool; runner.environment='github-hosted' cannot reach it, falling back to the default cohort.\n" +
+        '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
     );
 
-    // The self-hosted pool still gets the canary endpoint — the gate restricts
-    // the override, it does not disable the rollout.
+    // Fail-closed: an unset runner class also keeps the default, and the
+    // warning names the unset class rather than claiming an observed one.
     expect(
-      serve('self-hosted', 'https://canary.example.com/v1', 'canary-key'),
+      serve(
+        'canary-model',
+        '10',
+        '12300',
+        'https://canary.example.com/v1',
+        'canary-key',
+        undefined,
+        '',
+      ),
     ).toBe(
-      '::notice title=Review model::canary-model (PR #12300, canary 10%, bucket 0/10, cohort canary, endpoint canary.example.com)\n' +
-        'canary-model|canary|https://canary.example.com/v1|canary-key',
+      "::warning::canary endpoint is served only to the self-hosted pool; runner.environment='<unset>' cannot reach it, falling back to the default cohort.\n" +
+        '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // Key/URL validity is checked before the runner gate, so a misconfigured
+    // pair reports the specific "unusable" reason even on a hosted runner.
+    expect(
+      serve(
+        'canary-model',
+        '10',
+        '12300',
+        'not a url',
+        'canary-key',
+        undefined,
+        'github-hosted',
+      ),
+    ).toBe(
+      '::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort.\n' +
+        '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
     );
 
     // A model-only canary (no canary URL) is untouched by the gate: the model
     // split still applies on a hosted runner, over the reachable default
     // gateway.
-    expect(serve('github-hosted', '', '')).toBe(
+    expect(
+      serve(
+        'canary-model',
+        '10',
+        '12300',
+        undefined,
+        undefined,
+        undefined,
+        'github-hosted',
+      ),
+    ).toBe(
       '::notice title=Review model::canary-model (PR #12300, canary 10%, bucket 0/10, cohort canary, endpoint default.example.com)\n' +
         'canary-model|canary|https://default.example.com/v1|default-key',
     );

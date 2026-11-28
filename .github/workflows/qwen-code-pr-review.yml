@@ -1986,22 +1986,25 @@ jobs:
           # cohort instead. The gate is fail-closed (an unknown runner class
           # also keeps the default), and a model-only canary — no canary URL —
           # is untouched, since the default gateway is reachable everywhere.
+          # Key/URL validity is checked FIRST so a misconfigured pair reports
+          # the specific "unusable" reason on every runner, hosted included;
+          # the pool warning then records the runner.environment it resolved.
           REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY:-}"
           REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY#"${REVIEW_BASE_URL_CANARY%%[![:space:]]*}"}"
           REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY%"${REVIEW_BASE_URL_CANARY##*[![:space:]]}"}"
           if [ "$REVIEW_COHORT" = canary ] && [ -n "$REVIEW_BASE_URL_CANARY" ]; then
-            if [ "${RUNNER_ENVIRONMENT:-}" != "self-hosted" ]; then
-              echo "::warning::canary endpoint is served only to the self-hosted pool; this runner cannot reach it, falling back to the default cohort."
-              OPENAI_MODEL="${REVIEW_MODEL_DEFAULT:-}"
-              REVIEW_COHORT=default
-            elif [ -n "${REVIEW_API_KEY_CANARY:-}" ] &&
-              node -e 'try{if(!new URL(process.env.REVIEW_BASE_URL_CANARY).host)process.exit(1)}catch{process.exit(1)}' 2>/dev/null; then
-              OPENAI_BASE_URL="$REVIEW_BASE_URL_CANARY"
-              OPENAI_API_KEY="$REVIEW_API_KEY_CANARY"
-            else
+            if [ -z "${REVIEW_API_KEY_CANARY:-}" ] ||
+              ! node -e 'try{if(!new URL(process.env.REVIEW_BASE_URL_CANARY).host)process.exit(1)}catch{process.exit(1)}' 2>/dev/null; then
               echo "::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort."
               OPENAI_MODEL="${REVIEW_MODEL_DEFAULT:-}"
               REVIEW_COHORT=default
+            elif [ "${RUNNER_ENVIRONMENT:-}" != "self-hosted" ]; then
+              echo "::warning::canary endpoint is served only to the self-hosted pool; runner.environment='${RUNNER_ENVIRONMENT:-<unset>}' cannot reach it, falling back to the default cohort."
+              OPENAI_MODEL="${REVIEW_MODEL_DEFAULT:-}"
+              REVIEW_COHORT=default
+            else
+              OPENAI_BASE_URL="$REVIEW_BASE_URL_CANARY"
+              OPENAI_API_KEY="$REVIEW_API_KEY_CANARY"
             fi
           fi
           export OPENAI_MODEL OPENAI_BASE_URL OPENAI_API_KEY
