@@ -2976,7 +2976,7 @@ describe('StandaloneSessionService', () => {
       harness.bridge,
       root.canonicalRoot,
       { conversationKind: 'standalone-top-level' },
-      { runtimeBaseDir: '/runtime' },
+      { runtimeBaseDir: '/runtime', worktreeRoot: '.qwen/worktrees' },
     );
   });
 

@@ -6617,7 +6617,7 @@ class QwenAgent implements Agent {
       );
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
-          const worktreeRoot = settings.merged.worktree?.root;
+          const worktreeRoot = settings?.merged?.worktree?.root;
           const sessionService =
             worktreeRoot !== undefined
               ? new SessionService(params.cwd, { worktreeRoot })
@@ -7080,7 +7080,7 @@ class QwenAgent implements Agent {
       );
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
-          const worktreeRoot = settings.merged.worktree?.root;
+          const worktreeRoot = settings?.merged?.worktree?.root;
           const sessionService =
             worktreeRoot !== undefined
               ? new SessionService(params.cwd, { worktreeRoot })
@@ -7286,7 +7286,7 @@ class QwenAgent implements Agent {
     const result = await this.runWithPinnedRuntimeBaseDirForRequest(
       cwd,
       (requestSettings) => {
-        const worktreeRoot = requestSettings.merged.worktree?.root;
+        const worktreeRoot = requestSettings?.merged?.worktree?.root;
         const sessionService =
           worktreeRoot !== undefined
             ? new SessionService(cwd, { worktreeRoot })
@@ -15486,7 +15486,7 @@ class QwenAgent implements Agent {
         const success = await this.runWithPinnedRuntimeBaseDirForRequest(
           cwd,
           async (requestSettings) => {
-            const worktreeRoot = requestSettings.merged.worktree?.root;
+            const worktreeRoot = requestSettings?.merged?.worktree?.root;
             const sessionService =
               worktreeRoot !== undefined
                 ? new SessionService(cwd, { worktreeRoot })
@@ -15540,7 +15540,7 @@ class QwenAgent implements Agent {
         const success = await this.runWithPinnedRuntimeBaseDirForRequest(
           cwd,
           async (requestSettings) => {
-            const worktreeRoot = requestSettings.merged.worktree?.root;
+            const worktreeRoot = requestSettings?.merged?.worktree?.root;
             const sessionService =
               worktreeRoot !== undefined
                 ? new SessionService(cwd, { worktreeRoot })
@@ -15837,7 +15837,7 @@ class QwenAgent implements Agent {
           sessionData = await this.runWithPinnedRuntimeBaseDirForRequest(
             cwd,
             async (requestSettings) => {
-              const worktreeRoot = requestSettings.merged.worktree?.root;
+              const worktreeRoot = requestSettings?.merged?.worktree?.root;
               const sessionService =
                 worktreeRoot !== undefined
                   ? new SessionService(cwd, { worktreeRoot })
@@ -17618,14 +17618,16 @@ class QwenAgent implements Agent {
             ...(restoreOptions && sessionId
               ? {
                   sessionRestore: {
-                    projectionSource: (restoreSessionId) =>
-                      new SessionService(cwd, {
+                    projectionSource: (restoreSessionId) => {
+                      const worktreeRoot = settings?.merged?.worktree?.root;
+                      return new SessionService(cwd, {
                         runtimeBaseDir: Storage.getRuntimeBaseDir(),
-                        worktreeRoot: settings.merged.worktree?.root,
+                        ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
                       }).readRestoreProjection(
                         restoreSessionId,
                         restoreOptions,
-                      ),
+                      );
+                    },
                   },
                 }
               : {}),

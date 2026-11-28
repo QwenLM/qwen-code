@@ -111,6 +111,11 @@ describe('worktree-root validation and parsing', () => {
       InvalidWorktreeRootError,
     );
   });
+
+  it('reports the dedicated ".." traversal diagnostic rather than trailing-dot (M5)', () => {
+    expect(validateWorktreeRoot('../outside')).toContain('".."');
+    expect(validateWorktreeRoot('a/../../outside')).toContain('".."');
+  });
 });
 
 describe('worktree-root path helpers', () => {
