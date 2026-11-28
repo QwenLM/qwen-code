@@ -179,7 +179,9 @@ async function setUiLanguage(
     }
   }
 
-  await setLanguageAsync(lang);
+  const effectiveLanguage = (services.settings?.merged?.general?.language ||
+    lang) as SupportedLanguage | 'auto';
+  await setLanguageAsync(effectiveLanguage);
 
   // Reload commands so `t()` lookups in their metadata re-resolve under the new language.
   context.ui.reloadCommands();
@@ -188,7 +190,7 @@ async function setUiLanguage(
     type: 'message',
     messageType: 'info',
     content: t('UI language changed to {{lang}}', {
-      lang: formatUiLanguageDisplay(lang),
+      lang: formatUiLanguageDisplay(getCurrentLanguage()),
     }),
   };
 }

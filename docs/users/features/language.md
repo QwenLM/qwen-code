@@ -48,6 +48,14 @@ Aliases are also supported:
 /language ui ca       # Catalan
 ```
 
+### Scope flags
+
+`/language ui <language> --global` saves the language in user settings;
+`/language ui <language> --project` saves it in the trusted workspace settings.
+A workspace language takes precedence while it is set, so a `--global` change
+does not switch the current workspace away from its configured language. Remove
+the workspace value (or run `--project`) to apply the saved user language.
+
 ### Auto-detection
 
 On first startup, Qwen Code detects your system locale and sets the UI language automatically.

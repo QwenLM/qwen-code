@@ -448,6 +448,56 @@ describe('languageCommand', () => {
       );
     });
 
+    it('applies the trusted workspace language when --global only saves user settings', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+      (mockContext.services.settings as { isTrusted?: boolean }).isTrusted =
+        true;
+      (mockContext.services.settings as { merged?: unknown }).merged = {
+        general: { language: 'zh' },
+      };
+
+      await languageCommand.action(mockContext, 'ui de --global');
+
+      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+        'user',
+        'general.language',
+        'de',
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('zh');
+    });
+
+    it('applies the saved language with --global when no workspace override exists', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+      (mockContext.services.settings as { merged?: unknown }).merged = {
+        general: { language: 'de' },
+      };
+
+      await languageCommand.action(mockContext, 'ui de --global');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('de');
+    });
+
+    it('applies the saved language with --project when trusted', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+      (mockContext.services.settings as { isTrusted?: boolean }).isTrusted =
+        true;
+      (mockContext.services.settings as { merged?: unknown }).merged = {
+        general: { language: 'zh' },
+      };
+
+      await languageCommand.action(mockContext, 'ui zh --project');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('zh');
+    });
+
     it('rejects --project in an untrusted workspace without persisting', async () => {
       if (!languageCommand.action) {
         throw new Error('The language command must have an action.');
