@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from 'react';
 import { Box, useIsScreenReaderEnabled } from 'ink';
 import { useUIState } from './contexts/UIStateContext.js';
+import { useUIActions } from './contexts/UIActionsContext.js';
 import { useSettings } from './contexts/SettingsContext.js';
 import { CORRUPTED_SUFFIX } from '../config/settings.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
@@ -19,16 +19,16 @@ import fs from 'node:fs';
 
 export const App = () => {
   const uiState = useUIState();
+  const uiActions = useUIActions();
   const settings = useSettings();
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
-  const [dismissed, setDismissed] = useState(false);
 
   if (uiState.quittingMessages) {
     return <QuittingDisplay />;
   }
 
   // Render corrupted dialog at the top level, before any other UI
-  if (settings.corruptedPath && !dismissed) {
+  if (uiState.isSettingsCorruptedDialogOpen && settings.corruptedPath) {
     return (
       <StreamingContext.Provider value={uiState.streamingState}>
         <Box marginX={2}>
@@ -86,8 +86,7 @@ export const App = () => {
                   );
                 }
               }
-              settings.corruptionDialogDismissed = true;
-              setDismissed(true);
+              uiActions.closeSettingsCorruptedDialog();
             }}
           />
         </Box>

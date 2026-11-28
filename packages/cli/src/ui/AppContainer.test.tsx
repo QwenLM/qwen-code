@@ -6988,6 +6988,29 @@ describe('AppContainer State Management', () => {
       }).not.toThrow();
     });
 
+    it('closes the settings corruption dialog and clears dialogsVisible together', () => {
+      const corruptedSettings = {
+        ...mockSettings,
+        corruptedPath: '/project/.qwen/settings.json.corrupted',
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={corruptedSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      expect(capturedUIState.isSettingsCorruptedDialogOpen).toBe(true);
+      expect(capturedUIState.dialogsVisible).toBe(true);
+
+      act(() => capturedUIActions.closeSettingsCorruptedDialog());
+
+      expect(capturedUIState.isSettingsCorruptedDialogOpen).toBe(false);
+      expect(capturedUIState.dialogsVisible).toBe(false);
+    });
+
     it('initializes Markdown render mode from ui.renderMode', () => {
       const rawSettings = {
         ...mockSettings,

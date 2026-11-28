@@ -822,7 +822,6 @@ export class LoadedSettings {
   readonly corruptedPath: string | undefined;
   readonly wasRecovered: boolean;
   readonly workspaceSettingsActive: boolean;
-  corruptionDialogDismissed: boolean = false;
 
   private _merged: Settings;
 

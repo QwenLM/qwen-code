@@ -4416,6 +4416,16 @@ export const AppContainer = (props: AppContainerProps) => {
     history: historyManager.history,
     sessionStats,
   });
+  const [
+    settingsCorruptionDialogDismissed,
+    setSettingsCorruptionDialogDismissed,
+  ] = useState(false);
+  const isSettingsCorruptedDialogOpen =
+    !!settings.corruptedPath && !settingsCorruptionDialogDismissed;
+  const closeSettingsCorruptedDialog = useCallback(
+    () => setSettingsCorruptionDialogDismissed(true),
+    [],
+  );
   const dialogsVisible =
     showWelcomeBackDialog ||
     shouldShowIdePrompt ||
@@ -4459,7 +4469,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isSkillReviewDialogOpen ||
     bgTasksDialogOpen ||
     showWorktreeExitDialog ||
-    !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
+    isSettingsCorruptedDialogOpen;
   dialogsVisibleRef.current = dialogsVisible;
 
   const shouldShowStickyTodos =
@@ -5558,6 +5568,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isStatsDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
+      // Settings corruption dialog
+      isSettingsCorruptedDialogOpen,
       // Per-task token tracking
       taskStartTokens,
       taskStartStreamingChars,
@@ -5710,6 +5722,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isStatsDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
+      // Settings corruption dialog
+      isSettingsCorruptedDialogOpen,
       // Per-task token tracking
       taskStartTokens,
       taskStartStreamingChars,
@@ -5819,6 +5833,8 @@ export const AppContainer = (props: AppContainerProps) => {
       closeFeedbackDialog,
       temporaryCloseFeedbackDialog,
       submitFeedback,
+      // Settings corruption dialog
+      closeSettingsCorruptedDialog,
       // Rewind selector
       openRewindSelector,
       closeRewindSelector,
@@ -5910,6 +5926,8 @@ export const AppContainer = (props: AppContainerProps) => {
       closeFeedbackDialog,
       temporaryCloseFeedbackDialog,
       submitFeedback,
+      // Settings corruption dialog
+      closeSettingsCorruptedDialog,
       // Rewind selector
       openRewindSelector,
       closeRewindSelector,
