@@ -147,15 +147,20 @@ call raw `gh api` or GraphQL mutations directly.
 
 ### 2.4 Raised Long-Running PR Budgets
 
-To accommodate multi-round deep PR iteration and build + audit + real-env
-rounds without prematurely cutting off healthy work:
+Empirical measurement of 106 pure single-prompt audit + real-environment rounds
+in a maintainer workspace (excluding erroneous local `/review` runs and mid-turn
+injections) showed P50 = 34.1 min, P75 = 61.2 min, P90 = 116.1 min, P95 = 155.3
+min, and P98 = 173.4 min — so even 60 minutes would still cut off 26.4% of real
+deep rounds. Raising the background fix limit to 240 minutes (4 hours) covers
+over 97% of real rounds while normal crashes or suspended sessions still expire
+within 90 seconds via the heartbeat freshness check:
 
-| Budget                                           | Previous |    Updated |
-| ------------------------------------------------ | -------: | ---------: |
-| `MAX_PUSHES` (`state.ts`)                        |       10 |     **20** |
-| `FIX_TIME_LIMIT_MS` (`autofix-pr-grants.ts`)     |   30 min | **60 min** |
-| `FIX_CLAIM_DEADLINE_MS` (`autofix-pr-grants.ts`) |   40 min | **70 min** |
-| `FIX_MAX_AGE_MS` (`fix.ts`)                      |   45 min | **75 min** |
+| Budget                                           | Previous |     Updated |
+| ------------------------------------------------ | -------: | ----------: |
+| `MAX_PUSHES` (`state.ts`)                        |       10 |      **20** |
+| `FIX_TIME_LIMIT_MS` (`autofix-pr-grants.ts`)     |   30 min | **240 min** |
+| `FIX_CLAIM_DEADLINE_MS` (`autofix-pr-grants.ts`) |   40 min | **250 min** |
+| `FIX_MAX_AGE_MS` (`fix.ts`)                      |   45 min | **255 min** |
 
 The safety invariants (`FIX_CLAIM_DEADLINE_MS = FIX_TIME_LIMIT_MS + 10 min`,
 `FIX_MAX_AGE_MS = FIX_CLAIM_DEADLINE_MS + 5 min`) are preserved.
@@ -189,4 +194,4 @@ The safety invariants (`FIX_CLAIM_DEADLINE_MS = FIX_TIME_LIMIT_MS + 10 min`,
 4. `schedule.test.ts`, `state.test.ts`, `fix.test.ts`, and `autofix-pr.test.ts`
    verify `watch.resolve` persistence, `--no-resolve` propagation across
    `schedule`/`reply`/`autofix_pr` tool/`BackgroundFix.followUp()`, legacy state
-   compatibility, and the updated 20-push / 60-70-75-minute budgets.
+   compatibility, and the updated 20-push / 240-250-255-minute budgets.

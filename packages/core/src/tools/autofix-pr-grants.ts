@@ -239,10 +239,10 @@ export const FIX_HEARTBEAT_MS = 30_000;
 /** A refresh later than this past its time: the process was suspended. */
 export const FIX_HEARTBEAT_LATE_MS = 60_000;
 /** The attempt time limit: the agent is stopped then. */
-export const FIX_TIME_LIMIT_MS = 60 * 60_000;
+export const FIX_TIME_LIMIT_MS = 240 * 60_000;
 /** How long an attempt waits for its round's claim, from when it opened:
  * a notification waits for the session to be idle. */
-export const FIX_CLAIM_DEADLINE_MS = 70 * 60_000;
+export const FIX_CLAIM_DEADLINE_MS = 250 * 60_000;
 /** How long, after an attempt ended, whoever acts on its worktree next
  * waits for its stopped agent to settle. */
 export const FIX_SETTLE_WAIT_MS = 15_000;

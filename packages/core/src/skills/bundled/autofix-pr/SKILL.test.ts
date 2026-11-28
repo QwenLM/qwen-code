@@ -620,7 +620,7 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain('"resolve": true');
     expect(body).toContain('resolveReviewThread');
     expect(body).toContain('after 20 pushes');
-    expect(body).toContain('within 75 minutes');
+    expect(body).toContain('within 255 minutes');
     expect(body).not.toContain('after 10 pushes');
     expect(body).not.toContain('within 45 minutes');
   });

@@ -2007,7 +2007,7 @@ describe('background fixes', () => {
       expect(fix.done).toBe(false);
     });
 
-    it('waits for a claim until 70 minutes after it opened, however late the agent ended', async () => {
+    it('waits for a claim until 250 minutes after it opened, however late the agent ended', async () => {
       writeMarker(fix.attempt);
       await vi.advanceTimersByTimeAsync(FIX_CLAIM_DEADLINE_MS - 60_000);
       fix.end({ status: 'completed', report: 'done' });

@@ -72,14 +72,14 @@ resolve 线程的写操作严格收敛在确定性 helper
 
 ### 2.4 放宽长周期 PR 与重型实测预算
 
-为支撑长周期 PR 多轮迭代以及含构建 + 审计 + 真实环境验证的单轮耗时：
+对维护者工作区中 106 轮纯单次触发（排除误调本地 `/review` 与中途追加消息）的深度审计 + 本地真实环境验证实测显示：P50 = 34.1 分钟、P75 = 61.2 分钟、P90 = 116.1 分钟、P95 = 155.3 分钟、P98 = 173.4 分钟——即便是 60 分钟仍有 26.4% 的真实轮次会被腰斩。将后台修复单轮上限提升至 240 分钟（4 小时）可覆盖 97% 以上的真实深度轮次，同时正常进程崩溃或休眠仍会通过心跳机制在 90 秒内释放，不会空等上限：
 
-| 预算项                                            |    原值 |      调整后 |
-| ------------------------------------------------- | ------: | ----------: |
-| `MAX_PUSHES`（`state.ts`）                        |      10 |      **20** |
-| `FIX_TIME_LIMIT_MS`（`autofix-pr-grants.ts`）     | 30 分钟 | **60 分钟** |
-| `FIX_CLAIM_DEADLINE_MS`（`autofix-pr-grants.ts`） | 40 分钟 | **70 分钟** |
-| `FIX_MAX_AGE_MS`（`fix.ts`）                      | 45 分钟 | **75 分钟** |
+| 预算项                                            |    原值 |       调整后 |
+| ------------------------------------------------- | ------: | -----------: |
+| `MAX_PUSHES`（`state.ts`）                        |      10 |       **20** |
+| `FIX_TIME_LIMIT_MS`（`autofix-pr-grants.ts`）     | 30 分钟 | **240 分钟** |
+| `FIX_CLAIM_DEADLINE_MS`（`autofix-pr-grants.ts`） | 40 分钟 | **250 分钟** |
+| `FIX_MAX_AGE_MS`（`fix.ts`）                      | 45 分钟 | **255 分钟** |
 
 原有安全差值不变量（`FIX_CLAIM_DEADLINE_MS = FIX_TIME_LIMIT_MS + 10 分钟`，`FIX_MAX_AGE_MS = FIX_CLAIM_DEADLINE_MS + 5 分钟`）保持不变。
 
@@ -95,4 +95,4 @@ resolve 线程的写操作严格收敛在确定性 helper
 1. `SKILL.md` 与 `SKILL.test.ts` 明确并钉住默认无方向 + 对抗审计（连续 2 轮干净，上限 5 轮）、本地真实环境验证与清理、禁止本地 `/review`、全覆盖 `review` 正文与可信 `issue_comment` 清账、`--audit` 在 `wait` 时触发、仅对已推修复设 `resolve: true`、`--no-resolve` 与新预算值。
 2. `reply.test.ts` 覆盖 GraphQL 正向 resolve 与全部 fail-closed 跳过原因（`no_post`、`disabled`、`not_pushed`、`head_mismatch`、`already_resolved`、`not_replied`、`new_comment_in_thread`、`graphql_error`、`not_resolved`、`request_failed`）、幂等重试以及 `watch.resolve === false` 强制校验。
 3. `chain.integration.test.ts` 通过 `fake-gh` 端到端证明 `prepare` → `snapshot` → 修复提交 → `push` → `reply` 真实 resolve 已修复线程、保持 declined 线程打开，并在 `--no-resolve` 下不关闭线程。
-4. `schedule.test.ts`、`state.test.ts`、`fix.test.ts` 与 `autofix-pr.test.ts` 覆盖 `watch.resolve` 持久化、`--no-resolve` 经由 `schedule`/`reply`/`autofix_pr` 工具/`BackgroundFix.followUp()` 的全链路透传、旧状态文件兼容以及 20 次推送 / 60-70-75 分钟新预算。
+4. `schedule.test.ts`、`state.test.ts`、`fix.test.ts` 与 `autofix-pr.test.ts` 覆盖 `watch.resolve` 持久化、`--no-resolve` 经由 `schedule`/`reply`/`autofix_pr` 工具/`BackgroundFix.followUp()` 的全链路透传、旧状态文件兼容以及 20 次推送 / 240-250-255 分钟新预算。

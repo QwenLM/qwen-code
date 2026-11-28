@@ -18,7 +18,7 @@ fourth is revised there. Later extensions (2026-11-28,
 [`2026-11-28-autofix-pr-audit-and-resolve.md`](2026-11-28-autofix-pr-audit-and-resolve.md))
 add built-in undirected/adversarial audit and local real-environment
 verification, proactive `--audit`, fail-closed review thread resolution in
-`reply` (`--no-resolve`), and raised budgets (20 pushes, 60/70/75 min fix
+`reply` (`--no-resolve`), and raised budgets (20 pushes, 240/250/255 min fix
 attempt bounds).
 
 ## 1. Problem
