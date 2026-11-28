@@ -505,6 +505,13 @@ describe('tokenLimit with output type', () => {
       expect(tokenLimit('gemini-3-flash-preview', 'output')).toBe(65536);
     });
 
+    it('should return 64K output for Gemini 2.5', () => {
+      expect(tokenLimit('gemini-2.5-pro', 'output')).toBe(65536);
+      expect(tokenLimit('gemini-2.5-flash', 'output')).toBe(65536);
+      expect(tokenLimit('gemini-2.5-flash-lite', 'output')).toBe(65536);
+      expect(tokenLimit('models/gemini-2.5-pro', 'output')).toBe(65536);
+    });
+
     it('should return correct output limits for Claude Opus 4.6 through 4.8', () => {
       expect(tokenLimit('claude-opus-4-6', 'output')).toBe(128_000);
       expect(tokenLimit('claude-opus-4-7', 'output')).toBe(128_000);
@@ -544,7 +551,8 @@ describe('tokenLimit with output type', () => {
     });
 
     it('should return fallback output limits for legacy Gemini', () => {
-      expect(tokenLimit('gemini-2.5-pro', 'output')).toBe(8192);
+      expect(tokenLimit('gemini-2.0-flash', 'output')).toBe(8192);
+      expect(tokenLimit('gemini-1.5-pro', 'output')).toBe(8192);
     });
 
     it('should return fallback output limits for legacy Claude', () => {
