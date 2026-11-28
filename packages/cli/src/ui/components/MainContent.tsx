@@ -23,6 +23,10 @@ import {
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
+import {
+  createQuestionDraftCache,
+  QuestionDraftContext,
+} from '../contexts/question-draft-context.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
@@ -140,6 +144,7 @@ export const MainContent = ({
 }: MainContentProps) => {
   const { version } = useAppContext();
   const uiState = useUIState();
+  const [questionDrafts] = useState(createQuestionDraftCache);
   const transcriptSessionId = uiState.historyManager.sessionId;
   const { allExpanded: fullDetail } = useThoughtExpanded();
   const streamingState = uiState.streamingState;
@@ -478,19 +483,21 @@ export const MainContent = ({
       if (isPending) {
         const ps = pendingStateRef.current;
         return (
-          <VirtualHistoryItem
-            terminalWidth={terminalWidth}
-            mainAreaWidth={mainAreaWidth}
-            availableTerminalHeight={pendingAvailableTerminalHeight}
-            item={{ ...item, id: 0 }}
-            isPending={true}
-            isFocused={!ps.isEditorDialogOpen}
-            activeShellPtyId={ps.activePtyId}
-            embeddedShellFocused={ps.embeddedShellFocused}
-            commands={uiState.slashCommands}
-            sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-            fullDetail={fullDetail}
-          />
+          <QuestionDraftContext.Provider value={questionDrafts}>
+            <VirtualHistoryItem
+              terminalWidth={terminalWidth}
+              mainAreaWidth={mainAreaWidth}
+              availableTerminalHeight={pendingAvailableTerminalHeight}
+              item={{ ...item, id: 0 }}
+              isPending={true}
+              isFocused={!ps.isEditorDialogOpen}
+              activeShellPtyId={ps.activePtyId}
+              embeddedShellFocused={ps.embeddedShellFocused}
+              commands={uiState.slashCommands}
+              sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+              fullDetail={fullDetail}
+            />
+          </QuestionDraftContext.Provider>
         );
       }
       return (
@@ -521,6 +528,7 @@ export const MainContent = ({
       staticAreaMaxItemHeight,
       uiState.slashCommands,
       sourceCopyOffsetsByHistoryItem,
+      questionDrafts,
       fullDetail,
       pendingAvailableTerminalHeight,
       uiState.constrainHeight,

@@ -11,7 +11,14 @@ import {
 } from './AskUserQuestionDialog.js';
 import type { ToolAskUserQuestionConfirmationDetails } from '@qwen-code/qwen-code-core';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
-import { renderWithProviders } from '../../../test-utils/render.js';
+import {
+  renderWithProviders,
+  withProviders,
+} from '../../../test-utils/render.js';
+import {
+  createQuestionDraftCache,
+  QuestionDraftContext,
+} from '../../contexts/question-draft-context.js';
 import stripAnsi from 'strip-ansi';
 
 const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -614,6 +621,64 @@ describe('<AskUserQuestionDialog />', () => {
   });
 
   describe('multi-select interaction', () => {
+    it('restores an unsubmitted answer when the pending question remounts', async () => {
+      const details = createConfirmationDetails({
+        questions: [createSingleQuestion({ multiSelect: true })],
+      });
+      const drafts = createQuestionDraftCache();
+      const question = (request: ToolAskUserQuestionConfirmationDetails) => (
+        <QuestionDraftContext.Provider value={drafts}>
+          <AskUserQuestionDialog
+            confirmationDetails={request}
+            availableWidth={80}
+            onConfirm={request.onConfirm}
+          />
+        </QuestionDraftContext.Provider>
+      );
+      const { stdin, lastFrame, rerender, unmount } = renderWithProviders(
+        question(details),
+      );
+      await wait();
+      stdin.write(' ');
+      await waitForFrame(() =>
+        expect(clean(lastFrame())).toContain('[✓] 1. Red'),
+      );
+      stdin.write('4');
+      await waitForFrame(() =>
+        expect(clean(lastFrame())).toContain('❯ [ ] 4.'),
+      );
+      await wait();
+      for (const character of 'Purple') {
+        await writeText(stdin, character);
+      }
+      const expectDraft = () => {
+        expect(clean(lastFrame())).toContain('[✓] 1. Red');
+        expect(clean(lastFrame())).toContain('❯ [✓] 4. > Purple');
+      };
+      await waitForFrame(expectDraft);
+
+      // Virtualized history unmounts the row when it scrolls out of range.
+      rerender(withProviders(<></>));
+      await waitForFrame(() => expect(clean(lastFrame())).not.toContain('Red'));
+      rerender(withProviders(question(details)));
+      await waitForFrame(expectDraft);
+      await wait();
+      await writeText(stdin, '!');
+      await waitForFrame(() => expect(clean(lastFrame())).toContain('Purple!'));
+      expect(details.onConfirm).not.toHaveBeenCalled();
+
+      rerender(
+        withProviders(
+          question(createConfirmationDetails({ questions: details.questions })),
+        ),
+      );
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('❯ [ ] 1. Red');
+        expect(clean(lastFrame())).not.toContain('Purple');
+      });
+      unmount();
+    });
+
     it('does not auto-submit when pressing number key in multi-select mode', async () => {
       const onConfirm = vi.fn();
       const details = createConfirmationDetails({

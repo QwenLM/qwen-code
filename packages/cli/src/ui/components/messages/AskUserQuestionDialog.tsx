@@ -5,13 +5,17 @@
  */
 
 import type React from 'react';
-import { useRef, useState } from 'react';
+import { useContext, useLayoutEffect, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type {
   ToolAskUserQuestionConfirmationDetails,
   ToolConfirmationPayload,
 } from '@qwen-code/qwen-code-core/tools/tools.js';
+import {
+  QuestionDraftContext,
+  type QuestionDraft,
+} from '../../contexts/question-draft-context.js';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
@@ -55,27 +59,74 @@ interface AskUserQuestionDialogProps {
   ) => Promise<void>;
 }
 
-export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
+export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = (
+  props,
+) => {
+  const pending = useContext(QuestionDraftContext)?.(props.confirmationDetails);
+  return <QuestionForm key={pending?.key} {...props} pending={pending} />;
+};
+
+const QuestionForm = ({
   confirmationDetails,
   isFocused = true,
   availableWidth,
   onConfirm,
-}) => {
-  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  pending,
+}: AskUserQuestionDialogProps & { pending?: { draft?: QuestionDraft } }) => {
+  const draft = pending?.draft;
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(
+    draft?.currentQuestionIndex ?? 0,
+  );
   const [selectedOptions, setSelectedOptions] = useState<
     Record<number, string>
-  >({});
+  >(draft?.selectedOptions ?? {});
   const [customInputValues, setCustomInputValues] = useState<
     Record<number, string>
-  >({});
-  const customInputValuesRef = useRef<Record<number, string>>({});
-  const [selectedIndex, setSelectedIndex] = useState(0);
+  >(draft?.customInputValues ?? {});
+  const customInputValuesRef = useRef(customInputValues);
+  const [selectedIndex, setSelectedIndex] = useState(draft?.selectedIndex ?? 0);
   const [multiSelectedOptions, setMultiSelectedOptions] = useState<
     Record<number, string[]>
-  >({});
+  >(draft?.multiSelectedOptions ?? {});
   const [customInputChecked, setCustomInputChecked] = useState<
     Record<number, boolean>
-  >({});
+  >(draft?.customInputChecked ?? {});
+
+  useLayoutEffect(() => {
+    if (!pending) return;
+    return () => {
+      // TextInput can report its final edit before the parent commits another
+      // render. Read the live value when the row leaves the viewport.
+      const values = customInputValuesRef.current;
+      const latest = values[currentQuestionIndex];
+      const checked =
+        confirmationDetails.questions[currentQuestionIndex]?.multiSelect &&
+        latest !== undefined &&
+        latest !== customInputValues[currentQuestionIndex]
+          ? {
+              ...customInputChecked,
+              [currentQuestionIndex]: latest.trim().length > 0,
+            }
+          : customInputChecked;
+      pending.draft = {
+        currentQuestionIndex,
+        selectedIndex,
+        selectedOptions,
+        multiSelectedOptions,
+        customInputValues: values,
+        customInputChecked: checked,
+      };
+    };
+  }, [
+    pending,
+    currentQuestionIndex,
+    selectedIndex,
+    selectedOptions,
+    multiSelectedOptions,
+    customInputValues,
+    customInputChecked,
+    confirmationDetails,
+  ]);
 
   const hasMultipleQuestions = confirmationDetails.questions.length > 1;
   const totalTabs = hasMultipleQuestions

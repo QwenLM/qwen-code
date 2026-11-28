@@ -124,6 +124,8 @@ Press `Ctrl+R` to search prompt history, or shell history while shell mode is ac
 
 Active when `ui.useTerminalBuffer` is enabled (Settings → UI → Virtualized History), screen reader mode is off, and Qwen Code is running in a compatible interactive terminal (`stdout` is a TTY, CI is inactive, and `TERM` is not `dumb`), which is the default for ordinary non-screen-reader sessions. In that mode conversation history is rendered inside an in-app viewport instead of the host terminal scrollback, so the keys below replace the terminal's native scroll.
 
+You can scroll back to earlier messages while answering a question. When you return to the pending question, your selections and any text you typed are still there.
+
 | Shortcut        | Description                                                                     |
 | --------------- | ------------------------------------------------------------------------------- |
 | `Shift+Up`      | Scroll history up one line.                                                     |
