@@ -2,6 +2,8 @@
 
 将 `qwen serve` 的 HTTP API 封装为 MCP (Model Context Protocol) Server，方便任何支持 MCP 的客户端直接调用。
 
+事件订阅会在空闲超过 30 分钟后被定期清理。正在执行的提示不会因暂时没有文本输出而被清理；提示结束后重新开始计算空闲时间。
+
 ## 快速开始
 
 ### 1. 启动 qwen serve daemon
