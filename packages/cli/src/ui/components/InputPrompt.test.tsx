@@ -7,7 +7,22 @@
 
 import { renderWithProviders, withProviders } from '../../test-utils/render.js';
 import { waitFor, act } from '@testing-library/react';
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
+
+const mockVimMode = vi.hoisted(() => ({
+  vimMode: 'NORMAL' as 'NORMAL' | 'INSERT',
+}));
+
+vi.mock('../contexts/VimModeContext.js', () => ({
+  useVimModeState: () => ({ vimEnabled: true, vimMode: mockVimMode.vimMode }),
+  useVimModeActions: () => ({
+    toggleVimEnabled: vi.fn(),
+    setVimMode: (mode: 'NORMAL' | 'INSERT') => {
+      mockVimMode.vimMode = mode;
+    },
+  }),
+  VimModeProvider: ({ children }: { children: ReactNode }) => children,
+}));
 import type { InputPromptProps } from './InputPrompt.js';
 import {
   InputPrompt,
@@ -47,6 +62,7 @@ import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { StreamingState } from '../types.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
+import { useVim } from '../hooks/vim.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
 import {
   useAgentViewActions,
@@ -4834,6 +4850,30 @@ describe('InputPrompt', () => {
       expect(mockBuffer.handleInput).toHaveBeenCalled();
       unmount();
     });
+
+    it.each(['NORMAL', 'INSERT'] as const)(
+      'opens the external editor on Ctrl+X with the real vim handler in %s mode',
+      async (mode) => {
+        mockVimMode.vimMode = mode;
+        const VimPrompt = () => {
+          const vim = useVim(mockBuffer as TextBuffer, vi.fn());
+          return <InputPrompt {...props} vimHandleInput={vim.handleInput} />;
+        };
+
+        const { stdin, unmount } = renderWithProviders(<VimPrompt />);
+        await wait();
+        if (mode === 'INSERT') {
+          stdin.write('i');
+          await wait();
+        }
+
+        stdin.write('\x18');
+        await wait();
+
+        expect(mockBuffer.openInExternalEditor).toHaveBeenCalled();
+        unmount();
+      },
+    );
 
     it('should call handleInput when vim mode is disabled', async () => {
       // Mock vimHandleInput to return false (vim didn't handle the input)
