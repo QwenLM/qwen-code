@@ -2,7 +2,7 @@
 
 [English](2026-11-27-verify-pr-adversarial-and-guard-gates.md) | [简体中文](2026-11-27-verify-pr-adversarial-and-guard-gates.zh-CN.md)
 
-- **Status**: Implemented and locally verified
+- **Status**: Implemented (PR #18549, merged 2026-11-28, `940e9b7925`)
 - **Date**: 2026-11-27
 
 ## Problem Statement
