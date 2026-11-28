@@ -138,7 +138,8 @@ public final class WorkspaceRuntimeResolver {
                 .orElseThrow(WorkspaceExecutionStore::unavailable);
         if (authority.isExternal(session.workspace())) {
             if (hook || managedExtensions.isEnabled() || externalRegistrations == null
-                    || !"session".equals(boundSessionIsolationClass)) {
+                    || !java.util.Set.of("session", "workspace")
+                            .contains(boundSessionIsolationClass)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
             authority.authorizeExternal(session, lifecycle);
@@ -150,7 +151,9 @@ public final class WorkspaceRuntimeResolver {
             }
             return new Resolved(saved, new RuntimeScope(session.tenantId(), saved.getWorkspaceId(),
                     Long.toString(saved.getWorkspaceGeneration()), registered.mountRoot(),
-                    WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session").withLifecycleAuthority(lifecycle));
+                    WorkspaceExecutionProfile.CAPABILITY_DIGEST,
+                    boundSessionIsolationClass)
+                    .withLifecycleAuthority(lifecycle));
         }
         if (lifecycle == null && hook && "CLOSING".equals(session.status())) {
             authority.authorizeLegacyClose(session);

@@ -72,6 +72,7 @@ public class ManagedAgentProperties
     private final Memory memory = new Memory();
     private final ToolPublication toolPublication = new ToolPublication();
     private final SessionResources sessionResources = new SessionResources();
+    private final SessionResourceGc sessionResourceGc = new SessionResourceGc();
     private final ObjectStorage objectStorage = new ObjectStorage();
     private final Artifacts artifacts = new Artifacts();
     private final Extensions extensions = new Extensions();
@@ -442,11 +443,13 @@ public class ManagedAgentProperties
             throw new IllegalStateException("Bound-Session isolation must be session or workspace");
         }
         if ("workspace".equals(boundSessionIsolation)
+                && !ExternalRuntimeKinds.isWorkspace(runtimeBroker.getProvisioner())
                 && (!RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
                         || !runtimeBroker.isDurableLocalProcess()
                         || runtimeBroker.isChildWorkspacesEnabled())) {
-            throw new IllegalStateException("Workspace-isolated bound Sessions require a durable"
-                    + " local-process Broker and cannot combine with child Workspaces");
+            throw new IllegalStateException("Workspace-isolated bound Sessions require a"
+                    + " durable local-process or external-workspace Broker and cannot"
+                    + " combine with child Workspaces");
         }
         // Under Session isolation, which SSH-bound Sessions always use, a
         // create warm would start one worker per unused Session and
@@ -850,6 +853,16 @@ public class ManagedAgentProperties
 
     @Getter
     @Setter
+    public static class SessionResourceGc {
+        private boolean enabled;
+        private boolean workerEnabled = true;
+        private String endpoints = "";
+        private String topic = "";
+        private String consumerGroup = "";
+    }
+
+    @Getter
+    @Setter
     public static class ObjectStorage {
         private boolean enabled;
     }
@@ -961,9 +974,6 @@ public class ManagedAgentProperties
         private boolean enabled;
         private final Retention retention = new Retention();
         private final McpParking mcpParking = new McpParking();
-        private String host = "127.0.0.1";
-        private int port = 4182;
-        private boolean allowNonLoopback;
         private String token = "";
         private Map<String, String> providerOptions = Map.of();
         private String provisioner = RuntimeProviderKinds.LOCAL_PROCESS;

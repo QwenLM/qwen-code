@@ -221,6 +221,7 @@ export class RestSseTransport implements DaemonTransport {
         opts.onEpoch?.(responseEpoch);
       }
 
+      opts.onEventStreamReady?.();
       yield* parseSseStream(res.body, fetchSignal);
     } finally {
       requestCtrl.abort();

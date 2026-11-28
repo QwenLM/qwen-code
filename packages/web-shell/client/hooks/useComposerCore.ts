@@ -74,8 +74,9 @@ import {
   pushInputHistoryEntry,
   useInputHistory,
 } from '../hooks/useInputHistory';
-import { subscribeSidechannelRemotePrompt } from '../daemon/remotePromptSidechannel';
+import { subscribeSidechannelRemotePrompt } from '../utils/remote-prompt-sidechannel';
 import type { DaemonInputHistoryKind } from '../daemon/workspace/types';
+import { MAX_INPUT_HISTORY_ENTRY_CHARS } from '@qwen-code/qwen-code-core/utils/input-history.js';
 import {
   useAtMentionMenu,
   type AtMentionMenuState,
@@ -1678,7 +1679,12 @@ export interface MobileComposerBackend {
   expandedTextareaRef: React.RefObject<HTMLTextAreaElement | null>;
   value: string;
   onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => void;
-  onBlur: () => void;
+  onSelect?: (event: React.SyntheticEvent<HTMLTextAreaElement>) => void;
+  onKeyDown?: (event: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  onBlur: (
+    event?: React.FocusEvent<HTMLTextAreaElement>,
+    options?: { keepSlashMenu?: boolean },
+  ) => void;
   placeholder: string;
 }
 
@@ -1907,6 +1913,12 @@ export function useComposerCore(
   );
   const mobileTextRef = useRef(mobileText);
   const mobileTextVersionRef = useRef(0);
+  const mobileSelectionRef = useRef<[number, number]>([
+    mobileText.length,
+    mobileText.length,
+  ]);
+  const pendingMobileCaretRef = useRef<number | null>(null);
+  const composingRef = useRef(false);
   const restoredInputAnnotationsRef = useRef<DaemonInputAnnotation[]>([]);
   const skipNextRestoredAnnotationMappingRef = useRef(false);
   const draftIdentityRef = useRef({
@@ -3179,6 +3191,7 @@ export function useComposerCore(
   const [slashMenu, setSlashMenuState] = useState<SlashMenuState | null>(null);
   const slashMenuRef = useRef<SlashMenuState | null>(null);
   const dismissedSlashMenuRef = useRef<EditorState['doc'] | null>(null);
+  const dismissedMobileSlashVersionRef = useRef<number | null>(null);
 
   // True while the user is paging through input history with the arrow keys
   // and has not typed since. Unlike history.isNavigating() (which stays set
@@ -3293,15 +3306,164 @@ export function useComposerCore(
     closeAtMenuState();
   }, [clearAutoAtTriggerIfIntact, closeAtMenuState]);
 
+  const getMobileSelection = useCallback(
+    (el: HTMLTextAreaElement | null, text: string): [number, number] => {
+      if (el && el.value === text) {
+        const start = el.selectionStart ?? text.length;
+        const end = el.selectionEnd ?? start;
+        return [start, end];
+      }
+      const [start, end] = mobileSelectionRef.current;
+      return [
+        Math.max(0, Math.min(start, text.length)),
+        Math.max(0, Math.min(end, text.length)),
+      ];
+    },
+    [],
+  );
+
+  const refreshSlashMenuForLine = useCallback(
+    (
+      lineText: string,
+      lineFrom: number,
+      cursorInLine: number,
+      preferredIndex?: number,
+    ) => {
+      if (disabledRef.current || shellModeRef.current) {
+        setSlashMenu(null);
+        return;
+      }
+      // While browsing history, a recalled slash command (e.g. "/theme")
+      // should not pop its argument menu — the user is browsing, not composing.
+      // Editing the line re-arms it (historyBrowseActiveRef clears on edit).
+      if (historyBrowseActiveRef.current) {
+        setSlashMenu(null);
+        return;
+      }
+      if (!lineText.startsWith('/')) {
+        setSlashMenu(null);
+        return;
+      }
+      const relativeResult = getSlashCommandCompletionResult(
+        lineText,
+        cursorInLine,
+        commandsRef.current,
+        skillsRef.current,
+        languageRef.current,
+        (key) => tRef.current(key),
+        slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
+        allowEmptySlashMenuRef.current,
+        slashArgumentCompleterRef.current,
+      );
+      if (!relativeResult) {
+        setSlashMenu(null);
+        return;
+      }
+      const result = {
+        ...relativeResult,
+        from: lineFrom + relativeResult.from,
+        to: lineFrom + relativeResult.to,
+      };
+      closeAtMenu();
+      const currentIndex =
+        preferredIndex ?? slashMenuRef.current?.selectedIndex ?? 0;
+      const selectedIndex = Math.max(
+        0,
+        Math.min(currentIndex, result.items.length - 1),
+      );
+      setSlashMenu({ ...result, selectedIndex });
+    },
+    [closeAtMenu, setSlashMenu],
+  );
+
+  const refreshSlashMenuForMobile = useCallback(
+    (
+      text: string,
+      selectionStart: number,
+      selectionEnd: number,
+      preferredIndex?: number,
+    ) => {
+      if (
+        disabledRef.current ||
+        shellModeRef.current ||
+        historyBrowseActiveRef.current ||
+        expandedTextareaRef.current !== null ||
+        selectionStart !== selectionEnd
+      ) {
+        setSlashMenu(null);
+        return;
+      }
+      const safeCursor = Math.max(0, Math.min(selectionStart, text.length));
+      const lineStart =
+        safeCursor === 0 ? 0 : text.lastIndexOf('\n', safeCursor - 1) + 1;
+      const nextNewline = text.indexOf('\n', safeCursor);
+      const lineEnd = nextNewline === -1 ? text.length : nextNewline;
+      refreshSlashMenuForLine(
+        text.slice(lineStart, lineEnd),
+        lineStart,
+        safeCursor - lineStart,
+        preferredIndex,
+      );
+    },
+    [refreshSlashMenuForLine, setSlashMenu],
+  );
+
   const openSlashMenu = useCallback(() => {
     const view = viewRef.current;
     if (
-      !view ||
+      (!view && !isTouchComposer) ||
       disabledRef.current ||
       shellModeRef.current ||
       historyBrowseActiveRef.current
     ) {
       return false;
+    }
+    if (!view) {
+      if (expandedTextareaRef.current !== null) return false;
+      closeAtMenu();
+      const currentText = mobileTextRef.current;
+      const [, end] = getMobileSelection(
+        mobileTextareaRef.current,
+        currentText,
+      );
+      let cursor = end;
+      const lineStart =
+        cursor === 0 ? 0 : currentText.lastIndexOf('\n', cursor - 1) + 1;
+      const nextNewline = currentText.indexOf('\n', cursor);
+      const lineEnd = nextNewline === -1 ? currentText.length : nextNewline;
+      let lineText = currentText.slice(lineStart, lineEnd);
+      let activeLineStart = lineStart;
+      if (!lineText.startsWith('/')) {
+        if (currentText.length > 0) return false;
+        cursor = 1;
+        lineText = '/';
+        activeLineStart = 0;
+        mobileSelectionRef.current = [1, 1];
+        pendingMobileCaretRef.current = 1;
+        setMobileText('/');
+      }
+      const relativeResult = getSlashCommandCompletionResult(
+        lineText,
+        cursor - activeLineStart,
+        commandsRef.current,
+        skillsRef.current,
+        languageRef.current,
+        tRef.current,
+        slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
+        allowEmptySlashMenuRef.current,
+        slashArgumentCompleterRef.current,
+      );
+      if (!relativeResult) return false;
+      dismissedSlashMenuRef.current = null;
+      dismissedMobileSlashVersionRef.current = null;
+      setSlashMenu({
+        ...relativeResult,
+        from: activeLineStart + relativeResult.from,
+        to: activeLineStart + relativeResult.to,
+        selectedIndex: 0,
+      });
+      mobileTextareaRef.current?.focus();
+      return true;
     }
     closeAtMenu();
     let cursor = view.state.selection.main.head;
@@ -3328,13 +3490,20 @@ export function useComposerCore(
     );
     if (!result) return false;
     dismissedSlashMenuRef.current = null;
+    dismissedMobileSlashVersionRef.current = null;
     setSlashMenu({
       ...result,
       selectedIndex: 0,
     });
     view.focus();
     return true;
-  }, [closeAtMenu, setSlashMenu]);
+  }, [
+    closeAtMenu,
+    getMobileSelection,
+    isTouchComposer,
+    setMobileText,
+    setSlashMenu,
+  ]);
 
   const closeAtMenuIfOpenFn = atMenu.closeIfOpen;
   const closeAtMenuIfOpen = useCallback(() => {
@@ -3348,14 +3517,7 @@ export function useComposerCore(
 
   const refreshSlashMenuForView = useCallback(
     (view: EditorView | null, preferredIndex?: number) => {
-      if (!view || disabledRef.current || shellModeRef.current) {
-        setSlashMenu(null);
-        return;
-      }
-      // While browsing history, a recalled slash command (e.g. "/theme")
-      // should not pop its argument menu — the user is browsing, not composing.
-      // Editing the line re-arms it (historyBrowseActiveRef clears on edit).
-      if (historyBrowseActiveRef.current) {
+      if (!view) {
         setSlashMenu(null);
         return;
       }
@@ -3365,63 +3527,64 @@ export function useComposerCore(
         return;
       }
       const line = view.state.doc.lineAt(selection.head);
-      if (!line.text.startsWith('/')) {
-        setSlashMenu(null);
-        return;
-      }
-      const relativeResult = getSlashCommandCompletionResult(
+      refreshSlashMenuForLine(
         line.text,
+        line.from,
         selection.head - line.from,
-        commandsRef.current,
-        skillsRef.current,
-        languageRef.current,
-        (key) => tRef.current(key),
-        slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
-        allowEmptySlashMenuRef.current,
-        slashArgumentCompleterRef.current,
+        preferredIndex,
       );
-      if (!relativeResult) {
-        setSlashMenu(null);
-        return;
-      }
-      const result = {
-        ...relativeResult,
-        from: line.from + relativeResult.from,
-        to: line.from + relativeResult.to,
-      };
-      closeAtMenu();
-      const currentIndex =
-        preferredIndex ?? slashMenuRef.current?.selectedIndex ?? 0;
-      const selectedIndex = Math.max(
-        0,
-        Math.min(currentIndex, result.items.length - 1),
-      );
-      setSlashMenu({ ...result, selectedIndex });
     },
-    [closeAtMenu, setSlashMenu],
+    [refreshSlashMenuForLine, setSlashMenu],
   );
 
   // New argument data (a workspace's sessions arrived): recompute the menu
   // for a command being typed.
   useEffect(() => {
+    if (!slashArgumentCompleter) return;
     const view = viewRef.current;
-    if (
-      !view?.hasFocus ||
-      !slashArgumentCompleter ||
-      dismissedSlashMenuRef.current === view.state.doc
-    )
+    if (!view) {
+      if (
+        !isTouchComposer ||
+        expandedTextareaRef.current !== null ||
+        dismissedMobileSlashVersionRef.current === mobileTextVersionRef.current
+      ) {
+        return;
+      }
+      const el = mobileTextareaRef.current;
+      if (!el || el.ownerDocument.activeElement !== el) return;
+      const text = mobileTextRef.current;
+      const [start, end] = getMobileSelection(el, text);
+      if (start !== end) return;
+      const safeCursor = Math.max(0, Math.min(start, text.length));
+      const lineStart =
+        safeCursor === 0 ? 0 : text.lastIndexOf('\n', safeCursor - 1) + 1;
+      if (slashArgumentCompleter(text.slice(lineStart, safeCursor))) {
+        refreshSlashMenuForMobile(text, start, end);
+      }
+      return;
+    }
+    if (!view.hasFocus || dismissedSlashMenuRef.current === view.state.doc)
       return;
     const { head } = view.state.selection.main;
     const line = view.state.doc.lineAt(head);
     if (slashArgumentCompleter(line.text.slice(0, head - line.from))) {
       refreshSlashMenuForView(view);
     }
-  }, [refreshSlashMenuForView, slashArgumentCompleter]);
+  }, [
+    getMobileSelection,
+    isTouchComposer,
+    refreshSlashMenuForMobile,
+    refreshSlashMenuForView,
+    slashArgumentCompleter,
+  ]);
 
   const closeSlashMenu = useCallback(() => {
     dismissedSlashMenuRef.current = viewRef.current?.state.doc ?? null;
+    dismissedMobileSlashVersionRef.current = isTouchComposer
+      ? mobileTextVersionRef.current
+      : null;
     setSlashMenu(null);
-  }, [setSlashMenu]);
+  }, [isTouchComposer, setSlashMenu]);
 
   const selectSlashCompletion = useCallback(
     (index: number) => {
@@ -3456,9 +3619,40 @@ export function useComposerCore(
     (index?: number, submit = false) => {
       const view = viewRef.current;
       const current = slashMenuRef.current;
-      if (!view || !current) return false;
+      if ((!view && !isTouchComposer) || !current) return false;
       const item = current.items[index ?? current.selectedIndex];
       if (!item) return false;
+      if (!view) {
+        const currentText = mobileTextRef.current;
+        const from = Math.max(0, Math.min(current.from, currentText.length));
+        const to = Math.max(from, Math.min(current.to, currentText.length));
+        const commandReplacesEntireDraft =
+          from === 0 && to === currentText.length;
+        const nextText =
+          currentText.slice(0, from) + item.apply + currentText.slice(to);
+        const nextCaret = from + item.apply.length;
+        historyBrowseActiveRef.current = false;
+        dismissedMobileSlashVersionRef.current = null;
+        mobileSelectionRef.current = [nextCaret, nextCaret];
+        if (nextText !== currentText) {
+          pendingMobileCaretRef.current = nextCaret;
+          setMobileText(nextText);
+        } else {
+          pendingMobileCaretRef.current = null;
+          mobileTextareaRef.current?.setSelectionRange(nextCaret, nextCaret);
+        }
+        refreshSlashMenuForMobile(nextText, nextCaret, nextCaret, 0);
+        mobileTextareaRef.current?.focus();
+        if (
+          submit &&
+          autoSubmitSlashCommands &&
+          item.autoSubmit &&
+          commandReplacesEntireDraft
+        ) {
+          submitTextRef.current(null);
+        }
+        return true;
+      }
       const commandReplacesEntireDraft =
         current.from === 0 && current.to === view.state.doc.length;
       view.dispatch({
@@ -3477,7 +3671,12 @@ export function useComposerCore(
       }
       return true;
     },
-    [autoSubmitSlashCommands],
+    [
+      autoSubmitSlashCommands,
+      isTouchComposer,
+      refreshSlashMenuForMobile,
+      setMobileText,
+    ],
   );
 
   // Track whether editor has content for send button state
@@ -3605,6 +3804,9 @@ export function useComposerCore(
           });
         } else if (isTouchComposer && mobileTextRef.current !== draft.text) {
           setMobileText(draft.text);
+          mobileSelectionRef.current = [draft.text.length, draft.text.length];
+          pendingMobileCaretRef.current = null;
+          setSlashMenu(null);
           restoredInputAnnotationsRef.current = draft.inputAnnotations;
         }
       } finally {
@@ -3656,6 +3858,8 @@ export function useComposerCore(
       inputHistoryTarget.workspaceId === undefined) ||
       promptHistoryStorageKey ===
         getPromptHistoryStorageKey(inputHistoryTarget.workspaceCwd));
+  const remoteHistoryEnabledRef = useRef(remoteHistoryEnabled);
+  remoteHistoryEnabledRef.current = remoteHistoryEnabled;
   const shellRemoteHistoryEnabled =
     shellModeEnabled &&
     inputHistoryTarget !== undefined &&
@@ -3982,10 +4186,109 @@ export function useComposerCore(
       // browsing so the draft starts persisting again. Programmatic restores
       // go through setMobileText, never this handler.
       historyBrowseActiveRef.current = false;
-      setMobileText(event.target.value);
+      dismissedMobileSlashVersionRef.current = null;
+      pendingMobileCaretRef.current = null;
+      const target = event.target;
+      const nextValue = target.value;
+      setMobileText(nextValue);
+      if (target === expandedTextareaRef.current) {
+        setSlashMenu(null);
+        return;
+      }
+      const start = target.selectionStart ?? nextValue.length;
+      const end = target.selectionEnd ?? start;
+      mobileSelectionRef.current = [start, end];
+      refreshSlashMenuForMobile(nextValue, start, end);
     },
-    [setMobileText],
+    [refreshSlashMenuForMobile, setMobileText, setSlashMenu],
   );
+
+  const handleMobileSelect = useCallback(
+    (event: React.SyntheticEvent<HTMLTextAreaElement>) => {
+      const target = event.currentTarget;
+      if (target === expandedTextareaRef.current) return;
+      const start = target.selectionStart ?? target.value.length;
+      const end = target.selectionEnd ?? start;
+      const [prevStart, prevEnd] = mobileSelectionRef.current;
+      mobileSelectionRef.current = [start, end];
+      if (start === prevStart && end === prevEnd) return;
+      refreshSlashMenuForMobile(target.value, start, end);
+    },
+    [refreshSlashMenuForMobile],
+  );
+
+  const handleMobileKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (event.currentTarget === expandedTextareaRef.current) return;
+      if (
+        composingRef.current ||
+        event.nativeEvent.isComposing ||
+        event.keyCode === 229
+      ) {
+        return;
+      }
+      const current = slashMenuRef.current;
+      if (!current) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeSlashMenu();
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        moveSlashCompletionSelection('up');
+        return;
+      }
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        moveSlashCompletionSelection('down');
+        return;
+      }
+      if (event.key === 'Tab') {
+        if (acceptSlashCompletion()) {
+          event.preventDefault();
+        }
+        return;
+      }
+      if (
+        event.key === 'Enter' &&
+        !event.shiftKey &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey
+      ) {
+        if (acceptSlashCompletion(undefined, true)) {
+          event.preventDefault();
+        } else if (current.items.length === 0) {
+          event.preventDefault();
+        }
+      }
+    },
+    [acceptSlashCompletion, closeSlashMenu, moveSlashCompletionSelection],
+  );
+
+  const handleMobileBlur = useCallback(
+    (
+      _event?: React.FocusEvent<HTMLTextAreaElement>,
+      options?: { keepSlashMenu?: boolean },
+    ) => {
+      saveCurrentDraftRef.current();
+      if (!options?.keepSlashMenu) {
+        closeSlashMenu();
+      }
+    },
+    [closeSlashMenu],
+  );
+
+  useLayoutEffect(() => {
+    if (!isTouchComposer) return;
+    const caret = pendingMobileCaretRef.current;
+    if (caret === null) return;
+    pendingMobileCaretRef.current = null;
+    const el = mobileTextareaRef.current;
+    if (!el || el.value !== mobileText) return;
+    el.setSelectionRange(caret, caret);
+  }, [isTouchComposer, mobileText]);
 
   // Grow to the content's height and let CSS max-height apply the cap,
   // including percentage bounds and host overrides. Parsing a CSS percentage
@@ -4310,6 +4613,8 @@ export function useComposerCore(
         });
       } else {
         setMobileText('');
+        mobileSelectionRef.current = [0, 0];
+        pendingMobileCaretRef.current = null;
       }
     };
     const accepted = onSubmitRef.current(
@@ -5281,6 +5586,11 @@ export function useComposerCore(
         });
       } else if (!view) {
         setMobileText(nextText);
+        if (!adoptUnscopedInMemoryDraft) {
+          mobileSelectionRef.current = [nextText.length, nextText.length];
+          pendingMobileCaretRef.current = null;
+          setSlashMenu(null);
+        }
       }
       restoreDraftAttachments(composerDraftStorageKey);
     }
@@ -5311,6 +5621,7 @@ export function useComposerCore(
     sessionId,
     setComposerTags,
     setMobileText,
+    setSlashMenu,
     syncDraftAttachments,
     forgetDraftAttachments,
     restoreDraftAttachments,
@@ -5434,23 +5745,42 @@ export function useComposerCore(
 
   useEffect(() => {
     if (slashMenuRef.current) {
-      refreshSlashMenuForView(viewRef.current);
+      if (isTouchComposer) {
+        const text = mobileTextRef.current;
+        const [start, end] = getMobileSelection(
+          mobileTextareaRef.current,
+          text,
+        );
+        refreshSlashMenuForMobile(text, start, end);
+      } else {
+        refreshSlashMenuForView(viewRef.current);
+      }
     }
   }, [
+    isTouchComposer,
+    getMobileSelection,
     slashMenuDataKey,
     language,
+    refreshSlashMenuForMobile,
     refreshSlashMenuForView,
     allowEmptySlashMenu,
   ]);
 
   useEffect(() => {
-    const view = viewRef.current;
-    if (!view) return;
+    if (disabled || shellMode) {
+      closeSlashMenu();
+    }
+  }, [closeSlashMenu, disabled, shellMode]);
+
+  useEffect(() => {
     if (dialogOpen) {
       closeSlashMenu();
       closeAtMenu();
-      view.contentDOM.blur();
-    } else if (!isCoarsePointerDevice()) {
+      viewRef.current?.contentDOM.blur();
+      return;
+    }
+    const view = viewRef.current;
+    if (view && !isCoarsePointerDevice()) {
       view.focus();
     }
   }, [closeAtMenu, dialogOpen, closeSlashMenu]);
@@ -5602,16 +5932,20 @@ export function useComposerCore(
         const el = expandedTextareaRef.current ?? mobileTextareaRef.current;
         if (text) {
           historyBrowseActiveRef.current = false;
+          dismissedMobileSlashVersionRef.current = null;
+          let nextText: string;
+          let caret: number;
           if (options?.mode === 'replace') {
-            setMobileText(text);
+            nextText = text;
+            caret = text.length;
+            setMobileText(nextText);
           } else {
-            // No slash/at menus on the textarea backend: '/' and '@' are
-            // inserted literally and interpreted from the submitted text.
             const current = mobileTextRef.current;
             const start = el ? el.selectionStart : current.length;
             const end = el ? el.selectionEnd : current.length;
-            const caret = start + text.length;
-            setMobileText(current.slice(0, start) + text + current.slice(end));
+            caret = start + text.length;
+            nextText = current.slice(0, start) + text + current.slice(end);
+            setMobileText(nextText);
             // A controlled textarea resets the caret to the end when its
             // value changes; put it back after React re-renders, matching
             // the CodeMirror path's explicit selection anchor.
@@ -5623,6 +5957,15 @@ export function useComposerCore(
             } else {
               window.setTimeout(restoreCaret, 0);
             }
+          }
+          if (
+            expandedTextareaRef.current !== null &&
+            el === expandedTextareaRef.current
+          ) {
+            setSlashMenu(null);
+          } else {
+            mobileSelectionRef.current = [caret, caret];
+            refreshSlashMenuForMobile(nextText, caret, caret);
           }
         }
         el?.focus();
@@ -5709,12 +6052,13 @@ export function useComposerCore(
       closeSlashMenu,
       isTouchComposer,
       refreshAtMenuForView,
+      refreshSlashMenuForMobile,
       refreshSlashMenuForView,
       setMobileText,
+      setSlashMenu,
     ],
   );
 
-  const composingRef = useRef(false);
   const setComposing = useCallback((active: boolean) => {
     composingRef.current = active;
   }, []);
@@ -5844,13 +6188,40 @@ export function useComposerCore(
     return viewRef.current?.state.doc.toString() ?? '';
   }, [isTouchComposer]);
 
+  const saveCurrentDraftToHistory = useCallback(() => {
+    if (!composerMountedRef.current || shellModeRef.current) return;
+    const text = getText().trim();
+    if (!text) return;
+    historyActionsRef.current.push(text, { keepLocalOnRemoteMiss: true });
+
+    if (
+      !remoteHistoryEnabledRef.current ||
+      text.length > MAX_INPUT_HISTORY_ENTRY_CHARS
+    ) {
+      return;
+    }
+    const target = inputHistoryTargetRef.current;
+    const recordInputHistory =
+      workspaceRef.current?.actions?.recordInputHistory;
+    if (!target || typeof recordInputHistory !== 'function') return;
+    void recordInputHistory({
+      kind: 'prompt',
+      entry: text,
+      workspaceId: target.workspaceId,
+    }).catch(() => {});
+  }, [getText]);
+
   const setText = useCallback(
     (text: string) => {
       if (isTouchComposer) {
         // Unlike the CodeMirror path, no focus: on touch devices a
         // programmatic focus would pop the virtual keyboard unexpectedly.
         historyBrowseActiveRef.current = false;
+        dismissedMobileSlashVersionRef.current = null;
+        mobileSelectionRef.current = [text.length, text.length];
+        pendingMobileCaretRef.current = null;
         setMobileText(text);
+        refreshSlashMenuForMobile(text, text.length, text.length);
         return;
       }
       const view = viewRef.current;
@@ -5875,7 +6246,7 @@ export function useComposerCore(
       });
       view.focus();
     },
-    [isTouchComposer, setMobileText],
+    [isTouchComposer, refreshSlashMenuForMobile, setMobileText],
   );
 
   const removeInlineTags = useCallback(
@@ -5916,6 +6287,9 @@ export function useComposerCore(
       }
       if (clearTextOpt && isTouchComposer) {
         setMobileText('');
+        mobileSelectionRef.current = [0, 0];
+        pendingMobileCaretRef.current = null;
+        setSlashMenu(null);
       }
       if (clearTextOpt) {
         restoredInputAnnotationsRef.current = [];
@@ -5938,6 +6312,7 @@ export function useComposerCore(
       resetImageIngestion,
       setComposerTags,
       setMobileText,
+      setSlashMenu,
     ],
   );
 
@@ -6118,6 +6493,9 @@ export function useComposerCore(
     (text: string) => {
       if (isTouchComposer) {
         setMobileText(text);
+        mobileSelectionRef.current = [text.length, text.length];
+        pendingMobileCaretRef.current = null;
+        setSlashMenu(null);
         return;
       }
       const view = viewRef.current;
@@ -6128,7 +6506,7 @@ export function useComposerCore(
         scrollIntoView: true,
       });
     },
-    [isTouchComposer, setMobileText],
+    [isTouchComposer, setMobileText, setSlashMenu],
   );
 
   // ---- composerInput sync ----
@@ -6179,6 +6557,9 @@ export function useComposerCore(
       if (input.text !== undefined) {
         historyBrowseActiveRef.current = false;
         setMobileText(input.text);
+        mobileSelectionRef.current = [input.text.length, input.text.length];
+        pendingMobileCaretRef.current = null;
+        setSlashMenu(null);
       }
       let submitTimer: number | null = null;
       if (input.submit) {
@@ -6252,6 +6633,7 @@ export function useComposerCore(
     resolveComposerTagIcon,
     setComposerTags,
     setMobileText,
+    setSlashMenu,
     submit,
   ]);
 
@@ -6531,6 +6913,7 @@ export function useComposerCore(
       hasAttachments,
       hasInput,
       setText,
+      saveCurrentDraftToHistory,
       addTags,
       removeTag: removeTopTag,
       insertText,
@@ -6554,6 +6937,7 @@ export function useComposerCore(
     restoreFiles,
     restoreInputAnnotations,
     retryLast,
+    saveCurrentDraftToHistory,
     setText,
     submit,
   ]);
@@ -6568,7 +6952,9 @@ export function useComposerCore(
           expandedTextareaRef: expandedTextareaCallbackRef,
           value: mobileText,
           onChange: handleMobileChange,
-          onBlur: () => saveCurrentDraftRef.current(),
+          onSelect: handleMobileSelect,
+          onKeyDown: handleMobileKeyDown,
+          onBlur: handleMobileBlur,
           placeholder: composerPlaceholder,
         }
       : null,

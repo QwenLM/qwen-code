@@ -158,6 +158,13 @@ public class BrokerSecurity {
                             + " from server.port; the surface routing is"
                             + " port-based.");
         }
+        if (properties.getRuntimeBroker().isEnabled() && !publicLoopback
+                && internal.getPort() <= 0) {
+            throw new IllegalStateException(
+                    "qwen.managed-agent.runtime-broker.enabled requires an"
+                            + " isolated qwen.managed-agent.internal-server.port"
+                            + " when server.address is not loopback.");
+        }
         // The trusted channel adapter surface authenticates by the tenant
         // header alone, so its only protection is an isolated internal
         // listener; enabling it on the shared listener is refused here.

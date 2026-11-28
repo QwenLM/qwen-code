@@ -115,8 +115,7 @@ import type {
   WebShellUnavailableModelTooltipMount,
 } from '../unavailableModels';
 import { appendUnavailableComposerModels } from '../utils/composerModels';
-import { VoiceButton, type VoiceButtonHandle } from '../voice/VoiceButton';
-import { LiveVoiceButton } from '../live/LiveVoiceButton';
+import type { VoiceButtonHandle } from '../voice/VoiceButton';
 import type {
   VoiceStatusRevision,
   VoiceWorkspaceTarget,
@@ -127,10 +126,8 @@ import {
   gitBranchAriaLabel,
 } from './GitBranchIndicator';
 import { GitModePopover, type SessionGitIntent } from './GitModePopover';
-import {
-  BranchPickerPopover,
-  type BranchPickerPreservedState,
-} from './BranchPickerPopover';
+import type { BranchPickerPreservedState } from './BranchPickerPopover';
+import type { ComposerIntegrations } from './composer/composer-integrations';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
   ArrowDownIcon,
@@ -421,6 +418,7 @@ interface ChatEditorProps {
   composerTagIcons?: WebShellComposerTagIconMap;
   voiceTarget?: VoiceWorkspaceTarget;
   voiceStatusRevision?: VoiceStatusRevision;
+  composerIntegrations?: ComposerIntegrations;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** Click a pasted image in the composer to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
@@ -1109,6 +1107,16 @@ function ToolbarPopover({
   }, [open, submenuOpen, mobileSheet]);
 
   const hasCheckItems = hasRichItems || showCheck;
+  const pickerHeader = pickerContext && modelPicker?.mountHeader && (
+    <ModelPickerContent
+      key={scopeKey}
+      mount={modelPicker.mountHeader}
+      context={pickerContext}
+      overlayRoot={overlayRoot}
+      revision={modelPicker}
+      className={styles.modelPickerContent}
+    />
+  );
   const dropdownItems = (
     <div
       className={`${styles.dropdownList} ${
@@ -1119,6 +1127,7 @@ function ToolbarPopover({
             : ''
       } ${searchable ? styles.dropdownListConstrained : ''}`}
     >
+      {mobileSheet && pickerHeader}
       {visibleItems.map((item) => (
         <ToolbarDropdownRow
           key={JSON.stringify([scopeKey, item.id])}
@@ -1167,7 +1176,9 @@ function ToolbarPopover({
       aria-label={searchLabel}
       placeholder={searchLabel}
       autoComplete="off"
-      className={touchSearchField ? 'h-11 text-base md:text-base' : undefined}
+      className={
+        touchSearchField ? 'h-11 min-h-11 text-base md:text-base' : undefined
+      }
       autoCapitalize={touchSearchField ? 'off' : undefined}
       autoCorrect={touchSearchField ? 'off' : undefined}
       spellCheck={touchSearchField ? false : undefined}
@@ -1183,16 +1194,7 @@ function ToolbarPopover({
   ) : null;
   const searchableItems = (
     <>
-      {pickerContext && modelPicker?.mountHeader && (
-        <ModelPickerContent
-          key={scopeKey}
-          mount={modelPicker.mountHeader}
-          context={pickerContext}
-          overlayRoot={overlayRoot}
-          revision={modelPicker}
-          className={styles.modelPickerContent}
-        />
-      )}
+      {!mobileSheet && pickerHeader}
       {searchable &&
         (searchAction ? (
           <div className={styles.dropdownSearch}>
@@ -1249,7 +1251,7 @@ function ToolbarPopover({
           <div
             ref={sheetBodyRef}
             tabIndex={-1}
-            className="min-h-0 overflow-y-auto px-3 outline-none"
+            className={`min-h-0 px-3 outline-none ${submenu ? 'overflow-y-auto' : 'flex flex-col overflow-clip'}`}
             data-vaul-no-drag
           >
             {header}
@@ -1287,7 +1289,7 @@ function ToolbarPopover({
                   ref={sheetListRef}
                   tabIndex={-1}
                   data-web-shell-model-sheet-list
-                  className="absolute inset-x-3 bottom-[calc(100%+8px)] max-h-[60vh] overflow-y-auto rounded-xl border bg-popover p-2 shadow-lg outline-none"
+                  className="absolute inset-x-3 bottom-[calc(100%+8px)] flex max-h-[60vh] flex-col overflow-clip rounded-xl border bg-popover p-2 shadow-lg outline-none"
                   data-vaul-no-drag
                   onClick={(event) => event.stopPropagation()}
                 >
@@ -1653,6 +1655,9 @@ function SlashCommandPanel({
   panelRef,
   detailRef,
   compact,
+  mobile,
+  onPanelInteractStart,
+  onPanelInteractEnd,
   onClose,
   onSelect,
   onAccept,
@@ -1666,15 +1671,23 @@ function SlashCommandPanel({
   panelRef: RefObject<HTMLDivElement | null>;
   detailRef: RefObject<HTMLDivElement | null>;
   compact?: boolean;
+  mobile?: boolean;
+  onPanelInteractStart?: () => void;
+  onPanelInteractEnd?: () => void;
   onClose: () => void;
   onSelect: (index: number) => boolean;
   onAccept: (index?: number) => boolean;
 }) {
   const { t } = useI18n();
+  const stacked = Boolean(compact || mobile);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const listRef = useRef<HTMLDivElement>(null);
   const hoverAnchorRef = useRef<HTMLButtonElement>(null);
   const [collisionBoundary, setCollisionBoundary] =
     useState<HTMLElement | null>(null);
+  const [viewportMaxHeight, setViewportMaxHeight] = useState<
+    number | undefined
+  >(undefined);
   const [hoverDetail, setHoverDetail] = useState<{
     label: string;
     extensionName?: string;
@@ -1697,10 +1710,24 @@ function SlashCommandPanel({
   }, [commands]);
 
   useEffect(() => {
-    itemRefs.current[menu.selectedIndex]?.scrollIntoView({
+    const item = itemRefs.current[menu.selectedIndex];
+    if (!item) return;
+    if (mobile) {
+      const list = listRef.current;
+      if (!list || list.clientHeight === 0) return;
+      const listRect = list.getBoundingClientRect();
+      const itemRect = item.getBoundingClientRect();
+      if (itemRect.top < listRect.top) {
+        list.scrollTop += itemRect.top - listRect.top;
+      } else if (itemRect.bottom > listRect.bottom) {
+        list.scrollTop += itemRect.bottom - listRect.bottom;
+      }
+      return;
+    }
+    item.scrollIntoView({
       block: 'nearest',
     });
-  }, [menu.items, menu.selectedIndex]);
+  }, [menu.items, menu.selectedIndex, mobile]);
 
   useEffect(() => {
     setHoverDetail(null);
@@ -1711,6 +1738,61 @@ function SlashCommandPanel({
       anchorRef.current?.closest<HTMLElement>('[data-web-shell-root]') ?? null,
     );
   }, [anchorRef]);
+
+  const updateViewportMaxHeight = useCallback(() => {
+    if (!mobile) {
+      setViewportMaxHeight(undefined);
+      return;
+    }
+    const anchor = anchorRef.current;
+    const vv = window.visualViewport;
+    if (!anchor || !vv) {
+      setViewportMaxHeight(undefined);
+      return;
+    }
+    const rect = anchor.getBoundingClientRect();
+    if (rect.height === 0 && rect.top === 0) {
+      setViewportMaxHeight(undefined);
+      return;
+    }
+    // On iOS Safari the virtual keyboard overlays the layout viewport and
+    // shifts visualViewport.offsetTop; cap the menu to the visible room
+    // above the composer so the top Skills rows stay on screen.
+    const visibleAbove = rect.top - Math.max(0, vv.offsetTop);
+    const next = Math.max(POPOVER_MIN_HEIGHT, Math.floor(visibleAbove - 24));
+    setViewportMaxHeight((prev) => (prev === next ? prev : next));
+  }, [anchorRef, mobile]);
+
+  useLayoutEffect(() => {
+    if (!mobile) {
+      setViewportMaxHeight(undefined);
+      return;
+    }
+    if (anchorRef.current) {
+      updateViewportMaxHeight();
+    }
+  }, [anchorRef, mobile, updateViewportMaxHeight]);
+
+  useEffect(() => {
+    if (!mobile) return;
+    updateViewportMaxHeight();
+    const vv = window.visualViewport;
+    vv?.addEventListener('resize', updateViewportMaxHeight);
+    vv?.addEventListener('scroll', updateViewportMaxHeight);
+    window.addEventListener('resize', updateViewportMaxHeight);
+    const anchor = anchorRef.current;
+    const observer =
+      anchor && typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(updateViewportMaxHeight)
+        : null;
+    if (anchor && observer) observer.observe(anchor);
+    return () => {
+      vv?.removeEventListener('resize', updateViewportMaxHeight);
+      vv?.removeEventListener('scroll', updateViewportMaxHeight);
+      window.removeEventListener('resize', updateViewportMaxHeight);
+      observer?.disconnect();
+    };
+  }, [anchorRef, mobile, updateViewportMaxHeight]);
 
   useEffect(() => {
     const preserveImeEscape = (event: KeyboardEvent) => {
@@ -1759,15 +1841,16 @@ function SlashCommandPanel({
           ref={panelRef}
           side="top"
           align="start"
-          alignOffset={compact ? 0 : 16}
-          sideOffset={compact ? 6 : 8}
+          alignOffset={stacked ? 0 : 16}
+          sideOffset={stacked ? 6 : 8}
           avoidCollisions={compact}
-          collisionPadding={compact ? 8 : 12}
+          collisionPadding={stacked ? 8 : 12}
           collisionBoundary={collisionBoundary ?? undefined}
           className="duration-0 data-open:animate-none data-closed:animate-none"
           role={menu.items.length > 0 ? 'listbox' : undefined}
           data-web-shell-slash-menu
-          data-web-shell-compact-overlay={compact ? '' : undefined}
+          data-web-shell-compact-overlay={stacked ? '' : undefined}
+          data-web-shell-mobile-slash-menu={mobile ? '' : undefined}
           onOpenAutoFocus={(event) => event.preventDefault()}
           onCloseAutoFocus={(event) => event.preventDefault()}
           onInteractOutside={(event) => {
@@ -1780,7 +1863,18 @@ function SlashCommandPanel({
               event.preventDefault();
             }
           }}
-          onMouseDown={(event) => event.preventDefault()}
+          onPointerDown={() => onPanelInteractStart?.()}
+          onPointerUp={() => onPanelInteractEnd?.()}
+          onPointerCancel={() => onPanelInteractEnd?.()}
+          onTouchStart={() => onPanelInteractStart?.()}
+          onTouchEnd={() => onPanelInteractEnd?.()}
+          onTouchCancel={() => onPanelInteractEnd?.()}
+          onMouseDown={(event) => {
+            onPanelInteractStart?.();
+            event.preventDefault();
+          }}
+          onMouseUp={() => onPanelInteractEnd?.()}
+          onClick={(event) => event.stopPropagation()}
           onMouseLeave={(event) => {
             const nextTarget = event.relatedTarget;
             if (
@@ -1792,7 +1886,16 @@ function SlashCommandPanel({
             setHoverDetail(null);
           }}
         >
-          <div className={styles.slashPanel}>
+          <div
+            className={styles.slashPanel}
+            style={
+              viewportMaxHeight !== undefined
+                ? ({
+                    '--slash-panel-viewport-max-height': `${viewportMaxHeight}px`,
+                  } as CSSProperties)
+                : undefined
+            }
+          >
             {menu.items.length === 0 && (loading || loadError) && (
               <div
                 role="status"
@@ -1803,6 +1906,7 @@ function SlashCommandPanel({
             )}
             <div className={styles.slashPanelBody}>
               <div
+                ref={listRef}
                 className={styles.slashList}
                 onScroll={() => setHoverDetail(null)}
               >
@@ -1848,11 +1952,12 @@ function SlashCommandPanel({
                             : ''
                         }`}
                         onMouseEnter={(event) => {
+                          if (mobile) return;
                           onSelect(index);
                           const detail = item.detail?.trim()
                             ? item.detail
                             : undefined;
-                          if ((!detail && !display.extensionName) || compact) {
+                          if ((!detail && !display.extensionName) || stacked) {
                             setHoverDetail(null);
                             return;
                           }
@@ -1884,6 +1989,11 @@ function SlashCommandPanel({
                           });
                         }}
                         onMouseDown={(event) => {
+                          onPanelInteractStart?.();
+                          event.preventDefault();
+                          event.stopPropagation();
+                        }}
+                        onClick={(event) => {
                           event.preventDefault();
                           event.stopPropagation();
                           onAccept(index);
@@ -1913,7 +2023,7 @@ function SlashCommandPanel({
         </PopoverContent>
       </Popover>
       <Popover
-        open={!compact && Boolean(hoverDetail)}
+        open={!stacked && Boolean(hoverDetail)}
         onOpenChange={(open) => {
           if (!open) setHoverDetail(null);
         }}
@@ -2093,6 +2203,7 @@ export const ChatEditor = memo(
       composerTagIcons,
       voiceTarget,
       voiceStatusRevision,
+      composerIntegrations,
       onImageIngestionNotice,
       onImagePreview,
       onAttachmentPreview,
@@ -2814,8 +2925,24 @@ export const ChatEditor = memo(
     const [mobileFocused, setMobileFocused] = useState(false);
     const [expandedEditor, setExpandedEditor] = useState(false);
     const expandedSelectionRef = useRef<[number, number]>([0, 0]);
+    const BranchPickerPopoverComponent =
+      composerIntegrations?.BranchPickerPopover;
+    const VoiceButtonComponent = composerIntegrations?.VoiceButton;
+    const LiveVoiceButtonComponent = composerIntegrations?.LiveVoiceButton;
+
     const [liveVoiceOpen, setLiveVoiceOpen] = useState(false);
     const [liveVoiceSupported, setLiveVoiceSupported] = useState(false);
+    useEffect(() => {
+      if (!VoiceButtonComponent) {
+        setVoiceActive(false);
+      }
+    }, [VoiceButtonComponent]);
+    useEffect(() => {
+      if (!LiveVoiceButtonComponent) {
+        setLiveVoiceOpen(false);
+        setLiveVoiceSupported(false);
+      }
+    }, [LiveVoiceButtonComponent]);
     useEffect(() => {
       setExpandedEditor(false);
     }, [sessionId, atWorkspaceCwd, disabled]);
@@ -2908,6 +3035,39 @@ export const ChatEditor = memo(
     }, [onSkillsOpenChange, skillsOpen]);
     const hasAtMenu = Boolean(atMenu);
     const editorViewRef = core.viewRef;
+    const slashPanelPointerActiveRef = useRef(false);
+    const slashPanelPointerTimerRef = useRef<number | null>(null);
+    const clearSlashPanelPointerState = useCallback(() => {
+      if (slashPanelPointerTimerRef.current !== null) {
+        window.clearTimeout(slashPanelPointerTimerRef.current);
+        slashPanelPointerTimerRef.current = null;
+      }
+      slashPanelPointerActiveRef.current = false;
+    }, []);
+    const markSlashPanelPointerStart = useCallback(() => {
+      if (slashPanelPointerTimerRef.current !== null) {
+        window.clearTimeout(slashPanelPointerTimerRef.current);
+        slashPanelPointerTimerRef.current = null;
+      }
+      slashPanelPointerActiveRef.current = true;
+    }, []);
+    const markSlashPanelPointerEnd = useCallback(() => {
+      if (slashPanelPointerTimerRef.current !== null) {
+        window.clearTimeout(slashPanelPointerTimerRef.current);
+      }
+      // iOS Safari can blur the textarea between touchend and synthetic click;
+      // keep the menu open across that brief gap so tapping a skill registers.
+      slashPanelPointerTimerRef.current = window.setTimeout(() => {
+        slashPanelPointerTimerRef.current = null;
+        slashPanelPointerActiveRef.current = false;
+      }, 400);
+    }, []);
+    useEffect(() => {
+      if (!hasSlashMenu) {
+        clearSlashPanelPointerState();
+      }
+    }, [clearSlashPanelPointerState, hasSlashMenu]);
+    useEffect(() => clearSlashPanelPointerState, [clearSlashPanelPointerState]);
 
     useEffect(() => {
       if (!hasSlashMenu && !hasAtMenu) return;
@@ -3273,8 +3433,11 @@ export const ChatEditor = memo(
     const workspaceIndicatorVisible = Boolean(
       workspaceName && showToolbarAction('workspace'),
     );
+    const hasGitBranchControl =
+      Boolean(gitModeIntent && onGitModeIntentChange) ||
+      Boolean(BranchPickerPopoverComponent);
     const gitBranchVisible = Boolean(
-      gitBranch && showToolbarAction('gitBranch'),
+      gitBranch && showToolbarAction('gitBranch') && hasGitBranchControl,
     );
     // Both chips say where the prompt goes rather than how it runs, so a caller
     // can move them out of the toolbar without touching their availability.
@@ -3361,8 +3524,8 @@ export const ChatEditor = memo(
             draft={gitModeDraft}
             onDraftChange={setGitModeDraft}
           />
-        ) : (
-          <BranchPickerPopover
+        ) : BranchPickerPopoverComponent ? (
+          <BranchPickerPopoverComponent
             open={activeContextMenu === 'branch'}
             onOpenChange={(open) => setContextMenuOpen('branch', open)}
             preservedStateRef={branchPickerPreservedStateRef}
@@ -3390,8 +3553,8 @@ export const ChatEditor = memo(
                 worktree={gitWorktree}
               />
             </button>
-          </BranchPickerPopover>
-        )
+          </BranchPickerPopoverComponent>
+        ) : null
       ) : null;
     const renderGitBranchMeasure = (
       compact: boolean,
@@ -3471,7 +3634,8 @@ export const ChatEditor = memo(
       !isSimple &&
       !mobileVoiceActive &&
       gitBranchVisible &&
-      !(gitModeIntent && onGitModeIntentChange);
+      !(gitModeIntent && onGitModeIntentChange) &&
+      Boolean(BranchPickerPopoverComponent);
 
     useEffect(() => {
       if (activeContextMenu !== 'workspace') setWorkspaceNewSubOpen(false);
@@ -3819,6 +3983,9 @@ export const ChatEditor = memo(
           !core.shellMode)) && (
         <AddMenu
           simpleMode={isSimple}
+          onOpenChange={(open) => {
+            if (open) core.closeSlashMenu();
+          }}
           key={JSON.stringify([sessionId, atWorkspaceCwd, Boolean(disabled)])}
           disabled={disabled}
           commandsOnly={!showAddMenuAction}
@@ -3834,7 +4001,9 @@ export const ChatEditor = memo(
                   },
                   shellMode: core.shellMode,
                   onLiveVoice:
-                    liveVoiceSupported && showToolbarAction('voice')
+                    liveVoiceSupported &&
+                    Boolean(LiveVoiceButtonComponent) &&
+                    showToolbarAction('voice')
                       ? () => setLiveVoiceOpen(true)
                       : undefined,
                 }
@@ -4483,11 +4652,24 @@ export const ChatEditor = memo(
               onChange={core.mobileComposer.onChange}
               onCompositionStart={() => core.setComposing(true)}
               onCompositionEnd={() => core.setComposing(false)}
-              onSelect={() => core.resetVerticalColumn()}
-              onFocus={() => setMobileFocused(true)}
-              onBlur={() => {
+              onSelect={(event) => {
+                core.resetVerticalColumn();
+                core.mobileComposer?.onSelect?.(event);
+              }}
+              onKeyDown={core.mobileComposer.onKeyDown}
+              onFocus={() => {
+                clearSlashPanelPointerState();
+                setMobileFocused(true);
+              }}
+              onBlur={(event) => {
                 setMobileFocused(false);
-                core.mobileComposer?.onBlur();
+                const nextTarget = event.relatedTarget;
+                const keepSlashMenu =
+                  slashPanelPointerActiveRef.current ||
+                  (nextTarget instanceof Node &&
+                    (slashPanelRef.current?.contains(nextTarget) ||
+                      slashDetailRef.current?.contains(nextTarget)));
+                core.mobileComposer?.onBlur(event, { keepSlashMenu });
               }}
               placeholder={core.mobileComposer.placeholder}
               disabled={core.disabled}
@@ -4564,47 +4746,52 @@ export const ChatEditor = memo(
               )}
             {!isSimple && toolbarSecondary}
             {modeToggle}
-            {showToolbarAction('voice') && (
-              <>
-                <LiveVoiceButton
-                  portalContainer={liveVoicePortalContainer}
-                  hideInactiveTrigger={
-                    isSimple || (isMobile && Boolean(showAddMenuAction))
-                  }
-                  open={liveVoiceOpen}
-                  onOpenChange={setLiveVoiceOpen}
-                  onSupportedChange={setLiveVoiceSupported}
-                  onRequestFocusFallback={() => {
-                    containerRef.current
-                      ?.querySelector<HTMLButtonElement>(
-                        '[data-testid="composer-add-menu-trigger"]',
-                      )
-                      ?.focus();
-                  }}
-                />
-                <span
-                  data-web-shell-simple-voice={isSimple ? '' : undefined}
-                  hidden={
-                    isSimple &&
-                    (core.hasContent || isRunning || composerPreparing) &&
-                    !voiceActive
-                  }
-                  style={{
-                    // Inline display must not override [hidden] in simple mode.
-                    display: !isSimple ? 'contents' : undefined,
-                  }}
-                >
-                  <VoiceButton
-                    ref={voiceButtonRef}
-                    disabled={disabled}
-                    onActiveChange={setVoiceActive}
-                    target={voiceTarget}
-                    statusRevision={voiceStatusRevision}
-                    onInsert={(text) => insertVoiceTextRef.current(text)}
-                  />
-                </span>
-              </>
-            )}
+            {showToolbarAction('voice') &&
+              (LiveVoiceButtonComponent || VoiceButtonComponent) && (
+                <>
+                  {LiveVoiceButtonComponent && (
+                    <LiveVoiceButtonComponent
+                      portalContainer={liveVoicePortalContainer}
+                      hideInactiveTrigger={
+                        isSimple || (isMobile && Boolean(showAddMenuAction))
+                      }
+                      open={liveVoiceOpen}
+                      onOpenChange={setLiveVoiceOpen}
+                      onSupportedChange={setLiveVoiceSupported}
+                      onRequestFocusFallback={() => {
+                        containerRef.current
+                          ?.querySelector<HTMLButtonElement>(
+                            '[data-testid="composer-add-menu-trigger"]',
+                          )
+                          ?.focus();
+                      }}
+                    />
+                  )}
+                  {VoiceButtonComponent && (
+                    <span
+                      data-web-shell-simple-voice={isSimple ? '' : undefined}
+                      hidden={
+                        isSimple &&
+                        (core.hasContent || isRunning || composerPreparing) &&
+                        !voiceActive
+                      }
+                      style={{
+                        // Inline display must not override [hidden] in simple mode.
+                        display: !isSimple ? 'contents' : undefined,
+                      }}
+                    >
+                      <VoiceButtonComponent
+                        ref={voiceButtonRef}
+                        disabled={disabled}
+                        onActiveChange={setVoiceActive}
+                        target={voiceTarget}
+                        statusRevision={voiceStatusRevision}
+                        onInsert={(text) => insertVoiceTextRef.current(text)}
+                      />
+                    </span>
+                  )}
+                </>
+              )}
             {(isMobile || isSimple) &&
               isRunning &&
               (core.hasContent || voiceActive) && (
@@ -5178,9 +5365,15 @@ export const ChatEditor = memo(
                 panelRef={slashPanelRef}
                 detailRef={slashDetailRef}
                 compact={compactOverlays}
+                mobile={isMobile}
+                onPanelInteractStart={markSlashPanelPointerStart}
+                onPanelInteractEnd={markSlashPanelPointerEnd}
                 onClose={core.closeSlashMenu}
                 onSelect={core.selectSlashCompletion}
-                onAccept={(index) => core.acceptSlashCompletion(index, true)}
+                onAccept={(index) => {
+                  clearSlashPanelPointerState();
+                  return core.acceptSlashCompletion(index, true);
+                }}
               />
             )}
             {core.atMenu && (
@@ -5289,9 +5482,11 @@ export const ChatEditor = memo(
                       aria-hidden={!mobileFocused}
                       aria-label={t('composerMobile.hideKeyboard')}
                       onMouseDown={(event) => event.preventDefault()}
-                      onClick={() =>
-                        core.mobileComposer?.textareaRef.current?.blur()
-                      }
+                      onClick={() => {
+                        clearSlashPanelPointerState();
+                        core.closeSlashMenu();
+                        core.mobileComposer?.textareaRef.current?.blur();
+                      }}
                     >
                       <KeyboardIcon />
                     </button>
@@ -5308,6 +5503,7 @@ export const ChatEditor = memo(
                           textarea?.selectionStart ?? 0,
                           textarea?.selectionEnd ?? 0,
                         ];
+                        core.closeSlashMenu();
                         setExpandedEditor(true);
                       }}
                     >

@@ -20,8 +20,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.DispatchTarget;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.EventPage;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.MaterializationResult;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.MaterializationTarget;
@@ -32,15 +30,12 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionKey;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SyncRename;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -59,23 +54,21 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 
 @Repository
 @Qualifier("managedAgentTransactionManager")
 public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentStateStore {
     private final AgentEventJournal eventJournal;
-    private final AgentSessionQueries sessionQueries;
     private final AgentMessageProjection messageProjection;
     private final AgentSessionPolicies sessionPolicies;
     private final AgentSessionCommands sessionCommands;
     private final AgentLifecycleOperations lifecycleOperations;
     private final AgentSessionAdmissions sessionAdmissions;
     private final AgentTurnExecution turnExecution;
+    private final AgentTurnHandOff turnHandOff;
     private final AgentActionParking actionParking;
     private final AgentExecutionOperations executionOperations;
 
@@ -132,27 +125,17 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
     }
 
     private ManagedAgentStore(ManagedStoreAssembly assembly) {
-        super(assembly.sessionAdmissions(), assembly.sessionCommands(), assembly.sessionQueries());
+        super(assembly.sessionAdmissions(), assembly.sessionCommands(), assembly.sessionQueries(), assembly.eventJournal());
         this.eventJournal = assembly.eventJournal();
-        this.sessionQueries = assembly.sessionQueries();
         this.messageProjection = assembly.messageProjection();
         this.sessionPolicies = assembly.sessionPolicies();
         this.sessionCommands = assembly.sessionCommands();
         this.lifecycleOperations = assembly.lifecycleOperations();
         this.sessionAdmissions = assembly.sessionAdmissions();
         this.turnExecution = assembly.turnExecution();
+        this.turnHandOff = assembly.turnHandOff();
         this.actionParking = assembly.actionParking();
         this.executionOperations = assembly.executionOperations();
-    }
-
-    @Override
-    public JdbcSessionWorktreeStore.Descriptor findSessionWorktree(String tenantId, String sessionId) {
-        return sessionQueries.findSessionWorktree(tenantId, sessionId);
-    }
-
-    @Override
-    public Map<String, JdbcSessionWorktreeStore.Descriptor> findSessionWorktrees(String tenantId, List<String> sessionIds) {
-        return sessionQueries.findSessionWorktrees(tenantId, sessionIds);
     }
 
     @Override
@@ -305,11 +288,6 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
     }
 
     @Override
-    public String findChildWorkspaceCwd(String tenantId, String parentSessionId, String childRunId) {
-        return sessionQueries.findChildWorkspaceCwd(tenantId, parentSessionId, childRunId);
-    }
-
-    @Override
     @Transactional
     public Admission insertPublicChildSessionCommand(String tenantId, String parentSessionId,
             String idempotencyKey, String requestDigest, String title, List<Map<String, Object>> input,
@@ -323,11 +301,6 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
             String parentSessionId, String idempotencyKey,
             String requestDigest) {
         return sessionAdmissions.replayChildSessionCommand(tenantId, parentSessionId, idempotencyKey, requestDigest);
-    }
-
-    @Override
-    public StoreModels.SessionLineage findChildLineage(String tenantId, String sessionId) {
-        return sessionQueries.findChildLineage(tenantId, sessionId);
     }
 
     @Override
@@ -483,16 +456,6 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
     }
 
     @Override
-    public boolean hasCompletedWorkspaceClose(String tenantId, String sessionId) {
-        return sessionQueries.hasCompletedWorkspaceClose(tenantId, sessionId);
-    }
-
-    @Override
-    public Set<String> completedWorkspaceCloses(String tenantId, List<String> sessionIds) {
-        return sessionQueries.completedWorkspaceCloses(tenantId, sessionIds);
-    }
-
-    @Override
     @Transactional
     public SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId, String actorId, String scopedKey, String requestDigest) {
         return lifecycleOperations.unarchiveWorkspaceSession(tenantId, sessionId, actorId, scopedKey, requestDigest);
@@ -627,16 +590,6 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
     }
 
     @Override
-    public boolean hasExecutionRegistryFacts(String tenantId, String sessionId) {
-        return sessionQueries.hasExecutionRegistryFacts(tenantId, sessionId);
-    }
-
-    @Override
-    public Set<String> sessionsWithExecutionRegistryFacts(String tenantId, Collection<String> sessionIds) {
-        return sessionQueries.sessionsWithExecutionRegistryFacts(tenantId, sessionIds);
-    }
-
-    @Override
     public Optional<OperationRecord> findOperation(String tenantId, String sessionId, String operationId) {
         return lifecycleOperations.findOperation(tenantId, sessionId, operationId);
     }
@@ -758,37 +711,6 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
             boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported,
             boolean liveSupported, Map<String, List<String>> requestedRules, boolean rulesSupported, boolean autoSupported) {
         return sessionPolicies.changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision, supported, agentDefinitionSupported, requestedPlanMode, planModeSupported, liveSupported, requestedRules, rulesSupported, autoSupported);
-    }
-
-    @Override
-    public TurnPage listTurns(String tenantId, String sessionId, Long beforeCreatedAt, String beforeTurnId, int limit) {
-        return sessionQueries.listTurns(tenantId, sessionId, beforeCreatedAt, beforeTurnId, limit);
-    }
-
-    @Override
-    public Optional<TurnSummary> findTurnSummary(String tenantId, String sessionId, String turnId) {
-        return sessionQueries.findTurnSummary(tenantId, sessionId, turnId);
-    }
-
-    public List<EventRecord> findEvents(String tenantId, String sessionId, long afterSequence, int limit) {
-        return eventJournal.findEvents(tenantId, sessionId, afterSequence, limit);
-    }
-
-    public Map<SessionKey, Long> findEventTails(Collection<SessionKey> sessions) {
-        return eventJournal.findEventTails(sessions);
-    }
-
-    public Map<String, EventRecord> findLatestEnvironmentEvents(
-            String tenantId, Map<String, TurnSummary> latestTurns) {
-        return eventJournal.findLatestEnvironmentEvents(tenantId, latestTurns);
-    }
-
-    public List<EventRecord> findControlEvents(String tenantId, String sessionId, long throughSequence) {
-        return eventJournal.findControlEvents(tenantId, sessionId, throughSequence);
-    }
-
-    public EventPage findTranscriptEvents(String tenantId, String sessionId, Long beforeSequence, int limit) {
-        return eventJournal.findTranscriptEvents(tenantId, sessionId, beforeSequence, limit);
     }
 
     @Override
@@ -942,6 +864,15 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
         turnExecution.recordAdmission(tenantId, sessionId, turnId, owner, eventEpoch, lastEventId);
     }
 
+    @Override
+    @Transactional
+    public boolean recordAdmissionHandOff(String tenantId, String sessionId,
+            String turnId, String owner, String eventEpoch, long lastEventId,
+            String harnessOwner, Duration leaseDuration) {
+        return turnHandOff.recordAdmissionHandOff(tenantId, sessionId, turnId, owner,
+                eventEpoch, lastEventId, harnessOwner, leaseDuration);
+    }
+
     @Transactional
     public void recordRecoveryAdmission(String tenantId, String sessionId,
             String turnId, String owner, String expectedTurnEventEpoch,
@@ -1018,15 +949,6 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
             String sessionId, String type, Map<String, Object> data,
             String sourceKey) {
         eventJournal.appendLiveSessionEventIfAbsent(tenantId, sessionId, type, data, sourceKey);
-    }
-
-    @Override
-    public Optional<String> findLastVisibleStatusBeforeDelete(String tenantId, String sessionId) {
-        return sessionQueries.findLastVisibleStatusBeforeDelete(tenantId, sessionId);
-    }
-
-    public SessionRecord requireSession(String tenantId, String sessionId) {
-        return sessionQueries.requireSession(tenantId, sessionId);
     }
 
     public static ContextBinding readBinding(ResultSet result)

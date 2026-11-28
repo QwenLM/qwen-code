@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 
-import { act, createRef, type ComponentProps } from 'react';
+import {
+  act,
+  createRef,
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  type ComponentProps,
+} from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonWorkspaceGitStatus,
@@ -26,6 +33,7 @@ import {
   TOUCH_COMPOSER_QUERY,
 } from '../hooks/useIsTouchComposer';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import type { ComposerIntegrations } from './composer/composer-integrations';
 import styles from './ChatEditor.module.css';
 import type { VoiceButtonHandle } from '../voice/VoiceButton';
 import type {
@@ -56,31 +64,7 @@ const mockComposerCoreState = vi.hoisted(() => ({
   removeTopTag: vi.fn(),
 }));
 
-// Stand in for the branch picker so the tests can assert what the composer
-// hands it (the git status behind its action hints) without driving Radix.
-vi.mock('./BranchPickerPopover', async () => {
-  const { createElement } = await import('react');
-  return {
-    BranchPickerPopover: ({
-      children,
-      status,
-    }: {
-      children?: unknown;
-      status?: { operation?: string; unstaged?: number };
-    }) =>
-      createElement(
-        'div',
-        {
-          'data-testid': 'branch-picker',
-          'data-status-operation': status?.operation ?? undefined,
-          'data-status-unstaged': status?.unstaged ?? undefined,
-        },
-        children,
-      ),
-  };
-});
-
-// Mock useWorkspace so BranchPickerPopover can render without a real provider.
+// Mock useWorkspace for workspace-aware composer helpers without a real provider.
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   const actual =
     await importOriginal<
@@ -175,6 +159,7 @@ const composerCoreState = vi.hoisted(() => ({
   slashMenu: null as SlashMenuState | null,
   focus: vi.fn(),
   closeSlashMenu: vi.fn(),
+  acceptSlashCompletion: vi.fn(),
   mobileComposer: null as unknown,
   followupState: { isVisible: false, suggestion: '' } as {
     isVisible: boolean;
@@ -358,7 +343,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         slashMenu: composerCoreState.slashMenu,
         closeSlashMenu: composerCoreState.closeSlashMenu,
         selectSlashCompletion: vi.fn(),
-        acceptSlashCompletion: vi.fn(),
+        acceptSlashCompletion: composerCoreState.acceptSlashCompletion,
         atMenu: null,
         closeAtMenu: vi.fn(),
         selectAtCompletion: vi.fn(),
@@ -372,46 +357,44 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
   };
 });
 
-vi.mock('../voice/VoiceButton', async () => {
-  const React = await import('react');
-  return {
-    VoiceButton: ({
-      ref,
-      onActiveChange,
-    }: {
-      ref?: React.Ref<VoiceButtonHandle>;
-      onActiveChange?: (active: boolean) => void;
-    }) => {
-      voiceButtonState.onActiveChange = onActiveChange;
-      React.useImperativeHandle(
-        ref,
-        () => ({ flush: voiceButtonState.flush }),
-        [],
-      );
-      return <span data-testid="voice-button" />;
-    },
-  };
+const liveVoiceState = { supported: false };
+
+const TestBranchPickerPopover: NonNullable<
+  ComposerIntegrations['BranchPickerPopover']
+> = ({ children, status }) => (
+  <div
+    data-testid="branch-picker"
+    data-status-operation={status?.operation ?? undefined}
+    data-status-unstaged={status?.unstaged ?? undefined}
+  >
+    {children}
+  </div>
+);
+
+const TestVoiceButton = forwardRef<
+  VoiceButtonHandle,
+  ComponentProps<NonNullable<ComposerIntegrations['VoiceButton']>>
+>(function TestVoiceButton({ onActiveChange }, ref) {
+  voiceButtonState.onActiveChange = onActiveChange;
+  useImperativeHandle(ref, () => ({ flush: voiceButtonState.flush }), []);
+  return <span data-testid="voice-button" />;
 });
 
-const liveVoiceState = vi.hoisted(() => ({ supported: false }));
-vi.mock('../live/LiveVoiceButton', async () => {
-  const React = await import('react');
-  return {
-    LiveVoiceButton: ({
-      open,
-      onSupportedChange,
-    }: {
-      open?: boolean;
-      onSupportedChange?: (supported: boolean) => void;
-    }) => {
-      const supported = liveVoiceState.supported;
-      React.useEffect(() => {
-        onSupportedChange?.(supported);
-      }, [onSupportedChange, supported]);
-      return <span data-testid="live-voice-button" data-open={open} />;
-    },
-  };
-});
+const TestLiveVoiceButton: NonNullable<
+  ComposerIntegrations['LiveVoiceButton']
+> = ({ open, onSupportedChange }) => {
+  const supported = liveVoiceState.supported;
+  useEffect(() => {
+    onSupportedChange?.(supported);
+  }, [onSupportedChange, supported]);
+  return <span data-testid="live-voice-button" data-open={open} />;
+};
+
+const TEST_COMPOSER_INTEGRATIONS: ComposerIntegrations = {
+  BranchPickerPopover: TestBranchPickerPopover,
+  VoiceButton: TestVoiceButton,
+  LiveVoiceButton: TestLiveVoiceButton,
+};
 
 const mounted: Array<{
   root: Root;
@@ -431,6 +414,7 @@ afterEach(() => {
   composerCoreState.expandPastedText.mockReset();
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
+  composerCoreState.acceptSlashCompletion.mockReset();
   composerCoreState.mobileComposer = null;
   composerCoreState.followupState = { isVisible: false, suggestion: '' };
   composerCoreState.onAcceptFollowup.mockReset();
@@ -555,6 +539,7 @@ interface ChatEditorRenderProps
   skillsLoaded?: boolean;
   reasoning?: DaemonReasoningControls;
   onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
+  composerIntegrations?: ComposerIntegrations;
 }
 
 function renderChatEditorInto(
@@ -572,6 +557,10 @@ function renderChatEditorInto(
     onComposerTagClick,
     ...chatEditorProps
   } = props;
+  const resolvedIntegrations =
+    'composerIntegrations' in props
+      ? props.composerIntegrations
+      : TEST_COMPOSER_INTEGRATIONS;
   if (composerTags) {
     mockComposerCoreState.composerTags = composerTags;
   }
@@ -600,6 +589,7 @@ function renderChatEditorInto(
               currentMode="default"
               currentModel="qwen"
               {...chatEditorProps}
+              composerIntegrations={resolvedIntegrations}
             />
           </I18nProvider>
         </WebShellCustomizationProvider>
@@ -6434,6 +6424,195 @@ describe('ChatEditor mobile composer actions', () => {
     ).toBeNull();
   });
 
+  it('renders mobile slash menu with stacked layout, accepts on click across iOS touch-blur, and closes on expand/hide/add', async () => {
+    const backend = mobileComposer('/ver');
+    composerCoreState.slashMenu = {
+      kind: 'command',
+      query: 'ver',
+      from: 0,
+      to: 4,
+      selectedIndex: 0,
+      items: [
+        {
+          id: 'verify-pr',
+          label: '/verify-pr',
+          apply: '/verify-pr ',
+          type: 'skill',
+          category: 'skill',
+          section: 'Skills',
+          detail: 'Verify a pull request',
+        },
+      ],
+    };
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      skills: [{ name: 'verify-pr', description: 'Verify a pull request' }],
+    });
+
+    const panel = document.querySelector<HTMLElement>(
+      '[data-web-shell-slash-menu]',
+    );
+    expect(panel).not.toBeNull();
+    expect(panel?.hasAttribute('data-web-shell-mobile-slash-menu')).toBe(true);
+    expect(panel?.hasAttribute('data-web-shell-compact-overlay')).toBe(true);
+
+    const option = panel!.querySelector<HTMLButtonElement>('[role="option"]')!;
+    expect(option.textContent).toContain('/verify-pr');
+
+    // Touch hover must not spawn desktop detail popovers on mobile.
+    act(() => {
+      option.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    });
+    expect(document.querySelector('[data-web-shell-slash-detail]')).toBeNull();
+
+    // Simulate iOS tap: touchstart -> touchend -> textarea blur(relatedTarget: null) -> mousedown -> click.
+    const textarea = container.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-composer-editor]',
+    )!;
+    act(() => {
+      option.dispatchEvent(new Event('touchstart', { bubbles: true }));
+      option.dispatchEvent(new Event('touchend', { bubbles: true }));
+    });
+    act(() => {
+      textarea.dispatchEvent(
+        new FocusEvent('focusout', { bubbles: true, relatedTarget: null }),
+      );
+    });
+    expect(backend.onBlur).toHaveBeenCalledWith(expect.anything(), {
+      keepSlashMenu: true,
+    });
+
+    // mousedown preserves focus without prematurely accepting before click.
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      option.dispatchEvent(mouseDown);
+    });
+    expect(mouseDown.defaultPrevented).toBe(true);
+    expect(composerCoreState.acceptSlashCompletion).not.toHaveBeenCalled();
+
+    act(() => {
+      option.click();
+    });
+    expect(composerCoreState.acceptSlashCompletion).toHaveBeenCalledWith(
+      0,
+      true,
+    );
+
+    // Hiding the keyboard closes an open slash menu even right after panel touch.
+    act(() => {
+      textarea.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    });
+    act(() => {
+      option.dispatchEvent(new Event('touchstart', { bubbles: true }));
+      option.dispatchEvent(new Event('touchend', { bubbles: true }));
+    });
+    composerCoreState.closeSlashMenu.mockClear();
+    await clickButton('Hide keyboard');
+    expect(composerCoreState.closeSlashMenu).toHaveBeenCalled();
+
+    // Expanding the mobile editor or opening AddMenu closes an open slash menu.
+    composerCoreState.closeSlashMenu.mockClear();
+    await clickButton('Expand editor');
+    expect(composerCoreState.closeSlashMenu).toHaveBeenCalled();
+    await clickButton('Done');
+
+    composerCoreState.closeSlashMenu.mockClear();
+    await clickButton('Add to message');
+    expect(composerCoreState.closeSlashMenu).toHaveBeenCalled();
+  });
+
+  it('caps mobile slash panel max-height to visible room above composer using visualViewport', () => {
+    mobileComposer('/');
+    composerCoreState.slashMenu = {
+      kind: 'command',
+      query: '',
+      from: 0,
+      to: 1,
+      selectedIndex: 0,
+      items: [
+        {
+          id: 'verify-pr',
+          label: '/verify-pr',
+          apply: '/verify-pr ',
+          type: 'skill',
+          category: 'skill',
+          section: 'Skills',
+          detail: 'Verify a pull request',
+        },
+      ],
+    };
+
+    const listeners = new Map<string, Set<EventListener>>();
+    const fakeVisualViewport = {
+      height: 400,
+      offsetTop: 300,
+      addEventListener: (type: string, fn: EventListener) => {
+        if (!listeners.has(type)) listeners.set(type, new Set());
+        listeners.get(type)!.add(fn);
+      },
+      removeEventListener: (type: string, fn: EventListener) => {
+        listeners.get(type)?.delete(fn);
+      },
+    };
+    const originalVisualViewport = Object.getOwnPropertyDescriptor(
+      window,
+      'visualViewport',
+    );
+    const originalGetBoundingClientRect =
+      HTMLElement.prototype.getBoundingClientRect;
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      value: fakeVisualViewport,
+    });
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      if (this.hasAttribute('data-web-shell-composer-surface')) {
+        return {
+          top: 600,
+          bottom: 680,
+          left: 12,
+          right: 378,
+          width: 366,
+          height: 80,
+          x: 12,
+          y: 600,
+          toJSON: () => ({}),
+        };
+      }
+      return originalGetBoundingClientRect.call(this);
+    };
+
+    try {
+      renderChatEditor({ visibleToolbarActions: ['addMenu'] });
+      const panelInner = document.querySelector<HTMLElement>(
+        '[data-web-shell-slash-menu] > div',
+      );
+      expect(
+        panelInner?.style.getPropertyValue('--slash-panel-viewport-max-height'),
+      ).toBe('276px');
+
+      fakeVisualViewport.offsetTop = 360;
+      act(() => {
+        for (const fn of listeners.get('resize') ?? []) {
+          fn(new Event('resize'));
+        }
+      });
+      expect(
+        panelInner?.style.getPropertyValue('--slash-panel-viewport-max-height'),
+      ).toBe('216px');
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect =
+        originalGetBoundingClientRect;
+      if (originalVisualViewport) {
+        Object.defineProperty(window, 'visualViewport', originalVisualViewport);
+      } else {
+        Reflect.deleteProperty(window, 'visualViewport');
+      }
+    }
+  });
+
   it('prevents mousedown default on the remaining migrated buttons', async () => {
     mobileComposer('draft');
     renderChatEditor({ visibleToolbarActions: [] });
@@ -6942,6 +7121,18 @@ describe('ChatEditor mobile composer actions', () => {
         .getAttribute('data-open'),
     ).toBe('true');
     rerenderChatEditor(container, { visibleToolbarActions: ['addMenu'] });
+    await clickButton('Add to message');
+    expect(
+      document.querySelector('[data-web-shell-mobile-add-menu]')!.textContent,
+    ).not.toContain('Open Live Voice');
+    await clickButton('close');
+    rerenderChatEditor(container, {
+      visibleToolbarActions: ['addMenu', 'voice'],
+      composerIntegrations: undefined,
+    });
+    expect(
+      container.querySelector('[data-testid="live-voice-button"]'),
+    ).toBeNull();
     await clickButton('Add to message');
     expect(
       document.querySelector('[data-web-shell-mobile-add-menu]')!.textContent,
@@ -9220,4 +9411,105 @@ describe('ChatEditor Workflow mode', () => {
       }
     },
   );
+});
+
+describe('ChatEditor composerIntegrations boundary', () => {
+  it('omits voice, live voice, and branch picker when composerIntegrations is not provided', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice', 'gitBranch'],
+      gitBranch: 'main',
+      composerIntegrations: undefined,
+    });
+
+    expect(container.querySelector('[data-testid="voice-button"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="live-voice-button"]'),
+    ).toBeNull();
+    expect(container.querySelector('[data-testid="branch-picker"]')).toBeNull();
+    expect(
+      container.querySelector('[data-toolbar-measure="gitBranch:expanded"]'),
+    ).toBeNull();
+  });
+
+  it('still renders GitModePopover when gitModeIntent is provided without BranchPickerPopover', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['gitBranch'],
+      gitBranch: 'main',
+      gitModeIntent: { mode: 'current' },
+      onGitModeIntentChange: vi.fn(),
+      composerIntegrations: undefined,
+    });
+
+    expect(container.querySelector('[data-testid="branch-picker"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="git-mode-chip"]'),
+    ).not.toBeNull();
+  });
+
+  it('injects only the voice button when only VoiceButton is provided', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice'],
+      composerIntegrations: { VoiceButton: TestVoiceButton },
+    });
+
+    expect(
+      container.querySelector('[data-testid="voice-button"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="live-voice-button"]'),
+    ).toBeNull();
+  });
+
+  it('injects only live voice when only LiveVoiceButton is provided', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice'],
+      composerIntegrations: { LiveVoiceButton: TestLiveVoiceButton },
+    });
+
+    expect(
+      container.querySelector('[data-testid="live-voice-button"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="voice-button"]')).toBeNull();
+  });
+
+  it('injects only the branch picker when only BranchPickerPopover is provided', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice', 'gitBranch'],
+      gitBranch: 'main',
+      composerIntegrations: { BranchPickerPopover: TestBranchPickerPopover },
+    });
+
+    expect(
+      container.querySelector('[data-testid="branch-picker"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="voice-button"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="live-voice-button"]'),
+    ).toBeNull();
+  });
+
+  it('resets active voice state when VoiceButton integration is removed', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice'],
+      composerIntegrations: TEST_COMPOSER_INTEGRATIONS,
+    });
+    const entry = mounted.find((item) => item.container === container)!;
+
+    act(() => voiceButtonState.onActiveChange?.(true));
+    const submitBefore = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submitBefore.disabled).toBe(false);
+
+    renderChatEditorInto(entry.root, entry.portalRoot, {
+      visibleToolbarActions: ['voice'],
+      composerIntegrations: undefined,
+    });
+
+    expect(container.querySelector('[data-testid="voice-button"]')).toBeNull();
+    const submitAfter = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submitAfter.disabled).toBe(true);
+  });
 });

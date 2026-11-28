@@ -23,13 +23,21 @@ import { createHash, randomBytes } from 'node:crypto';
 import {
   chmodSync,
   chownSync,
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fchmodSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
+  readSync,
   readFileSync,
   realpathSync,
+  renameSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,6 +53,7 @@ import {
   normalizeBasePath,
 } from './verify-pr-model-proxy.mjs';
 import {
+  DEFAULT_MAX_BUNDLE_BYTES,
   DEFAULT_MODEL_VSOCK_PORT,
   buildInputManifest,
   createRoundInputBundle,
@@ -54,6 +63,12 @@ import {
   startCollectorServer,
   validateSocketPathLength,
 } from './verify-pr-vm-collector.mjs';
+import {
+  probeHostCapabilities,
+  stageLocalVmRound,
+  verifyFirecrackerDiskConfig,
+  verifyVfkitSeatbeltProfile,
+} from './verify-pr-vm-host.mjs';
 import {
   buildExecutionRecord,
   inspectPidState,
@@ -925,7 +940,7 @@ function writePrivateSafeFile(filePath, content) {
   chmodSync(filePath, 0o600);
 }
 
-function sha256RegularFile(filePath) {
+function sha256RegularFile(filePath, maxBytes = null) {
   let st;
   try {
     st = lstatSync(filePath);
@@ -935,13 +950,48 @@ function sha256RegularFile(filePath) {
   if (st.isSymbolicLink() || !st.isFile()) {
     return { error: 'non-regular-or-symlink', digest: null };
   }
-  return {
-    error: null,
-    dev: st.dev,
-    ino: st.ino,
-    nlink: st.nlink,
-    digest: createHash('sha256').update(readFileSync(filePath)).digest('hex'),
-  };
+  if (maxBytes !== null && (st.size === 0 || st.size > maxBytes)) {
+    return { error: `bundle-size-budget:${maxBytes}`, digest: null };
+  }
+
+  let fd;
+  try {
+    fd = openSync(
+      filePath,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+    );
+    st = fstatSync(fd);
+    if (!st.isFile()) {
+      return { error: 'non-regular-or-symlink', digest: null };
+    }
+    if (maxBytes !== null && (st.size === 0 || st.size > maxBytes)) {
+      return { error: `bundle-size-budget:${maxBytes}`, digest: null };
+    }
+    const hash = createHash('sha256');
+    const buf = Buffer.allocUnsafe(256 * 1024);
+    let bytesRead = 0;
+    for (;;) {
+      const bytes = readSync(fd, buf, 0, buf.length, null);
+      if (bytes === 0) break;
+      bytesRead += bytes;
+      if (maxBytes !== null && bytesRead > maxBytes) {
+        return { error: `bundle-size-budget:${maxBytes}`, digest: null };
+      }
+      hash.update(buf.subarray(0, bytes));
+    }
+    return {
+      error: null,
+      dev: st.dev,
+      ino: st.ino,
+      nlink: st.nlink,
+      bytes: bytesRead,
+      digest: hash.digest('hex'),
+    };
+  } catch (error) {
+    return { error: `unreadable:${error.code ?? 'UNKNOWN'}`, digest: null };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 function removeOwnedSocket(filePath, identity) {
@@ -1081,6 +1131,9 @@ export async function runHardwareRound({
   platform = `${process.platform}-${process.arch}`,
   sourceKernelPath = null,
   sourceRootfsPath = null,
+  sourceInitramfsPath = null,
+  stageAssets = false,
+  applyChown = null,
   trustedInputDigest = null,
   roundInput = null,
   modelProxy = null,
@@ -1309,62 +1362,81 @@ export async function runHardwareRound({
         errors: ['roundInput requires repoDir or prebuilt bundlePath'],
       };
     }
+    if (
+      modelProxy !== null &&
+      (!plan.modelVsockPath || effectiveProxySocketPath !== plan.modelVsockPath)
+    ) {
+      return {
+        ok: false,
+        errors: [
+          'roundInput with modelProxy must bind plan.modelVsockPath for guest access',
+        ],
+      };
+    }
   }
   let kernelDigest = null;
   let rootfsDigest = null;
+  let stagedAssets = null;
+  const failBeforeLaunch = (failureErrors) => {
+    if (stagedAssets) {
+      try {
+        stagedAssets.cleanup();
+      } catch {
+        // Best-effort cleanup of unlaunched per-round staged assets.
+      }
+      stagedAssets = null;
+    }
+    return { ok: false, errors: failureErrors };
+  };
   if (isLocalVmm) {
     if (!plan.hostVsockPath) {
-      return {
-        ok: false,
-        errors: ['local VMM plan requires hostVsockPath'],
-      };
+      return failBeforeLaunch(['local VMM plan requires hostVsockPath']);
     }
     if (
       typeof launchBackend !== 'function' &&
       (!Array.isArray(plan.argv) || plan.argv.length === 0)
     ) {
-      return {
-        ok: false,
-        errors: ['local VMM plan requires non-empty argv'],
-      };
+      return failBeforeLaunch(['local VMM plan requires non-empty argv']);
     }
     if (!sourceKernelPath || !sourceRootfsPath) {
-      return {
-        ok: false,
-        errors: [
-          'local VMM backends require sourceKernelPath and sourceRootfsPath for digest verification',
-        ],
-      };
+      return failBeforeLaunch([
+        'local VMM backends require sourceKernelPath and sourceRootfsPath for digest verification',
+      ]);
+    }
+    if (stageAssets === true) {
+      try {
+        stagedAssets = stageLocalVmRound({
+          plan,
+          sourceKernelPath,
+          sourceRootfsPath,
+          sourceInitramfsPath,
+          approvedRoots,
+          vaultDir: realVault,
+          applyChown,
+        });
+      } catch (error) {
+        return failBeforeLaunch([`stage-assets-failed:${error.message}`]);
+      }
     }
     const kHash = sha256RegularFile(sourceKernelPath);
     if (kHash.error) {
-      return {
-        ok: false,
-        errors: [`sourceKernelPath rejected (${kHash.error})`],
-      };
+      return failBeforeLaunch([`sourceKernelPath rejected (${kHash.error})`]);
     }
     const rHash = sha256RegularFile(sourceRootfsPath);
     if (rHash.error) {
-      return {
-        ok: false,
-        errors: [`sourceRootfsPath rejected (${rHash.error})`],
-      };
+      return failBeforeLaunch([`sourceRootfsPath rejected (${rHash.error})`]);
     }
     const launchKernel = sha256RegularFile(plan.kernelPath);
     if (launchKernel.error || launchKernel.digest !== kHash.digest) {
-      return {
-        ok: false,
-        errors: [
-          'planned kernel must be a regular file matching sourceKernelPath',
-        ],
-      };
+      return failBeforeLaunch([
+        'planned kernel must be a regular file matching sourceKernelPath',
+      ]);
     }
     const workDisk = plan.ownershipTemplate?.workDiskPath;
     if (!workDisk) {
-      return {
-        ok: false,
-        errors: ['local VMM plan requires ownershipTemplate.workDiskPath'],
-      };
+      return failBeforeLaunch([
+        'local VMM plan requires ownershipTemplate.workDiskPath',
+      ]);
     }
     const realSrcRootfs = realpathSync(resolve(sourceRootfsPath));
     let realWorkDisk = resolve(workDisk);
@@ -1374,36 +1446,41 @@ export async function runHardwareRound({
       // Keep lexical resolved path if working disk does not exist yet.
     }
     if (realWorkDisk === realSrcRootfs) {
-      return {
-        ok: false,
-        errors: [
-          'working disk path must be a per-round copy distinct from sourceRootfsPath',
-        ],
-      };
+      return failBeforeLaunch([
+        'working disk path must be a per-round copy distinct from sourceRootfsPath',
+      ]);
     }
     const launchDisk = sha256RegularFile(workDisk);
     if (launchDisk.error || launchDisk.digest !== rHash.digest) {
-      return {
-        ok: false,
-        errors: [
-          'working disk must be a regular-file copy matching sourceRootfsPath',
-        ],
-      };
+      return failBeforeLaunch([
+        'working disk must be a regular-file copy matching sourceRootfsPath',
+      ]);
     }
     if (
       launchDisk.nlink !== 1 ||
       (launchDisk.dev === rHash.dev && launchDisk.ino === rHash.ino)
     ) {
-      return {
-        ok: false,
-        errors: [
-          'working disk must be independently owned storage, not a hardlink or shared inode',
-        ],
-      };
+      return failBeforeLaunch([
+        'working disk must be independently owned storage, not a hardlink or shared inode',
+      ]);
     }
     if (typeof launchBackend !== 'function') {
       const launchError = validateDefaultLaunchInputs(plan);
-      if (launchError) return { ok: false, errors: [launchError] };
+      if (launchError) return failBeforeLaunch([launchError]);
+      const diskConfigCheck = verifyFirecrackerDiskConfig(plan, {
+        requireExists: stageAssets === true,
+      });
+      if (!diskConfigCheck.ok) {
+        return failBeforeLaunch([diskConfigCheck.error]);
+      }
+      const vfkitProfileCheck = verifyVfkitSeatbeltProfile(plan, {
+        approvedRoots,
+        vaultDir: realVault,
+        requireExists: stageAssets === true,
+      });
+      if (!vfkitProfileCheck.ok) {
+        return failBeforeLaunch([vfkitProfileCheck.error]);
+      }
     }
     kernelDigest = kHash.digest;
     rootfsDigest = rHash.digest;
@@ -1416,20 +1493,40 @@ export async function runHardwareRound({
   let effectiveTrustedInputDigest = trustedInputDigest;
   let preparedInput = null;
   if (roundInput !== null) {
+    const maxBundleBytes =
+      roundInput.maxBundleBytes ?? DEFAULT_MAX_BUNDLE_BYTES;
+    if (!Number.isSafeInteger(maxBundleBytes) || maxBundleBytes <= 0) {
+      return failBeforeLaunch([
+        'roundInput.maxBundleBytes must be a positive safe integer',
+      ]);
+    }
     try {
+      const entropyHex =
+        roundInput.entropyHex ?? randomBytes(32).toString('hex');
+      if (
+        typeof entropyHex !== 'string' ||
+        /^[0-9a-f]{64}$/.exec(entropyHex)?.[0] !== entropyHex
+      ) {
+        throw new Error('entropyHex must be a 64-char lowercase hex string');
+      }
       let bundleInfo;
+      const prebuiltHashBudget = Math.min(
+        maxBundleBytes,
+        DEFAULT_MAX_BUNDLE_BYTES,
+      );
       if (roundInput.repoDir) {
         bundleInfo = createRoundInputBundle({
           repoDir: roundInput.repoDir,
           baseRefOid: contextSnapshot.baseRefOid,
           headRefOid: contextSnapshot.headRefOid,
           outPath: join(realLauncher, 'round-input.bundle'),
-          ...(roundInput.maxBundleBytes !== undefined
-            ? { maxBundleBytes: roundInput.maxBundleBytes }
-            : {}),
+          maxBundleBytes: prebuiltHashBudget,
         });
       } else {
-        const bHash = sha256RegularFile(roundInput.bundlePath);
+        const bHash = sha256RegularFile(
+          roundInput.bundlePath,
+          prebuiltHashBudget,
+        );
         if (bHash.error) {
           throw new Error(`roundInput.bundlePath rejected (${bHash.error})`);
         }
@@ -1443,6 +1540,15 @@ export async function runHardwareRound({
         if (bStat.nlink !== 1) {
           throw new Error(
             'roundInput.bundlePath must be a single-link regular file',
+          );
+        }
+        if (
+          bStat.dev !== bHash.dev ||
+          bStat.ino !== bHash.ino ||
+          bStat.size !== bHash.bytes
+        ) {
+          throw new Error(
+            'roundInput.bundlePath changed while it was being hashed',
           );
         }
         if (
@@ -1461,11 +1567,137 @@ export async function runHardwareRound({
             'roundInput.bundlePath size does not match bundleBytes',
           );
         }
-        bundleInfo = {
-          bundlePath: realBundle,
-          bundleSha256: bHash.digest,
-          bundleBytes: bStat.size,
-        };
+        const privateBundle = join(realLauncher, 'round-input.bundle');
+        const stagedBundle = join(
+          realLauncher,
+          `.round-input.bundle.tmp.${process.pid}`,
+        );
+        let existingPrivate = null;
+        try {
+          existingPrivate = lstatSync(privateBundle);
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+        }
+        if (
+          existingPrivate &&
+          (!existingPrivate.isFile() ||
+            existingPrivate.isSymbolicLink() ||
+            existingPrivate.nlink !== 1)
+        ) {
+          throw new Error(
+            'refusing to overwrite a non-regular or multi-link private bundle',
+          );
+        }
+        let sourceFd;
+        let stagedFd;
+        let stagedIdentity;
+        let cleanupError;
+        try {
+          sourceFd = openSync(
+            realBundle,
+            fsConstants.O_RDONLY |
+              fsConstants.O_NOFOLLOW |
+              fsConstants.O_NONBLOCK,
+          );
+          const sourceStat = fstatSync(sourceFd);
+          if (sourceStat.size === 0 || sourceStat.size > prebuiltHashBudget) {
+            throw new Error(`bundle-size-budget:${prebuiltHashBudget}`);
+          }
+          if (
+            !sourceStat.isFile() ||
+            sourceStat.nlink !== 1 ||
+            sourceStat.dev !== bHash.dev ||
+            sourceStat.ino !== bHash.ino ||
+            sourceStat.size !== bStat.size
+          ) {
+            throw new Error(
+              'roundInput.bundlePath changed before its private copy was opened',
+            );
+          }
+          stagedFd = openSync(
+            stagedBundle,
+            fsConstants.O_WRONLY |
+              fsConstants.O_CREAT |
+              fsConstants.O_EXCL |
+              fsConstants.O_NOFOLLOW |
+              fsConstants.O_NONBLOCK,
+            0o600,
+          );
+          fchmodSync(stagedFd, 0o600);
+          stagedIdentity = fstatSync(stagedFd);
+          if (!stagedIdentity.isFile() || stagedIdentity.nlink !== 1) {
+            throw new Error(
+              'private bundle staging must be a single-link file',
+            );
+          }
+          const copyHash = createHash('sha256');
+          const buffer = Buffer.allocUnsafe(256 * 1024);
+          let copiedBytes = 0;
+          for (;;) {
+            const bytes = readSync(sourceFd, buffer, 0, buffer.length, null);
+            if (bytes === 0) break;
+            copiedBytes += bytes;
+            if (copiedBytes > prebuiltHashBudget) {
+              throw new Error(`bundle-size-budget:${prebuiltHashBudget}`);
+            }
+            copyHash.update(buffer.subarray(0, bytes));
+            let offset = 0;
+            while (offset < bytes) {
+              offset += writeSync(
+                stagedFd,
+                buffer,
+                offset,
+                bytes - offset,
+                null,
+              );
+            }
+          }
+          const copiedSha256 = copyHash.digest('hex');
+          if (copiedBytes !== bStat.size || copiedSha256 !== bHash.digest) {
+            throw new Error(
+              'roundInput.bundlePath changed while its private copy was made',
+            );
+          }
+          renameSync(stagedBundle, privateBundle);
+          bundleInfo = {
+            bundlePath: privateBundle,
+            bundleSha256: copiedSha256,
+            bundleBytes: copiedBytes,
+          };
+        } finally {
+          try {
+            if (sourceFd !== undefined) closeSync(sourceFd);
+            if (stagedFd !== undefined) closeSync(stagedFd);
+            if (stagedIdentity !== undefined) {
+              let remaining;
+              try {
+                remaining = lstatSync(stagedBundle);
+              } catch (error) {
+                if (error.code !== 'ENOENT') cleanupError = error;
+              }
+              if (
+                !cleanupError &&
+                remaining &&
+                (!remaining.isFile() ||
+                  remaining.dev !== stagedIdentity.dev ||
+                  remaining.ino !== stagedIdentity.ino)
+              ) {
+                cleanupError = new Error(
+                  'private bundle staging changed identity before cleanup',
+                );
+              }
+              if (!cleanupError && remaining) unlinkSync(stagedBundle);
+            }
+          } catch (error) {
+            cleanupError = error;
+          }
+        }
+        if (cleanupError) throw cleanupError;
+      }
+      if (bundleInfo.bundleBytes > prebuiltHashBudget) {
+        throw new Error(
+          `roundInput bundle exceeds guest transport limit ${prebuiltHashBudget} bytes`,
+        );
       }
       const manifestModelProxy = modelProxy
         ? {
@@ -1484,23 +1716,20 @@ export async function runHardwareRound({
         bundleSha256: bundleInfo.bundleSha256,
         bundleBytes: bundleInfo.bundleBytes,
         modelProxy: manifestModelProxy,
-        entropyHex: roundInput.entropyHex ?? null,
+        entropyHex,
       });
       if (
         trustedInputDigest !== null &&
         trustedInputDigest !== built.trustedInputDigest
       ) {
-        return {
-          ok: false,
-          errors: [
-            'trustedInputDigest does not match generated roundInput manifest digest',
-          ],
-        };
+        return failBeforeLaunch([
+          'trustedInputDigest does not match generated roundInput manifest digest',
+        ]);
       }
       effectiveTrustedInputDigest = built.trustedInputDigest;
       preparedInput = { ...bundleInfo, ...built };
     } catch (error) {
-      return { ok: false, errors: [`round-input-rejected:${error.message}`] };
+      return failBeforeLaunch([`round-input-rejected:${error.message}`]);
     }
   }
 
@@ -1510,7 +1739,7 @@ export async function runHardwareRound({
       `${JSON.stringify({ runId: plan.runId, revoked: false }, null, 2)}\n`,
     );
   } catch (error) {
-    return { ok: false, errors: [`token-file-rejected:${error.message}`] };
+    return failBeforeLaunch([`token-file-rejected:${error.message}`]);
   }
 
   let proxyServer = null;
@@ -1704,9 +1933,29 @@ export async function runHardwareRound({
           roundInput: preparedInput,
         });
       } else {
+        // Re-verify on-disk VM configs right before spawn to narrow the window
+        // after staging/token/collector setup.
+        const preSpawnConfigCheck = verifyFirecrackerDiskConfig(plan, {
+          requireExists: stageAssets === true,
+        });
+        if (!preSpawnConfigCheck.ok) {
+          throw new Error(preSpawnConfigCheck.error);
+        }
+        const preSpawnProfileCheck = verifyVfkitSeatbeltProfile(plan, {
+          approvedRoots,
+          vaultDir: realVault,
+          requireExists: stageAssets === true,
+        });
+        if (!preSpawnProfileCheck.ok) {
+          throw new Error(preSpawnProfileCheck.error);
+        }
         const child = spawn(plan.argv[0], plan.argv.slice(1), {
           stdio: 'ignore',
           detached: plan.backend === 'firecracker',
+          env: {
+            // The VMM/helper must not inherit host credentials.
+            PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
+          },
         });
         let spawnError = null;
         let childExited = false;
@@ -2032,6 +2281,18 @@ export async function runHardwareRound({
         sourceRootfsUnchanged
           ? 'destroyed'
           : 'failed';
+      if (
+        stagedAssets &&
+        !aliveAfterReap &&
+        !supervisorAlive &&
+        workerExitEvidence === 'absent'
+      ) {
+        try {
+          stagedAssets.cleanup();
+        } catch (error) {
+          errors.push(`staged-cleanup-failed:${error.message}`);
+        }
+      }
       destroyedAt = new Date().toISOString();
     } else if (plan.backend === 'provider-vm') {
       let destroyRes = { terminated: false, diskDeleted: false };
@@ -2175,10 +2436,137 @@ async function main(argv) {
   if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) {
     process.stdout.write(
       'Usage:\n' +
-        '  node scripts/verify-pr-vm-runner.mjs select --context <snapshot> [--backend <name>] [--kvm] [--vfkit --seatbelt-enforcing] [--provider-configured]\n' +
+        '  node scripts/verify-pr-vm-runner.mjs probe [--firecracker-bin <path>] [--jailer-bin <path>] [--vfkit-bin <path>] [--seatbelt-profile <path>] [--vmm-uid <n>] [--vmm-gid <n>] [--provider-configured]\n' +
+        '  node scripts/verify-pr-vm-runner.mjs select --context <snapshot> [--backend <name>] [--probe | --kvm | --vfkit --seatbelt-enforcing] [--provider-configured]\n' +
         '  node scripts/verify-pr-vm-runner.mjs run --config <host-run-config.json>\n',
     );
     return 0;
+  }
+  const parseProbeFlags = (
+    args,
+    startIndex,
+    { allowSelectFlags = false } = {},
+  ) => {
+    const parsed = {
+      contextPath: null,
+      preferredBackend: null,
+      useProbe: false,
+      kvmAvailable: false,
+      vfkitAvailable: false,
+      seatbeltEnforcing: false,
+      providerConfigured: false,
+      firecrackerBin: null,
+      jailerBin: null,
+      vfkitBin: null,
+      seatbeltProfilePath: null,
+      vmmUid: 65534,
+      vmmGid: 65534,
+      hasProbeOnlyFlag: false,
+      error: null,
+    };
+    const takeValue = (flag, index) => {
+      const value = args[index + 1];
+      if (
+        value === undefined ||
+        value.trim() === '' ||
+        value.startsWith('--')
+      ) {
+        parsed.error = `missing value for ${flag}`;
+        return null;
+      }
+      return value;
+    };
+    const parsePositiveInt = (flag, raw) => {
+      if (raw === undefined || !/^[1-9]\d*$/.test(raw)) {
+        parsed.error = `${flag} must be a positive integer`;
+        return null;
+      }
+      return Number(raw);
+    };
+    for (let i = startIndex; i < args.length; i += 1) {
+      const arg = args[i];
+      if (allowSelectFlags && arg === '--context') {
+        const val = takeValue(arg, i);
+        if (val === null) break;
+        parsed.contextPath = val;
+        i += 1;
+      } else if (allowSelectFlags && arg === '--backend') {
+        const val = takeValue(arg, i);
+        if (val === null) break;
+        parsed.preferredBackend = val;
+        i += 1;
+      } else if (allowSelectFlags && arg === '--probe') {
+        parsed.useProbe = true;
+      } else if (allowSelectFlags && arg === '--kvm') {
+        parsed.kvmAvailable = true;
+      } else if (allowSelectFlags && arg === '--vfkit') {
+        parsed.vfkitAvailable = true;
+      } else if (allowSelectFlags && arg === '--seatbelt-enforcing') {
+        parsed.seatbeltEnforcing = true;
+      } else if (arg === '--provider-configured') {
+        parsed.providerConfigured = true;
+      } else if (arg === '--firecracker-bin') {
+        const val = takeValue(arg, i);
+        if (val === null) break;
+        parsed.firecrackerBin = val;
+        parsed.hasProbeOnlyFlag = true;
+        i += 1;
+      } else if (arg === '--jailer-bin') {
+        const val = takeValue(arg, i);
+        if (val === null) break;
+        parsed.jailerBin = val;
+        parsed.hasProbeOnlyFlag = true;
+        i += 1;
+      } else if (arg === '--vfkit-bin') {
+        const val = takeValue(arg, i);
+        if (val === null) break;
+        parsed.vfkitBin = val;
+        parsed.hasProbeOnlyFlag = true;
+        i += 1;
+      } else if (arg === '--seatbelt-profile') {
+        const val = takeValue(arg, i);
+        if (val === null) break;
+        parsed.seatbeltProfilePath = val;
+        parsed.hasProbeOnlyFlag = true;
+        i += 1;
+      } else if (arg === '--vmm-uid') {
+        const val = parsePositiveInt(arg, args[(i += 1)]);
+        if (val === null) break;
+        parsed.vmmUid = val;
+        parsed.hasProbeOnlyFlag = true;
+      } else if (arg === '--vmm-gid') {
+        const val = parsePositiveInt(arg, args[(i += 1)]);
+        if (val === null) break;
+        parsed.vmmGid = val;
+        parsed.hasProbeOnlyFlag = true;
+      } else {
+        parsed.error = `unknown option ${arg}`;
+        break;
+      }
+    }
+    return parsed;
+  };
+  if (argv[0] === 'probe') {
+    const opts = parseProbeFlags(argv, 1, { allowSelectFlags: false });
+    if (opts.error) {
+      process.stderr.write(`verify-pr vm-runner probe: ${opts.error}\n`);
+      return 2;
+    }
+    const caps = probeHostCapabilities({
+      firecrackerBin: opts.firecrackerBin,
+      jailerBin: opts.jailerBin,
+      vfkitBin: opts.vfkitBin,
+      seatbeltProfilePath: opts.seatbeltProfilePath,
+      vmmUid: opts.vmmUid,
+      vmmGid: opts.vmmGid,
+      providerConfigured: opts.providerConfigured,
+    });
+    process.stdout.write(`${JSON.stringify(caps, null, 2)}\n`);
+    const anyHardware =
+      caps.kvmAvailable ||
+      (caps.vfkitAvailable && caps.seatbeltEnforcing) ||
+      caps.providerConfigured;
+    return anyHardware ? 0 : 1;
   }
   if (argv[0] === 'run') {
     let configPath = null;
@@ -2284,6 +2672,7 @@ async function main(argv) {
           bundleBytes: rawRoundInput.bundleBytes,
           maxBundleBytes: rawRoundInput.maxBundleBytes,
           maxReads: rawRoundInput.maxReads,
+          entropyHex: rawRoundInput.entropyHex,
         }
       : null;
     const result = await runHardwareRound({
@@ -2296,6 +2685,9 @@ async function main(argv) {
       platform: cfg.platform,
       sourceKernelPath: cfg.sourceKernelPath,
       sourceRootfsPath: cfg.sourceRootfsPath,
+      sourceInitramfsPath: cfg.sourceInitramfsPath ?? null,
+      stageAssets: cfg.stageAssets === true,
+      applyChown: cfg.applyChown ?? null,
       trustedInputDigest: cfg.trustedInputDigest ?? null,
       roundInput: resolvedRoundInput,
       collectorOptions: resolvedCollectorOptions,
@@ -2313,56 +2705,77 @@ async function main(argv) {
     );
     return 2;
   }
-  let contextPath = null;
-  let preferredBackend = null;
-  let kvmAvailable = false;
-  let vfkitAvailable = false;
-  let seatbeltEnforcing = false;
-  let providerConfigured = false;
-  for (let i = 1; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === '--context') contextPath = argv[(i += 1)] ?? null;
-    else if (arg === '--backend') preferredBackend = argv[(i += 1)] ?? null;
-    else if (arg === '--kvm') kvmAvailable = true;
-    else if (arg === '--vfkit') vfkitAvailable = true;
-    else if (arg === '--seatbelt-enforcing') seatbeltEnforcing = true;
-    else if (arg === '--provider-configured') providerConfigured = true;
-    else {
-      process.stderr.write(`verify-pr vm-runner: unknown option ${arg}\n`);
-      return 2;
-    }
+  const opts = parseProbeFlags(argv, 1, { allowSelectFlags: true });
+  if (opts.error) {
+    process.stderr.write(`verify-pr vm-runner: ${opts.error}\n`);
+    return 2;
   }
-  if (!contextPath) {
+  if (
+    opts.useProbe &&
+    (opts.kvmAvailable || opts.vfkitAvailable || opts.seatbeltEnforcing)
+  ) {
+    process.stderr.write(
+      'verify-pr vm-runner select: --probe cannot be combined with manual --kvm/--vfkit/--seatbelt-enforcing flags\n',
+    );
+    return 2;
+  }
+  if (!opts.useProbe && opts.hasProbeOnlyFlag) {
+    process.stderr.write(
+      'verify-pr vm-runner select: probe-only flags (--firecracker-bin/--jailer-bin/--vfkit-bin/--seatbelt-profile/--vmm-uid/--vmm-gid) require --probe\n',
+    );
+    return 2;
+  }
+  if (!opts.contextPath) {
     process.stderr.write('verify-pr vm-runner select: --context is required\n');
     return 2;
   }
   let snap;
   try {
-    snap = JSON.parse(readFileSync(contextPath, 'utf8'));
+    snap = JSON.parse(readFileSync(opts.contextPath, 'utf8'));
   } catch (error) {
     process.stderr.write(
-      `verify-pr vm-runner select: could not read valid JSON context ${contextPath}: ${error.message}\n`,
+      `verify-pr vm-runner select: could not read valid JSON context ${opts.contextPath}: ${error.message}\n`,
     );
     return 1;
   }
   if (snap === null || typeof snap !== 'object' || Array.isArray(snap)) {
     process.stderr.write(
-      `verify-pr vm-runner select: context ${contextPath} must be a JSON object\n`,
+      `verify-pr vm-runner select: context ${opts.contextPath} must be a JSON object\n`,
     );
     return 1;
   }
   const executionClass =
     snap?.trustClassification?.executionClass ?? 'hardware-isolated';
+  let probe = null;
+  let kvmAvailable = opts.kvmAvailable;
+  let vfkitAvailable = opts.vfkitAvailable;
+  let seatbeltEnforcing = opts.seatbeltEnforcing;
+  let providerConfigured = opts.providerConfigured;
+  if (opts.useProbe) {
+    probe = probeHostCapabilities({
+      firecrackerBin: opts.firecrackerBin,
+      jailerBin: opts.jailerBin,
+      vfkitBin: opts.vfkitBin,
+      seatbeltProfilePath: opts.seatbeltProfilePath,
+      vmmUid: opts.vmmUid,
+      vmmGid: opts.vmmGid,
+      providerConfigured: opts.providerConfigured,
+    });
+    kvmAvailable = probe.kvmAvailable;
+    vfkitAvailable = probe.vfkitAvailable;
+    seatbeltEnforcing = probe.seatbeltEnforcing;
+    providerConfigured = probe.providerConfigured;
+  }
   const decision = selectBackend({
     executionClass,
-    preferredBackend,
+    preferredBackend: opts.preferredBackend,
     kvmAvailable,
     vfkitAvailable,
     seatbeltEnforcing,
     providerConfigured,
   });
   process.stdout.write(
-    `${JSON.stringify({ executionClass, ...decision }, null, 2)}\n`,
+    `${JSON.stringify({ executionClass, ...decision, ...(probe ? { probe } : {}) }, null, 2)}\n`,
   );
   return decision.backend ? 0 : 1;
 }

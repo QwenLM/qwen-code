@@ -19,7 +19,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 
-final class JdbcRepositorySupport {
+public final class JdbcRepositorySupport {
     private JdbcRepositorySupport() {
     }
 
@@ -38,7 +38,7 @@ final class JdbcRepositorySupport {
         return RuntimeRequestKeys.scopeKey(scope);
     }
 
-    static String valueKey(String value) {
+    public static String valueKey(String value) {
         return RuntimeRequestKeys.valueKey(value);
     }
 
@@ -170,7 +170,7 @@ final class JdbcRepositorySupport {
         return false;
     }
 
-    static void setIdentity(PreparedStatement statement, int index, String value) throws SQLException {
+    public static void setIdentity(PreparedStatement statement, int index, String value) throws SQLException {
         // Connector/J does not support ParameterMetaData by default; only H2
         // needs the binary-column probe. MySQL binds text through the driver.
         if ("H2".equals(statement.getConnection().getMetaData().getDatabaseProductName())) {

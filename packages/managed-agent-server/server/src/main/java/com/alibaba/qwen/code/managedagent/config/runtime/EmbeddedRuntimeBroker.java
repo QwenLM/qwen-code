@@ -31,7 +31,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
-import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.routing.RoutingRuntimeProvisioner;
@@ -53,8 +52,6 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.transaction.PlatformTransactionManager;
 
 import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -63,12 +60,13 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
-public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
+public class EmbeddedRuntimeBroker implements RuntimeWarmer,
+        com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceRecoveryGateway,
+        AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(
             EmbeddedRuntimeBroker.class);
     public static final Duration LEASE = Duration.ofSeconds(30);
     private final RuntimeBrokerService service;
-    private final RuntimeBrokerHttpServer server;
     private final RuntimeRecoveryCoordinator recovery;
     private final WorkspaceRuntimeResolver workspaces;
     private final ChildWorkspaceProvider childWorkspaces;
@@ -289,20 +287,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             provisioner.close();
             throw failure;
         }
-        try {
-            this.server = new RuntimeBrokerHttpServer(
-                    new InetSocketAddress(broker.getHost(), broker.getPort()),
-                    broker.getToken(), service, broker.isAllowNonLoopback());
-            server.start();
-        } catch (IOException | IllegalArgumentException error) {
-            service.close();
-            // The same catch covers the token and port validation, so name
-            // the actual refusal instead of blaming the listener for all of
-            // them.
-            throw new IllegalStateException(
-                    "Runtime Broker listener could not start: "
-                            + error.getMessage(), error);
-        }
         this.recovery = broker.isTrustedLocalRebootRecovery()
                 ? new RuntimeRecoveryCoordinator(service, bindingRepository) : null;
         this.coordinator = new ManagedRuntimeCoordinator(
@@ -310,8 +294,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         // Log the resolved window: a suffix-less config value binds as
         // seconds, so a stale milliseconds-style "1800000" meant as 30
         // minutes shows up here as PT500H.
-        LOG.info("Embedded Runtime Broker listening at {} (v3 result window {})",
-                server.getBaseUri(), v3ResultWindow);
+        LOG.info("Embedded Runtime Broker ready (v3 result window {})",
+                v3ResultWindow);
     }
 
     @Override
@@ -443,16 +427,43 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         coordinator.verifyWorkspaceCwdTarget(binding, targetCwdRelative);
     }
 
-    public URI getBaseUri() {
-        return server.getBaseUri();
-    }
-
     @Scheduled(scheduler = "runtimeRecoveryScheduler",
             fixedDelay = 5000)
     public void recoverSavedRuntimes() {
         if (recovery != null) {
             recovery.scan();
         }
+    }
+
+    @Override
+    public void validateExternalTerminalOriginal(
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord binding) {
+        if (!(primaryProvisioner instanceof com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceRecoverySupport external)) {
+            throw new RuntimeBrokerException(409,
+                    "external_workspace_retirement_unavailable",
+                    "External Workspace retirement is unavailable", false);
+        }
+        external.validateTerminalOriginal(binding);
+    }
+
+    @Override
+    public java.util.Map<String, Object> externalRecoveryProviderRequest(
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord binding) {
+        if (!(primaryProvisioner instanceof com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceRecoverySupport external)) {
+            throw new RuntimeBrokerException(409,
+                    "external_workspace_recovery_unavailable",
+                    "External Workspace recovery is unavailable", false);
+        }
+        return external.recoveryProviderRequest(binding);
+    }
+
+    @Override
+    public CompletionStage<com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord>
+            recoverExternalWorkspaceBinding(
+                    String bindingId, long expectedGeneration,
+                    long expectedVersion) {
+        return service.recoverExternalWorkspaceBinding(
+                bindingId, expectedGeneration, expectedVersion);
     }
 
     /**
@@ -478,7 +489,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         if (recovery != null) {
             recovery.close();
         }
-        server.close();
+        service.close();
         if (childWorkspaces != null) {
             childWorkspaces.git().close();
         }

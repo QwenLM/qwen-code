@@ -71,8 +71,8 @@ import type {
   DaemonRestoredSession,
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionCancelableTaskKind,
   DaemonSessionTaskRuntimeStatus,
-  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonWorkflowActionInput,
@@ -103,9 +103,16 @@ export interface DaemonReplaySnapshot {
   lifecycleReplayIncomplete?: boolean;
 }
 
+/** Standalone session metadata supplied by a host without a local workspace. */
+export type StandaloneSessionMetadata = Omit<DaemonSession, 'workspaceCwd'> & {
+  sourceType: 'standalone';
+  context: { kind: 'standalone' };
+  workspaceCwd?: string;
+};
+
 export interface DaemonSessionClientOptions {
   client: DaemonClient;
-  session: DaemonSession;
+  session: DaemonSession | StandaloneSessionMetadata;
   /** True when load/resume attached to a session with an in-flight prompt. */
   hasActivePrompt?: boolean;
   /** ACP state returned by load/resume; empty for create/attach clients. */
@@ -315,6 +322,8 @@ export class DaemonSessionClient {
   private hasAcceptedRestStream = false;
   private lastAcceptedRestStreamId: string | undefined;
   private subscriptionActive = false;
+  private eventStreamReady = false;
+  private eventStreamReadiness?: EventTarget;
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
   private reattaching?: Promise<void>;
   private generatedUiReadGeneration = 0;
@@ -348,13 +357,15 @@ export class DaemonSessionClient {
 
   constructor(opts: DaemonSessionClientOptions) {
     this.client = opts.client;
-    this.session = { ...opts.session };
-    this.updateGeneratedUi(this.session.generatedUi);
-    const context = (opts.session as { context?: { kind?: unknown } }).context;
+    const workspaceCwd = opts.session.workspaceCwd ?? '';
     this.restoreStrategy =
-      opts.session.sourceType === 'standalone' && context?.kind === 'standalone'
+      opts.session.sourceType === 'standalone' &&
+      'context' in opts.session &&
+      opts.session.context?.kind === 'standalone'
         ? { kind: 'standalone' }
-        : { kind: 'workspace', workspaceCwd: opts.session.workspaceCwd };
+        : { kind: 'workspace', workspaceCwd };
+    this.session = { ...opts.session, workspaceCwd };
+    this.updateGeneratedUi(this.session.generatedUi);
     this.state = { ...(opts.state ?? {}) };
     this.hasActivePrompt = opts.hasActivePrompt ?? false;
     this.backgroundTurn = parseDaemonBackgroundTurn(
@@ -718,6 +729,39 @@ export class DaemonSessionClient {
     this.lastSeenEventId = validateLastEventId(lastEventId);
   }
 
+  /** Wait for an accepted live stream before a submission that has no admission cursor. */
+  async waitForEventStream(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    if (this.eventStreamReady) return;
+    const readiness = (this.eventStreamReadiness ??= new EventTarget());
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        readiness.removeEventListener('ready', onReady);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const onReady = () => {
+        cleanup();
+        resolve();
+      };
+      const onAbort = () => {
+        cleanup();
+        reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'));
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(
+          new DOMException(
+            'Timed out waiting for event stream',
+            'TimeoutError',
+          ),
+        );
+      }, 30_000);
+      readiness.addEventListener('ready', onReady, { once: true });
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
   async prompt(
     req: PromptRequest,
     signal?: AbortSignal,
@@ -798,23 +842,39 @@ export class DaemonSessionClient {
    * `turn_complete` / `turn_error` SSE event. Callers that need final turn
    * results should use `prompt()` or manage SSE terminal events themselves.
    * `beforeDispatch` can reject a stale caller before each HTTP attempt,
-   * including the retry after client registration recovery.
+   * including the retry after client registration recovery. An asynchronous
+   * caller revalidation must settle before the request is sent. Abortion
+   * interrupts that asynchronous wait as well.
    */
   async submitPrompt(
     req: PromptRequest,
     signal?: AbortSignal,
-    beforeDispatch?: (clientId: string | undefined) => void,
+    beforeDispatch?: (clientId: string | undefined) => void | Promise<void>,
   ): Promise<NonBlockingPromptAccepted> {
-    const accepted = await this.withClientIdSelfHeal(() => {
-      signal?.throwIfAborted();
-      beforeDispatch?.(this.clientId);
+    const accepted = await this.withClientIdSelfHeal(async () => {
+      let guardedClientId: string | undefined;
+      do {
+        if (signal?.aborted) throw signal.reason;
+        guardedClientId = this.clientId;
+        if (beforeDispatch && signal) {
+          // A signal must also settle an asynchronous caller guard before the
+          // transport has a request it could abort.
+          await this.waitForCallerAbort(
+            () => beforeDispatch(guardedClientId),
+            signal,
+          );
+        } else if (beforeDispatch) {
+          await beforeDispatch(guardedClientId);
+        }
+      } while (guardedClientId !== this.clientId);
+      if (signal?.aborted) throw signal.reason;
       return this.client.promptNonBlocking(
         this.sessionId,
         req,
         signal,
-        this.clientId,
+        guardedClientId,
       );
-    });
+    }, signal);
     if (!isNonBlockingAccepted(accepted)) {
       throw new Error('Expected non-blocking prompt acceptance');
     }
@@ -900,6 +960,31 @@ export class DaemonSessionClient {
   }
 
   /**
+   * Cancel only this caller's wait, preserving the caller's exact reason.
+   * The operation has its own lifecycle: shared reattachment and an async
+   * caller-supplied guard may still settle after the wait is cancelled.
+   */
+  private async waitForCallerAbort<T>(
+    operation: () => Promise<T> | T,
+    signal: AbortSignal,
+  ): Promise<T> {
+    if (signal.aborted) {
+      throw signal.reason;
+    }
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal.reason);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    aborted.catch(() => {});
+    try {
+      return await Promise.race([operation(), aborted]);
+    } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  /**
    * Run a prompt-admission call, recovering from a stale `clientId`.
    *
    * A daemon restart (or session reload) wipes the daemon's in-memory client
@@ -909,13 +994,24 @@ export class DaemonSessionClient {
    * cannot double-execute. We re-register to obtain a fresh `clientId` and
    * retry the admission exactly once. Any other error (and a second
    * `invalid_client_id`) propagates.
+   *
+   * With an abort signal, caller cancellation takes precedence over this
+   * classification and preserves its exact reason.
    */
-  private async withClientIdSelfHeal<T>(fn: () => Promise<T>): Promise<T> {
+  private async withClientIdSelfHeal<T>(
+    fn: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
     try {
       return await fn();
     } catch (err) {
+      if (signal?.aborted) throw signal.reason;
       if (!isInvalidClientId(err)) throw err;
-      await this.reattach();
+      if (signal) {
+        await this.waitForCallerAbort(() => this.reattach(), signal);
+      } else {
+        await this.reattach();
+      }
       return await fn();
     }
   }
@@ -1456,13 +1552,15 @@ export class DaemonSessionClient {
 
   cancelTask(
     taskId: string,
-    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
+    kind: DaemonSessionCancelableTaskKind,
+    source?: 'cron' | 'wakeup',
   ): Promise<{ cancelled: boolean }> {
     return this.client.sessionTaskCancel(
       this.sessionId,
       taskId,
       kind,
       this.clientId,
+      source,
     );
   }
 
@@ -1580,6 +1678,7 @@ export class DaemonSessionClient {
       if (released) return;
       released = true;
       this.subscriptionActive = false;
+      this.eventStreamReady = false;
     };
     const acquire = () => {
       if (started) return;
@@ -1645,6 +1744,12 @@ export class DaemonSessionClient {
       const epoch =
         subscribeOpts.epoch ?? (resume ? this.lastSeenEpoch : undefined);
       const callerOnEpoch = subscribeOpts.onEpoch;
+      const markReady = () => {
+        if (!this.eventStreamReady) {
+          this.eventStreamReady = true;
+          this.eventStreamReadiness?.dispatchEvent(new Event('ready'));
+        }
+      };
       const restSubscription = this.client.transport.type === 'rest';
       if (!restSubscription) {
         this.hasAcceptedRestStream = false;
@@ -1667,6 +1772,11 @@ export class DaemonSessionClient {
         onSseStreamAccepted: (streamId: string | undefined) => {
           this.hasAcceptedRestStream = true;
           this.lastAcceptedRestStreamId = streamId;
+          markReady();
+        },
+        onEventStreamReady: () => {
+          markReady();
+          subscribeOpts.onEventStreamReady?.();
         },
         ...(epoch !== undefined ? { epoch } : {}),
         onEpoch: (learned) => {
@@ -1674,6 +1784,7 @@ export class DaemonSessionClient {
           callerOnEpoch?.(learned);
         },
       })) {
+        markReady();
         const hydratedEvent = await this.hydrateEvent(event, opts.signal);
         this._dispatchTurnEvent(hydratedEvent);
         yield hydratedEvent;
@@ -1690,7 +1801,8 @@ export class DaemonSessionClient {
     }
   }
 
-  private async hydrateReplaySnapshot(signal?: AbortSignal): Promise<void> {
+  /** Resolve attachment references in the replay supplied to a restored client. */
+  async hydrateReplaySnapshot(signal?: AbortSignal): Promise<void> {
     this.replaySnapshot.compactedReplay = await Promise.all(
       this.replaySnapshot.compactedReplay.map(
         async (event) => await this.hydrateEvent(event, signal),

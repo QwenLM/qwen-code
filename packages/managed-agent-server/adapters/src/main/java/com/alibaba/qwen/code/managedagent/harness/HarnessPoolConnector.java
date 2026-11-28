@@ -58,6 +58,9 @@ public class HarnessPoolConnector implements HarnessConnector {
     private volatile List<Member> accepting = List.of();
     private volatile Contract contract;
     private volatile boolean closed;
+    private static final long CLAIM_FALLBACK_MILLIS = 30_000;
+    private volatile boolean workPullEnabled;
+    private volatile Runnable demandListener = () -> {};
 
     private record Owner(String instanceId, String bootId) {
     }
@@ -292,6 +295,15 @@ public class HarnessPoolConnector implements HarnessConnector {
         boolean quiescingOwner = member != null && member.reachable && member.quiescing && "ACTIVE".equals(placement.state());
         if (mayAcquire && (placement == null || member == null || !member.reachable
                 || quiescingOwner || !"ACTIVE".equals(placement.state()))) {
+            // Before any member is chosen, so demand is recorded even when no push member accepts.
+            if (operation == null && placement != null && !"ACTIVE".equals(placement.state()) && workPull()) {
+                long demandAge = placements.recordDemand(tenant, session);
+                demandListener.run();
+                if (demandAge < CLAIM_FALLBACK_MILLIS) {
+                    throw new ManagedAgentException(409, "harness_placement_released",
+                            "The released Session waits for a Harness poller to claim it.");
+                }
+            }
             List<Member> candidates = accepting.stream()
                     .filter(value -> value.reachable && !value.quiescing).toList();
             if (candidates.isEmpty()) {
@@ -330,11 +342,50 @@ public class HarnessPoolConnector implements HarnessConnector {
             }
             return null;
         }
+        return new Selected(placement, member, poolCall(tenant, session, placement));
+    }
+
+    private QwenHostedHarnessConnector.PoolCall poolCall(String tenant, String session, Placement placement) {
         String workspace = placement.workspaceId() == null
                 ? properties.getSessionStore().getWorkspaceId() : placement.workspaceId();
         var descriptor = new HostedHarnessPlacement(placement.instanceId(), placement.bootId(), placement.epoch());
         String token = credentials.issue(tenant, workspace, session, placement.instanceId(), placement.bootId(), placement.epoch());
-        return new Selected(placement, member, new QwenHostedHarnessConnector.PoolCall(tenant, session, descriptor, token));
+        return new QwenHostedHarnessConnector.PoolCall(tenant, session, descriptor, token);
+    }
+
+    /** Turns on the push-side claim gate (qwen.managed-agent.harness-pull.enabled). */
+    public void enableWorkPull() {
+        workPullEnabled = true;
+    }
+
+    private boolean workPull() {
+        return workPullEnabled && feature(HarnessFeature.WORK_PULL);
+    }
+
+    @Override
+    public boolean acceptsWorkPullClaims(String instanceId, String bootId) {
+        Member member = members.get(new Owner(instanceId, bootId));
+        return workPull() && member != null && member.reachable && !member.quiescing;
+    }
+
+    @Override
+    public boolean acceptsWorkPullReoffers(String instanceId, String bootId) {
+        return workPull() && members.containsKey(new Owner(instanceId, bootId));
+    }
+
+    @Override
+    public Map<String, Object> claimLoad(String tenant, String session, Placement placement) {
+        Member member = members.get(new Owner(placement.instanceId(), placement.bootId()));
+        if (closed || member == null) {
+            throw unavailable();
+        }
+        return member.connector.withPlacement(poolCall(tenant, session, placement),
+                () -> member.connector.passiveWakeLoad(tenant, session));
+    }
+
+    @Override
+    public void onClaimDemand(Runnable listener) {
+        demandListener = listener;
     }
 
     private static ManagedAgentException unavailable() {
@@ -431,6 +482,11 @@ public class HarnessPoolConnector implements HarnessConnector {
     @Override
     public boolean supportsSideQueries() {
         return feature(HarnessFeature.SIDE_QUERY) && !accepting.isEmpty();
+    }
+
+    @Override
+    public boolean supportsEventIngest() {
+        return feature(HarnessFeature.EVENT_INGEST);
     }
 
     @Override
@@ -718,6 +774,12 @@ public class HarnessPoolConnector implements HarnessConnector {
     @Override
     public Admission submit(String tenant, String session, String prompt, List<Map<String, Object>> input, String digest) {
         return call(tenant, session, leaf -> leaf.submit(tenant, session, prompt, input, digest));
+    }
+
+    @Override
+    public Admission submit(String tenant, String session, String prompt, List<Map<String, Object>> input, String digest,
+            String ingestTurn) {
+        return call(tenant, session, leaf -> leaf.submit(tenant, session, prompt, input, digest, ingestTurn));
     }
 
     @Override

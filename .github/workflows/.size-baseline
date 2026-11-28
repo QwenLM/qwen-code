@@ -19,7 +19,7 @@
 11494 build-and-publish-image.yml
 55276 cd-cua-driver.yml
 2222 cd-mobile-mcp.yml
-  217019 ci.yml
+221514 ci.yml
 4193 codeql.yml
 9389 comment-attachment-guard.yml
 2090 desktop-packaging-check.yml
@@ -33,7 +33,7 @@
 14543 managed-agent-gate.yml
 4318 managed-agent-loop.yml
 61381 main-ci-failure-issue.yml
-6761 main-ci-failure-resolve.yml
+9992 main-ci-failure-resolve.yml
 1343 mobile-shell.yml
 3259 pnpm-store.yml
 2489 pnpm-worktree-smoke.yml
@@ -43,7 +43,7 @@
 5942 qwen-autofix-fork-signal.yml
 456523 qwen-autofix.yml
 70473 qwen-ci-flaky-rerun.yml
-289004 qwen-code-pr-review.yml
+293862 qwen-code-pr-review.yml
 107075 qwen-fleet-shepherd.yml
 22680 qwen-issue-followup-bot.yml
 5760 qwen-pr-safety-precheck.yml
@@ -75,7 +75,7 @@
 11210 update-ecs-runner-qwen.yml
 6206 verify-landlock-helper.yml
 5575 verify-maven-repo.yml
-7051 web-shell-managed-host.yml
+11507 web-shell-managed-host.yml
 2307 web-shell-visuals-cleanup.yml
 20047 web-shell-visuals-publish.yml
 21149 web-shell-visuals.yml

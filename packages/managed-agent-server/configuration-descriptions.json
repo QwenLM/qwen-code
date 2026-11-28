@@ -49,8 +49,8 @@
       "zh": "将 Session 分配到多个 Hosted Harness 实例上（而不是单一的 `qwen.managed-agent.harness.base-url`），支持静态发现，并与成员之间使用双向 TLS。"
     },
     "qwen.managed-agent.internal-server": {
-      "en": "An optional separate listener for the internal routes (`/internal/**`), such as the Session Store the Harness calls, so they do not share the public listener.",
-      "zh": "可选的独立监听器，用于承载内部路由（`/internal/**`，例如 Harness 调用的 Session Store），使其不与公共监听器共用。"
+      "en": "An optional separate Spring listener for the internal routes (`/internal/**`), including the Session Store and enabled Runtime Broker routes, so they do not share the public listener. Enabling the Broker requires it when the main connector binds beyond loopback; remote Harness calls use a TLS-protected internal ingress.",
+      "zh": "可选的独立 Spring 监听器，用于承载内部路由（`/internal/**`，包括 Session Store 与启用后的 Runtime Broker 路由），使其不与公共监听器共用。主连接器绑定非回环地址时，启用 Broker 必须配置此监听器；远端 Harness 通过 TLS 保护的内部入口访问。"
     },
     "qwen.managed-agent.managed-extensions": {
       "en": "Running the processes of selected extension packages inside Workspace Runtime workers under the managed extension execution profile.",
@@ -65,8 +65,8 @@
       "zh": "tool publication 与 Session 资源 / journal 冷存储共用的通用 Aliyun OSS 对象存储。"
     },
     "qwen.managed-agent.runtime-broker": {
-      "en": "The embedded Runtime Broker: its private HTTP listener for the Hosted Harness, the provisioner that places and recovers the Runtime workers that run Hosted tools, their Workspace mounts and isolation, and the keys that encrypt the Runtime credentials it persists.",
-      "zh": "内嵌 Runtime Broker：包括面向 Hosted Harness 的私有 HTTP 监听器、放置并恢复执行 Hosted 工具的 Runtime worker 的 provisioner、worker 的 Workspace 挂载与隔离方式，以及加密其持久化 Runtime 凭据的密钥。"
+      "en": "The embedded Runtime Broker: its Spring routes on the Managed Agent internal surface for the Hosted Harness, the provisioner that places and recovers the Runtime workers that run Hosted tools, their Workspace mounts and isolation, and the keys that encrypt the Runtime credentials it persists. The Broker has no dedicated listener settings.",
+      "zh": "内嵌 Runtime Broker：包括在 Managed Agent 内部接口上面向 Hosted Harness 的 Spring 路由、放置并恢复执行 Hosted 工具的 Runtime worker 的 provisioner、worker 的 Workspace 挂载与隔离方式，以及加密其持久化 Runtime 凭据的密钥。Broker 不再有独立的监听器设置。"
     },
     "qwen.managed-agent.runtime-broker.mcp-parking": {
       "en": "Keeps the MCP connections of idle suspended Sessions alive for reuse on reopen, and reclaims them after an idle period.",
@@ -79,6 +79,10 @@
     "qwen.managed-agent.runtime-broker.ssh": {
       "en": "SSH Runtime nodes: hosts the server reaches over SSH, on which users may register Workspaces whose Runtime workers then run there.",
       "zh": "SSH Runtime 节点：服务端通过 SSH 访问的主机，用户可以在这些主机上登记 Workspace，其 Runtime worker 随后在该主机上运行。"
+    },
+    "qwen.managed-agent.session-resource-gc": {
+      "en": "Optional collection of retired MySQL-only Session resources with SQL polling and RocketMQ wakeups.",
+      "zh": "可选的纯 MySQL 已退役 Session 资源回收，支持 SQL 轮询和 RocketMQ 唤醒。"
     },
     "qwen.managed-agent.session-store": {
       "en": "The private Managed Session Store through which the Hosted Harness reads and writes Session journals on this server's internal routes, and the writer credentials and leases that guard it.",
@@ -94,6 +98,26 @@
     }
   },
   "properties": {
+    "qwen.managed-agent.session-resource-gc.enabled": {
+      "en": "Enable GC for retired MySQL-only Sessions. Requires tool publication and Session resource externalization, packing, and eviction to be disabled. Sessions with historical external resources, captures, or packs are held. Uses the existing tool-publication deletion grace.",
+      "zh": "启用纯 MySQL 已退役 Session 的 GC。要求关闭工具发布以及 Session 资源外置、打包和腾空。带历史外部资源、capture 或 journal pack 的 Session 会被暂缓。沿用工具发布的删除宽限期。"
+    },
+    "qwen.managed-agent.session-resource-gc.worker-enabled": {
+      "en": "Run the Session resource GC polling worker and, when configured, its MQ consumer on this replica. Keep a worker enabled on at least one replica. API-only replicas can still publish wakeups.",
+      "zh": "在此副本运行 Session 资源 GC 轮询 worker，并在配置了 MQ 时启动消费者。至少在一个副本启用 worker。仅 API 副本仍可发布唤醒。"
+    },
+    "qwen.managed-agent.session-resource-gc.endpoints": {
+      "en": "RocketMQ proxy gRPC endpoints. Set together with topic and consumer group. Leave all three empty for SQL polling only.",
+      "zh": "RocketMQ proxy gRPC 地址，与 topic 和消费组一起配置。三项均留空时只运行 SQL 轮询。"
+    },
+    "qwen.managed-agent.session-resource-gc.topic": {
+      "en": "Pre-created RocketMQ DELAY topic dedicated to Session resource GC. Broker delay limits must cover the configured grace for scheduled wakeups.",
+      "zh": "预先创建的 Session 资源 GC 专用 RocketMQ DELAY topic。要让定时唤醒生效，Broker 的延迟上限须覆盖配置的宽限期。"
+    },
+    "qwen.managed-agent.session-resource-gc.consumer-group": {
+      "en": "Pre-created ordinary RocketMQ consumer group shared by all Session resource GC consumers.",
+      "zh": "预先创建的普通 RocketMQ 消费组，由所有 Session 资源 GC 消费者共享。"
+    },
     "qwen.managed-agent.object-storage.enabled": {
       "en": "Whether the generic Aliyun OSS object-store auto-configuration is active. Defaults to follow `qwen.managed-agent.tool-publication.enabled`; set it true with tool publication disabled to back Session resources and journal cold storage without enabling publication. The OSS endpoint, region and bucket are still read from `qwen.managed-agent.tool-publication.oss-*`.",
       "zh": "通用 Aliyun OSS 对象存储自动装配是否启用。默认跟随 `qwen.managed-agent.tool-publication.enabled`；在关闭 tool publication 时设为 true，可在不启用发布的情况下支撑 Session 资源与 journal 冷存储。OSS endpoint、region、bucket 仍从 `qwen.managed-agent.tool-publication.oss-*` 读取。"
@@ -491,12 +515,12 @@
       "zh": "新建的内置 `qwen-code` Workspace Session 是否使用 `hosted-workspace-shell/1` profile：文件工具加前台 Shell。启动要求 `qwen.managed-agent.harness.workspace-files-enabled` 且审批模式为 `default` 或 `auto-edit`；与外部 Runtime provisioner 同时使用时启动时拒绝。关闭后，现有 Shell Session 的新 Turn 以 `409 workspace_unavailable` 被拒绝。"
     },
     "qwen.managed-agent.internal-server.address": {
-      "en": "The address the separate internal listener binds when `qwen.managed-agent.internal-server.port` is set; empty means `127.0.0.1`. Startup refuses an address that does not resolve, and a non-loopback address without `qwen.managed-agent.session-store.binding-key` unless `qwen.managed-agent.auth.allow-insecure-bind`. The listener is always plaintext, and the server warns when it leaves loopback. The `managed-local` profile requires a loopback address.",
-      "zh": "设置 `qwen.managed-agent.internal-server.port` 时，独立内部监听器绑定的地址；为空表示 `127.0.0.1`。无法解析的地址，以及未配置 `qwen.managed-agent.session-store.binding-key` 时的非回环地址（除非开启 `qwen.managed-agent.auth.allow-insecure-bind`），均启动时拒绝。该监听器始终为明文，离开回环地址时服务会发出警告。`managed-local` profile 要求回环地址。"
+      "en": "The address the separate internal listener binds when `qwen.managed-agent.internal-server.port` is set; empty means `127.0.0.1`. This listener carries the Session Store and, when enabled, the Runtime Broker's Spring routes. Startup refuses an address that does not resolve, and a non-loopback address without `qwen.managed-agent.session-store.binding-key` unless `qwen.managed-agent.auth.allow-insecure-bind`. The listener is always plaintext, so remote Harness calls require a TLS-protected internal ingress; the server warns when it leaves loopback. The `managed-local` profile requires a loopback address.",
+      "zh": "设置 `qwen.managed-agent.internal-server.port` 时，独立内部监听器绑定的地址；为空表示 `127.0.0.1`。该监听器承载 Session Store，以及启用后的 Runtime Broker Spring 路由。无法解析的地址，以及未配置 `qwen.managed-agent.session-store.binding-key` 时的非回环地址（除非开启 `qwen.managed-agent.auth.allow-insecure-bind`），均启动时拒绝。该监听器始终为明文，因此远端 Harness 必须通过 TLS 保护的内部入口访问；离开回环地址时服务会发出警告。`managed-local` profile 要求回环地址。"
     },
     "qwen.managed-agent.internal-server.port": {
-      "en": "The port of a separate listener for the internal routes (`/internal/**`, including the Session Store); `0` or less serves them on the public listener. When set, each listener answers 404 for the other's routes. Startup refuses a port equal to `server.port`, and `qwen.managed-agent.channels.enabled` requires a port. The listener never inherits `server.ssl`.",
-      "zh": "内部路由（`/internal/**`，包括 Session Store）独立监听器的端口；`0` 或更小的值表示这些路由由公共监听器提供。设置后，两个监听器对彼此的路由都返回 404。与 `server.port` 相同时启动时拒绝；`qwen.managed-agent.channels.enabled` 需要设置此端口。该监听器不会继承 `server.ssl`。"
+      "en": "The port of a separate listener for the internal routes (`/internal/**`, including the Session Store and enabled Runtime Broker); `0` or less serves them on the public listener. When set, each listener answers 404 for the other's routes. Startup refuses a port equal to `server.port`, requires a separate internal listener when the Broker is enabled with a non-loopback `server.address`, and `qwen.managed-agent.channels.enabled` requires a port. The listener never inherits `server.ssl`.",
+      "zh": "内部路由（`/internal/**`，包括 Session Store 与启用后的 Runtime Broker）独立监听器的端口；`0` 或更小的值表示这些路由由公共监听器提供。设置后，两个监听器对彼此的路由都返回 404。与 `server.port` 相同时启动时拒绝；Broker 启用且 `server.address` 为非回环地址时必须配置独立内部监听器；`qwen.managed-agent.channels.enabled` 也需要设置此端口。该监听器不会继承 `server.ssl`。"
     },
     "qwen.managed-agent.managed-extensions.cache-directory": {
       "en": "The absolute directory where Runtime workers cache the extension packages they run; keep it private and outside every Workspace. Required when `qwen.managed-agent.managed-extensions.enabled` is true: a relative or empty path is refused at startup when the Runtime Broker uses local-process or SSH workers.",
@@ -542,10 +566,6 @@
       "type": "yaml-list",
       "default": ""
     },
-    "qwen.managed-agent.runtime-broker.allow-non-loopback": {
-      "en": "Whether the embedded Runtime Broker may bind a non-loopback address in `qwen.managed-agent.runtime-broker.host`, such as `0.0.0.0`; without it, startup refuses such an address. The listener serves one global bearer token over plaintext HTTP, with no per-tenant authorization, so enable it only behind a layer that terminates TLS and authorizes callers: restricting the network alone still sends the token in clear text, and whoever reads it can drive every execution the Broker admits. The `managed-local` profile refuses a non-loopback host regardless.",
-      "zh": "是否允许内嵌 Runtime Broker 绑定 `qwen.managed-agent.runtime-broker.host` 中的非回环地址（例如 `0.0.0.0`）；未开启时，此类地址启动时拒绝。该监听器通过明文 HTTP 使用同一个全局 bearer token，且没有按租户的鉴权，因此只应在终止 TLS 并对调用方鉴权的前置层之后开启：仅限制网络仍会以明文传输该 token，读到它的人可以操控 Broker 接纳的所有执行。`managed-local` profile 无论此项如何都拒绝非回环 host。"
-    },
     "qwen.managed-agent.runtime-broker.bound-session-isolation-class": {
       "en": "How Runtime workers are shared among Sessions bound to a mounted local Workspace: `session` gives each Session its own worker, `workspace` lets the Sessions of one Workspace share one. Startup refuses other values. `workspace` requires the `local-process` provisioner with `qwen.managed-agent.runtime-broker.durable-local-process` and cannot combine with `qwen.managed-agent.runtime-broker.child-workspaces-enabled`; Session worktrees and public child agents need `session`. SSH-bound Sessions always use `session`.",
       "zh": "绑定到本地挂载 Workspace 的 Session 如何共享 Runtime worker：`session` 为每个 Session 单独启动 worker，`workspace` 让同一 Workspace 的 Session 共用一个 worker。其他取值启动时拒绝。`workspace` 要求使用 `local-process` provisioner 并开启 `qwen.managed-agent.runtime-broker.durable-local-process`，且不能与 `qwen.managed-agent.runtime-broker.child-workspaces-enabled` 同时使用；Session worktree 与公开子 agent 需要 `session`。SSH 绑定的 Session 始终使用 `session`。"
@@ -579,8 +599,8 @@
       "zh": "`local-process` provisioner 是否把每次 Runtime worker 启动登记到 `qwen.managed-agent.runtime-broker.state-directory`，使重启后的 Broker 接管仍在运行的同一 worker；关闭时 worker 随 Broker 退出而停止。需要 Linux 或 macOS，且状态目录须位于所有 Workspace 根目录之外，否则启动时拒绝。可信重启恢复、子 Workspace、Workspace 创建、本地目录导入以及 `workspace` 取值的绑定 Session 隔离都依赖此项。"
     },
     "qwen.managed-agent.runtime-broker.enabled": {
-      "en": "Whether the control plane runs the embedded Runtime Broker, which places the Runtime workers that execute Hosted tools and serves the Hosted Harness on `qwen.managed-agent.runtime-broker.host` and `qwen.managed-agent.runtime-broker.port`. When on, startup requires `qwen.managed-agent.runtime-broker.token`, `qwen.managed-agent.runtime-broker.credential-key-id`, `qwen.managed-agent.runtime-broker.credential-key`, `qwen.managed-agent.runtime-broker.workspace-cwd` and `qwen.managed-agent.harness.capability-digest`. Hosted Workspace files and child Workspaces require it.",
-      "zh": "控制面是否运行内嵌 Runtime Broker：它负责放置执行 Hosted 工具的 Runtime worker，并在 `qwen.managed-agent.runtime-broker.host` 与 `qwen.managed-agent.runtime-broker.port` 上为 Hosted Harness 提供服务。开启时，缺少 `qwen.managed-agent.runtime-broker.token`、`qwen.managed-agent.runtime-broker.credential-key-id`、`qwen.managed-agent.runtime-broker.credential-key`、`qwen.managed-agent.runtime-broker.workspace-cwd` 或 `qwen.managed-agent.harness.capability-digest` 时启动时拒绝。Hosted Workspace 文件与子 Workspace 都要求开启此项。"
+      "en": "Whether the control plane runs the embedded Runtime Broker, which places the Runtime workers that execute Hosted tools and serves the Hosted Harness through `/internal/runtime-broker/v1/**` Spring routes on the Managed Agent internal surface. There is no dedicated Broker listener. When off, the server creates neither the Broker service nor its routes, and a Harness without a Broker URL or token retains text-only Sessions. When on, startup requires `qwen.managed-agent.runtime-broker.token`, `qwen.managed-agent.runtime-broker.credential-key-id`, `qwen.managed-agent.runtime-broker.credential-key`, `qwen.managed-agent.runtime-broker.workspace-cwd` and `qwen.managed-agent.harness.capability-digest`; a non-loopback `server.address` also requires `qwen.managed-agent.internal-server.port`. Hosted Workspace files and child Workspaces require it.",
+      "zh": "控制面是否运行内嵌 Runtime Broker：它负责放置执行 Hosted 工具的 Runtime worker，并通过 Managed Agent 内部接口上的 `/internal/runtime-broker/v1/**` Spring 路由为 Hosted Harness 提供服务，不再有独立的 Broker 监听器。关闭时服务端既不创建 Broker 服务也不创建其路由，未配置 Broker URL 和 token 的 Harness 仍可运行纯文本 Session。开启时，缺少 `qwen.managed-agent.runtime-broker.token`、`qwen.managed-agent.runtime-broker.credential-key-id`、`qwen.managed-agent.runtime-broker.credential-key`、`qwen.managed-agent.runtime-broker.workspace-cwd` 或 `qwen.managed-agent.harness.capability-digest` 时启动时拒绝；`server.address` 为非回环地址时还必须设置 `qwen.managed-agent.internal-server.port`。Hosted Workspace 文件与子 Workspace 都要求开启此项。"
     },
     "qwen.managed-agent.runtime-broker.environment": {
       "en": "Extra environment variables for Runtime workers, as a map from variable name to value, set in a configuration file (YAML). No provisioner passes them on: startup refuses a non-empty map with the `local-process` provisioner, and the other provisioners ignore it.",
@@ -607,10 +627,6 @@
       "en": "How long the Broker keeps polling the external provider's `observe` route after `provision` for the provisioned worker to report ready; when it lapses, the placement fails with the retryable `runtime_external_unavailable`. A suffix-less number binds as seconds. Read only with an external provisioner, where startup refuses a value under 1ms.",
       "zh": "调用 `provision` 后，Broker 轮询外部 provider 的 `observe` 路由、等待所放置的 worker 就绪的最长时间；超时后本次放置以可重试的 `runtime_external_unavailable` 失败。不带单位的数字按秒绑定。仅在使用外部 provisioner 时读取，此时小于 1ms 的值启动时拒绝。"
     },
-    "qwen.managed-agent.runtime-broker.host": {
-      "en": "The address the embedded Runtime Broker's HTTP listener binds; the Hosted Harness reaches it through its own `QWEN_MANAGED_RUNTIME_BROKER_URL`. A non-loopback address, including `0.0.0.0`, requires `qwen.managed-agent.runtime-broker.allow-non-loopback`, and the `managed-local` profile refuses one regardless. Preflight compares the Broker URL in the Harness credentials file with this listener.",
-      "zh": "内嵌 Runtime Broker 的 HTTP 监听器绑定的地址；Hosted Harness 通过它自己的 `QWEN_MANAGED_RUNTIME_BROKER_URL` 访问该监听器。非回环地址（包括 `0.0.0.0`）需要开启 `qwen.managed-agent.runtime-broker.allow-non-loopback`，且 `managed-local` profile 无论如何都拒绝非回环地址。预检会将 Harness 凭据文件中的 Broker URL 与该监听器比对。"
-    },
     "qwen.managed-agent.runtime-broker.isolation-class": {
       "en": "How the Broker shares Runtime workers among Sessions with no Workspace binding: `session` gives each Hosted Session its own worker, `workspace` shares one across the configured Workspace. Startup refuses `workspace` with Hosted Workspace files on `local-process`, child Workspaces or an external provisioner, and refuses `session` with the `static` provisioner. Workspace-bound Sessions use `qwen.managed-agent.runtime-broker.bound-session-isolation-class` instead.",
       "zh": "Broker 如何在未绑定 Workspace 的 Session 之间共享 Runtime worker：`session` 为每个 Hosted Session 单独启动 worker，`workspace` 让配置的整个 Workspace 共用一个 worker。在 `local-process` 上启用 Hosted Workspace 文件、启用子 Workspace 或使用外部 provisioner 时，`workspace` 启动时拒绝；使用 `static` provisioner 时，`session` 启动时拒绝。绑定 Workspace 的 Session 改用 `qwen.managed-agent.runtime-broker.bound-session-isolation-class`。"
@@ -626,10 +642,6 @@
     "qwen.managed-agent.runtime-broker.operator-recovery-enabled": {
       "en": "Whether the offline operator-recovery command (`bin/qwen-managed-agent-admin operator-recovery`) may run its `inspect`, `prepare` and `complete` steps for a Hosted Shell capture that kept a Workspace lease. Set it for that maintenance process: the command refuses to run unless it is on with `qwen.managed-agent.runtime-broker.durable-local-process`, the `local-process` provisioner and `qwen.managed-agent.runtime-broker.state-directory`. The server refuses it at startup with an external provisioner.",
       "zh": "是否允许离线的运维恢复命令（`bin/qwen-managed-agent-admin operator-recovery`）对仍占用 Workspace 租约的 Hosted Shell 捕获执行 `inspect`、`prepare` 与 `complete` 步骤。请在该维护进程中设置：除非此项开启，且同时开启 `qwen.managed-agent.runtime-broker.durable-local-process`、使用 `local-process` provisioner 并配置 `qwen.managed-agent.runtime-broker.state-directory`，否则该命令拒绝运行。使用外部 provisioner 时，服务端启动时拒绝此项。"
-    },
-    "qwen.managed-agent.runtime-broker.port": {
-      "en": "The TCP port of the embedded Runtime Broker's HTTP listener; the Hosted Harness's `QWEN_MANAGED_RUNTIME_BROKER_URL` must reach it, directly on a loopback address or through the TLS-terminating proxy in front of a non-loopback bind. Startup fails when the listener cannot bind it. Preflight checks that the port is free, or listening with `--online`, and compares it with the Broker URL in the Harness credentials file.",
-      "zh": "内嵌 Runtime Broker HTTP 监听器的 TCP 端口；Hosted Harness 的 `QWEN_MANAGED_RUNTIME_BROKER_URL` 必须能到达它：回环地址时直接指向它，非回环绑定时经由前置的 TLS 终止代理。监听器无法绑定该端口时启动失败。预检会检查端口是否空闲（使用 `--online` 时检查是否在监听），并与 Harness 凭据文件中的 Broker URL 比对。"
     },
     "qwen.managed-agent.runtime-broker.previous-credential-keys": {
       "en": "Earlier Runtime credential keys kept after a rotation, as a map from key ID to base64-encoded 32-byte key, so rows encrypted under them stay readable; writes use only the active key. Secrets. Set it in a configuration file (YAML), each ID in brackets, such as `'[old-v1]': <key>`; environment variables cannot supply it. Startup refuses a key that is not 32 bytes or an ID equal to `qwen.managed-agent.runtime-broker.credential-key-id`.",
@@ -719,8 +731,8 @@
       "zh": "Broker 访问 static Runtime worker 时出示的 Bearer 令牌，属于密钥；已保存的绑定用 Runtime 凭据密钥（`qwen.managed-agent.runtime-broker.credential-key`）加密存储它。`qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时必填，最长 512 个字符。"
     },
     "qwen.managed-agent.runtime-broker.token": {
-      "en": "The bearer token the Hosted Harness presents to the embedded Runtime Broker's private listener; it also authorizes the loopback-only external storage registration endpoint. A secret. Required when `qwen.managed-agent.runtime-broker.enabled` is true; at most 512 characters. It can come from `qwen.managed-agent.harness.credentials-file` (`QWEN_MANAGED_RUNTIME_BROKER_TOKEN`) instead; setting it in both places is refused at startup.",
-      "zh": "Hosted Harness 访问内嵌 Runtime Broker 私有监听端口时出示的 Bearer 令牌；它也用于授权仅限回环地址的外部存储登记接口。属于密钥。`qwen.managed-agent.runtime-broker.enabled` 为 true 时必填，最长 512 个字符。也可以改由 `qwen.managed-agent.harness.credentials-file` 中的 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 提供；两处同时设置时启动时拒绝。"
+      "en": "The bearer token the Hosted Harness presents to the Runtime Broker's `/internal/runtime-broker/v1/**` Spring routes on the Managed Agent internal surface; it also authorizes the loopback-only external storage registration endpoint. A secret with its own authorization scope: public API signatures and Session Store writer credentials do not authorize Broker calls. Required when `qwen.managed-agent.runtime-broker.enabled` is true; at most 512 characters. It can come from `qwen.managed-agent.harness.credentials-file` (`QWEN_MANAGED_RUNTIME_BROKER_TOKEN`) instead; setting it in both places is refused at startup.",
+      "zh": "Hosted Harness 访问 Managed Agent 内部接口上的 Runtime Broker `/internal/runtime-broker/v1/**` Spring 路由时出示的 Bearer 令牌；它也用于授权仅限回环地址的外部存储登记接口。属于机密，具有独立的授权范围：公共 API 签名与 Session Store writer 凭据都不能授权 Broker 调用。`qwen.managed-agent.runtime-broker.enabled` 为 true 时必填，最长 512 个字符。也可以改由 `qwen.managed-agent.harness.credentials-file` 中的 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 提供；两处同时设置时启动时拒绝。"
     },
     "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery": {
       "en": "Whether, after a whole-host reboot on Linux or macOS, the Broker treats the changed boot identity (the kernel boot ID on Linux, the boot session UUID on the same macOS hardware) as proof that the original local workers stopped, and clears the holders of their saved Runtime bindings once every execution is terminal. It scans 8 saved bindings every 5 seconds and never starts a replacement worker or replays an execution. Requires `qwen.managed-agent.runtime-broker.durable-local-process` and the `local-process` provisioner; startup refuses it otherwise.",
@@ -878,6 +890,16 @@
       "zh": "允许 Hosted Harness 在 Session 唯一活跃的 Turn 正等待可恢复的审批或提问 Action 时挂起该 Session。Session Store 会在 writer grant 中公告该能力，挂起时的 seal 携带停靠 Turn 证书，控制面据此释放派发租约，直到决定、取消、审批模式变更或到期。需要同时开启 `qwen.managed-agent.wake-dispatch.enabled`，只开启 Action parking 会在启动时拒绝。默认关闭。关闭后不再产生新的停靠；已停靠的 Turn 仍经现有派发扫描恢复。",
       "type": "boolean"
     },
+    "qwen.managed-agent.event-ingest.enabled": {
+      "en": "Hands a freshly submitted Turn's event delivery to the Hosted Harness that admitted it. When the Session Store is enabled and the Harness advertises `event-ingest/1`, the dispatcher records the admission, gives the Turn's dispatch lease to that Harness and opens no event stream; the Harness pushes the committed events to any server instance through the Session Store and renews the lease with each request. Recovery, continuation and cancellation keep the stream, and a cancel takes a Harness-held Turn back at once. Turn it on only after every server instance serves the ingest route. Defaults off. Disabling it affects new admissions only; Turns the Harness already holds finish through ingest.",
+      "zh": "把一次全新提交的 Turn 的事件投递交给受理它的 Hosted Harness。在 Session Store 已开启且 Harness 声明 `event-ingest/1` 时，派发器记录受理后把该 Turn 的派发租约交给这个 Harness，不再打开事件流；Harness 经 Session Store 把已提交的事件推送给任一服务端实例，每次请求都会续租。恢复、续跑和取消仍走事件流，取消会立即收回 Harness 持有的 Turn。请在所有服务端实例都提供 ingest 路由之后再开启。默认关闭。关闭只影响新的受理；Harness 已持有的 Turn 仍经 ingest 完成。",
+      "type": "boolean"
+    },
+    "qwen.managed-agent.harness-pull.enabled": {
+      "en": "Lets a Hosted Harness claim released Sessions over an outbound work poll instead of Java assigning them round robin. When it is on and the Harness pool advertises `work-pull/1`, a push path that would take over a placement that is not active records claim demand and waits; a negotiated pool member that polls with a free cold-open slot claims the Session under a 30-second reservation. Demand that nobody claims within 30 seconds is assigned as before. The poll route is served on the internal listener only while this is on. Every Harness that holds the Harness token must be equally trusted.",
+      "zh": "允许 Hosted Harness 通过向外的工作轮询认领已释放的 Session，而不是由 Java 按轮询分配。开启且 Harness 池声明 `work-pull/1` 时，推送路径若要接管一个非活跃的 placement，会改为记录认领需求并等待；带着空闲冷启动槽位来轮询的已协商池成员会在 30 秒的预留下认领该 Session。30 秒内无人认领的需求按原来的方式分配。只有开启时，内部监听器上才提供 poll 路由。持有 Harness token 的每个 Harness 都必须同等可信。",
+      "type": "boolean"
+    },
     "qwen.managed-agent.wake-dispatch.enabled": {
       "en": "Lets a Hosted Harness suspend an idle Session whose only pending inputs are deferred, unattempted wake inputs. The Session Store advertises the capability in its writer grants, the suspension seal stamps the head with the earliest due time, and the wake recovery scan loads the Session when that time arrives without replaying its journal. Defaults off. Disabling it stops new such suspensions; heads already stamped are still delivered when due.",
       "zh": "允许 Hosted Harness 挂起一个空闲 Session，前提是它的待处理输入全部是延后到期且未被尝试过的唤醒输入。Session Store 会在 writer grant 中公告该能力，挂起时的 seal 会在 head 上记下最早的到期时间，唤醒恢复扫描在到期时加载该 Session，无需重放 journal。默认关闭。关闭后不再产生新的此类挂起；已带戳的 head 仍会在到期时投递。",
@@ -889,8 +911,8 @@
       "type": "duration"
     },
     "server.address": {
-      "en": "The address the public HTTP listener binds to. A non-loopback address needs `qwen.managed-agent.auth.mode=signed`; under `auto` or `open` mode startup refuses it unless `qwen.managed-agent.auth.allow-insecure-bind` is true. While the internal routes share this listener (no `qwen.managed-agent.internal-server.port`) and the Session Store or tool publication is on, a non-loopback address also needs `qwen.managed-agent.session-store.binding-key` unless `qwen.managed-agent.auth.allow-insecure-bind` is true. The `managed-local` profile refuses any non-loopback address.",
-      "zh": "公共 HTTP 监听器绑定的地址。非回环地址需要 `qwen.managed-agent.auth.mode=signed`；在 `auto` 或 `open` 模式下，除非 `qwen.managed-agent.auth.allow-insecure-bind` 为 true，否则启动时拒绝。内部路由与该监听器共用（未设置 `qwen.managed-agent.internal-server.port`）且开启了 Session Store 或工具发布时，非回环地址还需要 `qwen.managed-agent.session-store.binding-key`，除非 `qwen.managed-agent.auth.allow-insecure-bind` 为 true。`managed-local` profile 下非回环地址一律启动时拒绝。",
+      "en": "The address the public HTTP listener binds to. A non-loopback address needs `qwen.managed-agent.auth.mode=signed`; under `auto` or `open` mode startup refuses it unless `qwen.managed-agent.auth.allow-insecure-bind` is true. When the Runtime Broker is enabled, a non-loopback address also requires a separate `qwen.managed-agent.internal-server.port`: the Broker's Spring routes must stay on the internal surface rather than the public ingress. While the internal routes share this listener (no `qwen.managed-agent.internal-server.port`) and the Session Store or tool publication is on, a non-loopback address also needs `qwen.managed-agent.session-store.binding-key` unless `qwen.managed-agent.auth.allow-insecure-bind` is true. The `managed-local` profile refuses any non-loopback address.",
+      "zh": "公共 HTTP 监听器绑定的地址。非回环地址需要 `qwen.managed-agent.auth.mode=signed`；在 `auto` 或 `open` 模式下，除非 `qwen.managed-agent.auth.allow-insecure-bind` 为 true，否则启动时拒绝。启用 Runtime Broker 时，非回环地址还必须设置独立的 `qwen.managed-agent.internal-server.port`：Broker 的 Spring 路由必须留在内部接口上，不能经公共入口暴露。内部路由与该监听器共用（未设置 `qwen.managed-agent.internal-server.port`）且开启了 Session Store 或工具发布时，非回环地址还需要 `qwen.managed-agent.session-store.binding-key`，除非 `qwen.managed-agent.auth.allow-insecure-bind` 为 true。`managed-local` profile 下非回环地址一律启动时拒绝。",
       "type": "string"
     },
     "server.port": {

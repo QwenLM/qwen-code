@@ -349,7 +349,7 @@ describe('ComposerUsageStats', () => {
     expect(container.textContent).toContain('2 turns');
     update({ sessionId: 's-2' });
     await flush();
-    expect(loadStats).toHaveBeenLastCalledWith('s-2');
+    expect(loadStats).toHaveBeenLastCalledWith('s-2', expect.any(AbortSignal));
     expect(container.innerHTML).toBe('');
     resolveSecond(stats({ sessionId: 's-2', promptCount: 7 }));
     await flush();
@@ -361,16 +361,22 @@ describe('ComposerUsageStats', () => {
     const first = deferredStats();
     const second = deferredStats();
     const loadStats = vi
-      .fn<(id: string) => Promise<DaemonSessionStatsStatus>>()
+      .fn<
+        (id: string, signal?: AbortSignal) => Promise<DaemonSessionStatsStatus>
+      >()
       .mockReturnValueOnce(first.promise)
       .mockReturnValueOnce(second.promise)
       .mockResolvedValue(stats({ sessionId: 's-2', promptCount: 8 }));
     const { container, update } = render({ loadStats });
     await flush();
+    const firstSignal = loadStats.mock.calls[0]?.[1];
+    expect(firstSignal).toBeInstanceOf(AbortSignal);
+    expect(firstSignal?.aborted).toBe(false);
     update({ sessionId: 's-2' });
     await flush();
+    expect(firstSignal?.aborted).toBe(true);
     expect(loadStats).toHaveBeenCalledTimes(2);
-    expect(loadStats).toHaveBeenLastCalledWith('s-2');
+    expect(loadStats).toHaveBeenLastCalledWith('s-2', expect.any(AbortSignal));
 
     update({ sessionId: 's-2', refreshSignal: 1 });
     first.resolve(stats({ promptCount: 99 }));
@@ -385,7 +391,7 @@ describe('ComposerUsageStats', () => {
     second.resolve(stats({ sessionId: 's-2', promptCount: 7 }));
     await flush();
     expect(loadStats).toHaveBeenCalledTimes(3);
-    expect(loadStats).toHaveBeenLastCalledWith('s-2');
+    expect(loadStats).toHaveBeenLastCalledWith('s-2', expect.any(AbortSignal));
     expect(container.textContent).toContain('8 turns');
   });
 
@@ -460,5 +466,33 @@ describe('ComposerUsageStats', () => {
     await flush();
     act(() => container.querySelector('button')!.click());
     expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts an in-flight loadStats signal on unmount and omits cache hit when cacheHitUnknown is true', async () => {
+    const inFlight = deferredStats();
+    const loadInFlight = vi.fn(
+      (_id: string, _signal?: AbortSignal) => inFlight.promise,
+    );
+    render({ loadStats: loadInFlight });
+    await flush();
+    const signal = loadInFlight.mock.calls[0]?.[1];
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal?.aborted).toBe(false);
+    const mountedEntry = mounted.pop()!;
+    act(() => mountedEntry.root.unmount());
+    mountedEntry.container.remove();
+    expect(signal?.aborted).toBe(true);
+
+    const { container } = render({
+      loadStats: vi.fn(async () => ({
+        ...stats({ promptCount: 0 }),
+        cacheHitUnknown: true,
+      })),
+    });
+    await flush();
+    expect(container.textContent).toContain('4.36M tok');
+    expect(container.textContent).not.toContain('cache hit');
+    expect(container.textContent).not.toContain('turn');
+    expect(container.querySelector('button')?.getAttribute('title')).toBeNull();
   });
 });

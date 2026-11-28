@@ -166,6 +166,11 @@ describe('validateAutofixPrParams', () => {
     [{ command: 'sync', pr: 1, discard: 'yes' as never }, /must be a boolean/],
     [{ command: 'schedule', pr: 1, every: 2.5 }, /positive integer/],
     [{ command: 'push', pr: 1, in_place: true }, /does not take "in_place"/],
+    [{ command: 'push', pr: 1, watch: true }, /does not take "watch"/],
+    [
+      { command: 'prepare', pr: 1, repo: 'o/r', watch: true },
+      /needs "in_place"/,
+    ],
     // The plan is the one the skill writes beside the worktree, never a file
     // of another PR, a relative path, or one the PR's own tree carries.
     [
@@ -214,6 +219,7 @@ describe('validateAutofixPrParams', () => {
     for (const params of [
       { command: 'prepare', pr: 1, repo: 'o/r', host: 'github.com' },
       { command: 'prepare', pr: 1, repo: 'o/r', in_place: true },
+      { command: 'prepare', pr: 1, repo: 'o/r', in_place: true, watch: true },
       { command: 'snapshot', pr: 1, task: '0123456789ab' },
       { command: 'reply', pr: 1, plan, task: 't1' },
       { command: 'status' },
@@ -234,6 +240,10 @@ describe('autofixPrArgs', () => {
     [
       { command: 'prepare', pr: 5, repo: 'o/r', in_place: true },
       ['prepare', '5', '--repo=o/r', '--in-place'],
+    ],
+    [
+      { command: 'prepare', pr: 5, repo: 'o/r', in_place: true, watch: true },
+      ['prepare', '5', '--repo=o/r', '--in-place', '--watch'],
     ],
     [
       { command: 'ci-log', pr: 5, run_id: '99', lines: 300, task: 't1' },
@@ -647,15 +657,25 @@ describe('permission rules', () => {
     ).toMatch(/Takes the watch of PR #12 over/);
   });
 
-  it('says what an in-place start does', async () => {
-    const details = await invocation({
+  it('says what an in-place start and take-over do', async () => {
+    const start = await invocation({
       command: 'prepare',
       pr: 12,
       repo: 'o/r',
       in_place: true,
     }).getConfirmationDetails(signal());
-    expect((details as { warnings?: string[] }).warnings?.join(' ')).toMatch(
+    expect((start as { warnings?: string[] }).warnings?.join(' ')).toMatch(
       /Starts an in-place watch of PR #12: the fix agent works in your own checkout/,
+    );
+    const takeOver = await invocation({
+      command: 'prepare',
+      pr: 12,
+      repo: 'o/r',
+      in_place: true,
+      take_over: true,
+    }).getConfirmationDetails(signal());
+    expect((takeOver as { warnings?: string[] }).warnings?.join(' ')).toMatch(
+      /Takes the in-place watch of PR #12 over/,
     );
   });
 
@@ -1182,9 +1202,17 @@ describe('unattended', () => {
     expect(await granted()).toBe(false);
   });
 
-  it('refuses an in-place watch: its fixes always run attended', async () => {
+  it('refuses an in-place watch: its fixes always run attended, even when scheduled', async () => {
+    vi.stubEnv('FAKE_IN_PLACE', '1');
     await prepare();
     vi.stubEnv('FAKE_STATUS', status({ inPlace: true }));
+    const scheduled = await invocation({
+      command: 'schedule',
+      pr: 12,
+      every: 5,
+    }).execute(signal());
+    expect(scheduled.error).toBeUndefined();
+    expect(watchTask('session-a', 12)).toMatchObject({ task: 'feedc0ffee12' });
     const result = await confirmAndRun();
     expect(result.error?.message).toMatch(/in-place watch/);
     expect(await granted()).toBe(false);

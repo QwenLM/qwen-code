@@ -701,9 +701,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         passiveManagedRuntimeRecovery, actionResponse, mcpManagementOnly));
     }
 
-    private Attachment createOrLoadAttachment(String tenantId, String sessionId,
-            boolean loadExisting, boolean passiveManagedRuntimeRecovery,
-            boolean actionResponse, boolean mcpManagementOnly) {
+    /** The body {@link #recoverForWake} would post, for a work-pull claimer to run instead. */
+    Map<String, Object> passiveWakeLoad(String tenantId, String sessionId) {
+        requireReadyForNewWork(tenantId, sessionId, false);
+        SessionRecord session = requireAttachable(tenantId, sessionId, true, true, false);
+        return client().loadSessionBody(loadRequest(session, true, false, false, null));
+    }
+
+    private SessionRecord requireAttachable(String tenantId, String sessionId, boolean loadExisting,
+            boolean passiveManagedRuntimeRecovery, boolean actionResponse) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         requireShellApproval(session);
         if (session.publicChildAgentsVersion() == 1 && !supportsPublicChildAgents()) {
@@ -730,6 +736,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
         }
         requireApprovalSelectionSupport(session);
+        return session;
+    }
+
+    private Attachment createOrLoadAttachment(String tenantId, String sessionId,
+            boolean loadExisting, boolean passiveManagedRuntimeRecovery,
+            boolean actionResponse, boolean mcpManagementOnly) {
+        SessionRecord session = requireAttachable(tenantId, sessionId, loadExisting,
+                passiveManagedRuntimeRecovery, actionResponse);
         AttachmentKey key = attachmentKey(tenantId, sessionId);
         if (!mcpManagementOnly && !loadExisting && !attachments.containsKey(key)
                 && mcpManagementAttachments.containsKey(key)) {
@@ -812,9 +826,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public Admission submit(String tenantId, String sessionId,
             String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
+        return submit(tenantId, sessionId, promptId, input, payloadDigest, null);
+    }
+
+    @Override
+    public Admission submit(String tenantId, String sessionId, String promptId,
+            List<Map<String, Object>> input, String payloadDigest, String ingestTurnId) {
         try {
             return doSubmit(tenantId, sessionId, promptId, input,
-                    payloadDigest);
+                    payloadDigest, ingestTurnId);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -1106,6 +1126,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsEventIngest() {
+        return sessionStore.isEnabled() && feature(HarnessFeature.EVENT_INGEST);
+    }
+
+    @Override
     public SideQueryTarget prepareSideQuery() {
         if (!supportsSideQueries()) {
             throw new ManagedAgentException(409, "unsupported_feature", "Hosted side queries are unavailable.");
@@ -1209,7 +1234,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     private Admission doSubmit(String tenantId, String sessionId,
             String promptId,
-            List<Map<String, Object>> input, String payloadDigest) {
+            List<Map<String, Object>> input, String payloadDigest, String ingestTurnId) {
         SessionRecord session = requireReadyForNewWork(tenantId, sessionId, false);
         HarnessSessionRef ref = attachment(tenantId, sessionId, true);
         SubmitHarnessTurn.Builder builder = SubmitHarnessTurn.builder()
@@ -1242,6 +1267,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             throw new IllegalStateException("Hosted input attachments are unavailable");
         }
         input.forEach(builder::addContent);
+        if (ingestTurnId != null) {
+            builder.eventIngest(ingestTurnId);
+        }
         PromptReceipt receipt = turnAdmission(tenantId, sessionId, ref,
                 attached -> client().submitTurn(builder.session(attached).build()));
         return new Admission(receipt.getLastEventId(),
@@ -2075,6 +2103,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private HarnessSessionRef load(SessionRecord session,
             boolean passiveManagedRuntimeRecovery,
             boolean driveRuntimeRecovery, boolean cancellationTakeover, boolean mcpManagementOnly, String promptId) {
+        LoadHarnessSession request = loadRequest(session, passiveManagedRuntimeRecovery, driveRuntimeRecovery,
+                cancellationTakeover, promptId);
+        return mcpManagementOnly ? client().loadMcpManagementSession(request) : client().loadSession(request);
+    }
+
+    private LoadHarnessSession loadRequest(SessionRecord session, boolean passiveManagedRuntimeRecovery,
+            boolean driveRuntimeRecovery, boolean cancellationTakeover, String promptId) {
         if ((cancellationTakeover && session.workspace() != null) || promptId != null) {
             requireTargetedCancellation(promptId);
         }
@@ -2104,7 +2139,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (promptId != null) {
             request.withCancellationPromptId(promptId);
         }
-        return mcpManagementOnly ? client().loadMcpManagementSession(request) : client().loadSession(request);
+        return request;
     }
 
     @Override

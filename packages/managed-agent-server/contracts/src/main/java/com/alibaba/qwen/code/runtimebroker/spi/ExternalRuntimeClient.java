@@ -14,4 +14,11 @@ public interface ExternalRuntimeClient {
 
     /** Returns {@code state} RUNNING, STARTING, GONE or UNKNOWN, and {@code endpoint} when RUNNING. */
     public CompletionStage<Map<String, Object>> observe(Map<String, Object> request);
+
+    /**
+     * Reattaches the provider to the persisted original Worker after a
+     * provider-process restart. The request carries the original boot, scope,
+     * handle and endpoint; implementations must never provision a replacement.
+     */
+    public CompletionStage<Map<String, Object>> reattach(Map<String, Object> request);
 }

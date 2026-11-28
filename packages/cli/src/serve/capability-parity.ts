@@ -263,6 +263,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     evidence:
       'surface:AUTOMATION_RUN,surface:STORE_AUTOMATION_CREATE,surface:STORE_AUTOMATION_LIST,surface:STORE_AUTOMATION_RETIRE',
   },
+  scheduled_task_owner_selection: NO_MANAGED_EQUIVALENT(
+    'Managed automations do not accept daemon session-owner selectors',
+  ),
   // Fixed-interval /loop: cron_create passes a gate through to the
   // definition, probed before each firing by the same gateCommandError the
   // daemon's scheduled-task gate uses, so a quiet watch spends no turn.
@@ -697,6 +700,9 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   // Internal relay MCP leg the Hosted Harness connects back to, behind the
   // relay credential, never a client capability.
   'INTERNAL_CLIENT_FILES_MCP',
+  // Internal work poll the Hosted Harness calls with its bearer token to
+  // claim released Sessions, never a client capability.
+  'HARNESS_WORK_POLL',
   // Internal writer and publication routes: between the control plane and its
   // own stores, behind writer credentials, never a client capability.
   'PUB_ADMISSION_PREPARE',
@@ -716,6 +722,7 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'STORE_MODEL_CONFIG_QUERY',
   'STORE_MEMORY_QUERY',
   'STORE_USER_MESSAGE_CLAIM',
+  'STORE_EVENT_INGEST',
   'STORE_EXECUTION_AUTHORIZE',
   'STORE_LIFECYCLE_AUTHORIZE',
   'STORE_RECOVERY_BLOCK',

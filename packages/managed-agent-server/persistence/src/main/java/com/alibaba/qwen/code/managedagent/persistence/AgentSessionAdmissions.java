@@ -105,10 +105,6 @@ final class AgentSessionAdmissions {
         this.childSessionAdmissions = new ChildSessionAdmissions(jdbc, clock, storeRows, eventJournal, sessionCommands, configRecords, modelConfigs, creationSkills, definitions, workspaceFilesEnabled);
     }
 
-    ChildSessionAdmissions childSessionAdmissions() {
-        return childSessionAdmissions;
-    }
-
     Admission insertSessionCommand(String tenantId, String actorId,
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,

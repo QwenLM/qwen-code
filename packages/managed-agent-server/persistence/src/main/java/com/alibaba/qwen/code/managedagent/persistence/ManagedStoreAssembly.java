@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.event.CommittedEventPublisher;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelOption;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
@@ -27,15 +29,16 @@ final class ManagedStoreAssembly {
     private final AgentLifecycleOperations lifecycleOperations;
     private final AgentSessionAdmissions sessionAdmissions;
     private final AgentTurnExecution turnExecution;
+    private final AgentTurnHandOff turnHandOff;
     private final AgentActionParking actionParking;
     private final AgentExecutionOperations executionOperations;
 
     ManagedStoreAssembly(JdbcTemplate jdbc, ObjectMapper objectMapper,
             Clock clock, CommittedEventPublisher eventPublisher,
             JdbcManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
-            com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
+            WorktreeFiles worktreeFiles,
             JdbcManagedSessionSkills creationSkills,
-            com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
+            ExtensionPackages extensionPackages,
             JdbcWorkspaceLifecycleStore lifecycle, JdbcManagedAgentDefinitionStore definitions,
             JdbcSessionWorktreeStore sessionWorktrees,
             JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs,
@@ -69,6 +72,7 @@ final class ManagedStoreAssembly {
         this.lifecycleOperations = new AgentLifecycleOperations(eventJournal, sessionCommands, sessionPolicies, sessionQueries, storeRows, jdbc, lifecycle, objectMapper, clock, workspaces, workspaceFilesEnabled, lifecycleHandoffMillis);
         this.sessionAdmissions = new AgentSessionAdmissions(eventJournal, sessionCommands, sessionPolicies, storeRows, configRecords, jdbc, clock, approvalMode, workspaces, agentRevision, modelCatalog, definitions, creationSkills, sessionWorktrees, extensionPackages, workspaceFilesEnabled, workspaceShellEnabled, workspaceChildAgentsEnabled, managedExtensionExecutionEnabled, workspaceMounts, createdRoots, modelConfigs);
         this.turnExecution = new AgentTurnExecution(eventJournal, messageProjection, sessionCommands, storeRows, jdbc, objectMapper, clock, journalPacks);
+        this.turnHandOff = new AgentTurnHandOff(turnExecution, jdbc, clock);
         this.actionParking = new AgentActionParking(storeRows, jdbc, clock);
         this.executionOperations = new AgentExecutionOperations(eventJournal, lifecycleOperations, sessionPolicies, sessionQueries, storeRows, worktreeFiles, jdbc, clock, workspaces, workspaceFilesEnabled, journalPacks);
     }
@@ -103,6 +107,10 @@ final class ManagedStoreAssembly {
 
     AgentTurnExecution turnExecution() {
         return turnExecution;
+    }
+
+    AgentTurnHandOff turnHandOff() {
+        return turnHandOff;
     }
 
     AgentActionParking actionParking() {

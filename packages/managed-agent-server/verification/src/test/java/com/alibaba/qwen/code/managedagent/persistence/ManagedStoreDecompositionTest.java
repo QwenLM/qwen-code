@@ -42,12 +42,16 @@ class ManagedStoreDecompositionTest {
             JournalResourceWrites.class,
             JournalWriterLifecycle.class,
             JournalCommit.class,
+            ManagedAgentReadEntries.class,
+            ManagedAgentPrincipalEntries.class,
             ManagedStoreAssembly.class);
 
     @Test
     void collaboratorsAreImmutableOrdinaryObjectsWithAcyclicDependencies() {
         for (Class<?> component : COMPONENTS) {
-            assertThat(Modifier.isFinal(component.getModifiers())).as(component.getSimpleName()).isTrue();
+            if (component != ManagedAgentReadEntries.class && component != ManagedAgentPrincipalEntries.class) {
+                assertThat(Modifier.isFinal(component.getModifiers())).as(component.getSimpleName()).isTrue();
+            }
             assertThat(Modifier.isPublic(component.getModifiers())).isFalse();
             assertThat(component.getInterfaces()).isEmpty();
             assertNoSpringComponent(component);
@@ -55,9 +59,15 @@ class ManagedStoreDecompositionTest {
                 assertThat(Modifier.isFinal(field.getModifiers())).as(field.toString()).isTrue();
                 assertThat(field.getType()).isNotIn(ManagedAgentStore.class, JdbcManagedSessionStore.class);
             }
-            assertThat(Arrays.stream(component.getDeclaredMethods()))
-                    .noneMatch(method -> method.isAnnotationPresent(Transactional.class));
+            if (component != ManagedAgentPrincipalEntries.class) {
+                assertThat(Arrays.stream(component.getDeclaredMethods()))
+                        .noneMatch(method -> method.isAnnotationPresent(Transactional.class));
+            }
             requireAcyclic(component, new HashSet<>());
+        }
+        for (Class<?> ancestor = ManagedAgentStore.class.getSuperclass();
+                ancestor != Object.class; ancestor = ancestor.getSuperclass()) {
+            assertThat(COMPONENTS).as(ancestor.getSimpleName()).contains(ancestor);
         }
     }
 
@@ -148,7 +158,7 @@ class ManagedStoreDecompositionTest {
                 markTurnRecoveryBlocked/6::REQUIRED:DEFAULT:false markTurnFailureRecovery/5::REQUIRED:DEFAULT:false requestRecoveryRecheck/3::REQUIRED:DEFAULT:false
                 parkTurnForRuntimeRecovery/6::REQUIRED:DEFAULT:false parkTurnForAction/4::REQUIRED:DEFAULT:false deferTurnRetry/5::REQUIRED:DEFAULT:false scheduleTurnRetry/6::REQUIRED:DEFAULT:false
                 bindHarness/5::REQUIRED:DEFAULT:false bindSessionHarness/3::REQUIRED:DEFAULT:false bindRecoveredHarness/6::REQUIRED:DEFAULT:false markSubmissionAttempted/4::REQUIRED:DEFAULT:false
-                withdrawSubmissionAttempted/4::REQUIRED:DEFAULT:false recordAdmission/6::REQUIRED:DEFAULT:false recordRecoveryAdmission/8::REQUIRED:DEFAULT:false
+                withdrawSubmissionAttempted/4::REQUIRED:DEFAULT:false recordAdmission/6::REQUIRED:DEFAULT:false recordAdmissionHandOff/8::REQUIRED:DEFAULT:false recordRecoveryAdmission/8::REQUIRED:DEFAULT:false
                 retractContinuationOutput/6::REQUIRED:DEFAULT:false retractHarnessTurnOutput/7::REQUIRED:DEFAULT:false retractHarnessTurnOutput/10::REQUIRED:DEFAULT:false
                 recordHarnessEvents/6::REQUIRED:DEFAULT:false cancelUnadmittedTurn/4::REQUIRED:DEFAULT:false cancelBeforeAdmission/4::REQUIRED:DEFAULT:false
                 failTurn/6::REQUIRED:DEFAULT:false failWorktreeInitialTurns/3::REQUIRED:DEFAULT:false failRecoveryBlockedTurn/5::REQUIRED:DEFAULT:false
@@ -164,6 +174,7 @@ class ManagedStoreDecompositionTest {
         assertEntries(JdbcManagedSessionStore.class, """
                 authorizeLifecycle/5::REQUIRED:DEFAULT:false skipContended/2:- lockBounded/1:-
                 lockBoundedResult/1:- namedRootDeadlock/1:- authorizeOrdinary/4::REQUIRED:DEFAULT:false
+                authenticateEventIngest/7::REQUIRED:DEFAULT:false
                 creatorActor/2:-
                 approvalSelection/4::REQUIRED:DEFAULT:false usesDataSource/1:- lockSnapshotWriter/4:-
                 lockPublicationWriter/6:- lockPublicationWriter/8:- acquireWriter/4::NOT_SUPPORTED:DEFAULT:false acquireWriter/5::NOT_SUPPORTED:DEFAULT:false
@@ -217,7 +228,7 @@ class ManagedStoreDecompositionTest {
             for (var field : arm.getDeclaredFields()) {
                 assertThat(Modifier.isFinal(field.getModifiers())).as(field.toString()).isTrue();
                 assertThat(field.getType()).isIn(AgentSessionAdmissions.class, AgentSessionCommands.class,
-                        AgentSessionQueries.class);
+                        AgentSessionQueries.class, AgentEventJournal.class);
             }
         }
         assertThat(entryPopulation(readArm)).containsExactlyInAnyOrderElementsOf(List.of(
@@ -226,7 +237,12 @@ class ManagedStoreDecompositionTest {
                 "findLatestLifecycleOperations/2:-", "findTurn/3:-", "findActiveTurns/2:-",
                 "findLatestTurns/2:-", "findModelContexts/2:-", "modelOptions/0:-",
                 "findModelSelections/2:-", "findTurnModelSelection/3:-",
-                "findApprovalSelections/2:-", "findApprovalOwners/3:-", "findTurnApprovalSelection/3:-"));
+                "findApprovalSelections/2:-", "findApprovalOwners/3:-", "findTurnApprovalSelection/3:-",
+                "findSessionWorktree/2:-", "findSessionWorktrees/2:-", "findChildWorkspaceCwd/3:-", "findChildLineage/2:-",
+                "hasCompletedWorkspaceClose/2:-", "completedWorkspaceCloses/2:-", "hasExecutionRegistryFacts/2:-",
+                "sessionsWithExecutionRegistryFacts/2:-", "listTurns/5:-", "findTurnSummary/3:-",
+                "findLastVisibleStatusBeforeDelete/2:-", "requireSession/2:-", "findEvents/4:-", "findEventTails/1:-",
+                "findLatestEnvironmentEvents/2:-", "findControlEvents/3:-", "findTranscriptEvents/4:-"));
         assertThat(entryPopulation(superclass)).containsExactlyInAnyOrderElementsOf(List.of(
                 "insertSessionCommand/10::REQUIRED:DEFAULT:false",
                 "insertSessionCommand/11::REQUIRED:DEFAULT:false",

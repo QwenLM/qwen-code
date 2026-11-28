@@ -106,6 +106,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
             "qwen.managed-agent.session-store.enabled=true",
             "qwen.managed-agent.session-store.binding-key=" + "0123456789abcdef0123456789abcdef",
             "qwen.managed-agent.client-files.enabled=true",
+            "qwen.managed-agent.harness-pull.enabled=true",
             "qwen.managed-agent.runtime-broker.ssh.enabled=false",
             "qwen.managed-agent.runtime-broker.web-terminal=true",
             "qwen.managed-agent.tool-publication.entry-concurrency=4",
@@ -351,11 +352,13 @@ public class SurfaceAdmissionAcceptanceTest {
     }
 
     public static Stream<SurfaceRegistry> everyRoute() {
-        // The client-files MCP leg carries no tenant context by design: the
-        // relay credential is its only admission (probed in the rule-class
-        // matrix), so a cross-tenant principal is not a meaningful probe.
+        // The client-files MCP leg and the Harness work poll carry no tenant
+        // context by design: the relay credential or the Harness token is
+        // their only admission (probed in the rule-class matrix), so a
+        // cross-tenant principal is not a meaningful probe.
         return Stream.of(SurfaceRegistry.values())
-                .filter(entry -> entry != SurfaceRegistry.INTERNAL_CLIENT_FILES_MCP);
+                .filter(entry -> entry != SurfaceRegistry.INTERNAL_CLIENT_FILES_MCP
+                        && entry != SurfaceRegistry.INTERNAL_HARNESS_WORK_POLL);
     }
 
     public static Stream<SurfaceRegistry> refusalProbedRoutes() {
@@ -414,6 +417,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 }
             }
             case INTERNAL_CLIENT_FILES -> expect(entry, null, 403, "client_files_credential_invalid");
+            case INTERNAL_HARNESS_WORK -> expect(entry, null, 403, "harness_work_poller_refused");
             case PERSONAL_MEMORY -> {
                 expect(entry, null, 401, "actor_required");
                 expect(entry, STRANGER, 503, "memory_disabled");
@@ -1689,7 +1693,7 @@ public class SurfaceAdmissionAcceptanceTest {
     private void expectInternal(SurfaceRegistry entry) throws Exception {
         int status = switch (entry.capabilities().iterator().next()) {
             case STORE_MEMORY_QUERY, STORE_USER_MESSAGE_CLAIM, STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
-                    STORE_RECOVERY_BLOCK, STORE_TRANSACTION_COMMIT,
+                    STORE_RECOVERY_BLOCK, STORE_EVENT_INGEST, STORE_TRANSACTION_COMMIT,
                     STORE_RESTORE, STORE_TOOL_RESULT_PUBLISH,
                     STORE_TRANSACTION_LIST, STORE_RESOURCE_GET, STORE_SNAPSHOT_PUBLISH,
                     STORE_SNAPSHOT_GET, STORE_SNAPSHOT_PAGES, PUB_FINISHED,
@@ -1990,6 +1994,7 @@ public class SurfaceAdmissionAcceptanceTest {
             case CLIENT_FILES_RESPOND -> "{\"sessionId\":\"" + session
                     + "\",\"generation\":1,\"rpcRequestId\":\"probe\",\"responseJson\":\"{}\"}";
             case INTERNAL_CLIENT_FILES_MCP -> "{\"jsonrpc\":\"2.0\",\"id\":\"probe\",\"method\":\"tools/list\"}";
+            case HARNESS_WORK_POLL -> "{}";
             case SIDE_QUERY_GET, SIDE_QUERY_STREAM, SIDE_QUERY_CANCEL -> "{\"sessionId\":\"" + session
                     + "\",\"queryId\":\"11111111-1111-4111-8111-111111111111\"}";
             case STORE_SIDE_QUERY -> {
@@ -2160,6 +2165,11 @@ public class SurfaceAdmissionAcceptanceTest {
                     + "\"writerId\":\"writer-probe\",\"writerGeneration\":1,"
                     + "\"recoveryStatus\":\"BLOCKED_WORKSPACE\","
                     + "\"recoveryDetailCode\":\"probe\"}";
+            case STORE_EVENT_INGEST -> "{\"workspaceId\":\"ws\","
+                    + "\"writerId\":\"writer-probe\",\"writerGeneration\":1,"
+                    + "\"eventEpoch\":\"epoch\",\"turnId\":\"turn\","
+                    + "\"promptId\":\"prompt\",\"afterSequence\":0,"
+                    + "\"throughSequence\":0,\"events\":[]}";
             case STORE_TRANSACTION_COMMIT -> "{\"workspaceId\":\"ws\","
                     + "\"writerId\":\"writer-probe\",\"writerGeneration\":1,"
                     + "\"expectedJournalRevision\":0,"

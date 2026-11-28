@@ -76,12 +76,16 @@ CREATE TABLE ma_session (
     harness_placement_epoch BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Monotonic Harness assignment generation.',
     harness_placement_state VARCHAR(16) NOT NULL DEFAULT 'UNASSIGNED' COMMENT 'Harness assignment state: UNASSIGNED, ACTIVE, QUIESCING, or RELEASED.',
     CONSTRAINT ck_ma_harness_placement CHECK ((harness_placement_state = 'UNASSIGNED' AND harness_instance_id IS NULL AND harness_owner_boot_id IS NULL AND harness_placement_epoch = 0) OR (harness_instance_id IS NOT NULL AND harness_owner_boot_id IS NOT NULL AND harness_placement_epoch > 0 AND (CASE harness_placement_state WHEN 'ACTIVE' THEN 6 WHEN 'QUIESCING' THEN 9 WHEN 'RELEASED' THEN 8 ELSE -1 END = CHAR_LENGTH(harness_placement_state)))),
+    harness_claim_requested_at BIGINT UNSIGNED COMMENT 'Database time in Unix epoch milliseconds when a push path first asked a Harness poller to claim the Session; cleared by writer acquisition or a push takeover.',
+    harness_claim_reserved_until BIGINT UNSIGNED COMMENT 'Database time in Unix epoch milliseconds until which only the claiming poller may take over the current placement; cleared by writer acquisition.',
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT uk_ma_session_id UNIQUE (id),
     CONSTRAINT ck_ma_session_boolean_values CHECK ((is_recovery_protected >= 0 AND is_recovery_protected <= 1) AND (is_resource_gc_completed >= 0 AND is_resource_gc_completed <= 1) AND (is_plan_enabled >= 0 AND is_plan_enabled <= 1))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Managed Session identity, lifecycle, Workspace binding, and execution preferences.';
 
 CREATE INDEX idx_ma_harness_owner ON ma_session (harness_instance_id, harness_owner_boot_id, harness_placement_state, tenant_id, session_id);
+
+CREATE INDEX idx_ma_harness_claim_demand ON ma_session (harness_claim_requested_at, harness_claim_reserved_until);
 
 CREATE INDEX idx_ma_session_retirement ON ma_session (retired_at, is_recovery_protected);
 
@@ -335,6 +339,8 @@ CREATE TABLE ma_event_stream (
     output_ranges_json LONGTEXT COMMENT 'Serialized output ranges referenced by the stream projection.',
     is_projection_pending TINYINT UNSIGNED GENERATED ALWAYS AS (last_sequence > covered_sequence)
         COMMENT 'Generated flag indicating public events not yet covered by projection.',
+    is_replay_floor_pending TINYINT UNSIGNED GENERATED ALWAYS AS (covered_sequence > replay_floor_sequence)
+        COMMENT 'Generated flag indicating replay floor has not advanced to projection coverage.',
     gmt_modified BIGINT UNSIGNED NOT NULL COMMENT 'Last record update time in Unix epoch milliseconds.',
     CONSTRAINT uk_ma_event_stream_business_key UNIQUE (tenant_id, session_id, stream_kind, stream_id),
     CONSTRAINT ck_ma_stream_kind CHECK ((CASE stream_kind WHEN 'SESSION' THEN 7 WHEN 'TASK' THEN 4 ELSE -1 END = CHAR_LENGTH(stream_kind))),
@@ -342,10 +348,12 @@ CREATE TABLE ma_event_stream (
     CONSTRAINT ck_ma_stream_wake CHECK (wake_covered_sequence IS NULL OR (stream_kind = 'SESSION' AND wake_covered_sequence >= 0)),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_event_stream_id PRIMARY KEY (id),
-    CONSTRAINT ck_ma_event_stream_boolean_values CHECK ((is_projection_pending >= 0 AND is_projection_pending <= 1))
+    CONSTRAINT ck_ma_event_stream_boolean_values CHECK ((is_projection_pending >= 0 AND is_projection_pending <= 1) AND (is_replay_floor_pending >= 0 AND is_replay_floor_pending <= 1))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Durable Session or Task event sequence, replay floor, and projection progress.';
 
 CREATE INDEX idx_ma_stream_projection ON ma_event_stream (stream_kind, is_projection_pending, gmt_modified);
+
+CREATE INDEX idx_ma_stream_replay_floor ON ma_event_stream (stream_kind, stream_id, is_replay_floor_pending, gmt_modified);
 
 CREATE TABLE ma_public_event (
     tenant_id VARCHAR(36) NOT NULL COMMENT 'Tenant identity used for isolation.',
@@ -820,7 +828,7 @@ CREATE INDEX idx_ma_work_evidence ON ma_operation_work (evidence_resource_ref);
 
 CREATE TABLE ma_workspace (
     tenant_id VARCHAR(36) NOT NULL COMMENT 'Tenant identity used for isolation.',
-    workspace_id VARCHAR(128) NOT NULL COMMENT 'Workspace identity within the tenant.',
+    workspace_id VARCHAR(128) COLLATE utf8mb4_0900_as_cs NOT NULL COMMENT 'Workspace identity within the tenant.',
     workspace_generation BIGINT UNSIGNED NOT NULL COMMENT 'Current generation of the registered Workspace.',
     storage_id VARCHAR(256) NOT NULL COMMENT 'Logical storage identity.',
     display_name VARCHAR(512) NOT NULL COMMENT 'User-visible Workspace name.',
@@ -1110,6 +1118,7 @@ CREATE TABLE ma_tool_execution (
         (binding_id, runtime_generation, execution_state),
     INDEX idx_tool_execution_harness
         (harness_session_id, execution_call_id),
+    shared_dispatch_class VARCHAR(16) COMMENT 'Verified dispatch classification. Only READ is ever stored; NULL fences shared claims and READ permits concurrent readers.',
     CONSTRAINT uk_ma_tool_execution_business_key UNIQUE (execution_call_id),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_tool_execution_id PRIMARY KEY (id),

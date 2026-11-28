@@ -103,11 +103,11 @@ Web Shell does not substitute the first row.
 
 ## Presentation and interaction
 
-The header appears immediately above the model search field. When the model
-list is inside the reasoning submenu, the header belongs to that submenu;
-existing reasoning controls remain in the outer popover. Mount the header only
-while the model list is open. An omitted or declined header leaves no empty
-region.
+In the desktop popover, the header appears immediately above the model search
+field. When the model list is inside the reasoning submenu, the header belongs
+to that submenu and the reasoning controls stay in the outer popover. Mount the
+header only while the model list is open. An omitted or declined header leaves
+no empty region.
 
 Rows retain their native selection button and selected or disabled indicator.
 The host replaces the display region between those boundaries and controls its
@@ -140,6 +140,9 @@ of the desktop nested popovers. Reasoning controls stay in the sheet. The Model
 row opens the model list as a floating card immediately above that row;
 selecting a model collapses only the card so reasoning controls remain
 available. Done closes the sheet and restores focus to the model trigger.
+
+The search field stays above the scrollable model list. The host header appears
+at the top of the list and scrolls with the models.
 
 Host overlays remain interactive by pointer while the sheet is open, and their
 pointer interactions do not dismiss it. The modal focus scope and `aria-hidden`

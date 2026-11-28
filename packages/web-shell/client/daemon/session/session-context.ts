@@ -7,7 +7,6 @@
 import type {
   DaemonCapabilities,
   DaemonSessionClient,
-  DaemonSession,
   DaemonStandaloneSession,
 } from '@qwen-code/sdk/daemon';
 import type {
@@ -173,7 +172,7 @@ export function isDaemonErrorExplicitlyNonRetryable(error: unknown): boolean {
 }
 
 export function getStandaloneConnectionState(
-  session: DaemonSession | undefined,
+  session: DaemonSessionClient['session'] | undefined,
 ): DaemonStandaloneConnectionState | undefined {
   if (!isStandaloneDaemonSession(session)) return undefined;
   const standalone = session as Partial<DaemonStandaloneSession>;
@@ -190,7 +189,7 @@ export function getStandaloneConnectionState(
 }
 
 export function isStandaloneDaemonSession(
-  session: DaemonSession | undefined,
+  session: DaemonSessionClient['session'] | undefined,
 ): boolean {
   if (!session) return false;
   const standalone = session as Partial<DaemonStandaloneSession>;
@@ -207,5 +206,6 @@ export function daemonClientSessionContext(
   if (isStandaloneDaemonSession(client.session)) {
     return { kind: 'standalone' };
   }
-  return { kind: 'workspace', cwd: client.workspaceCwd };
+  const cwd = client.workspaceCwd;
+  return cwd ? { kind: 'workspace', cwd } : undefined;
 }

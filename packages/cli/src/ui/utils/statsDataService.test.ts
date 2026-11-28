@@ -859,7 +859,7 @@ describe('loadStatsData — per-request ledger accounting', () => {
 
     const week = await loadStatsData('week', current);
     expect(reportTokens(week.report)).toBe(100_001);
-    expect(week.report.sessionCount).toBe(2);
+    expect(week.report.sessionCount).toBe(1);
     expect(week.report.skills.totalCalls).toBe(3);
     expect(week.heatmap[dayKey(old)]).toBe(100_000);
     expect(week.heatmap[dayKey(now)]).toBe(1);
@@ -1640,5 +1640,174 @@ describe('loadStatsData — per-request ledger accounting', () => {
 
     expect(result.delta).not.toBeNull();
     expect(result.delta?.tokens).toBeCloseTo(0);
+  });
+
+  it('counts distinct ledger-only active sessions in report.sessionCount and delta.sessions', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stats-census-'));
+    const prevQwenHome = process.env['QWEN_HOME'];
+    const prevRuntime = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_HOME'] = tmpDir;
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      const actualDashboard = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core/services/usage-dashboard-service.js')
+      >('@qwen-code/qwen-code-core/services/usage-dashboard-service.js');
+      vi.mocked(loadLedgerOrEmpty).mockImplementation(
+        actualDashboard.loadLedgerOrEmpty,
+      );
+
+      const now = new Date();
+      const shiftDay = (offsetDays: number) => {
+        const d = new Date(
+          now.getFullYear(),
+          now.getMonth(),
+          now.getDate() + offsetDays,
+          12,
+        );
+        return {
+          ts: d.getTime(),
+          iso: d.toISOString(),
+          localDate: dayKey(d.getTime()),
+          localMonth: dayKey(d.getTime()).slice(0, 7),
+        };
+      };
+
+      const usageDir = path.join(tmpDir, 'usage');
+      fs.mkdirSync(usageDir, { recursive: true });
+      const rowsByMonth = new Map<string, string[]>();
+      const pushRow = (
+        offsetDays: number,
+        sessionId: string,
+        executionId: string,
+      ) => {
+        const d = shiftDay(offsetDays);
+        const list = rowsByMonth.get(d.localMonth) ?? [];
+        list.push(
+          JSON.stringify({
+            schemaVersion: 1,
+            id: executionId,
+            executionId,
+            timestamp: d.iso,
+            localDate: d.localDate,
+            localMonth: d.localMonth,
+            sessionId,
+            model: 'qwen-max',
+            authType: 'openai',
+            source: 'main',
+            inputTokens: 80,
+            outputTokens: 20,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 100,
+            apiDurationMs: 10,
+          }),
+        );
+        rowsByMonth.set(d.localMonth, list);
+      };
+
+      // Previous completed 6-day window (for 'week' = 6 completed days + today):
+      // 2 distinct ledger-only sessions (no usage_record.jsonl entries at all).
+      pushRow(-8, 'prev-sess-1', 'e-prev-1');
+      pushRow(-9, 'prev-sess-2', 'e-prev-2');
+      // Current completed 6-day window: 4 distinct sessions (one also has 2
+      // persisted runs to verify union deduplication).
+      pushRow(-1, 'cur-sess-1', 'e-cur-1');
+      pushRow(-1, 'cur-sess-2', 'e-cur-2');
+      pushRow(-2, 'cur-sess-3', 'e-cur-3');
+      pushRow(-3, 'cur-sess-4', 'e-cur-4');
+
+      for (const [month, lines] of rowsByMonth) {
+        fs.writeFileSync(
+          path.join(usageDir, `token-usage-${month}.jsonl`),
+          lines.join('\n') + '\n',
+        );
+      }
+
+      const d1 = shiftDay(-1).ts;
+      mockedLoadUsageHistory.mockResolvedValue([
+        makeRecord({
+          sessionId: 'cur-sess-1',
+          timestamp: d1,
+          startTime: d1 - 1000,
+          runScoped: true,
+        }),
+        makeRecord({
+          sessionId: 'cur-sess-1',
+          timestamp: d1 + 1000,
+          startTime: d1 + 500,
+          runScoped: true,
+        }),
+      ]);
+
+      const result = await loadStatsData('week');
+      expect(result.report.sessionCount).toBe(4);
+      expect(result.delta?.sessions).toBeCloseTo(100);
+    } finally {
+      if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = prevQwenHome;
+      if (prevRuntime === undefined) delete process.env['QWEN_RUNTIME_DIR'];
+      else process.env['QWEN_RUNTIME_DIR'] = prevRuntime;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('counts distinct sessions per project to match report.sessionCount when a session resumes multiple times', async () => {
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(new Map());
+    const now = Date.now();
+    mockedLoadUsageHistory.mockResolvedValue([
+      makeRecord({
+        sessionId: 'same-proj-session',
+        project: '/workspace/demo',
+        timestamp: now - 3_000,
+        startTime: now - 3_500,
+        runScoped: true,
+      }),
+      makeRecord({
+        sessionId: 'same-proj-session',
+        project: '/workspace/demo',
+        timestamp: now - 2_000,
+        startTime: now - 2_500,
+        runScoped: true,
+      }),
+      makeRecord({
+        sessionId: 'same-proj-session',
+        project: '/workspace/demo',
+        timestamp: now - 1_000,
+        startTime: now - 1_500,
+        runScoped: true,
+      }),
+    ]);
+
+    const result = await loadStatsData('today');
+    expect(result.report.sessionCount).toBe(1);
+    expect(result.report.projects).toHaveLength(1);
+    expect(result.report.projects[0]?.path).toBe('/workspace/demo');
+    expect(result.report.projects[0]?.sessionCount).toBe(1);
+  });
+
+  it('excludes future-dated run records from report.sessionCount and per-project session counts', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-11-27T10:00:00.000Z'));
+      vi.mocked(loadLedgerOrEmpty).mockResolvedValue(new Map());
+      const now = Date.now();
+      mockedLoadUsageHistory.mockResolvedValue([
+        makeRecord({
+          sessionId: 'future-dated-session',
+          project: '/workspace/future',
+          startTime: now + 30_000,
+          timestamp: now + 60_000,
+          models: {},
+          runScoped: true,
+        }),
+      ]);
+
+      const result = await loadStatsData('today');
+      expect(result.report.sessionCount).toBe(0);
+      expect(result.report.totalRequests).toBe(0);
+      expect(result.report.projects).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

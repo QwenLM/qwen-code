@@ -293,7 +293,7 @@ export function useInputHistory(
   const getMutationVersion = useCallback(() => mutationVersionRef.current, []);
 
   const push = useCallback(
-    (text: string) => {
+    (text: string, { keepLocalOnRemoteMiss = false } = {}) => {
       const h = readCurrentHistory();
       mutationVersionRef.current++;
       if (remoteHistoryEnabledRef.current) {
@@ -311,9 +311,10 @@ export function useInputHistory(
           next.push({
             ...previous,
             text: normalized,
-            ...(previous === undefined &&
-            h.some((entry) => entry.trim() === normalized) &&
-            remoteSourceRef.current?.has(normalized) !== true
+            ...(keepLocalOnRemoteMiss ||
+            (previous === undefined &&
+              h.some((entry) => entry.trim() === normalized) &&
+              remoteSourceRef.current?.has(normalized) !== true)
               ? { hadLocalBefore: true }
               : {}),
             seenRemoteRevision: seenRemoteRevisionRef.current,

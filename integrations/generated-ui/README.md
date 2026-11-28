@@ -52,6 +52,8 @@ HTML is sanitized before rendering and again for each HTML update. Use headings,
 | `ui.value(id, value)`      | Queue an input value and expose the requested string to subsequent `ui.input` calls in the same round.                                                  |
 | `ui.state.get()`           | Return a fresh copy of the card's saved JSON value, or `null` when nothing is saved.                                                                    |
 | `ui.state.set(value)`      | Replace the saved value with plain JSON data of at most 16 KiB; the last value set in a round counts. Other values throw an error the card can catch.   |
+| `ui.copy(text)`            | From a click handler, ask the host to copy non-empty text of at most 16 KiB. Elsewhere, or as a second effect in a click, it throws a catchable error.  |
+| `ui.download(...)`         | From a click handler, ask the host to download `(filename, mimeType, text)`: CSV, plain, JSON or Markdown text up to 64 KiB, given its extension.       |
 
 `ui.value` updates the same-round snapshot even for an input created earlier in that round with `ui.html`. These reads reflect the requested string; browser normalization (such as number validation, range clamping or select matching) and HTML-created default values appear in the next dispatched input snapshot. Validate values against the control's constraints before calculating derived results.
 
@@ -72,6 +74,10 @@ Each initialization or event has a 250 ms execution budget, a 32 MiB guest heap 
 ### Saved state
 
 Web Shell keeps the value a card passes to `ui.state.set` with the conversation when its daemon supports view state. The server mints a card id into each result, outside the document identity, so two identical cards keep separate state. The saved value comes back after a reload, when the conversation is reopened and in a fork; rewinding past a save drops it; other conversations and cards never see it. The App reads the value before the first round and hands every round's value to the host, which saves changes one write at a time and shows the outcome (saving, saved, or why it was not saved) in its own bar outside the card. Reopening a released card restores the value; **Reopen and reset** clears it. Results recorded before card ids existed, hosts without this storage and the static transcript view save nothing: `ui.state.get()` returns `null`, and values set stay in the current activation. The [design](../../docs/design/generated-ui-view-state.md) describes the storage, limits and outcomes.
+
+### Copy and download
+
+A click handler can hand the view's current result to the user with `ui.copy(text)` or `ui.download(filename, mimeType, text)`, once per click. The App performs it only when the click's round applied to the values the user sees; when the values changed meanwhile, it says that nothing was copied or downloaded and asks for another click. Web Shell performs both for the bundled card and validates each request itself: the text size, the MIME type (`text/csv`, `text/plain`, `application/json` or `text/markdown`), and a sanitized file name with the extension of its type. Its bar outside the card shows each outcome; when the browser refuses the clipboard write, the bar keeps the text and offers its own **Copy** button. Calls outside a click, invalid arguments and a second effect in one click throw errors the card can catch; an uncaught call during initialization is a `VIEW_ERROR`. Web Shell performs neither action for manually installed extensions. In an interactive view, the App shows an unavailable notice after the user clicks for an action the host does not support. The static transcript shows the saved title and summary with a generic interactive-view notice. The [design](../../docs/design/generated-ui-copy-download.md) describes the limits and outcomes.
 
 ### Styling
 

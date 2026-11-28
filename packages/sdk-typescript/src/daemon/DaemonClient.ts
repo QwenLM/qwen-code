@@ -124,8 +124,8 @@ import type {
   DaemonStatusReport,
   DaemonUpdateStatus,
   DaemonStatusReportDetail,
+  DaemonSessionCancelableTaskKind,
   DaemonSessionTaskRuntimeStatus,
-  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonWorkflowActionInput,
@@ -1082,6 +1082,8 @@ export interface SubscribeOptions {
    * an older daemon or intermediary omits a valid stream-id response header.
    */
   onSseStreamAccepted?: (streamId: string | undefined) => void;
+  /** Called when the subscription is ready to receive session events. */
+  onEventStreamReady?: () => void;
 }
 
 export class DaemonClient {
@@ -4759,14 +4761,15 @@ export class DaemonClient {
   async sessionTaskCancel(
     sessionId: string,
     taskId: string,
-    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
+    kind: DaemonSessionCancelableTaskKind,
     clientId?: string,
+    source?: 'cron' | 'wakeup',
   ): Promise<{ cancelled: boolean }> {
     return await this.sessionTaskMutation<{ cancelled: boolean }>(
       sessionId,
       taskId,
       'cancel',
-      { kind },
+      { kind, ...(source ? { source } : {}) },
       clientId,
     );
   }
@@ -7836,6 +7839,7 @@ export class DaemonClient {
       sseConnectReason: opts.sseConnectReason,
       previousSseStreamId: opts.previousSseStreamId,
       onSseStreamAccepted: opts.onSseStreamAccepted,
+      onEventStreamReady: opts.onEventStreamReady,
       signal: opts.signal,
       connectTimeoutMs: this.fetchTimeoutMs || undefined,
     });

@@ -3,6 +3,18 @@
 Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 React
 组件嵌入到其他项目中。
 
+## 场景推荐与输入历史
+
+欢迎页的场景推荐要替换输入时，宿主可通过 `composerRef` 先保存当前草稿，再填入推荐文本。
+已有文本会进入当前工作区的输入历史，可以按 Ctrl+R 搜索并恢复。空白草稿会被跳过，
+整个操作无需创建会话。
+
+```ts
+const composer = composerRef.current;
+composer?.saveCurrentDraftToHistory();
+composer?.setText(recommendation);
+```
+
 ## 宿主已有 Managed Session
 
 `ManagedAgentWebShell` 支持注入 `managedAgentProvider`；省略它时必须同时传 `baseUrl`，
@@ -448,6 +460,12 @@ export function QwenCodePanel() {
   );
 }
 ```
+
+嵌入宿主可以通过 `sessionAdapter` 接管独立会话的创建、恢复和常规 prompt 提交。
+适配器客户端必须提供 `capabilities()`，可按需提供品牌。宿主通过实时事件和恢复历史
+提供已受理的用户消息，并在最后一批会话事件发出后结束 `completion`。导航离开后的
+提交在受理时解除客户端附着。继续会话等操作直接使用会话客户端，工作区会话沿用
+daemon 路由。详见[独立会话适配器设计](../../docs/design/web-shell-session-adapter.zh-CN.md)。
 
 ### 2. 共享 Provider 接入（纯消费者）
 
@@ -1147,8 +1165,9 @@ const modelPicker: WebShellModelPickerOptions = {
 ```
 
 将上面的 `modelPicker` 传给 `WebShell` 或 `WebShellWithProviders`。示例模型和
-`0.5×` 为虚构展示数据。头部位于模型搜索框上方，模型列表进入思考参数子菜单时，
-头部随列表进入；`currentModelId` 始终来自所属输入框实际选中的模型。
+`0.5×` 为虚构展示数据。桌面浮层中的头部位于搜索框上方，模型列表进入思考参数
+子菜单时，头部随列表进入。底部面板的搜索框固定在滚动区上方，头部放在模型列表
+的最前面，随模型行滚动。`currentModelId` 始终来自所属输入框实际选中的模型。
 
 map 的值是可重复挂载的工厂。同一个模型出现在不同输入框时会分别调用，不能共享
 一个 DOM 节点。key 必须与选择器的原始 id 完全一致；未知 key 不会增加模型条目。

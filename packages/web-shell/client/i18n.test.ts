@@ -22,6 +22,7 @@ import * as ruPart4Stub from './i18n-ru-part4.transcript-stub';
 import * as ruPart5Stub from './i18n-ru-part5.transcript-stub';
 import * as ruPart6Stub from './i18n-ru-part6.transcript-stub';
 import * as ruRemainderStub from './i18n-ru-remainder.transcript-stub';
+import * as archivedSessionsStub from './components/sidebar/archived-sessions-messages.transcript-stub';
 
 // getTranslator returns the raw key when EN has no entry. SettingsMessage
 // translateSettingText then substitutes the settingsSchema.ts description,
@@ -1160,6 +1161,73 @@ describe('touch follow-up catalog parity', () => {
         const translated = getTranslator(language)(key);
         expect(translated).not.toBe(key);
         expect(translated).not.toBe(en);
+      }
+    }
+  });
+});
+
+describe('overload strip messages interpolate their readings', () => {
+  const vars = { ratio: '2.50', lag: 20, reason: 'cpu_load' };
+
+  it.each(['en', 'zh-CN', 'zh-TW', 'ru'] as const)(
+    '%s renders the readings, not the raw template',
+    (language) => {
+      const t = getTranslator(language);
+      const detail = t('sidebar.overloadDetail', vars);
+      expect(detail).toContain('2.50');
+      expect(detail).toContain('20');
+      expect(detail).toContain('cpu_load');
+      if (language !== 'en') {
+        // Parity: a dropped translation would silently render the EN template.
+        expect(detail).not.toBe(
+          getTranslator('en')('sidebar.overloadDetail', vars),
+        );
+      }
+      expect(detail).not.toContain('{ratio}');
+      expect(detail).not.toContain('{lag}');
+      expect(detail).not.toContain('{reason}');
+      expect(t('sidebar.overloadPaused')).not.toBe('sidebar.overloadPaused');
+    },
+  );
+});
+
+const ARCHIVED_PANEL_KEYS = [
+  'sidebar.archivedSearchPlaceholder',
+  'sidebar.clearSearch',
+  'sidebar.archiveFilterAndSort',
+  'sidebar.archiveType',
+  'sidebar.archiveTypeAll',
+  'sidebar.archiveTypeLocal',
+  'sidebar.archiveTypeCloud',
+  'sidebar.sortUpdated',
+  'sidebar.sortCreated',
+  'sidebar.sortAlphabetical',
+  'sidebar.allWorkspaces',
+  'sidebar.archivedCount',
+  'sidebar.archivedCountMore',
+  'sidebar.archivedLoadMore',
+  'sidebar.archivedFilteredEmpty',
+  'sidebar.archivedWorkspaceEmpty',
+  'sidebar.clearFilters',
+  'sidebar.showAllWorkspaces',
+  'sidebar.archivedPaginationHint',
+] as const;
+
+describe('archived conversations catalog parity', () => {
+  it('carries every archived conversations key in every shipped catalog and keeps transcript stub empty', () => {
+    expect(archivedSessionsStub.ARCHIVED_SESSIONS_MESSAGES_EN).toEqual({});
+    expect(archivedSessionsStub.ARCHIVED_SESSIONS_MESSAGES_ZH).toEqual({});
+    expect(archivedSessionsStub.ARCHIVED_SESSIONS_MESSAGES_RU).toEqual({});
+    for (const key of ARCHIVED_PANEL_KEYS) {
+      const en = getTranslator('en')(key, { count: 2 });
+      expect(en).not.toBe(key);
+      for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+        const translated = getTranslator(language)(key, { count: 2 });
+        expect(translated).not.toBe(key);
+        expect(translated).not.toBe(en);
+        if (language === 'zh-TW') {
+          expect(`${key}: ${translated}`).not.toMatch(SIMPLIFIED_ONLY_GLYPHS);
+        }
       }
     }
   });

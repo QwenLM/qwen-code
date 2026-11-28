@@ -23,23 +23,23 @@ import path from 'node:path';
 const isHosted = (className) => /^Hosted.*IT$/.test(className);
 const isGate = (className) => /^Hosted.*Gate$/.test(className);
 const [family, ...modules] = process.argv.slice(2);
-const optIn =
-  family === 'o4-mysql' ||
-  family === 'o4-oss' ||
-  family === 'event-transport' ||
-  family === 'event-transport-multi-node';
-const inFamily = new Map([
-  ['hosted', isHosted],
-  ['non-hosted', (className) => /IT$/.test(className) && !isHosted(className)],
-  ['hosted-gates', isGate],
-  ['o4-mysql', (className) => className === 'O4MySqlGate'],
-  ['o4-oss', (className) => className === 'O4OssGate'],
-  ['event-transport', (className) => className === 'EventTransportBrokerGate'],
-  [
-    'event-transport-multi-node',
-    (className) => className === 'EventTransportMultiNodeGate',
-  ],
+const gcMqClass = 'SessionResourceCollectionMySqlIT';
+const optIn = new Map([
+  ['o4-mysql', ['O4MySqlGate']],
+  ['o4-oss', ['O4OssGate']],
+  ['event-transport', ['EventTransportBrokerGate']],
+  ['event-transport-multi-node', ['EventTransportMultiNodeGate', gcMqClass]],
 ]).get(family);
+const inFamily = optIn
+  ? (className) => optIn.includes(className)
+  : new Map([
+      ['hosted', isHosted],
+      [
+        'non-hosted',
+        (className) => /IT$/.test(className) && !isHosted(className),
+      ],
+      ['hosted-gates', isGate],
+    ]).get(family);
 if (!inFamily || modules.length === 0) {
   console.error(
     'usage: node scripts/check-failsafe-reports.js hosted|non-hosted|hosted-gates|o4-mysql|o4-oss|event-transport|event-transport-multi-node <maven-module-dir>...',
@@ -116,11 +116,14 @@ for (const requestedModule of modules) {
     failed = true;
     console.error(`::error::${module}: no ${family} test sources found`);
   }
-  if (optIn && expected.length !== 1) {
-    failed = true;
-    console.error(
-      `::error::${module}: expected exactly one ${family} gate source`,
-    );
+  for (const gate of optIn ?? []) {
+    if (
+      expected.filter((className) => simpleName(className) === gate).length !==
+      1
+    ) {
+      failed = true;
+      console.error(`::error::${module}: expected exactly one ${gate} source`);
+    }
   }
   const reports = path.join(module, 'target', 'failsafe-reports');
   const ran = new Map();
@@ -145,6 +148,19 @@ for (const requestedModule of modules) {
       failed = true;
       console.error(
         `::error::${module}: ${file} contains a skipped or failed gate case`,
+      );
+    }
+    if (
+      family === 'event-transport-multi-node' &&
+      simpleName(className) === gcMqClass &&
+      (count('testcase') !== 1 ||
+        !/<testcase\b[^>]*\sname="rocketMqWakeupsAndPolling(?:\([^"]*\))?"/.test(
+          report,
+        ))
+    ) {
+      failed = true;
+      console.error(
+        `::error::${module}: ${file} must report exactly the rocketMqWakeupsAndPolling case`,
       );
     }
     ran.set(
