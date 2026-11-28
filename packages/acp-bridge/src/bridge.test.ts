@@ -33973,10 +33973,8 @@ describe('createAcpSessionBridge', () => {
       await new Promise((r) => setImmediate(r));
 
       await bridge.closeSession(session.sessionId);
-      // `closeSession` already awaits the whole close, so the count is
-      // settled once it resolves; assert before draining so a regression
-      // that leaves the bus open fails here instead of timing out on the
-      // unbounded drain.
+      // The count verifies removal from the session map. The drain and
+      // `session_closed` assertion verify the separate event-bus teardown.
       expect(bridge.sessionCount).toBe(0);
       await drain;
 
