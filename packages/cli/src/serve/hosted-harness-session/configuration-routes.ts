@@ -213,7 +213,7 @@ export function createHostedExtensionsManager(
           legacy.at(-1)?.servers ??
           (baseMcp === undefined
             ? []
-            : parseHostedMcpServers(baseMcp).map((pin) => ({
+            : parseHostedMcpServers(baseMcp, true).map((pin) => ({
                 ...pin,
                 state: 'enabled' as const,
               }))),
@@ -221,7 +221,7 @@ export function createHostedExtensionsManager(
           session.hooks?.selectedPin ??
           (session.definition?.['hookCatalog'] === undefined
             ? null
-            : parseHostedHookPin(session.definition['hookCatalog'])),
+            : parseHostedHookPin(session.definition['hookCatalog'], true)),
       },
       {
         validate: (packages) => {
@@ -631,7 +631,7 @@ export function registerHostedConfigurationRoutes({
     const pins = session.definition?.['mcpServers'];
     return new HostedMcpManager(
       session.managed,
-      pins === undefined ? [] : parseHostedMcpServers(pins),
+      pins === undefined ? [] : parseHostedMcpServers(pins, true),
       { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
       session.mcp,
       () => session.hooks?.broker,

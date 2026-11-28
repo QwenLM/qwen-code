@@ -101,8 +101,51 @@ class ManagedMcpManagementServiceTest {
         verify(harness, never()).manageMcp(anyString(), anyString(), any());
     }
 
+    @Test
+    void boundsTheHarnessReportedRevisionAtTheSharedCounterCeiling() {
+        var operation = "11111111-1111-4111-8111-111111111111";
+        // The accepted side first: without this stub the mock returns an empty
+        // body, `requireSnapshot` rejects it, and the assertion below never
+        // runs — the refusal half would be green for the wrong reason.
+        when(harness.mcpManagementOperation("tenant", "session", operation))
+                .thenReturn(snapshot(9_007_199_254_740_990L));
+        assertThat(service.operation("tenant", "actor", "session", operation)
+                .path("revision").asLong()).isEqualTo(9_007_199_254_740_990L);
+        // The final committed revision is valid to read even though no
+        // subsequent command can increment it.
+        when(harness.mcpManagementOperation("tenant", "session", operation)).thenReturn(snapshot(9_007_199_254_740_991L));
+        assertThat(service.operation("tenant", "actor", "session", operation)
+                .path("revision").asLong()).isEqualTo(9_007_199_254_740_991L);
+    }
+
+    @Test
+    void readsBackTheFinalRevisionCommittedByTheHighestAdmissibleCommand() {
+        var command = new ManagedMcpManagementCommand("add", "docs", 9_007_199_254_740_990L,
+                new ManagedMcpServerPin("docs", 2, "a".repeat(64)));
+        when(harness.manageMcp(eq("tenant"), eq("session"), any()))
+                .thenReturn(snapshot(9_007_199_254_740_991L));
+        assertThat(service.submit("tenant", "actor", "session", "key", command)
+                .path("revision").asLong()).isEqualTo(9_007_199_254_740_991L);
+    }
+
+    @Test
+    void refusesAnExpectedRevisionThatCannotBeIncremented() {
+        var command = new ManagedMcpManagementCommand("add", "docs", 9_007_199_254_740_991L,
+                new ManagedMcpServerPin("docs", 2, "a".repeat(64)));
+        assertThatThrownBy(() -> service.submit("tenant", "actor", "session", "key", command))
+                .isInstanceOfSatisfying(ManagedAgentException.class, failure -> {
+                    assertThat(failure.getStatus()).isEqualTo(400);
+                    assertThat(failure.getCode()).isEqualTo("invalid_request");
+                });
+        verify(harness, never()).manageMcp(any(), any(), any());
+    }
+
     private static Map<String, Object> snapshot() {
-        return Map.of("sessionId", "session", "revision", 0, "supported", true,
+        return snapshot(0L);
+    }
+
+    private static Map<String, Object> snapshot(long revision) {
+        return Map.of("sessionId", "session", "revision", revision, "supported", true,
                 "servers", List.of(), "availableServers", List.of());
     }
 }

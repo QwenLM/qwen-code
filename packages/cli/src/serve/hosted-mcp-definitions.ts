@@ -10,9 +10,20 @@ export interface HostedMcpServerPin {
   readonly definitionDigest: string;
 }
 
+// Admission bound for a pin this build is about to store, and the widest
+// revision an older build could have stored before the bound existed. Stored
+// reads use the wider one: a refused read cannot be deleted because attach is
+// the delete precondition.
+export const HOSTED_COUNTER_CEILING = Number.MAX_SAFE_INTEGER - 1;
+export const HOSTED_STORED_REVISION_MAX = Number.MAX_SAFE_INTEGER;
+
 export function parseHostedMcpServers(
   value: unknown,
+  stored = false,
 ): readonly HostedMcpServerPin[] {
+  const revisionMax = stored
+    ? HOSTED_STORED_REVISION_MAX
+    : HOSTED_COUNTER_CEILING;
   // Saved Sessions retain the original pin format so they can load and detach.
   if (!Array.isArray(value) || value.length < 1 || value.length > 32) {
     throw new Error('MCP profile requires 1–32 server definitions.');
@@ -29,6 +40,7 @@ export function parseHostedMcpServers(
       !/^[A-Za-z0-9._:-]{1,128}$/u.test(pin['serverId']) ||
       !Number.isSafeInteger(pin['serverRevision']) ||
       Number(pin['serverRevision']) < 1 ||
+      Number(pin['serverRevision']) > revisionMax ||
       typeof pin['definitionDigest'] !== 'string' ||
       !/^[0-9a-f]{64}$/u.test(pin['definitionDigest']) ||
       ids.has(pin['serverId'])

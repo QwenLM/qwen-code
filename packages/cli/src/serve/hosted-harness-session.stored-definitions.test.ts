@@ -14,7 +14,7 @@ import {
   state,
   store,
 } from './hosted-harness-session.test-helper.js';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -531,6 +531,59 @@ describe('Hosted Harness stored definitions', () => {
     await expect(state.model.mock.results[0].value).resolves.toMatchObject({
       text: 'read only',
     });
+  });
+
+  // #16891: a definition persisted before AgentDefinitionExtensions bounded
+  // pins can hold 2^53-1. Every body that replays such a pin — load and
+  // create alike — must be read at the stored bound, or the request dies at
+  // the body parse (400) and the Session can never be attached; attach is the
+  // delete precondition, so it could never be removed either.
+  it('reads a replayed pin at the stored bound on both load and create', async () => {
+    const atCeiling = {
+      serverId: 'demo',
+      serverRevision: Number.MAX_SAFE_INTEGER,
+      definitionDigest: 'a'.repeat(64),
+    };
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-mcp/1',
+        mcpServers: [{ ...atCeiling, serverRevision: 1 }],
+      })
+      .expect(200);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .expect(204);
+    // The pin disagrees with the stored one, so the load still answers the
+    // conflict — reaching it proves the body parse admitted the value. Under
+    // the admission bound the same request stops at `invalid_hosted_mcp_servers`.
+    expect(
+      (
+        await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        ).send({
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-mcp/1',
+          mcpServers: [atCeiling],
+        })
+      ).body.code,
+    ).toBe('hosted_tool_profile_conflict');
+    // A create replays the same persisted pin (the harness connector sends
+    // the stored definition's own pins), so it must be admitted at the stored
+    // bound too. Under the admission bound this stops at
+    // `invalid_hosted_mcp_servers` and the first attach can never happen.
+    const replayed = await headers(supertest(server).post('/session')).send({
+      sessionId: randomUUID(),
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-mcp/1',
+      mcpServers: [atCeiling],
+    });
+    expect(replayed.status).toBe(200);
   });
 
   it('recovers a large manual Skill call whose assistant committed before its response', async () => {

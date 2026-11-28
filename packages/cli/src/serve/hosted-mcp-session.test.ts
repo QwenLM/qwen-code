@@ -1460,6 +1460,24 @@ it('refuses duplicate servers, unpinned definitions and credentials in Hosted in
     expect(() => parseHostedMcpServers(input)).toThrow();
 });
 
+it('accepts only the shared counter ceiling and refuses the value above it', () => {
+  const ceiling = { ...pin, serverRevision: Number.MAX_SAFE_INTEGER - 1 };
+  expect(parseHostedMcpServers([ceiling])).toEqual([ceiling]);
+  expect(() =>
+    parseHostedMcpServers([
+      { ...pin, serverRevision: Number.MAX_SAFE_INTEGER },
+    ]),
+  ).toThrow();
+});
+
+it('still reads a stored pin admitted under the wider ceiling', () => {
+  // A Session persisted before the ceiling tightened keeps its pin on the
+  // stored read; refusing it here would wedge the Session behind a load that
+  // cannot succeed while attach, its delete precondition, stays unreachable.
+  const legacy = { ...pin, serverRevision: Number.MAX_SAFE_INTEGER };
+  expect(parseHostedMcpServers([legacy], true)).toEqual([legacy]);
+});
+
 it('does not let a stale cancel intent claim not-started after invocation dispatch', async () => {
   await mcp.ensureReady();
   const operationId = randomUUID();
@@ -2267,7 +2285,7 @@ it('commits a tombstone-heavy snapshot under the total capacity and reads it bac
   const previous = Array.from({ length: 96 }, (_, index) => ({
     ...pin,
     serverId: `${index < 32 ? 'live' : 'removed'}-${index}`.padEnd(128, 'x'),
-    serverRevision: Number.MAX_SAFE_INTEGER,
+    serverRevision: Number.MAX_SAFE_INTEGER - 1,
     state: (index === 0
       ? 'enabled'
       : index < 32
@@ -2304,7 +2322,7 @@ it('refuses a durable record whose retained snapshot exceeds the total capacity'
   const overfilled = Array.from({ length: 97 }, (_, index) => ({
     ...pin,
     serverId: `${index < 32 ? 'live' : 'removed'}-${index}`.padEnd(128, 'x'),
-    serverRevision: Number.MAX_SAFE_INTEGER,
+    serverRevision: Number.MAX_SAFE_INTEGER - 1,
     state: (index === 0
       ? 'enabled'
       : index < 32

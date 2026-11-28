@@ -629,7 +629,7 @@ export function registerHostedSessionOpenRoutes({
       if (body?.['hookCatalog'] !== undefined) {
         if (!brokerOptions || (create && !toolProfile))
           throw new Error('Hooks require a Hosted Workspace profile.');
-        hookCatalog = parseHostedHookPin(body['hookCatalog']);
+        hookCatalog = parseHostedHookPin(body['hookCatalog'], true);
       }
     } catch {
       error(res, 400, 'invalid_hosted_hook_catalog');
@@ -642,14 +642,14 @@ export function registerHostedSessionOpenRoutes({
           body?.['lifecycleAuthority'] === undefined ||
           body?.['mcpServers'] !== undefined)
       )
-        mcpServers = parseHostedMcpServers(body?.['mcpServers']);
+        mcpServers = parseHostedMcpServers(body?.['mcpServers'], true);
       else if (body?.['mcpServers'] !== undefined) {
         if (
           !isHostedWorkspacePublicShellProfile(toolProfile) ||
           !contract.lifecycleV2Profiles?.includes(toolProfile)
         )
           throw new Error('MCP requires a supported Workspace profile.');
-        mcpServers = parseHostedMcpServers(body['mcpServers']);
+        mcpServers = parseHostedMcpServers(body['mcpServers'], true);
       }
       if (
         create &&
@@ -1972,11 +1972,22 @@ export function registerHostedSessionOpenRoutes({
             definition?.['mcpServers'] !== undefined)) &&
         mcpServers === undefined
       ) {
-        mcpServers = parseHostedMcpServers(definition?.['mcpServers']);
+        // A definition persisted under an older admission bound still has to
+        // load: the ceiling is an admission bound, and a refused load cannot
+        // be deleted because attach is the delete precondition. A definition
+        // that fails even the stored reader keeps the declared error the
+        // create path uses, not the generic 503 handler.
+        try {
+          mcpServers = parseHostedMcpServers(definition?.['mcpServers'], true);
+        } catch {
+          await managed.close();
+          error(res, 400, 'invalid_hosted_mcp_servers');
+          return;
+        }
       }
       if (!create && hookCatalog === undefined && definition?.['hookCatalog']) {
         try {
-          hookCatalog = parseHostedHookPin(definition['hookCatalog']);
+          hookCatalog = parseHostedHookPin(definition['hookCatalog'], true);
         } catch {
           await managed.close();
           error(res, 409, 'hosted_tool_profile_conflict');
