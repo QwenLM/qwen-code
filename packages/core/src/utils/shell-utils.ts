@@ -289,6 +289,42 @@ export function escapeShellArg(arg: string, shell: ShellType): string {
   }
 }
 
+export function isLiteralShellArithmetic(expression: string): boolean {
+  const literal = expression.replace(
+    /\b0[xX][0-9a-fA-F]+\b|\b[0-9]+#[0-9A-Za-z@_]+\b/g,
+    '0',
+  );
+  return /^[0-9\s()+*/%<>=!&|^~?:-]*$/.test(literal);
+}
+
+// Invalid `$((` syntax can be a command substitution in Bash, not arithmetic.
+export function findLiteralArithmeticExpansionEnd(
+  command: string,
+  start: number,
+): number {
+  const modern = command.startsWith('$((', start);
+  if (!modern && !command.startsWith('$[', start)) return -1;
+  const bodyStart = start + (modern ? 3 : 2);
+  let depth = modern ? 2 : 1;
+  for (let index = bodyStart; index < command.length; index++) {
+    const character = command[index]!;
+    if (modern && character === '(') depth++;
+    if (character === (modern ? ')' : ']')) {
+      depth--;
+      if (depth === 0) {
+        if (modern && command[index - 1] !== ')') return -1;
+        return isLiteralShellArithmetic(
+          command.slice(bodyStart, modern ? index - 1 : index),
+        )
+          ? index
+          : -1;
+      }
+    }
+    if (!/[0-9A-Za-z@_#\s()+*/%<>=!&|^~?:-]/.test(character)) return -1;
+  }
+  return -1;
+}
+
 /**
  * Splits a shell command into a list of individual commands, respecting quotes.
  * This is used to separate chained commands (e.g., using &&, ||, ;).
@@ -301,11 +337,15 @@ export function splitCommands(command: string): string[] {
   let inSingleQuotes = false;
   let inDoubleQuotes = false;
   let inBackticks = false;
+  let inAnsiCQuotes = false;
   let substitutionDepth = 0;
   // Quote state of each enclosing level, saved on `$(` and restored on the
   // matching `)`, so a substitution body's quotes cannot leak outwards and the
   // surrounding quotes cannot mask the body's closing paren.
-  const quoteStack: Array<{ single: boolean; double: boolean }> = [];
+  const quoteStack: Array<{
+    single: boolean;
+    double: boolean;
+  }> = [];
   let i = 0;
 
   const previousNonWhitespaceChar = (index: number): string | undefined => {
@@ -321,6 +361,30 @@ export function splitCommands(command: string): string[] {
   while (i < command.length) {
     const char = command[i];
     const nextChar = command[i + 1];
+
+    if (inAnsiCQuotes) {
+      currentCommand += char;
+      if (char === '\\' && nextChar !== undefined) {
+        currentCommand += nextChar;
+        i += 2;
+        continue;
+      }
+      if (char === "'") inAnsiCQuotes = false;
+      i++;
+      continue;
+    }
+    if (
+      !inSingleQuotes &&
+      !inDoubleQuotes &&
+      !inBackticks &&
+      char === '$' &&
+      nextChar === "'"
+    ) {
+      inAnsiCQuotes = true;
+      currentCommand += "$'";
+      i += 2;
+      continue;
+    }
 
     if (!inSingleQuotes && char === '\\' && nextChar === '\n') {
       i += 2;
@@ -346,11 +410,20 @@ export function splitCommands(command: string): string[] {
       char === '$' &&
       nextChar === '('
     ) {
+      const arithmeticEnd = findLiteralArithmeticExpansionEnd(command, i);
+      if (arithmeticEnd !== -1) {
+        currentCommand += command.slice(i, arithmeticEnd + 1);
+        i = arithmeticEnd + 1;
+        continue;
+      }
       // A substitution body is quoted independently of its surroundings, so
       // save the enclosing quote state and start the body unquoted. `"$(...)"`
       // is the common case: the double quote belongs to the outer command and
       // must not make the body's `)` look quoted.
-      quoteStack.push({ single: inSingleQuotes, double: inDoubleQuotes });
+      quoteStack.push({
+        single: inSingleQuotes,
+        double: inDoubleQuotes,
+      });
       inSingleQuotes = false;
       inDoubleQuotes = false;
       substitutionDepth++;
@@ -400,7 +473,8 @@ export function splitCommands(command: string): string[] {
         currentCommand = '';
       } else if (char === '&') {
         const prevChar = previousNonWhitespaceChar(i);
-        if (prevChar === '>' || prevChar === '<') {
+        if (prevChar === '>' || prevChar === '<' || nextChar === '>') {
+          // `>&2` / `<&fd` and `&>` / `&>>` are redirects, not separators.
           currentCommand += char;
         } else {
           commands.push(currentCommand.trim());
