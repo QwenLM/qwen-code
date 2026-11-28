@@ -230,10 +230,15 @@ import { registerBrandRoutes } from './routes/brand.js';
 import { registerCapabilitiesRoutes } from './routes/capabilities.js';
 import {
   createHostedHarnessContract,
+  HOSTED_HARNESS_WORK_URL_ENV,
   installHostedHarnessContractMiddleware,
 } from './hosted-harness-contract.js';
 import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
+import {
+  resolveHostedHarnessWorkUrl,
+  startHostedHarnessWorkPoll,
+} from './hosted-harness-work-poll.js';
 import { registerHostedSideQueryRoutes } from './hosted-side-query.js';
 import {
   registerHostedPackagePreparation,
@@ -2724,6 +2729,7 @@ export function createServeApp(
       : undefined;
   installHostedHarnessContractMiddleware(app, hostedHarness);
   let stopHostedPackagePreparation: (() => Promise<void>) | undefined;
+  let stopHostedWorkPoll: (() => Promise<void>) | undefined;
   if (hostedHarness) {
     const broker =
       opts.managedRuntimeBrokerUrl && opts.managedRuntimeBrokerToken
@@ -2745,6 +2751,25 @@ export function createServeApp(
       ordinary,
     );
     registerHostedSideQueryRoutes(app, hostedHarness, ordinary);
+    const workUrl = process.env[HOSTED_HARNESS_WORK_URL_ENV];
+    const { instanceId } = hostedHarness;
+    if (workUrl !== undefined && instanceId !== undefined) {
+      const host =
+        opts.hostname.includes(':') && !opts.hostname.startsWith('[')
+          ? `[${opts.hostname}]`
+          : opts.hostname;
+      const stop = startHostedHarnessWorkPoll({
+        workUrl: resolveHostedHarnessWorkUrl(workUrl),
+        selfUrl: () => `http://${host}:${getPort()}`,
+        token: opts.token!,
+        contract: { ...hostedHarness, instanceId },
+        freeSlots: ordinary.freeColdOpenSlots,
+      });
+      stopHostedWorkPoll = stop;
+      // A runtime app disposed without its app drain stops here.
+      (app.locals as { stopHostedWorkPoll?: () => void }).stopHostedWorkPoll =
+        () => void stop();
+    }
     app.use((req, res, next) => {
       if (req.path === '/capabilities' || req.path === '/health') next();
       else res.sendStatus(404);
@@ -4721,6 +4746,7 @@ export function createServeApp(
   }
   if (stopHostedPackagePreparation)
     serveAppLifecycle.addAppDrain(stopHostedPackagePreparation);
+  if (stopHostedWorkPoll) serveAppLifecycle.addAppDrain(stopHostedWorkPoll);
   serveAppLifecycle.addAppDrain(async () => {
     (
       app.locals as { stopScheduledTaskKeepalive?: () => void }

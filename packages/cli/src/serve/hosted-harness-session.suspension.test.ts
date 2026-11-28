@@ -693,6 +693,14 @@ describe('idle suspension', () => {
   // wait, and the slot frees when the in-flight open completes.
   it('refuses cold opens past the instance cap until a slot frees', async () => {
     const server = await app(false, undefined, true, { coldOpenLimit: 1 });
+    // The work poll reports this count as its free slots.
+    const freeSlots = () =>
+      (
+        server as Server & {
+          harnessRegistration: { freeColdOpenSlots: () => number };
+        }
+      ).harnessRegistration.freeColdOpenSlots();
+    expect(freeSlots()).toBe(1);
     let release!: () => void;
     const stall = new Promise<void>((resolve) => {
       release = resolve;
@@ -726,8 +734,10 @@ describe('idle suspension', () => {
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_session_open_busy');
     expect(statsOf(server).openBusyRefusals).toBe(1);
+    expect(freeSlots()).toBe(0);
     release();
     expect((await creating).status).toBe(200);
+    expect(freeSlots()).toBe(1);
     const retried = await headers(supertest(server).post('/session')).send({
       sessionId: '44444444-4444-4444-8444-444444444444',
       sessionScope: 'thread',

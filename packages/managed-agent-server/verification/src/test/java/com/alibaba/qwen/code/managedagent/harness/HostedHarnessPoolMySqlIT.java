@@ -21,6 +21,7 @@ import org.springframework.boot.web.servlet.context.ServletWebServerApplicationC
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
+import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -238,6 +239,80 @@ class HostedHarnessPoolMySqlIT {
     }
 
     @Test
+    @Timeout(120)
+    void aPollingMemberClaimsAReleasedSessionAndItsWriterConsumesTheClaim() throws Exception {
+        Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath();
+        assertThat(cli).isRegularFile();
+        int port;
+        try (var socket = new ServerSocket(0)) {
+            port = socket.getLocalPort();
+        }
+        String origin = "http://127.0.0.1:" + port;
+        URI first = startHarness(cli, "pool-a", null, origin);
+        URI second = startHarness(cli, "pool-b", null, origin);
+        spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class).run(
+                "--server.address=127.0.0.1", "--server.port=" + port,
+                "--spring.datasource.url=" + required("mysql.url"),
+                "--spring.datasource.username=" + required("mysql.user"),
+                "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
+                "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
+                "--spring.datasource.druid.max-active=4", "--spring.datasource.druid.max-wait=5000",
+                "--spring.datasource.druid.connect-properties.connectTimeout=5000",
+                "--spring.datasource.druid.connect-properties.socketTimeout=10000",
+                "--qwen.managed-agent.session-store.enabled=true",
+                "--qwen.managed-agent.session-store.base-url=" + origin,
+                "--qwen.managed-agent.session-store.workspace-id=" + WORKSPACE,
+                "--qwen.managed-agent.session-store.binding-key=" + BINDING_KEY,
+                "--qwen.managed-agent.wake-dispatch.enabled=true",
+                "--qwen.managed-agent.harness-pull.enabled=true",
+                "--qwen.managed-agent.harness.enabled=true", "--qwen.managed-agent.runtime-broker.enabled=false",
+                "--qwen.managed-agent.harness.token=" + TOKEN,
+                "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
+                "--qwen.managed-agent.harness.heartbeat-interval=PT0S",
+                "--qwen.managed-agent.harness.pool.enabled=true",
+                "--qwen.managed-agent.harness.pool.instances[0].instance-id=pool-a",
+                "--qwen.managed-agent.harness.pool.instances[0].base-url=" + first,
+                "--qwen.managed-agent.harness.pool.instances[1].instance-id=pool-b",
+                "--qwen.managed-agent.harness.pool.instances[1].base-url=" + second);
+        jdbc = spring.getBean(JdbcTemplate.class);
+        var placements = spring.getBean(JdbcHarnessPlacementStore.class);
+        pool = (HarnessPoolConnector) HostedGateTestSupport.connectorOwning(
+                spring.getBean(HarnessConnector.class));
+        pool.refresh();
+        String tenant = UUID.randomUUID().toString();
+        String session = root(tenant);
+        pool.createOrLoad(tenant, session, false);
+        var original = placements.get(tenant, session);
+        assertThat(original.instanceId()).isEqualTo("pool-a");
+        // Draining releases the idle Session, and a draining Harness has no
+        // free slot, so it stops polling: only pool-b can claim.
+        HostedHarnessClient firstClient = client(first);
+        pool.drainInstance("pool-a", UUID.randomUUID().toString());
+        await(() -> "DRAINED".equals(firstClient.readInstance().get("state")), 30);
+        assertThat(placements.get(tenant, session).state()).isEqualTo("RELEASED");
+
+        // The pool advertises work-pull/1, so the push path records demand
+        // instead of taking the released placement over.
+        assertThatThrownBy(() -> pool.createOrLoad(tenant, session, true))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        refusal -> assertThat(refusal.getCode()).isEqualTo("harness_placement_released"));
+        // Nothing else retries this Session, so only a poller can place it
+        // before the 30-second push fallback; its load's writer acquisition
+        // clears both the demand and the reservation.
+        await(() -> placements.get(tenant, session).epoch() == original.epoch() + 1
+                && jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_id = ?"
+                        + " AND harness_claim_requested_at IS NULL AND harness_claim_reserved_until IS NULL",
+                        Integer.class, tenant, session) == 1, 20);
+        var claimed = placements.get(tenant, session);
+        assertThat(claimed.instanceId()).isEqualTo("pool-b");
+        assertThat(jdbc.queryForObject("SELECT writer_id FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, session)).isEqualTo(claimed.bootId());
+        HostedHarnessClient secondClient = client(second);
+        await(() -> Integer.valueOf(1).equals(
+                ((Map<?, ?>) secondClient.readInstance().get("counters")).get("attachedSessions")), 20);
+    }
+
+    @Test
     @Timeout(180)
     void refreshReapsAnExpiredCleanSuspensionWithoutOpeningTheSuccessor() throws Exception {
         Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath();
@@ -354,6 +429,10 @@ class HostedHarnessPoolMySqlIT {
     }
 
     private URI startHarness(Path cli, String id, Long idleSuspendMs) throws Exception {
+        return startHarness(cli, id, idleSuspendMs, null);
+    }
+
+    private URI startHarness(Path cli, String id, Long idleSuspendMs, String workUrl) throws Exception {
         Path dir = Files.createDirectories(temporary.resolve(id));
         Path config = Files.createDirectory(dir.resolve(".qwen"));
         String model = "pool-idle-fixture";
@@ -381,6 +460,9 @@ class HostedHarnessPoolMySqlIT {
         environment.put("QWEN_CODE_SYSTEM_DEFAULTS_PATH", dir.resolve("system-defaults.json").toString());
         if (idleSuspendMs != null) {
             environment.put("QWEN_E2E_IDLE_SUSPEND_MS", idleSuspendMs.toString());
+        }
+        if (workUrl != null) {
+            environment.put("QWEN_MANAGED_HARNESS_WORK_URL", workUrl);
         }
         Process process = builder.start();
         children.add(process);

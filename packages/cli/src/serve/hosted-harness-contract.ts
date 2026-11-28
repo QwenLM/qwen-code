@@ -17,6 +17,7 @@ export const HOSTED_HARNESS_CAPABILITY_DIGEST_ENV =
   'QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST';
 export const HOSTED_LIFECYCLE_V2_PROFILES_ENV =
   'QWEN_HOSTED_LIFECYCLE_V2_PROFILES';
+export const HOSTED_HARNESS_WORK_URL_ENV = 'QWEN_MANAGED_HARNESS_WORK_URL';
 const LIFECYCLE_V2_PROFILES = [
   'hosted-workspace-files/1',
   'hosted-workspace-shell/1',
@@ -51,6 +52,7 @@ export function createHostedHarnessContract(
   instanceId: string | undefined = process.env[
     'QWEN_HOSTED_HARNESS_INSTANCE_ID'
   ],
+  workPull: boolean = process.env[HOSTED_HARNESS_WORK_URL_ENV] !== undefined,
 ): HostedHarnessContract {
   if (
     lifecycleV2Profiles.some(
@@ -87,7 +89,13 @@ export function createHostedHarnessContract(
     features: Object.freeze([
       ...(instanceId === undefined
         ? []
-        : ['harness-pool-owner/1', 'harness-instance-lifecycle/1']),
+        : [
+            'harness-pool-owner/1',
+            'harness-instance-lifecycle/1',
+            // Advertised only where the work poll runs: the control plane
+            // stops placing released Sessions by push once a pool has it.
+            ...(workPull ? ['work-pull/1'] : []),
+          ]),
       'hosted_approval_resume_v1',
       'hosted_model_round_recovery_v1',
       'model-selection/1',

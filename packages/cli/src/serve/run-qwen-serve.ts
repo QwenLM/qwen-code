@@ -5387,6 +5387,7 @@ async function runQwenServeImpl(
       stopAgentHostRestore?: () => void;
       stopWebTerminalRegistry?: () => void;
       stopHostedMountHandbacks?: () => void;
+      stopHostedWorkPoll?: () => void;
       stopSubscriptionAuth?: () => void;
       stopWeixinAuth?: () => void;
       subSessionStoppers?: Array<() => void>;
@@ -5409,6 +5410,7 @@ async function runQwenServeImpl(
     stopSafely('Agent Host reconnect', locals.stopAgentHostRestore);
     stopSafely('web terminal registry', locals.stopWebTerminalRegistry);
     stopSafely('Hosted mount handbacks', locals.stopHostedMountHandbacks);
+    stopSafely('Hosted work poll', locals.stopHostedWorkPoll);
     stopSafely('Subscription authorization', locals.stopSubscriptionAuth);
     stopSafely('WeChat authorization', locals.stopWeixinAuth);
     stopTrustPolicyMonitor(app);

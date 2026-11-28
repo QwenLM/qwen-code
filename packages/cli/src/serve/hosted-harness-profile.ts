@@ -6,7 +6,11 @@
 
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
 import type { ServeOptions } from './types.js';
-import { isHostedHarnessCapabilityDigest } from './hosted-harness-contract.js';
+import {
+  HOSTED_HARNESS_WORK_URL_ENV,
+  isHostedHarnessCapabilityDigest,
+} from './hosted-harness-contract.js';
+import { resolveHostedHarnessWorkUrl } from './hosted-harness-work-poll.js';
 import { isLoopbackBind } from './loopback-binds.js';
 
 export function validateHostedHarnessProfile(
@@ -84,5 +88,17 @@ export function validateHostedHarnessProfile(
     throw new Error(
       '--profile hosted-harness requires a sha256 capability digest.',
     );
+  }
+  const workUrl = process.env[HOSTED_HARNESS_WORK_URL_ENV];
+  if (workUrl !== undefined) {
+    resolveHostedHarnessWorkUrl(workUrl);
+    // Only a pool member may claim, and claims are loaded through this
+    // process's own plain loopback listener.
+    if (process.env['QWEN_HOSTED_HARNESS_INSTANCE_ID'] === undefined)
+      throw new Error(
+        `${HOSTED_HARNESS_WORK_URL_ENV} requires QWEN_HOSTED_HARNESS_INSTANCE_ID.`,
+      );
+    if (opts.tlsCert !== undefined)
+      throw new Error(`${HOSTED_HARNESS_WORK_URL_ENV} does not support TLS.`);
   }
 }
