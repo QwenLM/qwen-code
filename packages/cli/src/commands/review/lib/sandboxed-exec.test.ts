@@ -1393,23 +1393,28 @@ describe('tiered sandbox, container hardening, and verifiable reap', () => {
   });
 
   it('the capability-gate fixture plan reads through the real plan reader and its CONTENT drives the class (R4-1 / N1)', () => {
-    // Same shape as .github/scripts/ensure-tiered-review-cli.sh's fixture plan.
-    // The assertions must fail if the parsed plan drifts (missing path, missing
-    // authorAssociation), not merely when the injected env/verdict changes.
-    const plan = {
-      pr: 0,
-      head: 'probe',
-      base: 'probe',
-      mergeBase: 'probe',
-      isCrossRepository: false,
-      authorAssociation: 'MEMBER',
-      diffStat: { files: 1, added: 1, deleted: 0 },
-      files: [{ path: 'src/a.ts', added: 1, deleted: 0, mode: '100644' }],
-      worktree: '/tmp/probe/.qwen/tmp/review-probe',
-    };
+    // F1: read the gate script's OWN plan literal instead of copying its shape,
+    // so an edit to the script's fixture (drop diffStat / authorAssociation)
+    // reds this test through the real reader.
+    const script = readFileSync(
+      fileURLToPath(
+        new URL(
+          '../../../../../../.github/scripts/ensure-tiered-review-cli.sh',
+          import.meta.url,
+        ),
+      ),
+      'utf8',
+    );
+    const literal = script.match(/printf '(\{"pr":0.*\})\\n' "\$wt"/)?.[1];
+    expect(literal).toBeDefined();
     const dir = mkdtempSync(join(tmpdir(), 'qwen-gate-fixture-plan-'));
     const planPath = join(dir, 'plan.json');
-    writeFileSync(planPath, JSON.stringify(plan));
+    writeFileSync(planPath, (literal as string).replace('%s', join(dir, 'wt')));
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    // Pin the script literal's own completeness advertising: the reader only
+    // consults diffStat when diffPath is null, so assert the literal directly.
+    expect(plan.diffStat).toBeDefined();
+    expect(plan.diffStat.files).toBe(plan.files.length);
     try {
       const trustContext = trustInputFromPlan(planPath);
       expect(trustContext).toBeDefined();

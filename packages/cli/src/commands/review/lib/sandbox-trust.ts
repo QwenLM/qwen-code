@@ -172,10 +172,11 @@ const CONTENT_ALLOWLIST_ROOT_FILES = new Set([
 /**
  * Narrow content allowlist for the operator opt-in that lets an external PR
  * run in the hardened shared-kernel container: only Markdown under `docs/`
- * and the four root prose files. Deliberately excludes data formats that a
- * toolchain might parse or execute (json/yaml/svg/images). Executable/symlink/
- * submodule git modes and binary flags are enforced separately by
- * `detectReviewMandatoryEscalations`, not by this path predicate.
+ * and the root prose files README / CHANGELOG / CONTRIBUTING / LICENSE, each
+ * accepted with or without the `.md` extension. Deliberately excludes data
+ * formats that a toolchain might parse or execute (json/yaml/svg/images).
+ * Executable/symlink/submodule git modes and binary flags are enforced
+ * separately by `detectReviewMandatoryEscalations`, not by this path predicate.
  */
 export function isReviewContentAllowlistedPath(rawPath: string): boolean {
   const p = normalizePath(rawPath).toLowerCase();

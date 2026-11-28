@@ -66,11 +66,15 @@ context:
     (rendering `<ModRowsProvider>` + `<MessageList>` with no daemon hook calls)
     and the existing `<DaemonTranscriptViewport>`.
   - Add backend-neutral `sessionViewportEnabled?: boolean` (default `true` on
-    `TranscriptViewport` so existing daemon callers `App.tsx`, `ChatPane.tsx`,
-    and existing viewport tests keep identical behavior). When
-    `sessionViewportEnabled === false`, `TranscriptViewport` renders
-    `<LiveTranscriptViewport>` directly without reading any daemon context.
-    When `sessionViewportEnabled !== false`, it checks
+    `TranscriptViewport`; subsequently refined in
+    [Slice 6c](2026-11-28-managed-host-zero-daemon-cleanup.md) to pair with an
+    explicitly injected `sessionViewportComponent` rather than importing daemon
+    hooks inside `TranscriptViewport.tsx`). When `sessionViewportEnabled ===
+false` or no `sessionViewportComponent` is supplied, `TranscriptViewport`
+    renders `<LiveTranscriptViewport>` directly without reading any daemon
+    context (logging a dev-mode warning if `sessionViewportEnabled` is set
+    without an injected component). When daemon hosts (`App.tsx`,
+    `ChatPane.tsx`) inject `DaemonTranscriptViewport`, it checks
     `useOptionalDaemonHistoryNavigationStore()` and falls back to
     `<LiveTranscriptViewport>` when absent rather than throwing.
   - Add backend-neutral `sessionViewportEnabled?: boolean` (default `false`),
@@ -129,11 +133,14 @@ context:
      example a standalone shell or unit test) should degrade cleanly to the
      live `<MessageList>` instead of crashing.
    - Why default `sessionViewportEnabled = true` on `TranscriptViewport` and
-     `false` on `ChatSurface`? Existing daemon callers of `TranscriptViewport`
-     (`App.tsx`, `ChatPane.tsx`, viewport unit suites) stay byte-for-byte
-     unchanged; `ChatSurface` is backend-neutral and not yet mounted by any
-     daemon column, so fail-closed defaults prevent silent cross-provider leaks
-     without branching on `controller.kind`.
+     `false` on `ChatSurface`? `ChatSurface` is backend-neutral so fail-closed
+     defaults prevent silent cross-provider leaks without branching on
+     `controller.kind`; in
+     [Slice 6c](2026-11-28-managed-host-zero-daemon-cleanup.md),
+     `DaemonTranscriptViewport` was extracted out of `TranscriptViewport.tsx`
+     and explicitly injected via `sessionViewportComponent` by `App.tsx` and
+     `ChatPane.tsx` so `TranscriptViewport.tsx` stays completely free of daemon
+     imports.
 2. **Optional questions (`required: false`) never fabricate an answer.**
    - Visiting or mounting an optional single-select question leaves its answer
      unset (`aria-checked="false"` across all options) instead of auto-selecting
@@ -175,9 +182,11 @@ context:
 ## Constraints and Risks
 
 - **Zero daemon regression:** `App.tsx`, `ChatPane.tsx`, all existing
-  `TranscriptViewport` tests, and all existing `AskUserQuestion` tests must
-  keep their exact behavior when `required`, `allowText`, `disabled`, and
-  `sessionViewportEnabled` are omitted.
+  `TranscriptViewport` tests (with `DaemonTranscriptViewport` injected via
+  `sessionViewportComponent` as refined in
+  [Slice 6c](2026-11-28-managed-host-zero-daemon-cleanup.md)), and all existing
+  `AskUserQuestion` tests must keep their exact behavior when `required`,
+  `allowText`, and `disabled` are omitted.
 - **Test-mock alignment:** Four `TranscriptViewport*.test.tsx` files partially
   mock `../daemon/session/DaemonSessionProvider` with only
   `useDaemonHistoryNavigationStore`; each must also export

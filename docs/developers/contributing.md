@@ -87,7 +87,7 @@ cd qwen-code
 To install dependencies defined in `package.json` as well as root dependencies:
 
 ```bash
-npm install
+corepack pnpm install --frozen-lockfile
 ```
 
 To build the entire project (all packages):
@@ -305,7 +305,7 @@ We publish an artifact for each commit to our internal registry. But if you need
 
 ```
 npm run clean
-npm install
+corepack pnpm install --frozen-lockfile
 npm run auth
 npm run prerelease:dev
 npm publish --workspaces
