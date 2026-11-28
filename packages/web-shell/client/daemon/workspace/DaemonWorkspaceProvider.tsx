@@ -13,12 +13,8 @@ import {
   useState,
 } from 'react';
 import { ComposerWorkspaceProvider } from '../../hooks/useComposerWorkspace.js';
-import type {
-  DaemonBrand,
-  DaemonCapabilities,
-  DaemonClient,
-} from '@qwen-code/sdk/daemon';
-import { DaemonHttpError } from '@qwen-code/sdk/daemon';
+import type { DaemonBrand, DaemonCapabilities } from '@qwen-code/sdk/daemon';
+import { DaemonClient, DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
   DaemonAvailability,
   createDaemonClient,
@@ -101,26 +97,31 @@ export function DaemonWorkspaceProvider({
   token,
   workspaceCwd,
   autoConnect = true,
+  sessionAdapter,
   transport,
   children,
 }: DaemonWorkspaceProviderProps) {
   // Render-phase so the breadcrumb exists before any child can throw, and
   // recorded even when no client is built (autoConnect={false}).
   recordProviderCopy(moduleInstanceId, false);
+  const hasSessionAdapter = sessionAdapter !== undefined;
+  const sessionAdapterRef = useRef(sessionAdapter);
+  sessionAdapterRef.current = sessionAdapter;
   const availability = useMemo(
     () =>
-      autoConnect
+      autoConnect && !hasSessionAdapter
         ? new DaemonAvailability(baseUrl, token, transport?.restFetch)
         : undefined,
-    [baseUrl, token, transport, autoConnect],
+    [baseUrl, token, transport, autoConnect, hasSessionAdapter],
   );
-  const client = useMemo(
-    () =>
-      autoConnect && availability
-        ? createDaemonClient({ baseUrl, token, transport }, availability)
-        : undefined,
-    [autoConnect, baseUrl, token, transport, availability],
-  );
+  const client = useMemo(() => {
+    if (!autoConnect) return undefined;
+    const options = { baseUrl, token, transport };
+    if (hasSessionAdapter && sessionAdapterRef.current) {
+      return sessionAdapterRef.current.createClient(options, DaemonClient);
+    }
+    return availability ? createDaemonClient(options, availability) : undefined;
+  }, [autoConnect, baseUrl, token, transport, availability, hasSessionAdapter]);
   const pendingDisposeRef = useRef(new Set<DaemonClient>());
   const clientRef = useRef<DaemonClient | undefined>(client);
   clientRef.current = client;
