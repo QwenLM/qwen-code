@@ -2,6 +2,8 @@
 
 Qwen Code can coordinate several teammates with the experimental Agent Team runtime. Teammates receive separate tasks, share a task list, exchange messages, and appear in the existing Agent View tabs. `/coordinate` defaults investigation workers to an enforced read-only tool set and can place one writer in a leader-owned Git worktree.
 
+In an ACP-hosted session, a teammate's message to the leader starts a follow-up turn when the leader is idle. If you stop the session, unread teammate messages wait until you resume it.
+
 ## Enable Agent Team
 
 Set `experimental.agentTeam` to `true` in Qwen Code settings and restart, or start Qwen Code with `QWEN_CODE_ENABLE_AGENT_TEAM=1`.
