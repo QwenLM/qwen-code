@@ -19,6 +19,7 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import * as approvalContinuation from './hosted-approval-continuation.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import { PRIVATE_ROOT_CAPABILITY_DIGEST } from './managed-private-root.js';
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => {
@@ -31,8 +32,15 @@ const statusOf = (server: Server, clientId: string) =>
     clientId,
   );
 
-// A write_file approval the model raises once; only a resumed Turn ends.
-function mockApprovalTurn(promptId = PROMPT_ID): void {
+// An approval the model raises once; only a resumed Turn ends.
+function mockApprovalTurn(promptId = PROMPT_ID, confined = false): void {
+  if (confined) {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'capabilityDigest',
+      'get',
+    ).mockReturnValue(PRIVATE_ROOT_CAPABILITY_DIGEST);
+  }
   vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
     async function (this: HostedWorkspaceBroker) {
       this.runtime = {
@@ -61,9 +69,11 @@ function mockApprovalTurn(promptId = PROMPT_ID): void {
       if (resumeFromToolResults)
         return { text: 'resumed', model: 'test-model' };
       const call = {
-        name: 'write_file',
+        name: confined ? 'run_shell_command' : 'write_file',
         callId: 'park-original-call',
-        args: { file_path: 'notes.txt', content: 'hello' },
+        args: confined
+          ? { command: 'pwd', is_background: false }
+          : { file_path: 'notes.txt', content: 'hello' },
         isClientInitiated: false,
         prompt_id: promptId,
       };

@@ -203,6 +203,73 @@ class WorkspaceRuntimeTransportTest {
     }
 
     @Test
+    void confinedSessionsRefusePublisherChangesBeforeContactingTheWorker() {
+        var scope = new RuntimeScope("tenant", "workspace", "7", "/workspace",
+                WorkspaceExecutionProfile.PRIVATE_ROOT_CAPABILITY_DIGEST, "session");
+        var session = new RuntimeSession("harness", "turn", "continuation", scope);
+        var lease = new RuntimeLease("runtime", URI.create("http://127.0.0.1:1"), "token", "lease", 1);
+        var http = mock(HttpRuntimeTransport.class);
+        var ownership = mock(JdbcWorkspaceExecutionStore.class);
+        var bindings = mock(RuntimeBindingRepository.class);
+        var sessions = mock(RuntimeSessionRepository.class);
+        var transport = new WorkspaceRuntimeTransport(http, ownership, bindings, sessions, ignored -> null);
+
+        assertThatThrownBy(() -> transport.installPublisher(lease, session, Map.of(), 1L))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("managed_runtime_confinement_denied"));
+        assertThatThrownBy(() -> transport.detachPublisher(lease, session, 1L))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("managed_runtime_confinement_denied"));
+        verifyNoInteractions(http, ownership, bindings, sessions);
+    }
+
+    @Test
+    void confinedReleaseNeedsPhysicalProofOnlyWhenAnInstallationCanStillBeOwed() {
+        var scope = new RuntimeScope("tenant", "workspace", "7", "/workspace",
+                WorkspaceExecutionProfile.PRIVATE_ROOT_CAPABILITY_DIGEST, "session");
+        var session = new RuntimeSession("harness", "turn", "continuation", scope);
+        var seed = new RuntimeProvisionSeed("provision", "binding-a", "incarnation", "lease", 1, "token");
+        var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:1"), seed.getToken(),
+                seed.getLeaseId(), seed.getEpoch());
+        var request = new RuntimeProvisionRequest(scope, "harness", "local-process", "storage");
+        var runtime = new RuntimeBindingRecord("binding-a", request, seed, 1, RuntimeBindingRecord.State.READY,
+                lease, new RuntimeResourceHandle("local-process", 3, Map.of("fixture", "confined")),
+                3, false, null, null, 0, 1, null, Instant.now(), Instant.now());
+        var record = new RuntimeSessionRecord(session, "binding-a", 1, RuntimeSessionRecord.State.RELEASING, 1, Instant.now());
+        var context = new ContextBinding("tenant", "workspace", 7, "storage", ".", "config", 1);
+        var bindings = mock(RuntimeBindingRepository.class);
+        when(bindings.findById("binding-a")).thenReturn(runtime);
+        var sessions = mock(RuntimeSessionRepository.class);
+        when(sessions.findById(scope, session.getRuntimeSessionId())).thenReturn(record);
+        var http = mock(HttpRuntimeTransport.class);
+        var ownership = mock(JdbcWorkspaceExecutionStore.class);
+        var transport = new WorkspaceRuntimeTransport(http, ownership, bindings, sessions, ignored -> context);
+        var refusal = new RuntimeBrokerException(409, "workspace_writer_unproven", "Original worker is not alone", false);
+        var proof = new CompletableFuture<Void>();
+        var evidence = List.of(CompletableFuture.<Void>failedFuture(refusal), proof).iterator();
+        transport.configureConfinedHandback(original -> {
+            assertThat(original).isSameAs(runtime);
+            return evidence.next();
+        });
+
+        assertThat(transport.release(lease, session).toCompletableFuture().join()).isTrue();
+        verifyNoInteractions(http);
+
+        when(ownership.isHeld(context, record)).thenReturn(true);
+        when(http.activateWorkspace(runtime, record, context, false)).thenReturn(CompletableFuture.completedFuture(null));
+        assertThatThrownBy(() -> transport.release(lease, session).toCompletableFuture().join()).hasCause(refusal);
+        verify(http).activateWorkspace(runtime, record, context, false);
+        verify(ownership, never()).releaseConfined(context, record, runtime);
+
+        var heldRelease = transport.release(lease, session).toCompletableFuture();
+        assertThat(heldRelease).isNotDone();
+        verify(ownership, never()).releaseConfined(context, record, runtime);
+        proof.complete(null);
+        assertThat(heldRelease.join()).isTrue();
+        verify(ownership).releaseConfined(context, record, runtime);
+    }
+
+    @Test
     void releaseRetiredClearsTheHolderWithAMatchingReceipt() throws Exception {
         var fixture = sshAcquisitionFixture();
         var runtime = fixture.runtime();

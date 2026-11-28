@@ -40,6 +40,7 @@ import {
   MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST,
 } from './managed-workspace-activation.js';
 import { ManagedRuntimeTerminals } from './managed-runtime-terminal.js';
+import { runPrivateRootShell } from './managed-private-root.js';
 import { registerManagedTerminalRoutes } from './managed-terminal-routes.js';
 import { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
@@ -308,6 +309,30 @@ export async function startManagedRuntimeAttestationWorker(
   const csiMount = csiBoot
     ? new ManagedCsiMount(csiBoot.context.mountRoot, csiBoot.storage.diskSerial)
     : undefined;
+  const privateRoot = boot.version === 2 ? boot.privateRoot : undefined;
+  if (
+    privateRoot &&
+    (containerMode || sshRuntime || capturePublisher || remotePublishers)
+  )
+    throw new Error(INVALID_BOOT_MESSAGE);
+  const confinedMount =
+    privateRoot && boot.version === 2
+      ? new ManagedContextMount(boot.mountRoot)
+      : undefined;
+  const confinedDirectory = await confinedMount?.resolve('.');
+  const confinementQualified =
+    !!privateRoot &&
+    boot.version === 2 &&
+    !!confinedDirectory &&
+    confinedDirectory === boot.mountRoot &&
+    (
+      await runPrivateRootShell(
+        privateRoot,
+        confinedDirectory,
+        ':',
+        AbortSignal.timeout(5_000),
+      )
+    )?.executionStatus === 'success';
   let executor: ManagedToolExecutor;
   try {
     if (csiBoot && csiMount) {
@@ -338,9 +363,10 @@ export async function startManagedRuntimeAttestationWorker(
           ? new ManagedContextMount(boot.mountRoot, () =>
               sshRuntime.verifyStorage(),
             )
-          : (externalMount ?? csiMount),
+          : (confinedMount ?? externalMount ?? csiMount),
         ledger,
         sshRuntime !== undefined || externalBoot !== undefined,
+        confinementQualified,
       );
       sshRuntime?.register(app, boot, executor);
       // The main listener mounts the same publication channels as the
@@ -387,6 +413,7 @@ export async function startManagedRuntimeAttestationWorker(
     capturePublisher: capturePublisher !== undefined,
     remotePublishers: remotePublishers !== undefined,
     publication: publication !== undefined,
+    confinementQualified,
   });
   const server = createServer(
     ownedManagedRuntimeRouteGate(app, routePlan.routes),

@@ -17,6 +17,7 @@ import {
   useHostedTextSession,
 } from './hosted-harness-session.test-helper.js';
 import { createHash, randomUUID } from 'node:crypto';
+import type { Server } from 'node:http';
 import path from 'node:path';
 import express from 'express';
 import supertest from 'supertest';
@@ -633,6 +634,39 @@ describe('Hosted Harness no-tool session', () => {
     await headers(supertest(server).post(`/session/${admittedId}/detach`))
       .set('X-Qwen-Client-Id', loaded.body.clientId as string)
       .expect(204);
+  });
+
+  it('inherits confined foreground-only on load and rechecks cold capability', async () => {
+    const profile = 'hosted-workspace-confined-shell/1';
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    const server = await app(true, undefined, true, undefined, undefined, [
+      profile,
+    ]);
+    const load = (listener: Server, options: Record<string, unknown> = {}) =>
+      headers(supertest(listener).post(`/session/${SESSION_ID}/load`)).send({
+        managedSessionStore: store(),
+        passiveManagedRuntimeRecovery: true,
+        ...options,
+      });
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: profile,
+        approvalMode: 'default',
+        foregroundOnly: true,
+      })
+      .expect(200);
+    await load(server).expect(200);
+    await load(server, { foregroundOnly: false }).expect(409);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .expect(204);
+    const disabled = await app(true);
+    const refused = await load(disabled).expect(409);
+    expect(refused.body.code).toBe('managed_runtime_confinement_denied');
+    await load(server).expect(200);
   });
 
   it.each([

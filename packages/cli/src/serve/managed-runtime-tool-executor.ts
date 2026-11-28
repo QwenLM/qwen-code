@@ -262,6 +262,11 @@ export type ManagedToolSetResolver = (
   },
 ) => Promise<ManagedToolSet | undefined>;
 
+import {
+  admitsConfinedShell,
+  CONFINEMENT_DENIED,
+} from './managed-private-root.js';
+
 const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   ReadFileTool.Name,
   WriteFileTool.Name,
@@ -422,7 +427,7 @@ export class ManagedToolExecutor {
   private capturePreparationStarted = false;
   private historyControlOutcomeUnknown = false;
   private ledgerIntegrityFailed = false;
-  private readonly pendingStarts = new Set<Promise<unknown>>();
+  private readonly pendingStarts = new Map<Promise<unknown>, string>();
   private startFailureObserved = false;
   private readonly fileHistories = new Map<string, ManagedRuntimeFileHistory>();
   private readonly historyControls = new Set<string>();
@@ -517,7 +522,7 @@ export class ManagedToolExecutor {
   async csiRetirementInventory(retirementId: string, sessionId: string) {
     this.sealAdmission(retirementId);
     const joined = await Promise.allSettled([
-      ...this.pendingStarts,
+      ...this.pendingStarts.keys(),
       ...[...this.entries.values()].flatMap((entry) =>
         entry.promise ? [entry.promise] : [],
       ),
@@ -630,7 +635,7 @@ export class ManagedToolExecutor {
         );
       this.closing = true;
       await Promise.all([
-        ...this.pendingStarts,
+        ...this.pendingStarts.keys(),
         ...[...this.entries.values()].flatMap((entry) =>
           entry.promise ? [entry.promise] : [],
         ),
@@ -679,7 +684,7 @@ export class ManagedToolExecutor {
         );
       return Promise.resolve(history.state());
     }
-    return this.trackStart(() =>
+    return this.trackStart(sessionId, () =>
       this.controlFileHistoryAdmitted(ownerSessionId, sessionId, operation),
     );
   }
@@ -799,7 +804,9 @@ export class ManagedToolExecutor {
   async readWorkspaceContext(
     sessionId: string,
   ): Promise<{ files: ManagedWorkspaceContextFile[] }> {
-    return this.trackStart(() => this.readWorkspaceContextAdmitted(sessionId));
+    return this.trackStart(sessionId, () =>
+      this.readWorkspaceContextAdmitted(sessionId),
+    );
   }
 
   async admitsProjectSkillPath(
@@ -939,6 +946,11 @@ export class ManagedToolExecutor {
       readonly ledger?: ManagedRuntimeLedger;
       readonly groupEvidenceTimeoutMs?: number;
       readonly sshForegroundOnly?: boolean;
+      readonly confinedShell?: (
+        directory: string,
+        command: string,
+        signal: AbortSignal,
+      ) => Promise<ManagedToolResultPayload | undefined>;
     } = {},
   ) {
     this.backgroundRegistry =
@@ -972,7 +984,12 @@ export class ManagedToolExecutor {
     );
   }
 
+  get isConfined(): boolean {
+    return this.options.confinedShell !== undefined;
+  }
+
   hasTool(toolName: string): boolean {
+    if (this.isConfined) return toolName === ShellTool.Name;
     return (
       ADMITTED_TOOL_NAMES.has(toolName) ||
       (toolName === MANAGED_MCP_TOOL && this.mcp !== undefined)
@@ -1006,6 +1023,23 @@ export class ManagedToolExecutor {
     this.providerSessions.delete(sessionId);
   }
 
+  isSessionAdmissionClosed(sessionId: string): boolean {
+    return this.closedSessions.has(sessionId);
+  }
+
+  closeConfinedSessionAdmission(sessionId: string): boolean {
+    this.closedSessions.add(sessionId);
+    return (
+      !Array.from(this.pendingStarts.values()).includes(sessionId) &&
+      ![...this.entries.values()].some(
+        (entry) =>
+          entry.reference.sessionId === sessionId &&
+          entry.state !== 'settled' &&
+          entry.state !== 'acknowledged',
+      )
+    );
+  }
+
   closeSessionAdmission(sessionId: string): void {
     if (this.hasActiveSession(sessionId)) {
       // The dedicated code names the one condition a Hook release may absorb
@@ -1036,7 +1070,7 @@ export class ManagedToolExecutor {
     input: Record<string, unknown>,
     measure?: true,
   ): Promise<ManagedToolResultPayload> {
-    return this.trackStart(() =>
+    return this.trackStart(reference.sessionId, () =>
       this.executeAdmitted(reference, toolName, input, measure),
     );
   }
@@ -1141,6 +1175,18 @@ export class ManagedToolExecutor {
       }
       return join(existing, reference, toolName, inputJson);
     }
+    if (
+      this.isConfined &&
+      (measure || toolName !== ShellTool.Name || !admitsConfinedShell(input))
+    )
+      return {
+        executionStatus: 'not_started',
+        responseParts: [],
+        error: {
+          type: CONFINEMENT_DENIED,
+          message: 'Only confined foreground Shell is admitted.',
+        },
+      };
     this.assertAdmissionOpen();
     const tools =
       input['managedExtension'] === undefined
@@ -1168,12 +1214,12 @@ export class ManagedToolExecutor {
       );
     }
     const tool = tools.tools.get(toolName);
-    if (!tool) {
+    if (!tool && !this.isConfined) {
       throw new ManagedToolConflictError(
         `Managed Runtime does not admit tool ${toolName}.`,
       );
     }
-    if (toolName === ShellTool.Name) {
+    if (toolName === ShellTool.Name && tool) {
       let isBackground = false;
       try {
         const params = structuredClone(input);
@@ -1202,8 +1248,37 @@ export class ManagedToolExecutor {
       controller: new AbortController(),
     };
     this.entries.set(reference.callId, entry);
-    entry.promise = this.run(entry, tool, tools, tools.directory);
+    entry.promise = this.options.confinedShell
+      ? this.runConfinedShell(
+          entry,
+          tools.directory!,
+          this.options.confinedShell,
+        )
+      : this.run(entry, tool!, tools, tools.directory);
     return join(entry, reference, toolName, inputJson);
+  }
+
+  private async runConfinedShell(
+    entry: JournalEntry,
+    directory: string,
+    launch: NonNullable<ManagedToolExecutor['options']['confinedShell']>,
+  ): Promise<void> {
+    entry.state = 'executing';
+    entry.lastSequence++;
+    try {
+      const result = await launch(
+        directory,
+        entry.input!['command'] as string,
+        AbortSignal.any([
+          entry.controller.signal,
+          AbortSignal.timeout(Number(entry.input!['timeout'] ?? 120_000)),
+        ]),
+      );
+      if (result) entry.result = result;
+    } finally {
+      entry.state = entry.result ? 'settled' : 'unknown';
+      entry.lastSequence++;
+    }
   }
 
   executeV3(
@@ -1213,7 +1288,9 @@ export class ManagedToolExecutor {
       readonly measure?: true;
     },
   ): Promise<ManagedToolV3View> {
-    return this.trackStart(() => this.executeV3Admitted(request));
+    return this.trackStart(request.reference.sessionId, () =>
+      this.executeV3Admitted(request),
+    );
   }
 
   private async executeV3Admitted(
@@ -2240,7 +2317,7 @@ export class ManagedToolExecutor {
       }
     }
     await Promise.allSettled([
-      ...this.pendingStarts,
+      ...this.pendingStarts.keys(),
       ...[...this.entries.values()].flatMap((entry) =>
         entry.promise ? [entry.promise] : [],
       ),
@@ -2346,14 +2423,17 @@ export class ManagedToolExecutor {
     ]);
   }
 
-  private trackStart<T>(action: () => Promise<T>): Promise<T> {
+  private trackStart<T>(
+    sessionId: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
     if (this.closing) {
       return Promise.reject(
         new ManagedToolUnavailableError('Managed Runtime worker is closing.'),
       );
     }
     const pending = action();
-    this.pendingStarts.add(pending);
+    this.pendingStarts.set(pending, sessionId);
     void pending.then(
       () => this.pendingStarts.delete(pending),
       () => {

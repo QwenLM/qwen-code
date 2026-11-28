@@ -190,20 +190,34 @@ public final class ManagedHostedRecoveryRecords {
         return stored;
     }
 
-    private static boolean shellPublicationLane(JsonNode ref, Function<String, StoredResource> resources) {
+    private enum ShellContinuationLane {
+        CONFINED_FOREGROUND,
+        PUBLIC_FOREGROUND,
+        PUBLIC_CAPTURE
+    }
+
+    private static ShellContinuationLane shellContinuationLane(JsonNode ref, Function<String, StoredResource> resources) {
         ManagedExtensionRecords.durableRef(ref, "Hosted Shell definition");
         require("managed-definition".equals(ref.path("kind").asText()) && ref.path("schemaVersion").asInt() == 1,
                 "Invalid Hosted Shell definition reference.");
         StoredResource stored = resolveResource(ref, resources);
         JsonNode definition = ManagedExtensionRecordStore.parse(new String(stored.bytes(), StandardCharsets.UTF_8));
-        require(definition != null && WorkspaceToolProfiles.isPublicShell(definition.path("toolProfile").asText()),
+        require(definition != null, "Invalid Hosted Shell definition.");
+        String profile = definition.path("toolProfile").asText();
+        if (WorkspaceToolProfiles.CONFINED_SHELL.equals(profile)) {
+            JsonNode foregroundOnly = definition.path("foregroundOnly");
+            require(foregroundOnly.isBoolean() && foregroundOnly.booleanValue() && !definition.has("captureBytes"),
+                    "Invalid confined Shell definition.");
+            return ShellContinuationLane.CONFINED_FOREGROUND;
+        }
+        require(WorkspaceToolProfiles.isPublicShell(profile),
                 "Native Shell continuation requires a public Shell profile.");
         if (definition.has("captureBytes")) {
             ManagedExtensionRecords.count(definition.get("captureBytes"), 1, ToolPublicationContract.MAX_CAPTURE_BYTES,
                     "Shell publication captureBytes");
-            return true;
+            return ShellContinuationLane.PUBLIC_CAPTURE;
         }
-        return false;
+        return ShellContinuationLane.PUBLIC_FOREGROUND;
     }
 
     private static String runtimeSessionId(String promptId) {
@@ -377,7 +391,7 @@ public final class ManagedHostedRecoveryRecords {
                 generation(runtime.get("workspaceGeneration"));
             }
             ManagedExtensionRecords.count(body.get("approvalOrdinal"), 0, calls.size() - 1, "approvalOrdinal");
-            Boolean publicationLane = null;
+            ShellContinuationLane shellLane = null;
             for (JsonNode call : calls) {
                 if (memoryOnly) {
                     require(Set.of("context_search", "context_remember", "context_get", "context_forget")
@@ -405,14 +419,15 @@ public final class ManagedHostedRecoveryRecords {
                             "Native Runtime correlation conflicts.");
                 }
                 boolean shell = "run_shell_command".equals(call.path("call").path("name").asText());
-                require(shell == call.has("publicationId"), "Invalid public Shell publication identity.");
-                if (shell) {
-                    if (publicationLane == null) {
-                        publicationLane = shellPublicationLane(body.get("definitionRef"), resources);
-                    }
+                if (shell && shellLane == null) {
+                    shellLane = shellContinuationLane(body.get("definitionRef"), resources);
+                }
+                boolean hasPublicationIdentity = shell && shellLane != ShellContinuationLane.CONFINED_FOREGROUND;
+                require(hasPublicationIdentity == call.has("publicationId"), "Invalid public Shell publication identity.");
+                if (hasPublicationIdentity) {
                     callFields.add("publicationId");
                     JsonNode publication = call.get("publicationId");
-                    require(publicationLane
+                    require(shellLane == ShellContinuationLane.PUBLIC_CAPTURE
                             ? publication.isTextual() && publication.asText().matches("[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
                             : publication.isNull(), "Invalid public Shell publication identity.");
                 }

@@ -68,6 +68,12 @@ import {
   HOSTED_TODO_MAX_ITEMS,
 } from './hosted-workspace-tool-input.js';
 import {
+  CONFINED_SHELL_PROFILE,
+  CONFINEMENT_DENIED,
+  CONFINEMENT_UNAVAILABLE,
+  PRIVATE_ROOT_CAPABILITY_DIGEST,
+} from './managed-private-root.js';
+import {
   HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
@@ -2558,7 +2564,16 @@ export class HostedWorkspaceToolTurn {
         ? Promise.resolve()
         : this.mcp
           ? this.mcp.ensureReady()
-          : this.broker.warm();
+          : this.confined
+            ? this.broker.resolveCapabilities().then(() => {
+                if (
+                  this.broker.capabilityDigest !==
+                  PRIVATE_ROOT_CAPABILITY_DIGEST
+                )
+                  throw new Error(CONFINEMENT_UNAVAILABLE);
+                return this.broker.warm();
+              })
+            : this.broker.warm();
     // Warmup runs alongside inference; a text-only answer need not wait for it.
     void this.warmed.catch(() => undefined);
   }
@@ -2568,12 +2583,17 @@ export class HostedWorkspaceToolTurn {
     return isHostedWorkspaceGlobProfile(this.profile);
   }
 
+  private get confined(): boolean {
+    return this.profile === CONFINED_SHELL_PROFILE;
+  }
+
   private get fileBackupsEnabled(): boolean {
     return (
-      !this.mcp ||
-      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
-      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
-      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V4
+      !this.confined &&
+      (!this.mcp ||
+        this.profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
+        this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
+        this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V4)
     );
   }
 
@@ -2728,6 +2748,17 @@ export class HostedWorkspaceToolTurn {
 
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
+    if (this.confined) {
+      await waitForTurn(this.warmed, signal);
+      this.advertised = [
+        {
+          ...hostedForegroundShellTool(),
+          description:
+            'Run one foreground command from /workspace in the private Runtime. Network access is closed. Output is bounded.',
+        },
+      ];
+      return this.advertised;
+    }
     await this.memory?.ready();
     if (this.memoryOnly) {
       this.planning =
@@ -3216,7 +3247,9 @@ export class HostedWorkspaceToolTurn {
         return;
     }
     await this.warmed;
-    const saved = await readHostedFileHistory(this.session);
+    const saved = this.confined
+      ? null
+      : await readHostedFileHistory(this.session);
     if (saved?.pendingTurn) {
       this.uncertain = true;
       try {
@@ -3538,7 +3571,7 @@ export class HostedWorkspaceToolTurn {
    */
   private async fetchWorkspaceContext(signal: AbortSignal): Promise<void> {
     const slot = this.context;
-    if (!slot) return;
+    if (this.confined || !slot) return;
     try {
       const files = await waitForTurn(this.broker.workspaceContext(), signal);
       // `''` means "the Workspace has none", so an aborted turn must not
@@ -4556,7 +4589,7 @@ export class HostedWorkspaceToolTurn {
           digest: item.requestDigest,
           argsDigest: item.argsDigest,
           inputDigest:
-            item.call.name === 'run_shell_command'
+            item.call.name === 'run_shell_command' && !this.confined
               ? managedToolDigest(input.input)
               : undefined,
           isShell: item.call.name === 'run_shell_command',
@@ -4656,10 +4689,12 @@ export class HostedWorkspaceToolTurn {
     if (
       batch.requests.some(
         (request) =>
+          (this.confined && request.call.name !== 'run_shell_command') ||
           !(
             singlePlanExit ||
             singleQuestion ||
             request.memory ||
+            (this.confined && request.call.name === 'run_shell_command') ||
             request.mcp ||
             (commandStep && request.call.name === 'skill') ||
             (this.publicChildren && request.call.name === 'agent') ||
@@ -4746,7 +4781,9 @@ export class HostedWorkspaceToolTurn {
         ),
         refusal: batch.refusals[ordinal] ?? null,
         actionId: batch.actionIds.get(ordinal) ?? null,
-        ...(request.isShell ? { publicationId: request.publicationId } : {}),
+        ...(request.isShell && !this.confined
+          ? { publicationId: request.publicationId }
+          : {}),
         ...(hookResults ? { hookResults: hookResults[ordinal] } : {}),
       });
     }
@@ -4861,6 +4898,8 @@ export class HostedWorkspaceToolTurn {
       const ids = new Set<string>();
       return source.map((call) => {
         const runtimeCallId = randomUUID();
+        if (this.confined && call.name !== 'run_shell_command')
+          throw new Error(CONFINEMENT_DENIED);
         const mcpInput = this.mcp?.toolInput(
           call.name,
           call.args,
@@ -5011,6 +5050,13 @@ export class HostedWorkspaceToolTurn {
           // H3: a background request is admitted exactly when this Session
           // owns its child_run orchestrator and the domain is enabled — the
           // deliberate refusals below keep their texts otherwise.
+          if (
+            this.confined &&
+            ((Object.hasOwn(args, 'is_background') &&
+              args['is_background'] !== false) ||
+              args['extension_context'] !== undefined)
+          )
+            validationError = denied(CONFINEMENT_DENIED);
           const backgroundRequested =
             args['is_background'] === true ||
             (typeof args['is_background'] === 'string' &&
@@ -6234,7 +6280,7 @@ export class HostedWorkspaceToolTurn {
             (await this.broker.prepare(
               request.runtimeCallId,
               request.digest,
-              request.inputDigest,
+              this.confined ? undefined : request.inputDigest,
               this.promptId,
             ));
         } catch (cause) {
@@ -7224,9 +7270,10 @@ export class HostedWorkspaceToolTurn {
               : undefined,
           this.mcp !== undefined,
         );
-        const shellResult = request.isShell
-          ? parseToolResultEnvelope(result)
-          : undefined;
+        const shellResult =
+          request.isShell && !this.confined
+            ? parseToolResultEnvelope(result)
+            : undefined;
         const receipt = shellResult?.capture
           ? await this.publisher!.receipt(executionCallId, shellResult)
           : undefined;

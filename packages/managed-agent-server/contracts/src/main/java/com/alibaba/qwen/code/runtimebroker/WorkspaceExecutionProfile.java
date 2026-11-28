@@ -45,6 +45,38 @@ public final class WorkspaceExecutionProfile {
      */
     public static final int EXTERNAL_SHELL_HANDLE_VERSION = 2;
 
+    public static final String PRIVATE_ROOT_CAPABILITY_DIGEST =
+            "sha256:e3b6f905a8c29c601d33a2a6204d69c307aa77bbe40e5146e3e45d8c616bf85c";
+    public static final String CONFINEMENT_DENIED = "managed_runtime_confinement_denied";
+    public static final String CONFINEMENT_UNAVAILABLE = "managed_runtime_confinement_unavailable";
+
+    public static boolean isConfined(String digest) {
+        return PRIVATE_ROOT_CAPABILITY_DIGEST.equals(digest);
+    }
+
+    public static RuntimeBrokerException confinementDenied() {
+        return new RuntimeBrokerException(409, CONFINEMENT_DENIED,
+                "The selected Runtime admits only confined foreground Shell at the Workspace root.", false);
+    }
+
+    public static RuntimeBrokerException confinementUnavailable() {
+        return new RuntimeBrokerException(409, CONFINEMENT_UNAVAILABLE,
+                "The selected Runtime could not establish private-root confinement.", false);
+    }
+
+    public static boolean allowsConfinedShell(Object name, Object input) {
+        if (!"run_shell_command".equals(name) || !(input instanceof java.util.Map<?, ?> args)
+                || !java.util.Set.of("command", "description", "timeout", "is_background").containsAll(args.keySet())
+                || !(args.get("command") instanceof String command) || command.isBlank() || command.indexOf(0) != -1) {
+            return false;
+        }
+        Object timeout = args.get("timeout");
+        return (!args.containsKey("is_background") || Boolean.FALSE.equals(args.get("is_background")))
+                && (!args.containsKey("description") || args.get("description") instanceof String)
+                && (!args.containsKey("timeout") || timeout instanceof Number number
+                    && number.doubleValue() == number.longValue() && number.longValue() >= 1 && number.longValue() <= 600_000);
+    }
+
     private WorkspaceExecutionProfile() {
     }
 
@@ -76,7 +108,7 @@ public final class WorkspaceExecutionProfile {
     public static boolean admitsCapabilityDigest(String digest) {
         return CAPABILITY_DIGEST.equals(digest)
                 || isExternalShell(digest)
-                || isMeasured(digest) || ManagedExtensionExecutionProfile.admits(digest);
+                || isMeasured(digest) || isConfined(digest) || ManagedExtensionExecutionProfile.admits(digest);
     }
 
     public static boolean isBoundWorkspaceScope(RuntimeScope scope) {

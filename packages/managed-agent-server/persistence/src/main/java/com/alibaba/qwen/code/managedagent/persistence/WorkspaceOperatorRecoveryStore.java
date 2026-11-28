@@ -99,7 +99,7 @@ public final class WorkspaceOperatorRecoveryStore {
                     + " FROM ma_runtime_binding WHERE binding_id = ? FOR UPDATE", (row, index) ->
                             saved.getVersion() == row.getLong("record_version")
                             && saved.getState().name().equals(row.getString("binding_state"))
-                            && row.getInt("resource_handle_version") == 2
+                            && row.getInt("resource_handle_version") == saved.getResourceHandle().getVersion()
                             && saved.getProvisionSeed().getProvisionRequestId().equals(
                                     row.getString("provision_request_id"))
                             && saved.getLease().getLeaseId().equals(row.getString("runtime_lease_id"))
@@ -276,6 +276,7 @@ public final class WorkspaceOperatorRecoveryStore {
                 || binding.getResourceHandle() == null
                 || !RuntimeProviderKinds.LOCAL_PROCESS.equals(binding.getResourceHandle().getKind())
                 || binding.getResourceHandle().getVersion() != 2
+                        && !RuntimeProviderKinds.isLocalProcessCgroup(binding.getResourceHandle())
                 || binding.getProvisionSeed() == null || binding.getLease() == null) {
             throw blocked();
         }

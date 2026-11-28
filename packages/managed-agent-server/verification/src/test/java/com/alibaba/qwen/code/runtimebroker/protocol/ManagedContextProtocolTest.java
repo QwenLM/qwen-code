@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.adapter.ManagedRuntimeAttestationConformanceTest;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -124,6 +125,26 @@ public class ManagedContextProtocolTest {
                 ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST),
                 seed(), configuration);
         assertEquals(cgroupRoot, boot.managedExtensions().get("cgroupRoot"));
+    }
+
+    @Test
+    void typedConfinedBootPreservesAndRequiresThePrivateRoot() {
+        var confined = new RuntimeProvisionRequest(new RuntimeScope("tenant-a", "workspace-a",
+                "7", "/runtime/workspaces/workspace-a", WorkspaceExecutionProfile.PRIVATE_ROOT_CAPABILITY_DIGEST,
+                "session"), "session-a", "local-process", "storage://pvc/workspace-a");
+        Map<String, Object> recipe = Map.of("version", 1,
+                "rootfs", Path.of("rootfs").toAbsolutePath().toString(),
+                "rootfsIdentity", "12:34", "bwrapIdentity", "56:78");
+        var input = new LinkedHashMap<>(recipe);
+        var boot = ManagedContextProtocol.boot(confined, seed(), null, input);
+        input.put("rootfsIdentity", "90:12");
+
+        assertEquals(recipe, boot.toWire().get("privateRoot"));
+        assertEquals(boot, ManagedContextProtocol.parseBoot(boot.toWire()));
+        var withoutRecipe = new LinkedHashMap<>(boot.toWire());
+        withoutRecipe.remove("privateRoot");
+        assertThrows(IllegalArgumentException.class, () -> ManagedContextProtocol.parseBoot(withoutRecipe));
+        assertThrows(IllegalArgumentException.class, () -> ManagedContextProtocol.boot(request(), seed(), null, recipe));
     }
 
     @Test

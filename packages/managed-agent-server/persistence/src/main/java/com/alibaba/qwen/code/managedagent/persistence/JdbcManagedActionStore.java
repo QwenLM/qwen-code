@@ -644,7 +644,7 @@ public class JdbcManagedActionStore
         }
         // A Shell answer runs a command, so the Workspace-operator arm does
         // not apply. Other Actions keep that arm.
-        boolean shell = ownerRow != null && WorkspaceToolProfiles.isPublicShell(ownerRow.toolProfile());
+        boolean shell = ownerRow != null && WorkspaceToolProfiles.hasForegroundShell(ownerRow.toolProfile());
         if (!admitted && (shell || !workspaceOperatorAdmits(tenantId, ownerRow, actorId))) {
             throw shell ? shellForbidden() : forbidden();
         }

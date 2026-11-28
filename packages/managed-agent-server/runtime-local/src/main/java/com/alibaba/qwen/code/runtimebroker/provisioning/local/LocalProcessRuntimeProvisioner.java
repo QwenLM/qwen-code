@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.spi.OperatorRuntimeRecovery;
 import org.apache.commons.codec.digest.DigestUtils;
 
@@ -37,6 +38,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -59,7 +61,7 @@ import java.util.regex.Pattern;
  * after that process attests as the same identity.
  */
 public final class LocalProcessRuntimeProvisioner
-        implements OperatorRuntimeRecovery {
+        implements OperatorRuntimeRecovery, com.alibaba.qwen.code.runtimebroker.spi.ConfinedWorkspaceHandbackVerifier {
     public static final String KIND = "local-process";
     public static final Duration READY_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration GRACE_BEFORE_FORCE = Duration.ofSeconds(5);
@@ -146,9 +148,22 @@ public final class LocalProcessRuntimeProvisioner
 
     public static LocalProcessRuntimeProvisioner durable(List<String> command,
             Path stateDirectory, HttpRuntimeTransport transport, boolean trustedRebootRecovery) {
+        return durable(command, stateDirectory, transport, trustedRebootRecovery, null);
+    }
+
+    static LocalProcessRuntimeProvisioner durable(List<String> command, Path stateDirectory,
+            HttpRuntimeTransport transport, boolean trustedRebootRecovery, Path cgroupRoot) {
+        return durable(command, stateDirectory, transport, trustedRebootRecovery, cgroupRoot, null);
+    }
+
+    static LocalProcessRuntimeProvisioner durable(List<String> command, Path stateDirectory,
+            HttpRuntimeTransport transport, boolean trustedRebootRecovery, Path cgroupRoot, Path privateRootfs) {
         LocalRuntimeStore.HostIdentity identity = LocalRuntimeStore.HostIdentity.current();
-        return new LocalProcessRuntimeProvisioner(command, stateDirectory, transport, null,
-                new LocalRuntimeStore(stateDirectory, identity), trustedRebootRecovery);
+        var store = new LocalRuntimeStore(stateDirectory, identity, cgroupRoot, privateRootfs);
+        if (privateRootfs != null) {
+            transport.withPrivateRoot(store::currentPrivateRoot);
+        }
+        return new LocalProcessRuntimeProvisioner(command, stateDirectory, transport, null, store, trustedRebootRecovery);
     }
 
     LocalProcessRuntimeProvisioner(List<String> command, Path workingDirectory,
@@ -247,6 +262,9 @@ public final class LocalProcessRuntimeProvisioner
             return submit(() -> store.locked(request, seed, knownHandle, true,
                     (resource, registration) -> registration.handle()));
         }
+        if (WorkspaceExecutionProfile.isConfined(request.getScope().getCapabilityDigest())) {
+            return CompletableFuture.failedFuture(WorkspaceExecutionProfile.confinementUnavailable());
+        }
         if (knownHandle != null) {
             if (!KIND.equals(knownHandle.getKind())
                     || knownHandle.getVersion() != 1) {
@@ -288,7 +306,15 @@ public final class LocalProcessRuntimeProvisioner
                         throw LocalRuntimeStore.blocked();
                     }
                     if (registration.state() != LocalRuntimeStore.State.RETIRED) {
-                        resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+                        if (sameBoot && RuntimeProviderKinds.isLocalProcessCgroup(registration.handle())) {
+                            var unit = LinuxRuntimeCgroup.saved(registration.handle());
+                            if (!unit.empty()) {
+                                throw LocalRuntimeStore.blocked();
+                            }
+                            recordCgroupStop(resource, registration, unit);
+                        } else {
+                            resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+                        }
                     }
                     RuntimeProvisionSeed seed = binding.getProvisionSeed();
                     RuntimeResourceHandle handle = binding.getResourceHandle();
@@ -360,6 +386,13 @@ public final class LocalProcessRuntimeProvisioner
 
     @Override
     public CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
+        // The Broker commits the handle before launch; its drain claim fences late startup.
+        boolean createIntent = binding.getResourceHandle() == null && binding.getLease() == null
+                && binding.getAttestationGeneration() == 0;
+        if (!createIntent && WorkspaceExecutionProfile.isConfined(binding.getRequest().getScope().getCapabilityDigest())
+                && !RuntimeProviderKinds.isLocalProcessCgroup(binding.getResourceHandle())) {
+            return CompletableFuture.failedFuture(LocalRuntimeStore.blocked());
+        }
         if (store == null || !binding.isDrainRequested() || !binding.getRequest().isManagedContext()
                 || !(WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
                         || HarnessOwnership.sharesRuntimeSessions(binding.getRequest()))
@@ -367,9 +400,6 @@ public final class LocalProcessRuntimeProvisioner
                 || binding.getProvisionSeed() == null) {
             return OperatorRuntimeRecovery.super.stopDrained(binding);
         }
-        // The Broker commits the handle before launch; its drain claim fences late startup.
-        boolean createIntent = binding.getResourceHandle() == null && binding.getLease() == null
-                && binding.getAttestationGeneration() == 0;
         return submit(() -> store.locked(binding.getRequest(),
                 binding.getProvisionSeed(), binding.getResourceHandle(), createIntent, (resource, registration) -> {
                 boolean originalBootStopped = trustedRebootRecovery && store.rebooted(registration);
@@ -380,6 +410,14 @@ public final class LocalProcessRuntimeProvisioner
                     throw LocalRuntimeStore.blocked();
                 }
                 boolean neverStarted = registration.pid() == 0;
+                if (RuntimeProviderKinds.isLocalProcessCgroup(registration.handle())) {
+                    if (createIntent && !neverStarted) {
+                        throw LocalRuntimeStore.blocked();
+                    }
+                    stopCgroup(resource, registration, originalBootStopped);
+                    return new RuntimeDrainReceipt(binding.getBindingId(), binding.getGeneration(),
+                            binding.getProvisionSeed().getProvisionRequestId(), registration.handle(), Instant.now());
+                }
                 var worker = originalBootStopped ? null : registration.process();
                 if (!originalBootStopped && !neverStarted && worker == null && !registration.processAbsent()) {
                     throw LocalRuntimeStore.blocked();
@@ -419,6 +457,40 @@ public final class LocalProcessRuntimeProvisioner
                 return new RuntimeDrainReceipt(binding.getBindingId(), binding.getGeneration(),
                         binding.getProvisionSeed().getProvisionRequestId(), registration.handle(), Instant.now(), mode, proofScope);
             }));
+    }
+
+    private static void stopCgroup(LocalRuntimeStore.Resource resource, LocalRuntimeStore.Registration registration,
+            boolean rebooted) throws IOException {
+        if (registration.state() == LocalRuntimeStore.State.RETIRED) {
+            if (!rebooted) {
+                LinuxRuntimeCgroup.saved(registration.handle()).removeEmpty();
+            }
+            return;
+        }
+        if (rebooted) {
+            resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+            return;
+        }
+        var unit = LinuxRuntimeCgroup.saved(registration.handle());
+        try {
+            unit.killAndWait(GRACE_BEFORE_FORCE);
+            if (registration.pid() != 0) {
+                waitForStop(registration, 5);
+                if (!registration.processAbsent()) {
+                    throw new IOException("The original Runtime PID still exists.");
+                }
+            }
+        } catch (IOException failure) {
+            throw new RuntimeBrokerException(503, "workspace_close_stop_unconfirmed",
+                    "Original Runtime cgroup stop could not be verified.", true, failure);
+        }
+        recordCgroupStop(resource, registration, unit);
+    }
+
+    private static void recordCgroupStop(LocalRuntimeStore.Resource resource,
+            LocalRuntimeStore.Registration registration, LinuxRuntimeCgroup unit) throws IOException {
+        resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+        unit.removeEmpty();
     }
 
     private static void waitForStop(LocalRuntimeStore.Registration registration, int seconds) {
@@ -657,7 +729,14 @@ public final class LocalProcessRuntimeProvisioner
         boot.put("workspaceGeneration", scope.getWorkspaceGeneration());
         boot.put("workspaceId", scope.getWorkspaceId());
         Map<String, Object> document = request.isManagedContext()
-                ? ManagedContextProtocol.boot(request, seed, ManagedExtensionExecutionProfile.admits(scope.getCapabilityDigest()) ? ManagedExtensionExecutionProfile.configuration(scope.getCapabilityDigest(), managedExtensionCacheDirectory, managedExtensionCgroupRoot) : null).toWire() : boot;
+                ? ManagedContextProtocol.boot(request, seed,
+                        ManagedExtensionExecutionProfile.admits(scope.getCapabilityDigest())
+                                ? ManagedExtensionExecutionProfile.configuration(scope.getCapabilityDigest(),
+                                        managedExtensionCacheDirectory, managedExtensionCgroupRoot)
+                                : null,
+                        WorkspaceExecutionProfile.isConfined(scope.getCapabilityDigest())
+                                ? store.currentPrivateRoot() : null).toWire()
+                : boot;
         byte[] encoded = JsonCodec.encode(document);
         if (encoded.length > READY_RECORD_LIMIT) {
             throw new IllegalArgumentException("Managed Runtime boot exceeds 32 KiB.");
@@ -751,12 +830,19 @@ public final class LocalProcessRuntimeProvisioner
             if (!store.sameBoot(original)) {
                 throw LocalRuntimeStore.blocked();
             }
+            requireLaunchRecipe(request, document, original);
             LocalRuntimeStore.Registration registration = original;
             if (registration.state() == LocalRuntimeStore.State.INTENT) {
                 resource.save(registration.withState(LocalRuntimeStore.State.LAUNCHING));
                 Path output = resource.createReady();
-                Process process = workerProcess().redirectOutput(output.toFile()).start();
+                var builder = workerProcess().redirectOutput(output.toFile());
+                var unit = RuntimeProviderKinds.isLocalProcessCgroup(original.handle())
+                        ? LinuxRuntimeCgroup.saved(original.handle()) : null;
+                Process process = (unit == null ? builder : unit.prepare(builder)).start();
                 try {
+                    if (unit != null) {
+                        unit.awaitMember(process, GRACE_BEFORE_FORCE);
+                    }
                     String started = LocalRuntimeStore.startIdentity(process.toHandle());
                     if (started == null) {
                         throw LocalRuntimeStore.blocked();
@@ -770,6 +856,9 @@ public final class LocalProcessRuntimeProvisioner
                     throw error;
                 }
                 try (var input = process.getOutputStream()) {
+                    if (unit != null) {
+                        input.write("start\n".getBytes(StandardCharsets.US_ASCII));
+                    }
                     input.write(JsonCodec.encode(document));
                 }
             }
@@ -799,13 +888,20 @@ public final class LocalProcessRuntimeProvisioner
     private RuntimeLease adoptDurable(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             Map<String, Object> document, LocalRuntimeStore.Resource resource,
             LocalRuntimeStore.Registration registration) throws IOException {
+        requireLaunchRecipe(request, document, registration);
+        boolean contained = RuntimeProviderKinds.isLocalProcessCgroup(registration.handle());
         if (registration.processAbsent()) {
-            resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+            if (!contained) {
+                resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+            }
             throw LocalRuntimeStore.blocked();
         }
         ProcessHandle process = registration.process();
         if (process == null) {
             return null;
+        }
+        if (contained && !LinuxRuntimeCgroup.saved(registration.handle()).contains(process.pid())) {
+            throw LocalRuntimeStore.blocked();
         }
         RuntimeLease lease;
         if (registration.endpoint() == null) {
@@ -823,8 +919,9 @@ public final class LocalProcessRuntimeProvisioner
                 if (worker != null) {
                     worker.destroyForcibly();
                 }
-                resource.save(registration.withState(
-                        LocalRuntimeStore.State.RETIRED));
+                if (!contained) {
+                    resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+                }
                 throw rejection;
             }
         } else {
@@ -841,6 +938,33 @@ public final class LocalProcessRuntimeProvisioner
         }
         owned.put(ownershipKey(lease), new OwnedProcess(null, registration, seed));
         return lease;
+    }
+
+    private static void requireLaunchRecipe(RuntimeProvisionRequest request, Map<String, Object> boot,
+            LocalRuntimeStore.Registration registration) {
+        if (WorkspaceExecutionProfile.isConfined(request.getScope().getCapabilityDigest())
+                && !Objects.equals(boot.get("privateRoot"), registration.handle().getValue().get("privateRoot"))) {
+            throw WorkspaceExecutionProfile.confinementUnavailable();
+        }
+    }
+
+    @Override
+    public CompletionStage<Void> verifyConfinedHandback(RuntimeBindingRecord binding) {
+        if (store == null || binding.getProvisionSeed() == null
+                || !RuntimeProviderKinds.isLocalProcessCgroup(binding.getResourceHandle())) {
+            return CompletableFuture.failedFuture(LocalRuntimeStore.blocked());
+        }
+        return submit(() -> store.locked(binding.getRequest(), binding.getProvisionSeed(),
+                binding.getResourceHandle(), false, (resource, registration) -> {
+                    if (!store.sameBoot(registration) || registration.state() != LocalRuntimeStore.State.READY
+                            || registration.process() == null
+                            || !LinuxRuntimeCgroup.saved(registration.handle()).onlyMember(registration.pid())
+                            || registration.process() == null) {
+                        throw new RuntimeBrokerException(409, "workspace_writer_unproven",
+                                "The original confined Runtime did not prove Workspace handback.", false);
+                    }
+                    return null;
+                }));
     }
 
     private RuntimeObservation observeDurable(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
@@ -860,15 +984,27 @@ public final class LocalProcessRuntimeProvisioner
                 if (!store.sameBoot(registration)) {
                     return RuntimeObservation.unknown(handle);
                 }
-                if (registration.state() == LocalRuntimeStore.State.RETIRED || registration.processAbsent()) {
-                    if (registration.state() != LocalRuntimeStore.State.RETIRED) {
-                        resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+                boolean retired = registration.state() == LocalRuntimeStore.State.RETIRED;
+                if (retired || registration.processAbsent()) {
+                    boolean contained = RuntimeProviderKinds.isLocalProcessCgroup(handle);
+                    if (!retired) {
+                        if (contained) {
+                            var unit = LinuxRuntimeCgroup.saved(handle);
+                            if (observedEmpty(unit)) {
+                                recordCgroupStop(resource, registration, unit);
+                                retired = true;
+                            }
+                        } else {
+                            resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+                        }
                     }
                     if (lastLease == null) {
                         return RuntimeObservation.conflict(handle);
                     }
                     return RuntimeObservation.notFound(localEvidence(seed, handle,
-                            RuntimeRecoveryEvidence.Fact.JOURNAL_LOST, "registered-process-exit"), null);
+                            RuntimeRecoveryEvidence.Fact.JOURNAL_LOST, "registered-process-exit"),
+                            contained && retired ? localEvidence(seed, handle,
+                                    RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED, "original-cgroup-stopped") : null);
                 }
                 if (registration.state() == LocalRuntimeStore.State.INTENT
                         || registration.state() == LocalRuntimeStore.State.LAUNCHING) {
@@ -890,6 +1026,14 @@ public final class LocalProcessRuntimeProvisioner
             });
         } catch (RuntimeBrokerException error) {
             return error.isRetryable() ? RuntimeObservation.unknown(handle) : RuntimeObservation.conflict(handle);
+        }
+    }
+
+    private static boolean observedEmpty(LinuxRuntimeCgroup unit) {
+        try {
+            return unit.empty();
+        } catch (IOException unverified) {
+            return false;
         }
     }
 

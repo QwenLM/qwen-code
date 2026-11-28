@@ -21,6 +21,7 @@ import { openManagedSession } from './managed-session-assembly.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import { LocalToolResultSegmentStore } from './local-managed-tool-result-store.js';
 import { LocalShellResultSession } from './local-shell-result-session.js';
+import { resetManagedRuntimeDispatchGatesForTest } from './managed-runtime-dispatch-gate.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
 import type {
   ToolResultExpectedIdentity,
@@ -37,6 +38,8 @@ const argsDigest = createHash('sha256')
   .digest('hex');
 const roots = new Set<string>();
 afterEach(async () => {
+  // Vitest retries reuse the Session ID and execution call ID in this worker.
+  resetManagedRuntimeDispatchGatesForTest();
   for (const root of roots) await fs.rm(root, { recursive: true, force: true });
   roots.clear();
 });

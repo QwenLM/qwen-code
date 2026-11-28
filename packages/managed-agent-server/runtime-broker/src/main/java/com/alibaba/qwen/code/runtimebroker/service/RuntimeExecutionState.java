@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
@@ -25,6 +26,7 @@ final class RuntimeExecutionState {
     private final RuntimeBindingRepository bindingRepository;
     private final RuntimeSessionRepository sessionRepository;
     private final ToolExecutionRepository executionRepository;
+    private final RuntimeTransport transport;
     private final String brokerOwnerId;
     private final Duration dispatchLeaseDuration;
     private final Clock clock;
@@ -32,15 +34,37 @@ final class RuntimeExecutionState {
     RuntimeExecutionState(RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository,
+            RuntimeTransport transport,
             String brokerOwnerId,
             Duration dispatchLeaseDuration,
             Clock clock) {
         this.bindingRepository = bindingRepository;
         this.sessionRepository = sessionRepository;
         this.executionRepository = executionRepository;
+        this.transport = transport;
         this.brokerOwnerId = brokerOwnerId;
         this.dispatchLeaseDuration = dispatchLeaseDuration;
         this.clock = clock;
+    }
+
+    ToolExecutionRecord admitExecution(SessionContext context, ToolExecutionRecord candidate, boolean dispatch) {
+        ToolExecutionRecord record = executionRepository.findByIdempotencyKey(candidate.getIdempotencyKey());
+        if (record == null) {
+            transport.requireExecutionAdmission(context.lease(), context.session());
+            try {
+                record = bindingRepository.admitExecution(sessionRepository, executionRepository, candidate);
+            } catch (IllegalArgumentException exception) {
+                throw conflict("runtime_execution_conflict", "execution identity is already in use", exception);
+            }
+        } else if (record.sameRequest(candidate) && dispatch
+                && (record.getState() == ToolExecutionRecord.State.PREPARED
+                        || record.getState() == ToolExecutionRecord.State.DISPATCHING)) {
+            transport.requireExecutionAdmission(context.lease(), context.session());
+        }
+        if (!record.sameRequest(candidate)) {
+            throw conflict("runtime_idempotency_conflict", "idempotency key belongs to another request");
+        }
+        return record;
     }
 
     void settleExecution(ToolExecutionRecord original, Map<String, Object> result) {

@@ -172,6 +172,9 @@ public interface ManagedAgentSettings {
         public String getToken();
         public String getProvisioner();
         public Map<String, String> getProviderOptions();
+        public default String privateRootfs() {
+            return getProviderOptions().get("private-rootfs");
+        }
         public String getWorkspaceId();
         public String getWorkspaceGeneration();
         public String getWorkspaceCwd();

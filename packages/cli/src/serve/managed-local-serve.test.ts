@@ -9,6 +9,7 @@ import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
+import { createHostedHarnessContract } from './hosted-harness-contract.js';
 import {
   managedLocalJavaEnvironment,
   runManagedLocalServe,
@@ -203,12 +204,9 @@ describe('Managed local startup supervision', () => {
               JSON.stringify({
                 hostedHarness: {
                   capabilityDigest: state.capabilityDigest,
-                  lifecycleV2Profiles: (
-                    lifecycle ??
-                    'hosted-workspace-files/1,hosted-workspace-shell/1'
-                  )
-                    .split(',')
-                    .filter(Boolean),
+                  lifecycleV2Profiles: createHostedHarnessContract(
+                    state.capabilityDigest,
+                  ).lifecycleV2Profiles,
                 },
               }),
             ),

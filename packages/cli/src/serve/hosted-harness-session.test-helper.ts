@@ -628,6 +628,7 @@ async function app(
     coldOpenLimit?: number;
   },
   caps?: SseAdmissionCaps,
+  lifecycleV2Profiles = ['hosted-workspace-shell/1', 'hosted-workspace-mcp/1'],
 ) {
   const result = express();
   result.use(express.json());
@@ -635,7 +636,7 @@ async function app(
     `sha256:${'a'.repeat(64)}`,
     BOOT_ID,
 
-    ['hosted-workspace-shell/1', 'hosted-workspace-mcp/1'],
+    lifecycleV2Profiles,
     instanceId,
   );
   const contract = extensionPackages

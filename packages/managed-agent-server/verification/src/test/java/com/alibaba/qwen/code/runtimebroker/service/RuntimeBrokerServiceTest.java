@@ -37,6 +37,8 @@ import com.alibaba.qwen.code.runtimebroker.provisioning.staticruntime.StaticRunt
 import org.apache.commons.codec.digest.DigestUtils;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import javax.sql.DataSource;
 
@@ -950,6 +952,49 @@ class RuntimeBrokerServiceTest {
             assertEquals(ToolExecutionRecord.State.SETTLED, started.getState());
             assertEquals(1, fixture.transport.executeCalls.get());
             assertEquals(reference, fixture.transport.lastReference);
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @CsvSource(delimiter = '|', textBlock = """
+            other tool | read_file | {"file_path":"notes.txt"} | false
+            background | run_shell_command | {"command":"pwd","is_background":true} | false
+            extra field | run_shell_command | {"command":"pwd","cwd":"."} | false
+            missing command | run_shell_command | {} | false
+            blank command | run_shell_command | {"command":"  "} | false
+            NUL command | run_shell_command | {"command":"pwd\\u0000"} | false
+            invalid description | run_shell_command | {"command":"pwd","description":1} | false
+            timeout below minimum | run_shell_command | {"command":"pwd","timeout":0} | false
+            fractional timeout | run_shell_command | {"command":"pwd","timeout":1.5} | false
+            timeout above maximum | run_shell_command | {"command":"pwd","timeout":600001} | false
+            minimum timeout | run_shell_command | {"command":"pwd","timeout":1} | true
+            maximum timeout | run_shell_command | {"command":"pwd","timeout":600000,"is_background":false,"description":"Print cwd"} | true
+            """)
+    void confinedShellDispatchAdmitsOnlyTheSupportedPayload(
+            String scenario, String toolName, String input, boolean allowed) {
+        RuntimeScope scope = new RuntimeScope("tenant", "workspace", "generation", "/workspace",
+                WorkspaceExecutionProfile.PRIVATE_ROOT_CAPABILITY_DIGEST, "session");
+        try (Fixture fixture = new Fixture(scope)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            String payload = "{\"toolName\":\"" + toolName + "\",\"input\":" + input + "}";
+            String digest = "sha256:" + DigestUtils.sha256Hex(payload.getBytes(StandardCharsets.UTF_8));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference("runtime", digest)));
+            var started = fixture.service.startExecution("harness", "runtime",
+                    prepared.getExecutionCallId(), payload);
+            if (allowed) {
+                join(started);
+                assertEquals("success", awaitExecution(fixture.executionRepository,
+                        prepared.getExecutionCallId(), ToolExecutionRecord.State.SETTLED).getExecutionStatus(), scenario);
+                assertEquals(1, fixture.transport.executeCalls.get(), scenario);
+            } else {
+                assertEquals(WorkspaceExecutionProfile.CONFINEMENT_DENIED, failure(started).getCode(), scenario);
+                var settled = fixture.executionRepository.findByExecutionCallId(prepared.getExecutionCallId());
+                assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState(), scenario);
+                assertEquals("not_started", settled.getExecutionStatus(), scenario);
+                assertEquals(0, settled.getDispatchGeneration(), scenario);
+                assertEquals(0, fixture.transport.executeCalls.get(), scenario);
+            }
         }
     }
 

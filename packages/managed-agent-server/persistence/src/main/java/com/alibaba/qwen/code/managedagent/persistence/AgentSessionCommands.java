@@ -99,7 +99,7 @@ final class AgentSessionCommands {
             return replayCommand(tenantId, operation, idempotencyKey,
                     requestDigest);
         }
-        if (WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !workspaceShellEnabled) {
+        if (WorkspaceToolProfiles.hasForegroundShell(session.toolProfile()) && !workspaceShellEnabled) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         if (session.workspace() != null) {

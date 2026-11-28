@@ -40,6 +40,7 @@ import { isHostedDurableMcpOwner } from './hosted-mcp-session.js';
 import { MANAGED_MCP_TOOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import { readHostedTurnApprovalSelection } from './hosted-approval-selection.js';
 import { isHostedWorkspacePublicShellProfile } from './hosted-workspace-profiles.js';
+import { CONFINED_SHELL_PROFILE } from './managed-private-root.js';
 
 /**
  * #17260: the saved continuation was captured under a public-child
@@ -312,8 +313,13 @@ export async function readHostedApprovalContinuation(
           toolProfile?: unknown;
           publicChildAgentsVersion?: unknown;
           captureBytes?: unknown;
+          foregroundOnly?: unknown;
         })
       : undefined;
+  const confinedShell =
+    plan.runtime !== null &&
+    definition?.toolProfile === CONFINED_SHELL_PROFILE &&
+    definition.foregroundOnly === true;
   if (publicChildren) {
     const model = plan.publicChildModel!;
     parsePublicChildModelRoute(model.route);
@@ -332,6 +338,7 @@ export async function readHostedApprovalContinuation(
   }
   if (
     shellPlan &&
+    !confinedShell &&
     !isHostedWorkspacePublicShellProfile(definition!.toolProfile)
   )
     throw new Error(conflict);
@@ -360,7 +367,7 @@ export async function readHostedApprovalContinuation(
           (hooksPlan ? 1 : 0) ||
       (hooksPlan && !validHookResults(item.hookResults)) ||
       Object.hasOwn(item, 'publicationId') !==
-        (item.call?.name === 'run_shell_command') ||
+        (!confinedShell && item.call?.name === 'run_shell_command') ||
       (Object.hasOwn(item, 'publicationId') &&
         (publicationLane
           ? typeof item.publicationId !== 'string' ||
@@ -369,6 +376,7 @@ export async function readHostedApprovalContinuation(
             )
           : item.publicationId !== null)) ||
       !item.call ||
+      (confinedShell && item.call.name !== 'run_shell_command') ||
       !(
         NATIVE_TOOLS.has(item.call.name) ||
         isHostedMemoryTool(item.call.name) ||

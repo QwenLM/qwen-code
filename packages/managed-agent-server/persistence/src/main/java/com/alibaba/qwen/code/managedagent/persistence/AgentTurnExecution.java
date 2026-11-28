@@ -516,8 +516,8 @@ final class AgentTurnExecution {
             for (EventRecord event : deltas) {
                 if (event.sourceKey() == null
                         || (!bounded && !event.sourceKey().startsWith(sourcePrefix))
-                        || sourceIdOf(event.sourceKey()) < fromSourceId
-                        || (bounded && sourceIdOf(event.sourceKey()) > throughSourceId)) {
+                        || AgentEventJournal.harnessSourceId(event.sourceKey()) < fromSourceId
+                        || (bounded && AgentEventJournal.harnessSourceId(event.sourceKey()) > throughSourceId)) {
                     continue;
                 }
                 Map<String, Object> data = new LinkedHashMap<>(event.data());
@@ -550,18 +550,6 @@ final class AgentTurnExecution {
                 eventEpoch, retractionSourceId, now);
         if (updated != 1) {
             throw new IllegalStateException("Turn dispatch lease was lost");
-        }
-    }
-
-    // A Harness source key ends in the journal sequence of its journal event;
-    // the boot and epoch prefixes are colon-free by construction but the
-    // suffix is what the range compares.
-    static long sourceIdOf(String sourceKey) {
-        try {
-            return Long.parseLong(
-                    sourceKey.substring(sourceKey.lastIndexOf(':') + 1));
-        } catch (NumberFormatException error) {
-            return -1;
         }
     }
 

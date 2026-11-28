@@ -438,4 +438,14 @@ final class AgentEventJournal {
                         sourceKey);
         return count != null && count > 0;
     }
+
+    // The suffix of a Harness source key is the journal event sequence.
+    static long harnessSourceId(String sourceKey) {
+        try {
+            return Long.parseLong(
+                    sourceKey.substring(sourceKey.lastIndexOf(':') + 1));
+        } catch (NumberFormatException error) {
+            return -1;
+        }
+    }
 }

@@ -49,6 +49,7 @@ import {
   registerManagedContextRoutes,
   selectShellCapturePublisher,
 } from './managed-context-worker.js';
+import * as privateRoot from './managed-private-root.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { getShellConfiguration } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
@@ -320,6 +321,146 @@ function shell(sessionId: string, callId: string, command: string) {
     input: { command },
   };
 }
+
+describe('confined Shell Worker', () => {
+  const confinedBoot = (): ManagedContextBoot => ({
+    ...BOOT,
+    mountRoot: fs.realpathSync.native(workspace()),
+    isolationClass: 'session',
+    capabilityDigest: privateRoot.PRIVATE_ROOT_CAPABILITY_DIGEST,
+    privateRoot: {
+      version: 1,
+      rootfs: '/private-root-fixture',
+      rootfsIdentity: '1:1',
+      bwrapIdentity: '1:2',
+    },
+  });
+
+  const attest = (origin: string, boot: ManagedContextBoot) =>
+    post(origin, ATTEST, {
+      ...(CANONICAL_ATTESTATION as Record<string, unknown>),
+      capabilityDigest: boot.capabilityDigest,
+      isolationClass: boot.isolationClass,
+      mountRoot: boot.mountRoot,
+      privateRoot: boot.privateRoot,
+    });
+
+  it.each(['not_started', 'unconfirmed'] as const)(
+    'refuses attestation and keeps tool routes closed when startup is %s',
+    async (outcome) => {
+      const launch = vi.spyOn(privateRoot, 'runPrivateRootShell');
+      launch.mockResolvedValue(
+        outcome === 'not_started'
+          ? { executionStatus: 'not_started', responseParts: [] }
+          : undefined,
+      );
+      onTestFinished(() => launch.mockRestore());
+      const boot = confinedBoot();
+      const origin = await startWorker(boot);
+      const refused = await attest(origin, boot);
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toMatchObject({
+        code: privateRoot.CONFINEMENT_UNAVAILABLE,
+      });
+      const installation = workspaceInstallation('confined', '.');
+      expect((await post(origin, CONTEXT, installation)).status).toBe(404);
+      expect(
+        (await post(origin, ACTIVATION, workspaceActivation(installation)))
+          .status,
+      ).toBe(404);
+      expect(
+        (await post(origin, EXECUTE, shell('confined', 'call', 'pwd'))).status,
+      ).toBe(404);
+      expect(launch).toHaveBeenCalledExactlyOnceWith(
+        boot.privateRoot,
+        boot.mountRoot,
+        ':',
+        expect.any(AbortSignal),
+      );
+    },
+  );
+
+  it('checks the confined payload at the Worker HTTP boundary before launching', async () => {
+    const launch = vi
+      .spyOn(privateRoot, 'runPrivateRootShell')
+      .mockResolvedValue({
+        executionStatus: 'success',
+        responseParts: [],
+      });
+    onTestFinished(() => launch.mockRestore());
+    const boot = confinedBoot();
+    const origin = await startWorker(boot);
+    const response = await attest(origin, boot);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      capabilityDigest: boot.capabilityDigest,
+      privateRoot: boot.privateRoot,
+    });
+    const install = workspaceInstallation('confined', '.');
+    expect((await post(origin, CONTEXT, install)).status).toBe(200);
+    expect(
+      (await post(origin, ACTIVATION, workspaceActivation(install))).status,
+    ).toBe(200);
+    expect(launch).toHaveBeenCalledTimes(1);
+    launch.mockClear();
+
+    const otherTool = await post(origin, EXECUTE, {
+      ...shell('confined', 'other-tool', ''),
+      toolName: 'read_file',
+      input: { file_path: 'notes.txt' },
+    });
+    expect(otherTool.status).toBe(409);
+    expect(await otherTool.json()).toMatchObject({
+      code: privateRoot.CONFINEMENT_DENIED,
+    });
+
+    const rejected = [
+      { command: 'pwd', is_background: true },
+      { command: 'pwd', is_background: 'false' },
+      { command: 'pwd', cwd: '.' },
+      {},
+      { command: '  ' },
+      { command: 'pwd\0' },
+      { command: 'pwd', description: 1 },
+      { command: 'pwd', timeout: 0 },
+      { command: 'pwd', timeout: 1.5 },
+      { command: 'pwd', timeout: 600_001 },
+    ];
+    for (const [index, input] of rejected.entries()) {
+      const answer = await post(origin, EXECUTE, {
+        ...shell('confined', 'refused-' + index, ''),
+        input,
+      });
+      expect(answer.status).toBe(200);
+      expect(await answer.json()).toMatchObject({
+        state: 'settled',
+        result: {
+          executionStatus: 'not_started',
+          error: { type: privateRoot.CONFINEMENT_DENIED },
+        },
+      });
+    }
+    expect(launch).not.toHaveBeenCalled();
+
+    for (const timeout of [1, 600_000]) {
+      const answer = await post(origin, EXECUTE, {
+        ...shell('confined', 'allowed-' + timeout, 'pwd'),
+        input: {
+          command: 'pwd',
+          timeout,
+          is_background: false,
+          description: 'Print cwd',
+        },
+      });
+      expect(answer.status).toBe(200);
+      expect(await answer.json()).toMatchObject({
+        state: 'settled',
+        result: { executionStatus: 'success' },
+      });
+    }
+    expect(launch).toHaveBeenCalledTimes(2);
+  });
+});
 
 /**
  * A shell command that writes the session and project directory its shell

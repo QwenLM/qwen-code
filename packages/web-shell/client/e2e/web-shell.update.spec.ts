@@ -1,9 +1,30 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import type { DaemonUpdateStatus } from '@qwen-code/sdk/daemon';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
 } from './utils/mockDaemon';
+
+async function expectUpdateAboveSettings(page: Page) {
+  // Read both rectangles in one frame while the menu animates.
+  const { buttonWidth, updateBottom, settingsTop } = await page
+    .locator('[data-web-shell-sidebar-more]')
+    .evaluate((menu) => {
+      const update = menu
+        .querySelector('[data-web-shell-update]')!
+        .getBoundingClientRect();
+      const settings = menu
+        .querySelector('button[aria-label="设置"]')!
+        .getBoundingClientRect();
+      return {
+        buttonWidth: update.width,
+        updateBottom: update.bottom,
+        settingsTop: settings.top,
+      };
+    });
+  expect(buttonWidth).toBeGreaterThan(100);
+  expect(updateBottom).toBeLessThan(settingsTop);
+}
 
 test('downloads silently, shows an update action in More and restarts in place @smoke', async ({
   page,
@@ -50,12 +71,7 @@ test('downloads silently, shows an update action in More and restarts in place @
   await page.getByRole('button', { name: '更多', exact: true }).click();
   await expect(entry).toHaveAccessibleName('更新');
   await expect(entry).toBeVisible();
-  const buttonBox = (await entry.boundingBox())!;
-  const settingsBox = (await page
-    .getByRole('button', { name: '设置', exact: true })
-    .boundingBox())!;
-  expect(buttonBox.width).toBeGreaterThan(100);
-  expect(buttonBox.y + buttonBox.height).toBeLessThan(settingsBox.y);
+  await expectUpdateAboveSettings(page);
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: '收起', exact: true }).click();
   await page.getByRole('button', { name: '更多', exact: true }).click();
@@ -66,7 +82,7 @@ test('downloads silently, shows an update action in More and restarts in place @
   await entry.click();
   await expect(entry).toHaveAccessibleName('重启中…');
   await expect(entry).toBeDisabled();
-  expect(restarts).toBe(1);
+  await expect.poll(() => restarts).toBe(1);
   await page.keyboard.press('Escape');
   await expect(entry).toHaveCount(0);
   status = { state: 'up-to-date', currentVersion: '0.24.6', canInstall: false };
@@ -129,12 +145,7 @@ test('keeps the update action above Settings across sidebar widths @smoke', asyn
     await expect(sidebar).toHaveCSS('width', `${expected}px`);
     await page.getByRole('button', { name: '更多', exact: true }).click();
     await expect(entry).toBeVisible();
-    const buttonBox = (await entry.boundingBox())!;
-    const settingsBox = (await page
-      .getByRole('button', { name: '设置', exact: true })
-      .boundingBox())!;
-    expect(buttonBox.width).toBeGreaterThan(100);
-    expect(buttonBox.y + buttonBox.height).toBeLessThan(settingsBox.y);
+    await expectUpdateAboveSettings(page);
   }
   expect(updatePosts).toBe(0);
   await page.screenshot({ path: testInfo.outputPath('update-sidebar.png') });

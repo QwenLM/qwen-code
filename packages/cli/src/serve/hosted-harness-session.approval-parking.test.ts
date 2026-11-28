@@ -75,6 +75,9 @@ describe('idle suspension', () => {
         sessionScope: 'thread',
         managedSessionStore: store(),
         toolProfile,
+        ...(toolProfile === 'hosted-workspace-confined-shell/1'
+          ? { foregroundOnly: true }
+          : {}),
         approvalMode: 'default',
         approvalTimeoutMs: 60_000,
         ...definition,
@@ -1048,22 +1051,33 @@ describe('idle suspension', () => {
     }
   });
 
-  it('parks a recoverable approval, releases placement, and resumes through cold recovery', async () => {
+  const exerciseColdApprovalRecovery = async (confined: boolean) => {
     state.wakeDispatch = true;
     state.actionParking = true;
     state.suspensionPlacementRelease = true;
     state.wakeStamps.length = 0;
-    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    state.approvalSelections.set(SESSION_ID, {
+      mode: 'default',
+      revision: 0,
+    });
     const park = vi.spyOn(HostedApprovalWaiters.prototype, 'park');
-    mockApprovalTurn();
+    mockApprovalTurn(PROMPT_ID, confined);
     try {
-      const server = await app(true, 'pod-a', true, { idleSuspendMs: 150 });
+      const lifecycle = [
+        'hosted-workspace-shell/1',
+        'hosted-workspace-confined-shell/1',
+      ];
+      const createHarness = () =>
+        app(true, 'pod-a', true, { idleSuspendMs: 150 }, undefined, lifecycle);
+      const server = await createHarness();
       // The Turn deadline lands before the 60s approval expiry.
       const clientId = await promptApproval(
         server,
         undefined,
         30_000,
-        'hosted-workspace-files/1',
+        confined
+          ? 'hosted-workspace-confined-shell/1'
+          : 'hosted-workspace-files/1',
         {
           managedSessionStore: { ...store(), writerToken: 'a'.repeat(32) },
           harnessPlacement: {
@@ -1112,7 +1126,7 @@ describe('idle suspension', () => {
         parkedTurn: {
           promptId: PROMPT_ID,
           wakeAt: deadline,
-          approvalRevision: 0,
+          ...(confined ? {} : { approvalRevision: 0 }),
         },
       });
       const requestId = journal.events.findLast(
@@ -1120,8 +1134,9 @@ describe('idle suspension', () => {
           event.kind === 'action.changed' &&
           event.payload['state'] === 'requested',
       )!.payload['requestId'] as string;
+      const recovered = confined ? await createHarness() : server;
       const loaded = await headers(
-        supertest(server).post(`/session/${SESSION_ID}/load`),
+        supertest(recovered).post(`/session/${SESSION_ID}/load`),
       )
         .send({
           managedSessionStore: { ...store(), writerToken: 'a'.repeat(32) },
@@ -1134,7 +1149,7 @@ describe('idle suspension', () => {
         })
         .expect(200);
       await headers(
-        supertest(server).post(
+        supertest(recovered).post(
           `/session/${SESSION_ID}/actions/${requestId}/resolve`,
         ),
       )
@@ -1148,7 +1163,7 @@ describe('idle suspension', () => {
       await vi.waitFor(
         async () => {
           expect(
-            (await statusOf(server, loaded.body.clientId as string)).body,
+            (await statusOf(recovered, loaded.body.clientId as string)).body,
           ).toMatchObject({ hasActivePrompt: false, recoveryBlocked: false });
         },
         { timeout: 5000 },
@@ -1170,12 +1185,17 @@ describe('idle suspension', () => {
       expect(requested).toHaveLength(1);
       expect(requested[0].payload['requestId']).toBe(requestId);
       expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
+      if (confined) {
+        expect(
+          HostedWorkspaceBroker.prototype.workspaceContext,
+        ).not.toHaveBeenCalled();
+      }
       // The reloaded resident suspends on its own; let it go before the next
       // test reads the shared wake stamps.
       await vi.waitFor(
         async () => {
           expect(
-            (await statusOf(server, loaded.body.clientId as string)).status,
+            (await statusOf(recovered, loaded.body.clientId as string)).status,
           ).toBe(404);
         },
         { timeout: 5000 },
@@ -1186,7 +1206,12 @@ describe('idle suspension', () => {
       state.suspensionPlacementRelease = false;
       state.approvalSelections.clear();
     }
-  });
+  };
+
+  it.each([false, true])(
+    'parks a recoverable approval, releases placement, and resumes through cold recovery (confined: %s)',
+    exerciseColdApprovalRecovery,
+  );
 
   async function allowParkedApproval(
     server: Server,

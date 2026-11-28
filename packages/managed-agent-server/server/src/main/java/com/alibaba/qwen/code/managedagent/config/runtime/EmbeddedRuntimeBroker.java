@@ -239,6 +239,10 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
         RuntimeTransport transport = workspaces == null ? http
                 : new WorkspaceRuntimeTransport(http, workspaces, workspaceExecutionStore,
                         bindingRepository, sessionRepository, workspaceVerifier::verifyAcquisition);
+        if (transport instanceof WorkspaceRuntimeTransport workspaceTransport
+                && primaryProvisioner instanceof com.alibaba.qwen.code.runtimebroker.spi.ConfinedWorkspaceHandbackVerifier local) {
+            workspaceTransport.configureConfinedHandback(local::verifyConfinedHandback);
+        }
         RuntimeProvisioner provisioner = workspaces == null ? baseProvisioner
                 : new WorkspaceRuntimeProvisioner(
                         baseProvisioner, workspaces, workspaceExecutionStore, bindingRepository);

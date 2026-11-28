@@ -185,12 +185,15 @@ final class RuntimeDrainCoordinator {
             work = work.thenCompose(ignored -> {
                 bindingRepository.requireHarnessCleanup(binding.getRequest().getScope(), harnessSessionId, authority);
                 if (binding.getState() == RuntimeBindingRecord.State.RELEASED) {
-                    if (binding.getDrainReceipt() == null || !binding.getDrainReceipt().matches(binding)) {
+                    boolean recoveredCgroup = RuntimeProviderKinds.isLocalProcessCgroup(binding.getResourceHandle())
+                            && binding.hasStoppedWriters();
+                    if (!recoveredCgroup && (binding.getDrainReceipt() == null || !binding.getDrainReceipt().matches(binding))) {
                         return failed(conflict("workspace_close_identity_unverified", "Original stop receipt is missing"));
                     }
                     return CompletableFuture.completedFuture(null);
                 }
-                if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())
+                if ((WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())
+                        || RuntimeProviderKinds.isLocalProcessCgroup(binding.getResourceHandle()))
                         && (binding.getDrainReceipt() != null || !stoppedOnly)) {
                     return drainBinding(binding, null, authority);
                 }
@@ -305,6 +308,11 @@ final class RuntimeDrainCoordinator {
             return failed(unavailable("runtime_close_claim_pending", "Original binding is still claimed"));
         }
         boolean lost = claimed.getState() == RuntimeBindingRecord.State.LOST;
+        boolean contained = RuntimeProviderKinds.isLocalProcessCgroup(claimed.getResourceHandle());
+        if (lost && contained) {
+            bindingRegistry.releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
+            return failed(conflict("workspace_close_execution_unsettled", "Lost Runtime resources require recovery"));
+        }
         if (absence != null && !absence.matches(claimed.getProvisionSeed(), claimed.getResourceHandle(), claimed.getLease())) {
             bindingRegistry.releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
             return failed(conflict("workspace_close_identity_unverified", "Original worker stop identity changed"));
@@ -332,7 +340,7 @@ final class RuntimeDrainCoordinator {
             // A LOST binding has no stop proof yet: stop the worker and commit
             // its receipt before releasing any row, so the release below runs
             // on proven retirement instead of a runtime the broker lost track of.
-            if (draining.getDrainReceipt() != null || absence != null || authority != null || lost) {
+            if (draining.getDrainReceipt() != null || absence != null || authority != null || lost || contained) {
                 if (authority != null) {
                     bindingRepository.requireHarnessCleanup(draining.getRequest().getScope(), draining.getRequest().getIsolationKey(), authority);
                 }
@@ -513,6 +521,9 @@ final class RuntimeDrainCoordinator {
 
     CompletionStage<RuntimeDrainReceipt> stopAcknowledgedRuntime(RuntimeBindingRecord binding,
             BindingRenewal renewal, RuntimeLifecycleAuthority authority) {
+        if (RuntimeProviderKinds.isLocalProcessCgroup(binding.getResourceHandle())) {
+            return provisioner.stopDrained(drainClaimForIo(renewal, authority));
+        }
         if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
             return stopAcknowledgedRuntime(binding);
         }

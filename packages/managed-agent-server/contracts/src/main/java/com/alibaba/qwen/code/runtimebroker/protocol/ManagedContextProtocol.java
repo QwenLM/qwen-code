@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonParser;
@@ -55,10 +56,13 @@ public final class ManagedContextProtocol {
             String leaseId, String provisionRequestId, String token, long epoch,
             String tenantId, String workspaceId, String workspaceGeneration,
             String storageId, String mountRoot, String capabilityDigest,
-            String isolationClass, Map<String, Object> managedExtensions) {
+            String isolationClass, Map<String, Object> managedExtensions,
+            Map<String, Object> privateRoot) {
         public Boot {
             managedExtensions = managedExtensions == null ? null
                     : BrokerValues.immutableMap(managedExtensions);
+            privateRoot = privateRoot == null ? null
+                    : BrokerValues.immutableMap(privateRoot);
         }
 
         public Map<String, Object> toWire() {
@@ -81,6 +85,9 @@ public final class ManagedContextProtocol {
             wire.put("isolationClass", isolationClass);
             if (managedExtensions != null) {
                 wire.put("managedExtensions", managedExtensions);
+            }
+            if (privateRoot != null) {
+                wire.put("privateRoot", privateRoot);
             }
             return Map.copyOf(wire);
         }
@@ -118,7 +125,13 @@ public final class ManagedContextProtocol {
         return boot(request, seed, null);
     }
 
-    public static Boot boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> extensions) {
+    public static Boot boot(RuntimeProvisionRequest request,
+            RuntimeProvisionSeed seed, Map<String, Object> extensions) {
+        return boot(request, seed, extensions, null);
+    }
+
+    public static Boot boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            Map<String, Object> extensions, Map<?, ?> privateRoot) {
         require(request != null && request.isManagedContext() && seed != null);
         RuntimeScope scope = request.getScope();
         Map<String, Object> boot = new LinkedHashMap<>();
@@ -141,6 +154,9 @@ public final class ManagedContextProtocol {
         if (extensions != null) {
             boot.put("managedExtensions", extensions);
         }
+        if (privateRoot != null) {
+            boot.put("privateRoot", privateRoot);
+        }
         return parseBoot(boot);
     }
 
@@ -155,13 +171,17 @@ public final class ManagedContextProtocol {
                 string(snapshot, "workspaceId"), string(snapshot, "workspaceGeneration"),
                 string(snapshot, "storageId"), string(snapshot, "mountRoot"),
                 string(snapshot, "capabilityDigest"), string(snapshot, "isolationClass"),
-                (Map<String, Object>) snapshot.get("managedExtensions"));
+                (Map<String, Object>) snapshot.get("managedExtensions"),
+                (Map<String, Object>) snapshot.get("privateRoot"));
     }
 
     public static void validateBoot(Map<String, Object> boot) {
         Set<String> expectedKeys = new HashSet<>(BOOT_KEYS);
         if (boot.containsKey("managedExtensions")) {
             expectedKeys.add("managedExtensions");
+        }
+        if (boot.containsKey("privateRoot")) {
+            expectedKeys.add("privateRoot");
         }
         require(boot.keySet().equals(expectedKeys)
                 && "boot".equals(boot.get("type"))
@@ -183,6 +203,12 @@ public final class ManagedContextProtocol {
                 .matches("sha256:[0-9a-f]{64}"));
         require(Set.of("session", "workspace")
                 .contains(string(boot, "isolationClass")));
+        boolean confined = WorkspaceExecutionProfile.isConfined(string(boot, "capabilityDigest"));
+        require(confined == boot.containsKey("privateRoot"));
+        if (confined) {
+            require("session".equals(boot.get("isolationClass"))
+                    && boot.get("privateRoot") instanceof Map<?, ?> recipe && validPrivateRoot(recipe));
+        }
         boolean extended = ManagedExtensionExecutionProfile.admits(string(boot, "capabilityDigest"));
         require(extended == boot.containsKey("managedExtensions"));
         if (extended) {
@@ -195,6 +221,15 @@ public final class ManagedContextProtocol {
                     && ManagedExtensionExecutionProfile.mode(string(boot, "capabilityDigest")).equals(config.get("mode"))
                     && config.get("cacheDirectory") instanceof String directory && Path.of(directory).isAbsolute());
         }
+    }
+
+    public static boolean validPrivateRoot(Map<?, ?> recipe) {
+        return recipe.keySet().equals(Set.of("version", "rootfs", "rootfsIdentity", "bwrapIdentity"))
+                && exactNumber(recipe.get("version"), 1)
+                && recipe.get("rootfs") instanceof String root
+                && root.length() <= 4096 && Path.of(root).isAbsolute()
+                && recipe.get("rootfsIdentity") instanceof String image && image.matches("[0-9]+:[0-9]+")
+                && recipe.get("bwrapIdentity") instanceof String bwrap && bwrap.matches("[0-9]+:[0-9]+");
     }
 
     public static Ready ready(Map<String, Object> ready, Boot boot) {

@@ -8,6 +8,8 @@
 // recovery all read this one vocabulary, so a new profile cannot be
 // persisted by one and refused by another.
 
+import { CONFINED_SHELL_PROFILE } from './managed-private-root.js';
+
 export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
 export const HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE =
   'hosted-workspace-external-files/1';
@@ -41,6 +43,7 @@ export const HOSTED_WORKSPACE_TEAM_LEAD_PROFILE =
 export const HOSTED_WORKSPACE_READ_PROFILE = 'hosted-workspace-read/1';
 
 export type HostedWorkspaceToolProfile =
+  | typeof CONFINED_SHELL_PROFILE
   | typeof HOSTED_WORKSPACE_FILE_PROFILE
   | typeof HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
   | typeof HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE
@@ -58,6 +61,7 @@ export function isHostedWorkspaceProfile(
   profile: unknown,
 ): profile is HostedWorkspaceToolProfile {
   return (
+    profile === CONFINED_SHELL_PROFILE ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE ||
     profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
     profile === HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE ||

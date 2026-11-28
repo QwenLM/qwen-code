@@ -488,6 +488,41 @@ public class JdbcWorkspaceExecutionStore
         release(binding, session, false);
     }
 
+    @Override
+    public void releaseConfined(ContextBinding binding, RuntimeSessionRecord session, RuntimeBindingRecord runtime) {
+        transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+            String key = storageKey(binding);
+            var handle = runtime.getResourceHandle();
+            List<Boolean> current = jdbc.query("SELECT runtime_generation, provision_request_id, resource_handle_version,"
+                    + " resource_handle_json, binding_state FROM ma_runtime_binding WHERE binding_id = ? FOR UPDATE",
+                    (row, index) -> runtime.getGeneration() == row.getLong("runtime_generation")
+                            && "READY".equals(row.getString("binding_state"))
+                            && runtime.getProvisionSeed().getProvisionRequestId().equals(row.getString("provision_request_id"))
+                            && handle.getVersion() == row.getInt("resource_handle_version")
+                            && handle.equals(com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle.fromJson(
+                                    handle.getKind(), handle.getVersion(), row.getString("resource_handle_json"))),
+                    runtime.getBindingId());
+            if (!current.equals(List.of(true))) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            List<String> effective = jdbc.query("SELECT execution_storage_id FROM ma_runtime_session WHERE"
+                    + " binding_id = ? AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?"
+                    + " AND session_state = 'RELEASING' AND is_rewind_pending = FALSE FOR UPDATE",
+                    (row, index) -> row.getString("execution_storage_id"), runtime.getBindingId(), runtime.getGeneration(),
+                    session.getRuntimeSessionId(), session.getSession().getHarnessSessionId());
+            if (effective.size() != 1 || effective.getFirst() != null && !key.equals(effective.getFirst())) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            int cleared = jdbc.update("UPDATE ma_runtime_session SET execution_storage_id = NULL"
+                    + " WHERE execution_storage_id = ? AND binding_id = ? AND runtime_generation = ?"
+                    + " AND runtime_session_id = ? AND harness_session_id = ? AND session_state = 'RELEASING'"
+                    + " AND is_rewind_pending = FALSE", ManagedSchemaKeys.identity(key), runtime.getBindingId(), runtime.getGeneration(),
+                    session.getRuntimeSessionId(), session.getSession().getHarnessSessionId());
+            releaseMembers(jdbc, key, cleared);
+        });
+    }
+
     /** Told the storage key whenever execution members refuse physical maintenance. */
     public void onMaintenanceBusy(Consumer<String> listener) {
         maintenanceBusy = listener;

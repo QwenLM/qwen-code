@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
@@ -40,6 +41,7 @@ public final class WorkspaceRuntimeResolver {
     private final Map<Storage, Mount> mounts = new LinkedHashMap<>();
     private final String boundSessionIsolationClass;
     private final boolean local;
+    private final boolean privateRootEnabled;
     private final boolean measuredTools;
     private final boolean webTerminal;
     private final ManagedAgentSettings.ManagedExtensions managedExtensions;
@@ -82,7 +84,9 @@ public final class WorkspaceRuntimeResolver {
         var broker = properties.getRuntimeBroker();
         this.local = RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner());
         this.boundSessionIsolationClass = broker.getBoundSessionIsolationClass();
-        if (WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(
+        this.privateRootEnabled = broker.privateRootfs() != null;
+        if (WorkspaceExecutionProfile.isConfined(properties.getHarness().getCapabilityDigest())
+                || WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(
                         properties.getHarness().getCapabilityDigest())
                 || WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST.equals(
                         properties.getHarness().getCapabilityDigest())
@@ -121,6 +125,10 @@ public final class WorkspaceRuntimeResolver {
         }
     }
 
+    boolean privateRootEnabled() {
+        return privateRootEnabled;
+    }
+
     public Resolved resolve(String sessionId) {
         return resolve(sessionId, null);
     }
@@ -136,7 +144,14 @@ public final class WorkspaceRuntimeResolver {
     private Resolved resolve(String sessionId, RuntimeLifecycleAuthority lifecycle, boolean hook) {
         SessionRecord session = sessions.findSessionById(sessionId)
                 .orElseThrow(WorkspaceExecutionStore::unavailable);
+        boolean confined = WorkspaceToolProfiles.CONFINED_SHELL.equals(session.toolProfile());
+        if (confined && (!privateRootEnabled || !local)) {
+            throw WorkspaceExecutionProfile.confinementUnavailable();
+        }
         if (authority.isExternal(session.workspace())) {
+            if (confined) {
+                throw WorkspaceExecutionProfile.confinementDenied();
+            }
             if (hook || managedExtensions.isEnabled() || externalRegistrations == null
                     || !java.util.Set.of("session", "workspace")
                             .contains(boundSessionIsolationClass)) {
@@ -164,6 +179,9 @@ public final class WorkspaceRuntimeResolver {
         }
         ContextBinding binding = session.workspace();
         if (ssh != null && ssh.runtimeStorage(binding) != null) {
+            if (confined) {
+                throw WorkspaceExecutionProfile.confinementDenied();
+            }
             if (hook && !managedExtensions.isEnabled()) {
                 throw WorkspaceExecutionStore.unavailable();
             }
@@ -177,7 +195,14 @@ public final class WorkspaceRuntimeResolver {
             throw WorkspaceExecutionStore.unavailable();
         }
         verifyMountIntact(mount);
-        String digest = extensionDigest(System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("mac") ? "darwin" : System.getProperty("os.name", "").toLowerCase(Locale.ROOT));
+        if (privateRootEnabled && (!confined || hook || !".".equals(binding.getCwdRelative())
+                || !"session".equals(boundSessionIsolationClass) || !"qwen-code".equals(session.agentId())
+                || session.agentDefinitionDigest() != null || session.publicChildAgentsVersion() != 0)) {
+            throw WorkspaceExecutionProfile.confinementDenied();
+        }
+        String digest = confined ? WorkspaceExecutionProfile.PRIVATE_ROOT_CAPABILITY_DIGEST
+                : extensionDigest(System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("mac")
+                        ? "darwin" : System.getProperty("os.name", "").toLowerCase(Locale.ROOT));
         if (webTerminal && WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(digest)) {
             digest = WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST;
         }
