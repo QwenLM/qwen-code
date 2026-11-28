@@ -3680,20 +3680,27 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Another goal control is still running. Try again once it finishes.',
   'memory.add': 'Add',
   'memory.add.desc': 'Write a durable memory',
-  'memory.autoDream': (v) =>
-    `Auto-dream: ${v?.status ?? 'unknown'} · ${v?.lastDream ?? 'never'} · /dream to run`,
-  'memory.autoDreamUnsupported':
-    'Auto-dream settings are not available from web-shell yet.',
-  'memory.autoFolder': 'Open auto-memory folder',
-  'memory.autoMemory': (v) => `Auto-memory: ${v?.status ?? 'unknown'}`,
-  'memory.autoMemoryUnsupported':
-    'Auto-memory settings are not available from web-shell yet.',
-  'memory.autoSkill': (v) => `Auto-skill: ${v?.status ?? 'unknown'}`,
-  'memory.autoSkillUnsupported':
-    'Auto-skill settings are not available from web-shell yet.',
+  'memory.autoContentChanged':
+    'This entry changed while it was being read. Select it again to retry.',
+  'memory.autoContentUnavailable': 'Content is not available for this entry.',
+  'memory.autoEmpty': 'No auto-memory entries yet.',
+  'memory.autoMemoryTab': 'Auto memory',
+  'memory.autoNotInitialized':
+    'No auto-memory directories have been created yet.',
+  'memory.autoProjectScope': 'Project memory',
+  'memory.autoToggleManaged':
+    'Set by a higher-priority configuration; it cannot be changed here.',
+  'memory.autoTruncated':
+    'Content is truncated (the file is larger than the read limit).',
+  'memory.autoUserScope': 'User memory',
   'memory.chooseScope': 'Choose where to save the memory',
   'memory.closed': 'Memory panel closed.',
   'memory.contentEmpty': 'Memory content is empty.',
+  'memory.enableAutoMemory': 'Auto-memory',
+  'memory.enableAutoMemory.desc':
+    'Capture memories automatically while working',
+  'memory.enableAutoDream': 'Auto-dream',
+  'memory.enableAutoDream.desc': 'Consolidate memories in the background',
   'memory.file': 'Memory file',
   'memory.fileOpen': 'Memory file opened.',
   'memory.fileTruncated':
@@ -3707,13 +3714,9 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Global memory is outside the bound workspace, so the current daemon file-read API cannot open its content.',
   'memory.loading': 'Loading memory...',
   'memory.loadingFile': 'Loading memory file...',
-  'memory.lastDream': '5 hours ago',
   'memory.menu': 'Memory',
-  'memory.never': 'never',
   'memory.noFiles': 'No memory files found.',
-  'memory.on': 'on',
-  'memory.openFolderUnsupported':
-    'Opening the auto-memory folder is not available from web-shell yet.',
+  'memory.openFolder': 'Open folder',
   'memory.placeholder': (v) => `Write ${v?.scope ?? 'memory'} content...`,
   'memory.project': 'Workspace',
   'memory.project.desc': 'Saved to this workspace memory file',
@@ -3731,7 +3734,6 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'memory.show': 'Show',
   'memory.show.desc': 'Show configured memory files',
   'memory.status': 'Workspace and user memory files',
-  'memory.unknown': 'unknown',
   'memory.write': 'Write memory content',
   'mode.auto': 'Classifier Approval',
   'mode.auto.desc':

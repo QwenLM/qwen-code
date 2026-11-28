@@ -23,7 +23,9 @@ describe('SERVE_ERROR_KINDS', () => {
     // non-ENOENT stat failures on workspace memory discovery (see
     // #4175 PR 16). Issue #4514 T2.8 added three runtime-mutation
     // error kinds; T2.9 appended prompt_deadline_exceeded and
-    // writer_idle_timeout. Future additions append to this list.
+    // writer_idle_timeout; the managed auto-memory listing (#13396)
+    // appended readdir_failed and symlinked_root. Future additions
+    // append to this list.
     expect(SERVE_ERROR_KINDS).toEqual([
       'missing_binary',
       'blocked_egress',
@@ -40,6 +42,8 @@ describe('SERVE_ERROR_KINDS', () => {
       'invalid_config',
       'prompt_deadline_exceeded',
       'writer_idle_timeout',
+      'readdir_failed',
+      'symlinked_root',
     ]);
   });
 

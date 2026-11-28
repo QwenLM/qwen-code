@@ -103,6 +103,11 @@ const WEB_SHELL_SETTINGS = new Set([
   'advisorModel',
   'visionBridgeTimeoutMs',
   'mcpServers',
+  // The /memory panel's auto-memory/auto-dream toggles render outside the
+  // settings dialog (`showInDialog: false`), but read + persist through
+  // this same route.
+  'memory.enableManagedAutoMemory',
+  'memory.enableManagedAutoDream',
   'worktree.defaultForNewSessions',
   'worktree.maxRetained',
 ]);
