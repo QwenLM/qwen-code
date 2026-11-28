@@ -374,17 +374,15 @@ describe('fitPendingSlice', () => {
     expect(keptLines).toBe(1);
   });
 
-  it('keeps a zero-data-row table horizontal on a narrow terminal (no vertical stub)', () => {
-    // Header + separator only (first data row still streaming). TableRenderer
-    // keeps the horizontal header box; renderVerticalFormat iterates data rows
-    // and would draw nothing. Even though the terminal is narrow (20 < 29), the
-    // estimator must charge horizontal chrome (5), not the 2-row vertical stub.
-    // intro(1)+5 = 6 > budget 4 → cut before it. Without the dataRows>0 guard it
-    // would charge 2, keep the table, and under-count the transient header box.
+  it('charges a zero-data-row table 0 rows because it renders nothing', () => {
+    // Header + separator only (first data row still streaming). MarkdownDisplay
+    // only draws a table once it has a data row, so the header box the old
+    // charge assumed is never drawn — the table costs 0 and the slice keeps
+    // it (and the lines after it) instead of cutting before it.
     const lines = ['intro', '| A | B | C | D |', '| - | - | - | - |'];
     const { keptLines, clipped } = fitPendingSlice(lines, 20, 4, CLAMP);
-    expect(clipped).toBe(true);
-    expect(keptLines).toBe(1);
+    expect(clipped).toBe(false);
+    expect(keptLines).toBe(3);
   });
 
   it('charges wrapped HORIZONTAL rows when cells wrap within MAX_ROW_LINES', () => {
