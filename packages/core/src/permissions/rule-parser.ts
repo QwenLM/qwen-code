@@ -24,13 +24,18 @@ const debugLogger = createDebugLogger('PERMISSIONS');
  * On Windows, `path.join()` produces backslash-separated paths, but the
  * permission rule system and picomatch both work with forward slashes.
  * This helper ensures consistent path separators across all platforms.
+ * A drive letter is uppercased, since Windows ignores its case.
  *
  * Examples:
  *   toPosixPath('C:\\Users\\foo\\bar') → 'C:/Users/foo/bar'
+ *   toPosixPath('d:\\x\\**') → 'D:/x/**'
  *   toPosixPath('/home/user/project') → '/home/user/project' (no-op on POSIX)
  */
 function toPosixPath(p: string): string {
-  return p.replace(/\\/g, '/');
+  const posix = p.replace(/\\/g, '/');
+  return /^[a-z]:\//.test(posix)
+    ? posix.charAt(0).toUpperCase() + posix.slice(1)
+    : posix;
 }
 
 /**
@@ -52,7 +57,7 @@ function isWindowsAbsolutePath(p: string): boolean {
  */
 function dropSlashBeforeDriveLetter(absolute: string): string {
   const drive = absolute.match(/^\/+([A-Za-z]:\/.*)$/);
-  return drive ? drive[1] : absolute;
+  return drive ? toPosixPath(drive[1]) : absolute;
 }
 import type {
   PermissionCheckContext,
@@ -573,7 +578,9 @@ export function parseRule(raw: string): PermissionRule {
   } else if (
     specifierKind !== 'literal' &&
     rawSpecifier.includes(':') &&
-    !rawSpecifier.startsWith('domain:')
+    !rawSpecifier.startsWith('domain:') &&
+    // The colon of a Windows drive path (`D:/x/**`, `//D:/x/**`).
+    !/^(\/\/)?[A-Za-z]:[\\/]/.test(rawSpecifier)
   ) {
     debugLogger.warn(
       `key:value syntax is only supported for literal-specifier tools (got ${specifierKind} for "${canonicalName}")`,
@@ -1588,11 +1595,13 @@ export function matchesPathPattern(
 function getCanonicalPatternCandidates(resolvedPattern: string): string[] {
   const candidates = new Set([resolvedPattern]);
   const { base } = picomatch.scan(resolvedPattern);
-  const canonicalBase = realpathNearestExisting(base);
+  // A glob in the first segment leaves a bare drive, which resolves to its cwd.
+  const driveRoot = /^[A-Za-z]:$/.test(base);
+  const canonicalBase = realpathNearestExisting(driveRoot ? base + '/' : base);
   if (canonicalBase !== undefined) {
-    candidates.add(
-      `${toPosixPath(canonicalBase)}${resolvedPattern.slice(base.length)}`,
-    );
+    const prefix = toPosixPath(canonicalBase);
+    const suffix = resolvedPattern.slice(base.length);
+    candidates.add((driveRoot ? prefix.replace(/\/$/, '') : prefix) + suffix);
   }
   return [...candidates];
 }
