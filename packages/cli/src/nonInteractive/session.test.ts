@@ -939,10 +939,11 @@ describe('runNonInteractiveStreamJson', () => {
   it('derives the initialize reply bound from the budget the client declared', async () => {
     vi.useFakeTimers();
     try {
-      const releaseInitialization = vi.fn();
-      config = createConfig({
-        initialize: vi.fn(() => new Promise<void>(releaseInitialization)),
+      let releaseInitialization!: () => void;
+      const initialization = new Promise<void>((resolve) => {
+        releaseInitialization = resolve;
       });
+      config = createConfig({ initialize: vi.fn(() => initialization) });
       mockDispatcher.dispatch.mockResolvedValue({ ready: true });
 
       const initRequest = createControlRequest('initialize');
@@ -975,13 +976,48 @@ describe('runNonInteractiveStreamJson', () => {
     }
   });
 
+  it('subtracts time already spent before the CLI can arm the reply timer', async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseInitialization!: () => void;
+      const initialization = new Promise<void>((resolve) => {
+        releaseInitialization = resolve;
+      });
+      config = createConfig({ initialize: vi.fn(() => initialization) });
+      mockDispatcher.dispatch.mockResolvedValue({ ready: true });
+
+      const initRequest = createControlRequest('initialize');
+      initRequest.request = {
+        subtype: 'initialize',
+        timeout: {
+          controlRequest: 6_000,
+          controlRequestDeadlineUnixMs: Date.now() + 3_000,
+        },
+      };
+      mockInputReader.read = async function* () {
+        yield initRequest;
+      };
+
+      const run = runNonInteractiveStreamJson(config, '');
+      await vi.advanceTimersByTimeAsync(1_499);
+      expect(mockDispatcher.sendSuccess).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(mockDispatcher.sendSuccess).toHaveBeenCalledOnce();
+      releaseInitialization();
+      await run;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps the default reply bound for a client that declares no control-request budget', async () => {
     vi.useFakeTimers();
     try {
-      const releaseInitialization = vi.fn();
-      config = createConfig({
-        initialize: vi.fn(() => new Promise<void>(releaseInitialization)),
+      let releaseInitialization!: () => void;
+      const initialization = new Promise<void>((resolve) => {
+        releaseInitialization = resolve;
       });
+      config = createConfig({ initialize: vi.fn(() => initialization) });
       mockDispatcher.dispatch.mockResolvedValue({ ready: true });
 
       mockInputReader.read = async function* () {
@@ -1046,7 +1082,7 @@ describe('runNonInteractiveStreamJson', () => {
     }
   });
 
-  it('does not leave shutdown waiting on an initialization that never settles', async () => {
+  it('waits for the initialize reply and releases prompts if readiness never settles', async () => {
     vi.useFakeTimers();
     try {
       config = createConfig({
@@ -1056,17 +1092,38 @@ describe('runNonInteractiveStreamJson', () => {
 
       mockInputReader.read = async function* () {
         yield createControlRequest('initialize');
+        yield createUserMessage('queued prompt');
       };
 
       const run = runNonInteractiveStreamJson(config, '');
-      await vi.advanceTimersByTimeAsync(SDK_INITIALIZE_REPLY_TIMEOUT_MS);
+      let shutdownComplete = false;
+      void run.then(() => {
+        shutdownComplete = true;
+      });
+      await vi.advanceTimersByTimeAsync(SDK_INITIALIZE_REPLY_TIMEOUT_MS - 1);
+      expect(shutdownComplete).toBe(false);
+      expect(mockDispatcher.sendSuccess).not.toHaveBeenCalled();
+      expect(mockOutputAdapter.emitResult).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(mockDispatcher.sendSuccess).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(
-        SDK_INITIALIZE_ABANDONED_SHUTDOWN_TIMEOUT_MS,
+        SDK_INITIALIZE_ABANDONED_SHUTDOWN_TIMEOUT_MS - 1,
       );
+      expect(shutdownComplete).toBe(false);
+      expect(mockOutputAdapter.emitResult).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(shutdownComplete).toBe(true);
       await run;
 
-      expect(mockDispatcher.sendSuccess).toHaveBeenCalledOnce();
       expect(mockDispatcher.sendError).not.toHaveBeenCalled();
+      expect(runNonInteractiveMock).not.toHaveBeenCalled();
+      expect(mockOutputAdapter.emitResult).toHaveBeenCalledOnce();
+      expect(mockOutputAdapter.emitResult).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isError: true,
+          errorMessage: 'Session initialization did not settle before shutdown',
+        }),
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -1111,6 +1168,8 @@ describe('runNonInteractiveStreamJson', () => {
       );
       expect(runNonInteractiveMock).not.toHaveBeenCalled();
       await run;
+      expect(mockDispatcher.sendSuccess).toHaveBeenCalledOnce();
+      expect(mockDispatcher.sendError).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

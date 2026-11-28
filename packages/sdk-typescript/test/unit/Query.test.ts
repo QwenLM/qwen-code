@@ -422,6 +422,12 @@ describe('Query', () => {
         transport.getLastWrittenMessage() as CLIControlRequest;
       expect(initRequest.type).toBe('control_request');
       expect(initRequest.request.subtype).toBe('initialize');
+      expect(
+        (initRequest.request as CLIControlInitializeRequest).timeout,
+      ).toEqual({
+        controlRequest: 60_000,
+        controlRequestDeadlineUnixMs: expect.any(Number),
+      });
 
       await respondToInitialize(transport, query);
       await query.close();
@@ -444,7 +450,11 @@ describe('Query', () => {
       expect(initRequest.request.subtype).toBe('initialize');
       expect(
         (initRequest.request as CLIControlInitializeRequest).timeout,
-      ).toEqual({ canUseTool: 120_000 });
+      ).toEqual({
+        canUseTool: 120_000,
+        controlRequest: 60_000,
+        controlRequestDeadlineUnixMs: expect.any(Number),
+      });
 
       await respondToInitialize(transport, query);
       await query.close();
@@ -453,6 +463,7 @@ describe('Query', () => {
     it('should include the client control-request budget in initialize request', async () => {
       // The CLI bounds its deferred initialize reply from this value, so a
       // lowered budget must reach it instead of leaving the 60 s default.
+      const earliestDeadline = Date.now() + 30_000;
       const query = new Query(transport, {
         cwd: '/test',
         timeout: {
@@ -467,9 +478,15 @@ describe('Query', () => {
       const initRequest =
         transport.getLastWrittenMessage() as CLIControlRequest;
       expect(initRequest.request.subtype).toBe('initialize');
-      expect(
-        (initRequest.request as CLIControlInitializeRequest).timeout,
-      ).toEqual({ controlRequest: 30_000 });
+      const timeout = (initRequest.request as CLIControlInitializeRequest)
+        .timeout;
+      expect(timeout?.controlRequest).toBe(30_000);
+      expect(timeout?.controlRequestDeadlineUnixMs).toBeGreaterThanOrEqual(
+        earliestDeadline,
+      );
+      expect(timeout?.controlRequestDeadlineUnixMs).toBeLessThanOrEqual(
+        Date.now() + 30_000,
+      );
 
       await respondToInitialize(transport, query);
       await query.close();

@@ -353,6 +353,7 @@ export interface CLIControlInitializeRequest {
   timeout?: {
     canUseTool?: number;
     controlRequest?: number;
+    controlRequestDeadlineUnixMs?: number;
   };
   /**
    * SDK MCP servers config

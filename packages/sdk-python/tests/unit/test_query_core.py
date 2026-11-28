@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
+
 from qwen_code_sdk.errors import AbortError, ControlRequestTimeoutError
 from qwen_code_sdk.json_lines import parse_json_line
 from qwen_code_sdk.query import Query
@@ -143,6 +145,7 @@ async def test_initialize_carries_the_control_request_budget() -> None:
     # The CLI bounds its deferred initialize reply below the client's budget,
     # so the payload must carry it rather than leaving the CLI to assume 60 s.
     transport = FakeTransport()
+    earliest_deadline = time.time() * 1000 + 30_000
     query = Query(
         transport=transport,  # type: ignore[arg-type]
         options=QueryOptions(
@@ -158,7 +161,13 @@ async def test_initialize_carries_the_control_request_budget() -> None:
     await query._ensure_started()
 
     init_request = await _wait_for_request(transport, "initialize")
-    assert init_request["request"]["timeout"] == {"controlRequest": 30_000}
+    timeout = init_request["request"]["timeout"]
+    assert timeout["controlRequest"] == 30_000
+    assert (
+        earliest_deadline
+        <= timeout["controlRequestDeadlineUnixMs"]
+        <= time.time() * 1000 + 30_000
+    )
 
     transport.push(
         {

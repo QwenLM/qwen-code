@@ -341,13 +341,12 @@ export class Query implements AsyncIterable<SDKMessage> {
   }
 
   private initializeTimeoutPayload(): CLIControlInitializeRequest['timeout'] {
-    const { canUseTool, controlRequest } = this.options.timeout ?? {};
-    if (canUseTool === undefined && controlRequest === undefined) {
-      return undefined;
-    }
+    const { canUseTool, controlRequest = DEFAULT_CONTROL_REQUEST_TIMEOUT } =
+      this.options.timeout ?? {};
     return {
       ...(canUseTool !== undefined ? { canUseTool } : {}),
-      ...(controlRequest !== undefined ? { controlRequest } : {}),
+      controlRequest,
+      controlRequestDeadlineUnixMs: Date.now() + controlRequest,
     };
   }
 
