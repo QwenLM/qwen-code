@@ -480,6 +480,32 @@ describe('ContentGenerationPipeline', () => {
     return pipeline.executeStream(request, promptId);
   }
 
+  it('preserves an explicit DashScope samplingParams.tool_stream opt-out', async () => {
+    const model = 'qwen3.8-max';
+    pipelineWith({
+      model,
+      baseUrl: DASHSCOPE_URL,
+      enableCacheControl: false,
+      enableRequestMetadata: false,
+      samplingParams: { tool_stream: false },
+    });
+    mockCliConfig = {
+      getContentGeneratorConfig: () => mockContentGeneratorConfig,
+    } as Config;
+    pipelineOnProvider(DashScopeOpenAICompatibleProvider);
+    mockForcedTool();
+
+    await collect(
+      await streamFrom(streamOf(), userRequest(model, forcedToolConfig(false))),
+    );
+
+    expect(sentBody()).toMatchObject({
+      stream: true,
+      tools: [{ type: 'function', function: { name: 'respond_in_schema' } }],
+      tool_stream: false,
+    });
+  });
+
   /** Makes the chunk converter return `responses`, one per call. */
   function convertChunksTo(...responses: GenerateContentResponse[]) {
     const convert = mockConverter.convertOpenAIChunkToLlm as Mock;
