@@ -94,6 +94,7 @@ import {
   type DaemonSessionOwnerSnapshot,
   type DaemonReasoningControls,
   type DaemonProductSessionContext,
+  type DaemonScheduledTask,
   type DaemonStreamingState,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
@@ -412,6 +413,20 @@ import {
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { GoalsDialog } from './components/dialogs/GoalsDialog';
 import { AutofixPrWatchesDialog } from './components/dialogs/AutofixPrWatchesDialog';
+import {
+  AutofixPrContext,
+  type AutofixPrContextValue,
+  type AutofixPrStartSessionRequest,
+} from './components/autofixPr/AutofixPrContext';
+import {
+  autofixPrWatchesKey,
+  useAutofixPrWatches,
+} from './hooks/useAutofixPrWatches';
+import {
+  indexAutofixPrWatches,
+  watchOfTask,
+  type IndexedAutofixPrWatch,
+} from './utils/autofixPrWatches';
 import { WorkflowRunsPage } from './components/workflows/WorkflowRunsPage';
 import { parseWebShellGoalCommand } from './utils/goalCondition';
 import { buildGoalControlRequest } from './utils/goalControlRequest';
@@ -20296,6 +20311,15 @@ export function App({
     taskIsStale?: () => boolean;
     beforeTaskDispatch?: () => void | Promise<void>;
   } | null>(null);
+  const pendingNewSessionRunRef = useRef<{
+    prompt: string;
+    targetCwd: string;
+    invocation: number;
+    runtimeClient: typeof workspace.client;
+    resolve: () => void;
+    reject: (err: unknown) => void;
+    timer?: ReturnType<typeof setTimeout>;
+  } | null>(null);
   const clearPendingBoundRun = useCallback((sessionId: string) => {
     const cur = pendingBoundRunRef.current;
     if (cur && cur.sessionId === sessionId) {
@@ -20681,6 +20705,12 @@ export function App({
         pendingBoundRunRef.current = null;
         prev.reject(new Error('superseded by another run'));
       }
+      const prevNew = pendingNewSessionRunRef.current;
+      if (prevNew) {
+        if (prevNew.timer !== undefined) clearTimeout(prevNew.timer);
+        pendingNewSessionRunRef.current = null;
+        prevNew.reject(new Error('superseded by another run'));
+      }
       return new Promise<void>((resolve, reject) => {
         const pending: NonNullable<typeof pendingBoundRunRef.current> = {
           sessionId,
@@ -20774,6 +20804,295 @@ export function App({
     tryFireBoundRun,
     workspace.client,
   ]);
+  const clearPendingNewSessionRun = useCallback((invocation?: number) => {
+    const cur = pendingNewSessionRunRef.current;
+    if (cur && (invocation === undefined || cur.invocation === invocation)) {
+      if (cur.timer !== undefined) clearTimeout(cur.timer);
+      pendingNewSessionRunRef.current = null;
+    }
+  }, []);
+  useEffect(
+    () => () => {
+      const cur = pendingNewSessionRunRef.current;
+      if (cur?.timer !== undefined) clearTimeout(cur.timer);
+      pendingNewSessionRunRef.current = null;
+    },
+    [],
+  );
+  const tryFireNewSessionRun = useCallback(() => {
+    const pending = pendingNewSessionRunRef.current;
+    const conn = connectionRef.current;
+    if (!pending) return;
+    if (
+      pending.runtimeClient !== boundRunRuntimeClientRef.current ||
+      sessionOpenInvocationRef.current !== pending.invocation ||
+      pendingSessionContextRef.current?.kind !== 'workspace' ||
+      pendingSessionContextRef.current.cwd !== pending.targetCwd
+    ) {
+      clearPendingNewSessionRun(pending.invocation);
+      pending.reject(
+        new DOMException('New session run was superseded', 'AbortError'),
+      );
+      return;
+    }
+    if (conn.sessionId !== undefined || sessionWriteBlockedRef.current) {
+      if (pending.timer === undefined) {
+        pending.timer = setTimeout(() => {
+          clearPendingNewSessionRun(pending.invocation);
+          pending.reject(
+            new Error('Timed out waiting for new session to prepare'),
+          );
+        }, BOUND_RUN_SWITCH_TIMEOUT_MS);
+      }
+      return;
+    }
+    if (pending.timer !== undefined) clearTimeout(pending.timer);
+    pendingNewSessionRunRef.current = null;
+    enqueueManualRun(pending.prompt).then(
+      () => {
+        pending.resolve();
+      },
+      (error: unknown) => {
+        pending.reject(error);
+      },
+    );
+  }, [clearPendingNewSessionRun, enqueueManualRun]);
+  useEffect(() => {
+    tryFireNewSessionRun();
+  }, [
+    connection.sessionId,
+    sessionWriteBlocked,
+    tryFireNewSessionRun,
+    workspace.client,
+  ]);
+
+  const autofixPrWorkspaces = useMemo(
+    () => (lockedWorkspaceCwd ? visibleWorkspaces : ordinaryWorkspaces),
+    [lockedWorkspaceCwd, ordinaryWorkspaces, visibleWorkspaces],
+  );
+  const autofixPrOperableWorkspaces = useMemo(() => {
+    if (lockedWorkspaceCapability) return [lockedWorkspaceCapability];
+    if (autofixPrWorkspaces.length > 1) {
+      return autofixPrWorkspaces.filter((ws) => ws.primary || ws.trusted);
+    }
+    return autofixPrWorkspaces.filter((ws) => ws.primary);
+  }, [autofixPrWorkspaces, lockedWorkspaceCapability]);
+  const autofixPrWatchWorkspaceIds = useMemo(
+    () =>
+      autofixPrOperableWorkspaces.length > 0
+        ? autofixPrOperableWorkspaces.map((ws) =>
+            ws.primary ? undefined : ws.id,
+          )
+        : [undefined],
+    [autofixPrOperableWorkspaces],
+  );
+  const autofixPrEnabled =
+    prWatchesAvailable && projectFeaturesAvailable && !managedMode;
+  const sharedAutofixPrWatches = useAutofixPrWatches(
+    autofixPrEnabled,
+    autofixPrWatchWorkspaceIds,
+  );
+  const autofixPrWatchIndex = useMemo(() => {
+    const cwdByKey = new Map<string, string>();
+    autofixPrWatchWorkspaceIds.forEach((id, index) => {
+      const cwd =
+        autofixPrOperableWorkspaces[index]?.cwd ??
+        (id === undefined ? workspace.capabilities?.workspaceCwd : undefined);
+      if (cwd) cwdByKey.set(autofixPrWatchesKey(id), cwd);
+    });
+    return indexAutofixPrWatches(sharedAutofixPrWatches.lists, cwdByKey);
+  }, [
+    autofixPrOperableWorkspaces,
+    autofixPrWatchWorkspaceIds,
+    sharedAutofixPrWatches.lists,
+    workspace.capabilities?.workspaceCwd,
+  ]);
+  const resolveAutofixWorkspaceCwd = useCallback(
+    (requestedCwd?: string): string | undefined => {
+      if (lockedWorkspaceCwd) {
+        if (lockedWorkspaceCapability?.trusted === false) return undefined;
+        if (requestedCwd !== undefined && requestedCwd !== lockedWorkspaceCwd) {
+          return undefined;
+        }
+        return lockedWorkspaceCwd;
+      }
+      if (requestedCwd !== undefined) {
+        if (ordinaryWorkspaces.length > 0) {
+          return ordinaryWorkspaces.find(
+            (entry) => entry.cwd === requestedCwd && entry.trusted !== false,
+          )?.cwd;
+        }
+        return requestedCwd === workspace.capabilities?.workspaceCwd
+          ? requestedCwd
+          : undefined;
+      }
+      return (
+        resolveWorkspaceMaintenanceTargetCwd() ??
+        (ordinaryWorkspaces.length === 0
+          ? workspace.capabilities?.workspaceCwd
+          : undefined)
+      );
+    },
+    [
+      lockedWorkspaceCapability?.trusted,
+      lockedWorkspaceCwd,
+      ordinaryWorkspaces,
+      resolveWorkspaceMaintenanceTargetCwd,
+      workspace.capabilities?.workspaceCwd,
+    ],
+  );
+  const canStartAutofixInWorkspace = useCallback(
+    (workspaceCwd?: string) =>
+      Boolean(resolveAutofixWorkspaceCwd(workspaceCwd)),
+    [resolveAutofixWorkspaceCwd],
+  );
+  const startAutofixPrInNewSession = useCallback(
+    async (request: AutofixPrStartSessionRequest): Promise<void> => {
+      const targetCwd = resolveAutofixWorkspaceCwd(request.workspaceCwd);
+      if (!targetCwd) {
+        throw new Error(t('autofixPr.error.workspaceUnavailable'));
+      }
+      const prevBound = pendingBoundRunRef.current;
+      if (prevBound) {
+        if (prevBound.dispatchStarted) {
+          throw createScheduledTaskCancellation(
+            'Another scheduled run is already dispatching',
+          );
+        }
+        if (prevBound.timer !== undefined) clearTimeout(prevBound.timer);
+        pendingBoundRunRef.current = null;
+        prevBound.reject(new Error('superseded by another run'));
+      }
+      const prevNew = pendingNewSessionRunRef.current;
+      if (prevNew) {
+        if (prevNew.timer !== undefined) clearTimeout(prevNew.timer);
+        pendingNewSessionRunRef.current = null;
+        prevNew.reject(new Error('superseded by another run'));
+      }
+      const created = await createNewSession(
+        { kind: 'workspace', cwd: targetCwd },
+        request.sessionTitle
+          ? { carryManualTitle: request.sessionTitle }
+          : undefined,
+      );
+      if (!created) return;
+      onSessionIdChange?.(undefined);
+      const invocation = sessionOpenInvocationRef.current;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const pending: NonNullable<typeof pendingNewSessionRunRef.current> = {
+            prompt: request.prompt,
+            targetCwd,
+            invocation,
+            runtimeClient: boundRunRuntimeClientRef.current,
+            resolve,
+            reject,
+          };
+          pendingNewSessionRunRef.current = pending;
+          tryFireNewSessionRun();
+        });
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          return;
+        }
+        throw error;
+      }
+    },
+    [
+      createNewSession,
+      onSessionIdChange,
+      resolveAutofixWorkspaceCwd,
+      t,
+      tryFireNewSessionRun,
+    ],
+  );
+  const startAutofixPrFromAction = useCallback(
+    async (request: AutofixPrStartSessionRequest): Promise<void> => {
+      try {
+        await startAutofixPrInNewSession(request);
+      } catch (error) {
+        reportError(error, t('autofixPrWatches.startFailed'));
+      }
+    },
+    [reportError, startAutofixPrInNewSession, t],
+  );
+  const openAutofixPrWatch = useCallback(
+    async (entry: IndexedAutofixPrWatch): Promise<void> => {
+      const taskLists = await Promise.all(
+        autofixPrWatchWorkspaceIds.map(async (id, index) => {
+          try {
+            const list = await workspaceActions.listScheduledTasks(id);
+            return {
+              cwd:
+                autofixPrOperableWorkspaces[index]?.cwd ??
+                (id === undefined
+                  ? workspace.capabilities?.workspaceCwd
+                  : undefined),
+              tasks: Array.isArray(list) ? list : [],
+            };
+          } catch {
+            return { cwd: undefined, tasks: [] as DaemonScheduledTask[] };
+          }
+        }),
+      );
+      for (const { cwd, tasks } of taskLists) {
+        const owning = tasks.find((task) => {
+          const match = watchOfTask(task.prompt, [entry.watch]);
+          return (
+            match !== null &&
+            !match.stale &&
+            task.sessionId === entry.watch.session
+          );
+        });
+        if (owning?.sessionId) {
+          showChat();
+          await loadSidebarSession(owning.sessionId, cwd).catch(
+            (error: unknown) => {
+              reportError(error, 'Failed to open session');
+            },
+          );
+          return;
+        }
+      }
+      openPrWatches();
+    },
+    [
+      autofixPrOperableWorkspaces,
+      autofixPrWatchWorkspaceIds,
+      loadSidebarSession,
+      openPrWatches,
+      reportError,
+      showChat,
+      workspace.capabilities?.workspaceCwd,
+      workspaceActions,
+    ],
+  );
+  const autofixPrContextValue = useMemo<AutofixPrContextValue | null>(
+    () =>
+      autofixPrEnabled
+        ? {
+            watchIndex: autofixPrWatchIndex,
+            lists: sharedAutofixPrWatches.lists,
+            error: sharedAutofixPrWatches.error,
+            loaded: sharedAutofixPrWatches.loaded,
+            reload: sharedAutofixPrWatches.reload,
+            canStartInWorkspace: canStartAutofixInWorkspace,
+            startInNewSession: startAutofixPrFromAction,
+            openWatch: openAutofixPrWatch,
+          }
+        : null,
+    [
+      autofixPrEnabled,
+      autofixPrWatchIndex,
+      canStartAutofixInWorkspace,
+      openAutofixPrWatch,
+      sharedAutofixPrWatches.error,
+      sharedAutofixPrWatches.lists,
+      sharedAutofixPrWatches.loaded,
+      sharedAutofixPrWatches.reload,
+      startAutofixPrFromAction,
+    ],
+  );
   useEffect(
     () => () => {
       const pending = pendingBoundRunRef.current;
@@ -26093,6 +26412,7 @@ export function App({
           {/* Compact view is fixed on for every message surface (main chat,
               split panes, subagent detail, drawer) — no toggle remains. */}
           <CompactModeContext.Provider value={true}>
+          <AutofixPrContext.Provider value={autofixPrContextValue}>
           <WorkspaceRuntimeContext.Provider value={workspace}>
           <DaemonStatusCardsContext.Provider
             value={DAEMON_STATUS_CARD_RENDERERS}
@@ -28047,6 +28367,12 @@ export function App({
                         // Stopping runs the skill in the watch's own session,
                         // as a scheduled task's manual run does.
                         onRunPrompt={runTaskManually}
+                        onStartWatch={
+                          canStartAutofixInWorkspace()
+                            ? startAutofixPrInNewSession
+                            : undefined
+                        }
+                        defaultWorkspaceCwd={resolveAutofixWorkspaceCwd()}
                         workspaces={
                           lockedWorkspaceCwd
                             ? visibleWorkspaces
@@ -29940,6 +30266,7 @@ export function App({
         </ArrowKeyHistoryProvider>
         </DaemonStatusCardsContext.Provider>
         </WorkspaceRuntimeContext.Provider>
+        </AutofixPrContext.Provider>
         </CompactModeContext.Provider>
         </WebShellPortalRootContext.Provider>
         </McpAppHostContext.Provider>

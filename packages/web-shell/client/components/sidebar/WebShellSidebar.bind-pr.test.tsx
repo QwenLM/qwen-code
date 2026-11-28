@@ -67,7 +67,11 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogQueries,
 }));
 
+import type { AutofixPrContextValue } from '../autofixPr/AutofixPrContext';
+
 const { I18nProvider } = await import('../../i18n');
+const { indexAutofixPrWatches } = await import('../../utils/autofixPrWatches');
+const { AutofixPrContext } = await import('../autofixPr/AutofixPrContext');
 const { WebShellSidebar } = await import('./WebShellSidebar');
 
 installSidebarDomShims();
@@ -86,29 +90,40 @@ function renderSidebar(
       typeof WebShellSidebar
     >['sessionActions'];
     standalone?: boolean;
+    collapsed?: boolean;
+    onOpenPrWatches?: () => void;
+    autofixCtx?: AutofixPrContextValue;
   } = {},
 ): void {
+  const sidebar = (
+    <WebShellSidebar
+      collapsed={props.collapsed ?? false}
+      onCollapsedChange={() => {}}
+      onOpenSettings={() => {}}
+      onOpenDaemonStatus={() => {}}
+      onOpenScheduledTasks={() => {}}
+      onOpenPrWatches={props.onOpenPrWatches}
+      onOpenGoals={() => {}}
+      onOpenSessions={() => {}}
+      onOpenSplitView={() => {}}
+      onNewSession={() => false}
+      onLoadSession={loadSession}
+      onError={() => {}}
+      sessionActions={props.sessionActions}
+      onLoadStandaloneSession={props.standalone ? async () => {} : undefined}
+      onStandaloneNotice={props.standalone ? () => {} : undefined}
+    />
+  );
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <WebShellSidebar
-          collapsed={false}
-          onCollapsedChange={() => {}}
-          onOpenSettings={() => {}}
-          onOpenDaemonStatus={() => {}}
-          onOpenScheduledTasks={() => {}}
-          onOpenGoals={() => {}}
-          onOpenSessions={() => {}}
-          onOpenSplitView={() => {}}
-          onNewSession={() => false}
-          onLoadSession={loadSession}
-          onError={() => {}}
-          sessionActions={props.sessionActions}
-          onLoadStandaloneSession={
-            props.standalone ? async () => {} : undefined
-          }
-          onStandaloneNotice={props.standalone ? () => {} : undefined}
-        />
+        {props.autofixCtx ? (
+          <AutofixPrContext.Provider value={props.autofixCtx}>
+            {sidebar}
+          </AutofixPrContext.Provider>
+        ) : (
+          sidebar
+        )}
       </I18nProvider>,
     );
   });
@@ -557,5 +572,260 @@ describe('WebShellSidebar bind PR', () => {
     // the absence of Bind PR is attributable to the standalone exclusion.
     expect(menuItem(menu, 'Rename')).not.toBeUndefined();
     expect(menuItem(menu, 'Bind PR')).toBeUndefined();
+  });
+
+  it('offers state-aware autofix-pr items in the session overflow menu for open PRs only', async () => {
+    const startInNewSession = vi.fn().mockResolvedValue(undefined);
+    const openWatch = vi.fn().mockResolvedValue(undefined);
+    const lists = new Map([
+      [
+        '',
+        {
+          available: true,
+          watches: [
+            {
+              pr: 102,
+              repo: 'o/r',
+              host: 'github.com',
+              url: 'https://github.com/o/r/pull/102',
+              headRefName: 'feat/watched',
+              headSha: 'a'.repeat(40),
+              pushes: 0,
+              maxPushes: 10,
+              session: 'watch-sess',
+              preparedAt: null,
+              lastCheck: null,
+              checkedRecently: true,
+              lastRound: null,
+              stopped: null,
+              watch: {
+                every: 2,
+                reply: true,
+                instructions: '',
+                task: 'feedc0ffee12',
+              },
+              ended: null,
+              needsHuman: [],
+              worktreeExists: true,
+              fix: null,
+            },
+            {
+              pr: 103,
+              repo: 'o/r',
+              host: 'github.com',
+              url: 'https://github.com/o/r/pull/103',
+              headRefName: 'feat/idle',
+              headSha: 'a'.repeat(40),
+              pushes: 1,
+              maxPushes: 10,
+              session: 'idle-sess',
+              preparedAt: null,
+              lastCheck: null,
+              checkedRecently: false,
+              lastRound: null,
+              stopped: null,
+              watch: {
+                every: 2,
+                reply: true,
+                instructions: '',
+                task: 'feedc0ffee13',
+              },
+              ended: null,
+              needsHuman: [],
+              worktreeExists: true,
+              fix: null,
+            },
+          ],
+        },
+      ],
+    ]);
+    const autofixCtx: AutofixPrContextValue = {
+      watchIndex: indexAutofixPrWatches(lists, new Map([['', '/tmp/project']])),
+      lists,
+      error: null,
+      loaded: true,
+      reload: vi.fn().mockResolvedValue(undefined),
+      canStartInWorkspace: () => true,
+      startInNewSession,
+      openWatch,
+    };
+
+    active.sessions = [
+      makeSession('s1', {
+        prs: [
+          {
+            number: 100,
+            url: 'https://github.com/o/r/pull/100',
+            state: 'merged',
+          },
+          {
+            number: 101,
+            url: 'https://github.com/o/r/pull/101',
+            state: 'open',
+          },
+          {
+            number: 102,
+            url: 'https://github.com/o/r/pull/102',
+            state: 'open',
+          },
+          {
+            number: 103,
+            url: 'https://github.com/o/r/pull/103',
+            state: 'open',
+          },
+        ],
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar({ autofixCtx });
+    await flushSidebar();
+
+    let menu = await openSessionMenu();
+    expect(menuItem(menu, 'Autofix PR #100')).toBeUndefined();
+    const startItem = menuItem(menu, 'Autofix PR #101');
+    const watchItem = menuItem(menu, 'PR #102 watch (Watching)');
+    const resumeItem = menuItem(menu, 'Resume autofix PR #103');
+    expect(startItem).not.toBeUndefined();
+    expect(watchItem).not.toBeUndefined();
+    expect(resumeItem).not.toBeUndefined();
+
+    act(() => click(startItem!));
+    await flushSidebar();
+    expect(startInNewSession).toHaveBeenCalledWith({
+      prompt: '/autofix-pr https://github.com/o/r/pull/101',
+      workspaceCwd: '/tmp/project',
+      sessionTitle: 'Autofix PR #101',
+    });
+
+    menu = await openSessionMenu();
+    act(() => click(menuItem(menu, 'PR #102 watch (Watching)')!));
+    await flushSidebar();
+    expect(openWatch).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: 'watching' }),
+    );
+
+    menu = await openSessionMenu();
+    act(() => click(menuItem(menu, 'Resume autofix PR #103')!));
+    await flushSidebar();
+    expect(startInNewSession).toHaveBeenLastCalledWith({
+      prompt: '/autofix-pr resume 103',
+      workspaceCwd: '/tmp/project',
+      sessionTitle: 'Autofix PR #103',
+    });
+  });
+
+  it('shows active and needsHuman indicators on the PR watches navigation item in expanded and collapsed states', async () => {
+    const activeLists = new Map([
+      [
+        '',
+        {
+          available: true,
+          watches: [
+            {
+              pr: 10,
+              repo: 'o/r',
+              host: 'github.com',
+              url: 'https://github.com/o/r/pull/10',
+              headRefName: 'feat',
+              headSha: 'a'.repeat(40),
+              pushes: 0,
+              maxPushes: 10,
+              session: 's1',
+              preparedAt: null,
+              lastCheck: null,
+              checkedRecently: true,
+              lastRound: null,
+              stopped: null,
+              watch: {
+                every: 2,
+                reply: true,
+                instructions: '',
+                task: 'feedc0ffee12',
+              },
+              ended: null,
+              needsHuman: [],
+              worktreeExists: true,
+              fix: null,
+            },
+          ],
+        },
+      ],
+    ]);
+    const activeCtx: AutofixPrContextValue = {
+      watchIndex: indexAutofixPrWatches(activeLists),
+      lists: activeLists,
+      error: null,
+      loaded: true,
+      reload: vi.fn().mockResolvedValue(undefined),
+      canStartInWorkspace: () => true,
+      startInNewSession: vi.fn().mockResolvedValue(undefined),
+      openWatch: vi.fn().mockResolvedValue(undefined),
+    };
+
+    renderSidebar({ onOpenPrWatches: vi.fn(), autofixCtx: activeCtx });
+    await flushSidebar();
+    const activeBtn = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="PR watches · 1 active"]',
+    );
+    expect(activeBtn).not.toBeNull();
+    expect(
+      activeBtn?.querySelector('[data-pr-watches-active]')?.textContent,
+    ).toBe('1');
+
+    const attentionLists = new Map([
+      [
+        '',
+        {
+          available: true,
+          watches: [
+            {
+              ...activeLists.get('')!.watches[0]!,
+              needsHuman: [
+                {
+                  sha: 'a'.repeat(40),
+                  at: '2026-11-28T00:00:00Z',
+                  text: 'Decision A',
+                },
+                {
+                  sha: 'a'.repeat(40),
+                  at: '2026-11-28T00:01:00Z',
+                  text: 'Decision B',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    ]);
+    const attentionCtx: AutofixPrContextValue = {
+      ...activeCtx,
+      watchIndex: indexAutofixPrWatches(attentionLists),
+      lists: attentionLists,
+    };
+
+    renderSidebar({ onOpenPrWatches: vi.fn(), autofixCtx: attentionCtx });
+    await flushSidebar();
+    const attentionBtn = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="PR watches · 2 waiting for you"]',
+    );
+    expect(attentionBtn).not.toBeNull();
+    expect(
+      attentionBtn?.querySelector('[data-pr-watches-attention]')?.textContent,
+    ).toBe('2');
+
+    // Collapsed sidebar renders the icon-corner dot instead of a text count.
+    renderSidebar({
+      collapsed: true,
+      onOpenPrWatches: vi.fn(),
+      autofixCtx: attentionCtx,
+    });
+    await flushSidebar();
+    const collapsedBtn = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="PR watches · 2 waiting for you"]',
+    );
+    expect(collapsedBtn).not.toBeNull();
+    expect(
+      collapsedBtn?.querySelector('[data-pr-watches-attention]')?.textContent,
+    ).toBe('');
   });
 });

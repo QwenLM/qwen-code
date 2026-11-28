@@ -46,3 +46,40 @@
   height: 12px;
   flex-shrink: 0;
 }
+
+.watchDot {
+  width: 6px;
+  height: 6px;
+  margin-left: 2px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.watchDotWatching {
+  background: var(--success-color);
+}
+
+.watchDotFixing {
+  background: var(--primary, var(--agent-blue-500));
+  animation: watchDotPulse 1.8s ease-in-out infinite;
+}
+
+.watchDotAttention {
+  background: var(--warning-color);
+}
+
+@keyframes watchDotPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .watchDotFixing {
+    animation: none;
+  }
+}

@@ -9,6 +9,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
+import {
+  AutofixPrContext,
+  type AutofixPrContextValue,
+} from '../autofixPr/AutofixPrContext';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -1210,6 +1214,106 @@ describe('GitDialog', () => {
         url: 'https://github.com/o/r/pull/99',
         state: 'open',
       },
+    });
+  });
+
+  it('offers an autofix button right after creating a PR and closes the dialog on click', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      isGitRepo: true,
+      files: [],
+    });
+    workspaceGit.mockResolvedValue({ branch: 'feat/autofix', detached: false });
+    workspaceGitHubDefaultBranch.mockResolvedValue({ branch: 'origin/main' });
+    workspaceGitBranches.mockResolvedValue({
+      local: [{ name: 'main' }],
+      remote: [{ name: 'origin/main' }],
+    });
+    workspaceGitHubCreatePullRequest.mockResolvedValue({
+      number: 108,
+      url: 'https://github.com/o/r/pull/108',
+    });
+    updateSessionMetadata.mockResolvedValue({});
+    mockState.capabilities = { features: ['workspace_github_prs'] };
+
+    const startInNewSession = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    const autofixCtx: AutofixPrContextValue = {
+      watchIndex: new Map(),
+      lists: new Map(),
+      error: null,
+      loaded: true,
+      reload: vi.fn().mockResolvedValue(undefined),
+      canStartInWorkspace: () => true,
+      startInNewSession,
+      openWatch: vi.fn().mockResolvedValue(undefined),
+    };
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <AutofixPrContext.Provider value={autofixCtx}>
+            <GitDialog
+              workspaceCwd="/repo"
+              initialView="commit"
+              onClose={onClose}
+            />
+          </AutofixPrContext.Provider>
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const createPrBtn = Array.from(
+      document.body.querySelectorAll('[data-web-shell-dialog] button'),
+    ).find((b) => b.textContent?.includes('Create Pull Request'));
+    await act(async () => {
+      createPrBtn!.click();
+    });
+    await flush();
+
+    const titleInput = document.body.querySelector<HTMLInputElement>(
+      '[data-web-shell-dialog] input',
+    )!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(titleInput, 'feat: new PR');
+      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const submitBtn = Array.from(
+      document.body.querySelectorAll('[data-web-shell-dialog] button'),
+    ).find(
+      (b) =>
+        b.textContent?.includes('Create') &&
+        !b.textContent?.includes('Pull Request'),
+    );
+    await act(async () => {
+      submitBtn!.click();
+    });
+    await flush();
+
+    const autofixBtn = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="autofix-pr-action"]',
+    );
+    expect(autofixBtn?.textContent).toBe('Autofix');
+    await act(async () => {
+      autofixBtn!.click();
+      await Promise.resolve();
+    });
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(startInNewSession).toHaveBeenCalledWith({
+      prompt: '/autofix-pr https://github.com/o/r/pull/108',
+      workspaceCwd: '/repo',
+      sessionTitle: 'Autofix PR #108',
     });
   });
 });

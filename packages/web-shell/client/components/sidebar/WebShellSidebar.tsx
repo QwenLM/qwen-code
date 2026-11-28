@@ -61,7 +61,10 @@ import {
   FolderKanbanIcon,
   ActivityIcon,
   CalendarClockIcon,
+  EyeIcon,
   GitPullRequestIcon,
+  RotateCwIcon,
+  WrenchIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   ListChevronsDownUpIcon,
@@ -167,6 +170,15 @@ import {
   TOUCH_COMPOSER_QUERY,
 } from '../../hooks/useIsTouchComposer';
 import { SessionPrBadge, openableSessionPrs } from '../SessionPrBadge';
+import { useAutofixPrOptional } from '../autofixPr/AutofixPrContext';
+import {
+  buildAutofixPrStartCommand,
+  findWatchForPr,
+  isPrOpenForAutofix,
+  isWatchActivePhase,
+  resumeCommand,
+  summarizeAutofixPrWatches,
+} from '../../utils/autofixPrWatches';
 import { hasVisibleGoal } from '../GoalStatusStrip';
 import { SessionGoalMarker } from '../SessionGoalMarker';
 import {
@@ -1417,6 +1429,12 @@ export function WebShellSidebar({
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
+  const autofixPrCtx = useAutofixPrOptional();
+  const prWatchSummary = useMemo(
+    () =>
+      autofixPrCtx ? summarizeAutofixPrWatches(autofixPrCtx.watchIndex) : null,
+    [autofixPrCtx],
+  );
   const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
   // Fixed per-origin rank for host groups (#13727): every connected host,
   // including the focused one, occupies its stable position regardless of
@@ -6276,6 +6294,95 @@ export function WebShellSidebar({
         !recent?.isStandalone &&
         sessionActionItems.has('bindPr') &&
         canMutateSessionMetadata(session);
+      const sessionTargetCwd =
+        getSessionWorkspaceCwd(session) ?? session.workspaceCwd;
+      const autofixMenuActions: Array<{
+        key: string;
+        label: string;
+        kind: 'open' | 'resume' | 'start';
+        run: () => void;
+      }> =
+        !standalone &&
+        !recent?.isStandalone &&
+        sessionActionItems.has('bindPr') &&
+        autofixPrCtx
+          ? [...openableSessionPrs(session.prs ?? [])]
+              .reverse()
+              .filter((pr) => isPrOpenForAutofix(pr.state))
+              .flatMap<{
+                key: string;
+                label: string;
+                kind: 'open' | 'resume' | 'start';
+                run: () => void;
+              }>((pr, index) => {
+                const entry = findWatchForPr(autofixPrCtx.watchIndex, pr.url);
+                if (entry && isWatchActivePhase(entry.phase)) {
+                  const statusText =
+                    entry.watch.needsHuman.length > 0
+                      ? t('autofixPr.action.needsHuman', {
+                          count: entry.watch.needsHuman.length,
+                        })
+                      : entry.phase === 'fixing'
+                        ? t('autofixPr.action.fixing')
+                        : entry.phase === 'abandonedFix'
+                          ? t('autofixPr.action.retrying')
+                          : t('autofixPr.action.watching');
+                  return [
+                    {
+                      key: `${index}:open:${pr.url}`,
+                      label: t('autofixPr.menu.openWatch', {
+                        number: pr.number,
+                        status: statusText,
+                      }),
+                      kind: 'open' as const,
+                      run: () => {
+                        void autofixPrCtx.openWatch(entry);
+                      },
+                    },
+                  ];
+                }
+                const targetWorkspaceCwd =
+                  sessionTargetCwd ?? entry?.workspaceCwd;
+                if (!autofixPrCtx.canStartInWorkspace(targetWorkspaceCwd)) {
+                  return [];
+                }
+                if (entry && entry.phase === 'idle') {
+                  return [
+                    {
+                      key: `${index}:resume:${pr.url}`,
+                      label: t('autofixPr.menu.resume', { number: pr.number }),
+                      kind: 'resume' as const,
+                      run: () => {
+                        void autofixPrCtx.startInNewSession({
+                          prompt: resumeCommand(entry.watch),
+                          workspaceCwd: targetWorkspaceCwd,
+                          sessionTitle: t('autofixPr.sessionTitle', {
+                            number: pr.number,
+                          }),
+                        });
+                      },
+                    },
+                  ];
+                }
+                return [
+                  {
+                    key: `${index}:start:${pr.url}`,
+                    label: t('autofixPr.menu.start', { number: pr.number }),
+                    kind: 'start' as const,
+                    run: () => {
+                      void autofixPrCtx.startInNewSession({
+                        prompt: buildAutofixPrStartCommand({ pr: pr.url }),
+                        workspaceCwd: targetWorkspaceCwd,
+                        sessionTitle: t('autofixPr.sessionTitle', {
+                          number: pr.number,
+                        }),
+                      });
+                    },
+                  },
+                ];
+              })
+          : [];
+      const showAutofixPr = autofixMenuActions.length > 0;
       const activeExportScope = getActiveExportScope(session);
       const showExport = standalone
         ? sessionActionItems.has('export')
@@ -6341,6 +6448,7 @@ export function WebShellSidebar({
         showArchive ||
         (showRename && !inlineActionItems.has('rename')) ||
         showBindPr ||
+        showAutofixPr ||
         showGroup ||
         (showExport && !inlineActionItems.has('export')) ||
         (showDelete && !inlineActionItems.has('delete'));
@@ -6351,6 +6459,7 @@ export function WebShellSidebar({
           showArchive ||
           showRename ||
           showBindPr ||
+          showAutofixPr ||
           showExport ||
           showDelete ||
           showGroup);
@@ -6782,6 +6891,22 @@ export function WebShellSidebar({
                                 {t('sessionsOverview.bindPr')}
                               </DropdownMenuItem>
                             )}
+                            {autofixMenuActions.map((action) => (
+                              <DropdownMenuItem
+                                key={action.key}
+                                disabled={busy}
+                                onSelect={action.run}
+                              >
+                                {action.kind === 'open' ? (
+                                  <EyeIcon />
+                                ) : action.kind === 'resume' ? (
+                                  <RotateCwIcon />
+                                ) : (
+                                  <WrenchIcon />
+                                )}
+                                {action.label}
+                              </DropdownMenuItem>
+                            ))}
                             {showGroup && (
                               <DropdownMenuItem
                                 disabled={busy}
@@ -6886,6 +7011,7 @@ export function WebShellSidebar({
       startRename,
       splitSessionIds,
       effectiveArchivedSort,
+      autofixPrCtx,
       language,
       t,
     ],
@@ -7900,23 +8026,67 @@ export function WebShellSidebar({
       )}
       {projectFeaturesEnabled &&
         primaryNavItems.has('prWatches') &&
-        onOpenPrWatches && (
-          <button
-            className={styles.pluginButton}
-            type="button"
-            title={railLayout ? undefined : t('sidebar.prWatches')}
-            aria-label={t('sidebar.prWatches')}
-            aria-current={
-              railLayout && activePage === 'prWatches' ? 'page' : undefined
-            }
-            onClick={() => openNavigation(onOpenPrWatches)}
-          >
-            <span className={styles.navIcon}>
-              <GitPullRequestIcon size={16} strokeWidth={1.2} />
-            </span>
-            {!collapsed && !railLayout && <span>{t('sidebar.prWatches')}</span>}
-          </button>
-        )}
+        onOpenPrWatches &&
+        (() => {
+          const needsHuman = prWatchSummary?.needsHumanCount ?? 0;
+          const active = prWatchSummary?.activeCount ?? 0;
+          const hasAttention = needsHuman > 0;
+          const hasActive = !hasAttention && active > 0;
+          const prWatchesLabel = hasAttention
+            ? t('sidebar.prWatchesNeedsHuman', { count: needsHuman })
+            : hasActive
+              ? t('sidebar.prWatchesActive', { count: active })
+              : t('sidebar.prWatches');
+          return (
+            <button
+              className={styles.pluginButton}
+              type="button"
+              title={railLayout ? undefined : prWatchesLabel}
+              aria-label={prWatchesLabel}
+              aria-current={
+                railLayout && activePage === 'prWatches' ? 'page' : undefined
+              }
+              onClick={() => openNavigation(onOpenPrWatches)}
+            >
+              <span className={styles.navIcon}>
+                <GitPullRequestIcon size={16} strokeWidth={1.2} />
+                {(collapsed || railLayout) && (hasAttention || hasActive) && (
+                  <span
+                    className={cx(
+                      styles.prWatchesNavDot,
+                      hasAttention
+                        ? styles.prWatchesNavDotAttention
+                        : styles.prWatchesNavDotActive,
+                    )}
+                    data-pr-watches-attention={hasAttention ? '' : undefined}
+                    data-pr-watches-active={hasActive ? '' : undefined}
+                    aria-hidden="true"
+                  />
+                )}
+              </span>
+              {!collapsed && !railLayout && (
+                <>
+                  <span>{t('sidebar.prWatches')}</span>
+                  {(hasAttention || hasActive) && (
+                    <span
+                      className={cx(
+                        styles.prWatchesNavBadge,
+                        hasAttention
+                          ? styles.prWatchesNavBadgeAttention
+                          : styles.prWatchesNavBadgeActive,
+                      )}
+                      data-pr-watches-attention={hasAttention ? '' : undefined}
+                      data-pr-watches-active={hasActive ? '' : undefined}
+                      aria-hidden="true"
+                    >
+                      {hasAttention ? needsHuman : active}
+                    </span>
+                  )}
+                </>
+              )}
+            </button>
+          );
+        })()}
       {projectFeaturesEnabled &&
         primaryNavItems.has('workflows') &&
         workflowsEnabled && (

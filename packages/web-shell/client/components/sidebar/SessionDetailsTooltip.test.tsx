@@ -14,6 +14,11 @@ import { I18nProvider } from '../../i18n';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import { Button } from '../ui/button';
 import { WebShellPortalRootContext } from '../../portalRoot';
+import { indexAutofixPrWatches } from '../../utils/autofixPrWatches';
+import {
+  AutofixPrContext,
+  type AutofixPrContextValue,
+} from '../autofixPr/AutofixPrContext';
 import styles from '../SessionPrStateIcon.module.css';
 import { SidebarHoverSuppressionContext } from './sidebar-hover-suppression';
 
@@ -1316,6 +1321,171 @@ describe('SessionDetailsTooltip', () => {
     });
 
     expect(document.body.textContent).toContain('Failed to copy session ID');
+    act(() => root.unmount());
+  });
+
+  it('shows autofix-pr actions on open PR rows and hides them for merged or read-only rows', async () => {
+    vi.useFakeTimers();
+    const startInNewSession = vi.fn().mockResolvedValue(undefined);
+    const openWatch = vi.fn().mockResolvedValue(undefined);
+    const lists = new Map([
+      [
+        '',
+        {
+          available: true,
+          watches: [
+            {
+              pr: 9517,
+              repo: 'o/r',
+              host: 'github.com',
+              url: 'https://github.com/o/r/pull/9517',
+              headRefName: 'feat',
+              headSha: 'a'.repeat(40),
+              pushes: 1,
+              maxPushes: 10,
+              session: 'watch-session',
+              preparedAt: null,
+              lastCheck: null,
+              checkedRecently: true,
+              lastRound: null,
+              stopped: null,
+              watch: {
+                every: 2,
+                reply: true,
+                instructions: '',
+                task: 'feedc0ffee12',
+              },
+              ended: null,
+              needsHuman: [],
+              worktreeExists: true,
+              fix: null,
+            },
+          ],
+        },
+      ],
+    ]);
+    const ctx: AutofixPrContextValue = {
+      watchIndex: indexAutofixPrWatches(
+        lists,
+        new Map([['', '/work/qwen-code']]),
+      ),
+      lists,
+      error: null,
+      loaded: true,
+      reload: vi.fn().mockResolvedValue(undefined),
+      canStartInWorkspace: () => true,
+      startInNewSession,
+      openWatch,
+    };
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <AutofixPrContext.Provider value={ctx}>
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'session-1',
+                workspaceCwd: '/work/qwen-code',
+                clientCount: 1,
+                prs: [
+                  {
+                    number: 9500,
+                    url: 'https://github.com/o/r/pull/9500',
+                    state: 'merged',
+                  },
+                  {
+                    number: 9501,
+                    url: 'https://github.com/o/r/pull/9501',
+                    state: 'open',
+                  },
+                  {
+                    number: 9517,
+                    url: 'https://github.com/o/r/pull/9517',
+                    state: 'open',
+                  },
+                ],
+              }}
+              label="Fix CI"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Fix CI</button>
+            </SessionDetailsTooltip>
+          </AutofixPrContext.Provider>
+        </I18nProvider>,
+      );
+    });
+
+    await openDetails(container);
+    const actions = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="autofix-pr-action"]',
+      ),
+    );
+    expect(actions).toHaveLength(2);
+    expect(actions[0]?.textContent).toBe('Watching');
+    expect(actions[1]?.textContent).toBe('Autofix');
+
+    await act(async () => {
+      actions[1]!.click();
+      await Promise.resolve();
+    });
+    expect(startInNewSession).toHaveBeenCalledWith({
+      prompt: '/autofix-pr https://github.com/o/r/pull/9501',
+      workspaceCwd: '/work/qwen-code',
+      sessionTitle: 'Autofix PR #9501',
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+    await openDetails(container);
+    const watchPill = document.querySelector<HTMLButtonElement>(
+      '[data-testid="autofix-pr-action"][data-autofix-pr-state="watching"]',
+    );
+    await act(async () => {
+      watchPill!.click();
+      await Promise.resolve();
+    });
+    expect(openWatch).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: 'watching' }),
+    );
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <AutofixPrContext.Provider value={ctx}>
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'session-1',
+                workspaceCwd: '/work/qwen-code',
+                clientCount: 1,
+                prs: [
+                  {
+                    number: 9501,
+                    url: 'https://github.com/o/r/pull/9501',
+                    state: 'open',
+                  },
+                ],
+              }}
+              label="Fix CI"
+              time=""
+              completedUnread={false}
+              readOnly
+            >
+              <button type="button">Fix CI</button>
+            </SessionDetailsTooltip>
+          </AutofixPrContext.Provider>
+        </I18nProvider>,
+      );
+    });
+    await openDetails(container);
+    expect(
+      document.querySelector('[data-testid="autofix-pr-action"]'),
+    ).toBeNull();
+
     act(() => root.unmount());
   });
 });

@@ -2265,6 +2265,60 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'autofixPrWatches.stopFailed': 'Could not stop the watch',
   'autofixPrWatches.noOwner': (v) =>
     `No session of this Web Shell runs it. In a session of its workspace, /autofix-pr stop ${v?.pr ?? ''} cleans it up, or /autofix-pr resume ${v?.pr ?? ''} starts it again.`,
+  'autofixPrWatches.addWatch': 'Watch a PR',
+  'autofixPrWatches.resume': 'Resume watch',
+  'autofixPrWatches.resumeHint': (v) =>
+    `Runs /autofix-pr resume ${v?.pr ?? ''} to resume this watch`,
+  'autofixPrWatches.restart': 'Restart watch',
+  'autofixPrWatches.restartHint': (v) =>
+    `Runs /autofix-pr ${v?.pr ?? ''} in a new session to start watching again`,
+  'autofixPrWatches.cleanUp': 'Clean up',
+  'autofixPrWatches.cleanUpHint': (v) =>
+    `Runs /autofix-pr stop ${v?.pr ?? ''} to remove this ended watch`,
+  'autofixPrWatches.resumeFailed': 'Could not resume the watch',
+  'autofixPrWatches.startFailed': 'Could not start /autofix-pr',
+  'autofixPr.action.start': 'Autofix',
+  'autofixPr.action.startHint': (v) =>
+    `Start /autofix-pr for PR #${v?.number ?? ''} in a new session`,
+  'autofixPr.action.resume': 'Resume',
+  'autofixPr.action.resumeHint': (v) =>
+    `Resume /autofix-pr watch for PR #${v?.number ?? ''}`,
+  'autofixPr.action.watching': 'Watching',
+  'autofixPr.action.fixing': 'Fixing',
+  'autofixPr.action.retrying': 'Retrying',
+  'autofixPr.action.needsHuman': (v) => `Needs you (${v?.count ?? 0})`,
+  'autofixPr.action.openWatchHint': (v) =>
+    `Open the /autofix-pr watch for PR #${v?.number ?? ''}`,
+  'autofixPr.sessionTitle': (v) => `Autofix PR #${v?.number ?? ''}`,
+  'autofixPr.dialog.title': 'Watch a pull request',
+  'autofixPr.dialog.workspace': 'Workspace',
+  'autofixPr.dialog.prLabel': 'Pull request',
+  'autofixPr.dialog.prPlaceholder': 'PR URL or #number',
+  'autofixPr.dialog.prInvalid':
+    'Enter a GitHub pull request URL or a positive PR number.',
+  'autofixPr.dialog.openPrs': 'Open pull requests',
+  'autofixPr.dialog.loadingPrs': 'Loading open pull requests…',
+  'autofixPr.dialog.watchedBadge': 'Watching',
+  'autofixPr.dialog.mode': 'Mode',
+  'autofixPr.dialog.modeWatch': 'Continuous watch',
+  'autofixPr.dialog.modeOnce': 'One-shot (--once)',
+  'autofixPr.dialog.every': 'Check interval (minutes)',
+  'autofixPr.dialog.everyInvalid': 'Enter a positive whole number of minutes.',
+  'autofixPr.dialog.reply': 'Post replies on the PR',
+  'autofixPr.dialog.instructions': 'Additional instructions (optional)',
+  'autofixPr.dialog.instructionsPlaceholder':
+    'e.g. Keep the public API unchanged',
+  'autofixPr.dialog.cancel': 'Cancel',
+  'autofixPr.dialog.submit': 'Start autofix',
+  'autofixPr.error.workspaceUnavailable':
+    'The selected workspace is unavailable or untrusted.',
+  'autofixPr.menu.start': (v) => `Autofix PR #${v?.number ?? ''}`,
+  'autofixPr.menu.resume': (v) => `Resume autofix PR #${v?.number ?? ''}`,
+  'autofixPr.menu.openWatch': (v) =>
+    `PR #${v?.number ?? ''} watch (${v?.status ?? ''})`,
+  'sidebar.prWatchesActive': (v) => `PR watches · ${v?.count ?? 0} active`,
+  'sidebar.prWatchesNeedsHuman': (v) =>
+    `PR watches · ${v?.count ?? 0} waiting for you`,
   'scheduledTasks.gate.notRunYet': 'gate not run yet',
   'scheduledTasks.gate.neverDelivered': 'never',
   'scheduledTasks.gate.lastFailed': 'last run failed',

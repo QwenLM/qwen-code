@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { PlusIcon } from 'lucide-react';
 import {
   useWorkspaceActions,
   type DaemonAutofixPrWatch,
@@ -17,12 +18,21 @@ import {
   useAutofixPrWatches,
 } from '../../hooks/useAutofixPrWatches';
 import {
+  buildAutofixPrStartCommand,
+  indexAutofixPrWatches,
+  resumeCommand,
   stopCommand,
   watchOfTask,
   watchPhase,
 } from '../../utils/autofixPrWatches';
 import { workspaceLabelForCwd } from '../../utils/workspace';
+import {
+  useAutofixPrOptional,
+  type AutofixPrStartSessionRequest,
+} from '../autofixPr/AutofixPrContext';
 import { AutofixPrWatchSummary } from '../autofixPr/AutofixPrWatchSummary';
+import { Button } from '../ui/button';
+import { StartAutofixPrDialog } from './StartAutofixPrDialog';
 import styles from './AutofixPrWatchesDialog.module.css';
 
 interface AutofixPrWatchesDialogProps {
@@ -36,6 +46,13 @@ interface AutofixPrWatchesDialogProps {
   /** `workspaceCwd`: the workspace of the session's task, where its
    * session is restored (absent on a single-workspace page). */
   onOpenSession: (sessionId: string, workspaceCwd?: string) => void;
+  /** Start `/autofix-pr` (or resume/clean up an unowned watch) in a dedicated
+   * session of the target workspace. */
+  onStartWatch?: (
+    request: AutofixPrStartSessionRequest,
+  ) => void | Promise<void>;
+  /** Default workspace selected in the "Watch a PR" dialog. */
+  defaultWorkspaceCwd?: string;
   /** Registered workspaces (multi-workspace daemons): every operable one's
    * watches are listed, each under its workspace. */
   workspaces?: DaemonWorkspaceCapability[];
@@ -46,7 +63,10 @@ interface AutofixPrWatchesDialogProps {
 
 interface Row {
   key: string;
+  /** Displayed workspace label in multi-workspace views. */
   workspaceCwd?: string;
+  /** Target workspace cwd for starting/resuming this watch in a new session. */
+  listedWorkspaceCwd?: string;
   watch: DaemonAutofixPrWatch;
   /** The session of this Web Shell that owns the watch: the one its
    * scheduled task is bound to. */
@@ -64,12 +84,15 @@ interface Row {
 export function AutofixPrWatchesDialog({
   onRunPrompt,
   onOpenSession,
+  onStartWatch,
+  defaultWorkspaceCwd,
   workspaces,
   lockedWorkspace,
   onError,
 }: AutofixPrWatchesDialogProps) {
   const { t } = useI18n();
   const actions = useWorkspaceActions();
+  const sharedWatches = useAutofixPrOptional();
   const workspaceList = useMemo(() => workspaces ?? [], [workspaces]);
   const isMultiWorkspace = !lockedWorkspace && workspaceList.length > 1;
   // As the scheduled-tasks page reads them: the primary by its unqualified
@@ -92,7 +115,26 @@ export function AutofixPrWatchesDialog({
         : [undefined],
     [operable],
   );
-  const { lists, error, loaded } = useAutofixPrWatches(true, workspaceIds);
+  const localWatches = useAutofixPrWatches(
+    sharedWatches === null,
+    workspaceIds,
+  );
+  const sharedReload = sharedWatches?.reload;
+  useEffect(() => {
+    if (sharedReload) {
+      void sharedReload();
+    }
+  }, [sharedReload]);
+  const { lists, error, loaded } = sharedWatches ?? localWatches;
+  const watchIndex = useMemo(() => {
+    if (sharedWatches) return sharedWatches.watchIndex;
+    const cwdByKey = new Map<string, string>();
+    workspaceIds.forEach((id, index) => {
+      const cwd = operable[index]?.cwd;
+      if (cwd) cwdByKey.set(autofixPrWatchesKey(id), cwd);
+    });
+    return indexAutofixPrWatches(lists, cwdByKey);
+  }, [lists, operable, sharedWatches, workspaceIds]);
 
   // The scheduled tasks of the same workspaces: a watch's task names the
   // session of this Web Shell that runs it.
@@ -149,9 +191,11 @@ export function AutofixPrWatchesDialog({
             match !== null && !match.stale && task.sessionId === watch.session
           );
         });
+        const listedWorkspaceCwd = operable[index]?.cwd ?? defaultWorkspaceCwd;
         out.push({
           key: `${key}:${watch.repo}#${watch.pr}`,
           ...(isMultiWorkspace ? { workspaceCwd: operable[index]?.cwd } : {}),
+          ...(listedWorkspaceCwd ? { listedWorkspaceCwd } : {}),
           watch,
           owner: owning?.task.sessionId ?? null,
           ...(owning?.cwd ? { ownerCwd: owning.cwd } : {}),
@@ -159,7 +203,14 @@ export function AutofixPrWatchesDialog({
       }
     });
     return out;
-  }, [isMultiWorkspace, lists, operable, tasks, workspaceIds]);
+  }, [
+    defaultWorkspaceCwd,
+    isMultiWorkspace,
+    lists,
+    operable,
+    tasks,
+    workspaceIds,
+  ]);
 
   const unreadable = useMemo(
     () =>
@@ -169,7 +220,11 @@ export function AutofixPrWatchesDialog({
     [lists, workspaceIds],
   );
 
-  const [stopping, setStopping] = useState<string | null>(null);
+  const [busyRow, setBusyRow] = useState<{
+    key: string;
+    kind: 'stop' | 'primary';
+  } | null>(null);
+  const [showStartDialog, setShowStartDialog] = useState(false);
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
@@ -177,29 +232,112 @@ export function AutofixPrWatchesDialog({
       mountedRef.current = false;
     };
   }, []);
-  const stop = useCallback(
-    async (row: Row) => {
-      if (stopping !== null || !row.owner) return;
-      setStopping(row.key);
+
+  const runRowAction = useCallback(
+    async (
+      key: string,
+      kind: 'stop' | 'primary',
+      fallbackError: string,
+      work: () => void | Promise<void>,
+    ) => {
+      if (busyRow !== null) return;
+      setBusyRow({ key, kind });
       try {
-        await onRunPrompt(
-          stopCommand(row.watch),
-          row.owner,
-          ...(row.ownerCwd !== undefined ? [row.ownerCwd] : []),
-        );
+        await work();
       } catch (err) {
-        onError(err, t('autofixPrWatches.stopFailed'));
+        onError(err, fallbackError);
       } finally {
-        if (mountedRef.current) setStopping(null);
+        if (mountedRef.current) setBusyRow(null);
       }
     },
-    [onError, onRunPrompt, stopping, t],
+    [busyRow, onError],
+  );
+
+  const stop = useCallback(
+    (row: Row) => {
+      if (row.owner) {
+        void runRowAction(
+          row.key,
+          'stop',
+          t('autofixPrWatches.stopFailed'),
+          () =>
+            onRunPrompt(
+              stopCommand(row.watch),
+              row.owner!,
+              ...(row.ownerCwd !== undefined ? [row.ownerCwd] : []),
+            ),
+        );
+      } else if (onStartWatch) {
+        void runRowAction(
+          row.key,
+          'stop',
+          t('autofixPrWatches.stopFailed'),
+          () =>
+            onStartWatch({
+              prompt: stopCommand(row.watch),
+              ...(row.listedWorkspaceCwd
+                ? { workspaceCwd: row.listedWorkspaceCwd }
+                : {}),
+              sessionTitle: t('autofixPr.sessionTitle', {
+                number: row.watch.pr,
+              }),
+            }),
+        );
+      }
+    },
+    [onRunPrompt, onStartWatch, runRowAction, t],
+  );
+
+  const resumeOrRestart = useCallback(
+    (row: Row, kind: 'resume' | 'restart') => {
+      const prompt =
+        kind === 'resume'
+          ? resumeCommand(row.watch)
+          : buildAutofixPrStartCommand({ pr: row.watch.url || row.watch.pr });
+      const fallbackError =
+        kind === 'resume'
+          ? t('autofixPrWatches.resumeFailed')
+          : t('autofixPrWatches.startFailed');
+      if (kind === 'resume' && row.owner) {
+        void runRowAction(row.key, 'primary', fallbackError, () =>
+          onRunPrompt(
+            prompt,
+            row.owner!,
+            ...(row.ownerCwd !== undefined ? [row.ownerCwd] : []),
+          ),
+        );
+      } else if (onStartWatch) {
+        void runRowAction(row.key, 'primary', fallbackError, () =>
+          onStartWatch({
+            prompt,
+            ...(row.listedWorkspaceCwd
+              ? { workspaceCwd: row.listedWorkspaceCwd }
+              : {}),
+            sessionTitle: t('autofixPr.sessionTitle', { number: row.watch.pr }),
+          }),
+        );
+      }
+    },
+    [onRunPrompt, onStartWatch, runRowAction, t],
   );
 
   return (
     <div className={styles.page}>
-      <div className={styles.description}>
-        {t('autofixPrWatches.description')}
+      <div className={styles.headerRow}>
+        <div className={styles.description}>
+          {t('autofixPrWatches.description')}
+        </div>
+        {onStartWatch && (
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => setShowStartDialog(true)}
+            data-testid="autofix-pr-add-watch"
+          >
+            <PlusIcon className="size-3.5" aria-hidden="true" />
+            {t('autofixPrWatches.addWatch')}
+          </Button>
+        )}
       </div>
       {error && (
         <div className={styles.loadError}>
@@ -207,17 +345,84 @@ export function AutofixPrWatchesDialog({
         </div>
       )}
       {loaded && rows.length === 0 && unreadable.length === 0 && (
-        <div className={styles.empty}>{t('autofixPrWatches.empty')}</div>
+        <div className={styles.empty}>
+          <span>{t('autofixPrWatches.empty')}</span>
+          {onStartWatch && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => setShowStartDialog(true)}
+            >
+              <PlusIcon className="size-3.5" aria-hidden="true" />
+              {t('autofixPrWatches.addWatch')}
+            </Button>
+          )}
+        </div>
       )}
       <div className={styles.list}>
         {rows.map((row) => {
           const phase = watchPhase(row.watch);
-          // One a gate still checks runs elsewhere, and is stopped there;
-          // one nothing checks is cleaned up or resumed in a session here.
+          // One a gate still checks (or a live fix still runs) runs elsewhere,
+          // and is stopped there; one nothing checks is cleaned up or resumed
+          // in a session here.
           const elsewhere =
-            phase !== 'ended' &&
-            phase !== 'unscheduled' &&
-            row.watch.checkedRecently;
+            phase === 'fixing' ||
+            (phase !== 'ended' &&
+              phase !== 'unscheduled' &&
+              row.watch.checkedRecently);
+          const isStopping =
+            busyRow?.key === row.key && busyRow.kind === 'stop';
+          const isPrimaryBusy =
+            busyRow?.key === row.key && busyRow.kind === 'primary';
+
+          const ownedSummaryProps = row.owner
+            ? {
+                onOpenSession: () =>
+                  onOpenSession(
+                    row.owner!,
+                    ...(row.ownerCwd !== undefined ? [row.ownerCwd] : []),
+                  ),
+                ...(phase === 'idle'
+                  ? {
+                      onPrimaryAction: () => resumeOrRestart(row, 'resume'),
+                      primaryActionLabel: t('autofixPrWatches.resume'),
+                      primaryActionHint: t('autofixPrWatches.resumeHint', {
+                        pr: row.watch.pr,
+                      }),
+                    }
+                  : {}),
+                onStop: () => stop(row),
+              }
+            : !elsewhere && onStartWatch
+              ? phase === 'idle' || phase === 'abandonedFix'
+                ? {
+                    onPrimaryAction: () => resumeOrRestart(row, 'resume'),
+                    primaryActionLabel: t('autofixPrWatches.resume'),
+                    primaryActionHint: t('autofixPrWatches.resumeHint', {
+                      pr: row.watch.pr,
+                    }),
+                    onStop: () => stop(row),
+                  }
+                : phase === 'ended' || phase === 'unscheduled'
+                  ? {
+                      onPrimaryAction: () => resumeOrRestart(row, 'restart'),
+                      primaryActionLabel: t('autofixPrWatches.restart'),
+                      primaryActionHint: t('autofixPrWatches.restartHint', {
+                        pr: row.watch.pr,
+                      }),
+                    }
+                  : phase === 'merged' || phase === 'closed'
+                    ? {
+                        onStop: () => stop(row),
+                        stopLabel: t('autofixPrWatches.cleanUp'),
+                        stopHint: t('autofixPrWatches.cleanUpHint', {
+                          pr: row.watch.pr,
+                        }),
+                      }
+                    : {}
+              : {};
+
           return (
             <div key={row.key} className={styles.card}>
               {row.workspaceCwd && (
@@ -228,20 +433,12 @@ export function AutofixPrWatchesDialog({
               <AutofixPrWatchSummary
                 watch={row.watch}
                 showPr
-                stopping={stopping === row.key}
+                stopping={isStopping}
+                primaryActionBusy={isPrimaryBusy}
                 outsideDaemon={!row.owner && elsewhere}
-                {...(row.owner
-                  ? {
-                      onOpenSession: () =>
-                        onOpenSession(
-                          row.owner!,
-                          ...(row.ownerCwd !== undefined ? [row.ownerCwd] : []),
-                        ),
-                      onStop: () => void stop(row),
-                    }
-                  : {})}
+                {...ownedSummaryProps}
               />
-              {!row.owner && !elsewhere && (
+              {!row.owner && !elsewhere && !onStartWatch && (
                 <div className={styles.hint}>
                   {t('autofixPrWatches.noOwner', { pr: row.watch.pr })}
                 </div>
@@ -258,6 +455,15 @@ export function AutofixPrWatchesDialog({
           </div>
         ))}
       </div>
+      {showStartDialog && onStartWatch && (
+        <StartAutofixPrDialog
+          workspaces={operable}
+          defaultWorkspaceCwd={defaultWorkspaceCwd ?? operable[0]?.cwd}
+          watchIndex={watchIndex}
+          onStart={onStartWatch}
+          onClose={() => setShowStartDialog(false)}
+        />
+      )}
     </div>
   );
 }

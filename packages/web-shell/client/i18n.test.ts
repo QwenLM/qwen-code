@@ -1232,3 +1232,67 @@ describe('archived conversations catalog parity', () => {
     }
   });
 });
+
+const AUTOFIX_PR_ENTRY_KEYS = [
+  'autofixPrWatches.addWatch',
+  'autofixPrWatches.resume',
+  'autofixPrWatches.resumeHint',
+  'autofixPrWatches.restart',
+  'autofixPrWatches.restartHint',
+  'autofixPrWatches.cleanUp',
+  'autofixPrWatches.cleanUpHint',
+  'autofixPrWatches.resumeFailed',
+  'autofixPrWatches.startFailed',
+  'autofixPr.action.start',
+  'autofixPr.action.startHint',
+  'autofixPr.action.resume',
+  'autofixPr.action.resumeHint',
+  'autofixPr.action.watching',
+  'autofixPr.action.fixing',
+  'autofixPr.action.retrying',
+  'autofixPr.action.needsHuman',
+  'autofixPr.action.openWatchHint',
+  'autofixPr.sessionTitle',
+  'autofixPr.dialog.title',
+  'autofixPr.dialog.workspace',
+  'autofixPr.dialog.prLabel',
+  'autofixPr.dialog.prPlaceholder',
+  'autofixPr.dialog.prInvalid',
+  'autofixPr.dialog.openPrs',
+  'autofixPr.dialog.loadingPrs',
+  'autofixPr.dialog.watchedBadge',
+  'autofixPr.dialog.mode',
+  'autofixPr.dialog.modeWatch',
+  'autofixPr.dialog.modeOnce',
+  'autofixPr.dialog.every',
+  'autofixPr.dialog.everyInvalid',
+  'autofixPr.dialog.reply',
+  'autofixPr.dialog.instructions',
+  'autofixPr.dialog.instructionsPlaceholder',
+  'autofixPr.dialog.cancel',
+  'autofixPr.dialog.submit',
+  'autofixPr.error.workspaceUnavailable',
+  'autofixPr.menu.start',
+  'autofixPr.menu.resume',
+  'autofixPr.menu.openWatch',
+  'sidebar.prWatchesActive',
+  'sidebar.prWatchesNeedsHuman',
+] as const;
+
+describe('autofix-pr entry points catalog parity', () => {
+  it('carries every autofix-pr entry point key in every shipped catalog without simplified-only glyphs in zh-TW', () => {
+    const vars = { pr: 42, number: 42, count: 2, status: 'Watching' };
+    for (const key of AUTOFIX_PR_ENTRY_KEYS) {
+      const en = getTranslator('en')(key, vars);
+      expect(en).not.toBe(key);
+      for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+        const translated = getTranslator(language)(key, vars);
+        expect(translated).not.toBe(key);
+        expect(translated).not.toBe(en);
+        if (language === 'zh-TW') {
+          expect(`${key}: ${translated}`).not.toMatch(SIMPLIFIED_ONLY_GLYPHS);
+        }
+      }
+    }
+  });
+});

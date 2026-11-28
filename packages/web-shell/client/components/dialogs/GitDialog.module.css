@@ -81,6 +81,13 @@
   padding: 4px 0;
 }
 
+.prStatusRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
 .commitStatusError {
   color: var(--destructive, #ef4444);
 }

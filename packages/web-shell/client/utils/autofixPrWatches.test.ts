@@ -7,8 +7,19 @@
 import { describe, expect, it } from 'vitest';
 import type { DaemonAutofixPrWatch } from '../daemon/workspace/types';
 import {
+  buildAutofixPrStartCommand,
+  findWatchForPr,
+  getWatchActiveStatus,
+  indexAutofixPrWatches,
+  isPrOpenForAutofix,
+  isWatchActivePhase,
+  normalizePrUrlKey,
+  parseAutofixPrInput,
   parseAutofixPrTick,
+  resumeCommand,
   stopCommand,
+  summarizeAutofixPrWatches,
+  summarizeSessionPrWatchStatus,
   watchOfTask,
   watchPhase,
 } from './autofixPrWatches';
@@ -126,6 +137,169 @@ describe('watchPhase', () => {
   });
 });
 
-it('stops a watch as a user types it', () => {
+it('stops and resumes a watch as a user types it', () => {
   expect(stopCommand(watch())).toBe('/autofix-pr stop 12');
+  expect(resumeCommand(watch())).toBe('/autofix-pr resume 12');
+});
+
+describe('buildAutofixPrStartCommand', () => {
+  it('builds watch, once, in-place, interval, no-reply, and instructions commands', () => {
+    expect(
+      buildAutofixPrStartCommand({ pr: 'https://github.com/o/r/pull/12' }),
+    ).toBe('/autofix-pr https://github.com/o/r/pull/12');
+    expect(
+      buildAutofixPrStartCommand({
+        pr: 12,
+        mode: 'watch',
+        every: 5,
+        noReply: true,
+        instructions: '  keep the public API\nunchanged  ',
+      }),
+    ).toBe('/autofix-pr 12 --every 5 --no-reply keep the public API unchanged');
+    expect(
+      buildAutofixPrStartCommand({
+        pr: 'https://github.com/o/r/pull/12',
+        mode: 'once',
+        every: 5,
+        noReply: true,
+      }),
+    ).toBe('/autofix-pr https://github.com/o/r/pull/12 --once --no-reply');
+    expect(
+      buildAutofixPrStartCommand({
+        pr: 12,
+        mode: 'in-place',
+        every: 5,
+      }),
+    ).toBe('/autofix-pr 12 --in-place');
+  });
+});
+
+describe('normalizePrUrlKey and parseAutofixPrInput', () => {
+  it('canonicalizes PR URLs case-insensitively and ignores trailing slashes', () => {
+    expect(normalizePrUrlKey('https://GitHub.com/Acme/Widgets/pull/12/')).toBe(
+      'github.com/acme/widgets#12',
+    );
+    expect(
+      normalizePrUrlKey('https://git.corp.example:8443/Org/Repo/pull/7'),
+    ).toBe('git.corp.example:8443/org/repo#7');
+    expect(normalizePrUrlKey('javascript:alert(1)')).toBeNull();
+    expect(normalizePrUrlKey('https://github.com/o/r/issues/12')).toBeNull();
+    expect(normalizePrUrlKey('https://github.com/o/r/pull/0')).toBeNull();
+  });
+
+  it('parses bare numbers, #numbers, and http(s) PR URLs', () => {
+    expect(parseAutofixPrInput('42')).toEqual({ kind: 'number', number: 42 });
+    expect(parseAutofixPrInput('#42')).toEqual({ kind: 'number', number: 42 });
+    expect(
+      parseAutofixPrInput('https://github.com/Acme/Widgets/pull/42/'),
+    ).toEqual({
+      kind: 'url',
+      url: 'https://github.com/Acme/Widgets/pull/42',
+      number: 42,
+    });
+    for (const invalid of ['', '0', '#0', '-1', 'abc', 'ftp://x/o/r/pull/1']) {
+      expect(parseAutofixPrInput(invalid)).toBeNull();
+    }
+  });
+});
+
+describe('indexAutofixPrWatches and helpers', () => {
+  it('indexes watches by canonical PR URL and keeps higher-priority phase on duplicates', () => {
+    const idleWatch = watch({ checkedRecently: false });
+    const fixingWatch = watch({
+      fix: { attempt: '0123456789ab', startedAt: null, fresh: true },
+    });
+    const index = indexAutofixPrWatches(
+      new Map([
+        ['', { available: true, watches: [idleWatch] }],
+        ['second', { available: true, watches: [fixingWatch] }],
+      ]),
+      new Map([
+        ['', '/w/main'],
+        ['second', '/w/second'],
+      ]),
+    );
+    const found = findWatchForPr(index, 'https://GITHUB.com/O/R/pull/12/');
+    expect(found?.phase).toBe('fixing');
+    expect(found?.workspaceCwd).toBe('/w/second');
+    expect(
+      findWatchForPr(index, 'https://github.com/other/repo/pull/12'),
+    ).toBeUndefined();
+  });
+
+  it('distinguishes active watch phases and open PR states', () => {
+    expect(isWatchActivePhase('watching')).toBe(true);
+    expect(isWatchActivePhase('fixing')).toBe(true);
+    expect(isWatchActivePhase('abandonedFix')).toBe(true);
+    expect(isWatchActivePhase('idle')).toBe(false);
+    expect(isWatchActivePhase('ended')).toBe(false);
+    expect(isWatchActivePhase('merged')).toBe(false);
+
+    expect(isPrOpenForAutofix('open')).toBe(true);
+    expect(isPrOpenForAutofix('draft')).toBe(true);
+    expect(isPrOpenForAutofix(undefined)).toBe(true);
+    expect(isPrOpenForAutofix('merged')).toBe(false);
+    expect(isPrOpenForAutofix('closed')).toBe(false);
+  });
+
+  it('summarizes active watches, needsHuman counts, and per-session PR watch status', () => {
+    const watching = watch({ pr: 10, url: 'https://github.com/o/r/pull/10' });
+    const fixing = watch({
+      pr: 11,
+      url: 'https://github.com/o/r/pull/11',
+      fix: { attempt: '0123456789ab', startedAt: null, fresh: true },
+    });
+    const waitingIdle = watch({
+      pr: 12,
+      url: 'https://github.com/o/r/pull/12',
+      checkedRecently: false,
+      needsHuman: [
+        { sha: 'a'.repeat(40), at: '2026-11-28T00:00:00Z', text: 'Decide A' },
+        { sha: 'a'.repeat(40), at: '2026-11-28T00:01:00Z', text: 'Decide B' },
+      ],
+    });
+    const endedWithOldNeedsHuman = watch({
+      pr: 13,
+      url: 'https://github.com/o/r/pull/13',
+      ended: { at: '2026-11-28T00:00:00Z', reason: 'stopped' },
+      needsHuman: [
+        { sha: 'a'.repeat(40), at: '2026-11-28T00:00:00Z', text: 'Old' },
+      ],
+    });
+    const index = indexAutofixPrWatches(
+      new Map([
+        [
+          '',
+          {
+            available: true,
+            watches: [watching, fixing, waitingIdle, endedWithOldNeedsHuman],
+          },
+        ],
+      ]),
+    );
+
+    expect(summarizeAutofixPrWatches(index)).toEqual({
+      activeCount: 2,
+      needsHumanCount: 2,
+    });
+    expect(getWatchActiveStatus(endedWithOldNeedsHuman)).toBeNull();
+    expect(
+      summarizeSessionPrWatchStatus(index, [
+        { url: 'https://github.com/o/r/pull/10', state: 'open' },
+        { url: 'https://github.com/o/r/pull/11', state: 'open' },
+      ]),
+    ).toEqual({ status: 'fixing', needsHumanCount: 0 });
+    // Merged PRs do not contribute a watch badge.
+    expect(
+      summarizeSessionPrWatchStatus(index, [
+        { url: 'https://github.com/o/r/pull/12', state: 'merged' },
+      ]),
+    ).toBeNull();
+    expect(
+      summarizeSessionPrWatchStatus(index, [
+        { url: 'https://github.com/o/r/pull/10', state: 'open' },
+        { url: 'https://github.com/o/r/pull/12', state: 'open' },
+      ]),
+    ).toEqual({ status: 'needsHuman', needsHumanCount: 2 });
+  });
 });

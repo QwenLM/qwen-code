@@ -4,6 +4,14 @@
   gap: 12px;
 }
 
+.headerRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
 .description {
   font-size: 13px;
   color: var(--muted-foreground);
@@ -17,6 +25,10 @@
 }
 
 .empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
   padding: 32px 16px;
   text-align: center;
   color: var(--muted-foreground);

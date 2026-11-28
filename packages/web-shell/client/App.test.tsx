@@ -892,6 +892,10 @@ const {
     suggestWorkspacePaths: vi.fn(),
     pickWorkspaceDirectory: vi.fn(),
     listScheduledTasks: vi.fn(),
+    listAutofixPrWatches: vi.fn().mockResolvedValue({
+      available: true,
+      watches: [],
+    }),
     updateScheduledTask: vi.fn(),
     deleteScheduledTask: vi.fn(),
     runScheduledTask: vi.fn(),
@@ -1276,6 +1280,11 @@ const {
           workspaceCwd?: string,
         ) => Promise<void>;
         onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
+        onStartWatch?: (request: {
+          prompt: string;
+          workspaceCwd?: string;
+          sessionTitle?: string;
+        }) => Promise<void>;
       } | null,
       latestGoalsProps: null as {
         onCreateGoal?: (
@@ -3173,6 +3182,11 @@ vi.doMock('./components/dialogs/AutofixPrWatchesDialog', async () => {
     AutofixPrWatchesDialog: (props: {
       onRunPrompt?: (prompt: string, sessionId: string) => Promise<void>;
       onOpenSession?: (sessionId: string) => void;
+      onStartWatch?: (request: {
+        prompt: string;
+        workspaceCwd?: string;
+        sessionTitle?: string;
+      }) => Promise<void>;
     }) => {
       testState.latestPrWatchesProps = props;
       return React.createElement('div');
@@ -16285,6 +16299,9 @@ beforeEach(() => {
   mockWorkspaceActions.controlGoal.mockResolvedValue({
     snapshot: { v: 2, activity: 'idle', goal: null },
   });
+  mockWorkspaceActions.listAutofixPrWatches
+    .mockReset()
+    .mockResolvedValue({ available: true, watches: [] });
   mockWorkspaceActions.loadPreflight.mockResolvedValue(null);
   mockWorkspaceActions.loadEnv.mockResolvedValue(null);
   mockCollectSystemInfo.mockImplementation(() => ({
@@ -58727,6 +58744,111 @@ describe('App PR watches from another context', () => {
       vi.clearAllTimers();
     },
   );
+
+  it('starts /autofix-pr in a fresh trusted workspace session and refuses untrusted targets', async () => {
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['autofix_pr_watches'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+          kind: 'ordinary',
+        },
+        {
+          id: 'untrusted',
+          cwd: '/tmp/untrusted',
+          primary: false,
+          trusted: false,
+          kind: 'ordinary',
+        },
+      ],
+    };
+    mockConnection.sessionId = 'existing-session';
+    mockConnection.workspaceCwd = '/tmp/project';
+    mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
+
+    const { container, rerender } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-pr-watches"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    const onStartWatch = testState.latestPrWatchesProps?.onStartWatch;
+    expect(typeof onStartWatch).toBe('function');
+
+    let untrustedErr: unknown;
+    await act(async () => {
+      try {
+        await onStartWatch!({
+          prompt: '/autofix-pr https://github.com/o/r/pull/99',
+          workspaceCwd: '/tmp/untrusted',
+          sessionTitle: 'Autofix PR #99',
+        });
+      } catch (err) {
+        untrustedErr = err;
+      }
+    });
+    expect(untrustedErr).toBeInstanceOf(Error);
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    mockSessionActions.createSession.mockResolvedValue({
+      sessionId: 'new-autofix-session',
+    });
+    mockSessionActions.sendPrompt.mockImplementation(
+      (_text: string, opts?: { onAdmitted?: () => void }) => {
+        opts?.onAdmitted?.();
+        return Promise.resolve();
+      },
+    );
+    let settled = false;
+    let startError: unknown;
+    let startPromise!: Promise<void>;
+    await act(async () => {
+      startPromise = onStartWatch!({
+        prompt: '/autofix-pr https://github.com/o/r/pull/42',
+        workspaceCwd: '/tmp/project',
+        sessionTitle: 'Autofix PR #42',
+      })
+        .then(() => {
+          settled = true;
+        })
+        .catch((err) => {
+          startError = err;
+        });
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(settled).toBe(false);
+
+    mockConnection.sessionId = undefined;
+    rerender();
+    await flush();
+    await startPromise;
+    expect(startError).toBeUndefined();
+    expect(settled).toBe(true);
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: '/tmp/project',
+        sessionContext: { kind: 'workspace', cwd: '/tmp/project' },
+      }),
+    );
+    expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
+      'Autofix PR #42',
+    );
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/autofix-pr https://github.com/o/r/pull/42',
+      expect.any(Object),
+    );
+  });
 });
 
 describe('App /goal command', () => {
