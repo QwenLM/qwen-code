@@ -41,12 +41,14 @@ import {
   statedContextWindows,
 } from '../utils/contextLengthError.js';
 import {
+  estimatePartChars,
   resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
 } from './compactionInputSlimming.js';
 import {
   CHARS_PER_TOKEN,
+  estimateContextTextTokens,
   estimateContentTokens,
   estimatePromptTokens,
 } from './tokenEstimation.js';
@@ -55,6 +57,7 @@ import {
   composePostCompactHistory,
   countToolResponseImages,
   postProcessSummary,
+  POST_COMPACT_TOKEN_BUDGET,
   stripAnalysisBlock,
   type SubagentSnapshot,
 } from './postCompactAttachments.js';
@@ -229,6 +232,21 @@ function estimateSummaryOutputTokens(
     Math.ceil(nonCjkCharCount / CHARS_PER_TOKEN) +
     Math.ceil(cjkCharCount * CJK_CHAR_TOKEN_MULTIPLIER);
   return Math.max(genericEstimate, cjkAwareEstimate);
+}
+
+// The published count already includes text at char/4. Charge only the
+// difference when deciding whether the next request has room for attachments.
+function restorationTextCorrection(contents: Content[]): number {
+  let correction = 0;
+  const visit = (text: string) => {
+    correction +=
+      estimateContextTextTokens(text) -
+      Math.ceil(text.length / CHARS_PER_TOKEN);
+  };
+  for (const entry of contents) {
+    for (const part of entry.parts ?? []) estimatePartChars(part, 0, visit);
+  }
+  return correction;
 }
 
 /**
@@ -824,11 +842,16 @@ export class ChatCompressionService {
       lastCurated.parts?.some((part) => !!part.functionCall)
         ? curatedHistory.slice(0, -1)
         : curatedHistory;
-    const pendingHistory = pendingToolResult ? [opts.pendingUserMessage!] : [];
+    const pendingHistory = opts.pendingUserMessage
+      ? [opts.pendingUserMessage]
+      : [];
     // Keep raw pending input intact for replay and compression checkpoints.
-    const visiblePendingHistory = config.getAutoMemoryContext?.()
+    const visiblePendingUserHistory = config.getAutoMemoryContext?.()
       ? pendingHistory
       : withoutAutoMemorySnapshots(pendingHistory);
+    const visiblePendingHistory = pendingToolResult
+      ? visiblePendingUserHistory
+      : [];
     const candidateTailStart =
       opts.requestPayloadTooLarge || triggerReason === 'image_overflow'
         ? undefined
@@ -1035,13 +1058,15 @@ export class ChatCompressionService {
     // applying it here floors the output budget at 1 for every slimmed
     // estimate that sits just under it, dropping the summary on every send
     // (#13876).
-    const reactiveContextCeiling =
+    const mainPromptCeiling =
       opts.observedServerCeiling &&
-      opts.observedServerCeilingKind !== 'input' &&
-      sideQueryOnMainRoute &&
       (opts.requestRouteKey === undefined ||
         opts.requestRouteKey === config.getModelRouteIdentity())
         ? Math.min(contextLimit, opts.observedServerCeiling)
+        : contextLimit;
+    const reactiveContextCeiling =
+      sideQueryOnMainRoute && opts.observedServerCeilingKind !== 'input'
+        ? mainPromptCeiling
         : contextLimit;
     // Window the output budget clamps against: on the main route it is the
     // main model's window, capped at any server-reported ceiling (#13432) — a
@@ -1734,7 +1759,6 @@ export class ChatCompressionService {
     let newTokenCount = originalHistoryTokenCount;
     let extraHistory: Content[] = [];
     let canCalculateNewTokenCount = false;
-    let restorationTokenCount = 0;
 
     if (!isSummaryEmpty) {
       const transcriptPath = await opts.getExistingTranscriptPath?.();
@@ -1757,8 +1781,21 @@ export class ChatCompressionService {
               lastCurated.parts?.some((p) => !!p.functionCall)
             ? curatedHistory.slice(0, -1)
             : curatedHistory;
+      // A retry of the summary request may have learned a smaller window.
+      const restorationWindow = sideQueryOnMainRoute
+        ? Math.min(mainPromptCeiling, coldWindow)
+        : mainPromptCeiling;
+      const restorationThreshold = computeThresholds(
+        restorationWindow,
+        config.getAutoCompactThreshold(),
+      ).auto;
+      const restorationTarget = Math.min(
+        restorationThreshold,
+        Math.max(0, restorationWindow - HARD_BUFFER),
+      );
 
       // Restore older context; the retained operation is appended below.
+      let withoutAttachments: Content[] | undefined;
       try {
         extraHistory = await composePostCompactHistory(
           historyForCompose,
@@ -1767,6 +1804,11 @@ export class ChatCompressionService {
             workspaceRoot: config.getTargetDir(),
             transcriptHint,
             signal,
+            fileTokenBudget: Math.min(
+              POST_COMPACT_TOKEN_BUDGET,
+              Math.floor(restorationWindow / 4),
+              Math.floor(restorationThreshold / 2),
+            ),
             // A payload-overflow compaction (#10380) exists because the
             // serialized request exceeded the gateway's BYTE limit while
             // staying under the token threshold. Restoration re-embeds
@@ -1786,6 +1828,10 @@ export class ChatCompressionService {
                   tuning.maxRecentImages -
                     countToolResponseImages(retainedTail),
                 ),
+            imageTokenEstimate: slimmingConfig.imageTokenEstimate,
+            onEmbeddedAttachments: (history) => {
+              withoutAttachments = history;
+            },
             // Restore plan-mode reminder + running-subagent snapshot so the
             // post-compact agent does not lose either piece of mid-session
             // state. Both reduce to no-ops when the corresponding source is
@@ -1842,8 +1888,30 @@ export class ChatCompressionService {
         ];
       }
 
-      restorationTokenCount = estimateContentTokens(
-        extraHistory.slice(2),
+      const restoredHistory = extraHistory.slice(2); // skip [summary, model ack]
+      const attachRetainedTail = (composedHistory: Content[]): Content[] => {
+        if (retainedTail.length === 0) return composedHistory;
+        // Keep the canonical summary/ack prefix for rewind and restoration.
+        // A user bridge separates the ack from the original model response.
+        return [
+          composedHistory[0],
+          composedHistory[1],
+          {
+            role: 'user',
+            parts: [
+              ...composedHistory
+                .slice(2)
+                .flatMap((entry) =>
+                  entry.role === 'user' ? (entry.parts ?? []) : [],
+                ),
+              { text: RETAINED_COMPACTION_TAIL_REMINDER },
+            ],
+          },
+          ...retainedTail,
+        ];
+      };
+      let restorationTokenCount = estimateContentTokens(
+        restoredHistory,
         slimmingConfig.imageTokenEstimate,
       );
       if (transcriptHint) {
@@ -1852,30 +1920,12 @@ export class ChatCompressionService {
         );
       }
       if (retainedTail.length > 0) {
-        const temporalReminder = RETAINED_COMPACTION_TAIL_REMINDER;
         restorationTokenCount += Math.ceil(
-          temporalReminder.length / CHARS_PER_TOKEN,
+          RETAINED_COMPACTION_TAIL_REMINDER.length / CHARS_PER_TOKEN,
         );
-        // Keep the canonical summary/ack prefix for rewind and restoration.
-        // A user bridge separates the ack from the original model response.
-        extraHistory = [
-          extraHistory[0],
-          extraHistory[1],
-          {
-            role: 'user',
-            parts: [
-              ...extraHistory
-                .slice(2)
-                .flatMap((entry) =>
-                  entry.role === 'user' ? (entry.parts ?? []) : [],
-                ),
-              { text: temporalReminder },
-            ],
-          },
-          ...retainedTail,
-        ];
-        markCompressedHistory(extraHistory, 3);
       }
+      extraHistory = attachRetainedTail(extraHistory);
+      let summaryTokenCorrection = 0;
 
       // Best-effort token math using model-reported token counts when
       // available. Some OpenAI-compatible providers omit usage for the
@@ -1947,7 +1997,17 @@ export class ChatCompressionService {
         // anchor needs its latest model output added explicitly. Count new
         // restoration/temporal context, not the retained tail, a second time.
         newTokenCount += restorationTokenCount;
+        if (outputCountIsEstimated) {
+          summaryTokenCorrection = Math.max(
+            0,
+            estimateContextTextTokens(stripAnalysisBlock(summary)) -
+              compressionOutputTokenCount,
+          );
+        }
       } else {
+        summaryTokenCorrection = restorationTextCorrection(
+          extraHistory.slice(0, 2),
+        );
         const estimatedOriginalVisibleTokenCount = estimateContentTokens(
           curatedHistory,
           slimmingConfig.imageTokenEstimate,
@@ -1989,6 +2049,40 @@ export class ChatCompressionService {
             );
         }
       }
+
+      if (
+        withoutAttachments &&
+        canCalculateNewTokenCount &&
+        newTokenCount +
+          summaryTokenCorrection +
+          restorationTextCorrection(visiblePendingUserHistory) +
+          restorationTextCorrection(restoredHistory) >=
+          restorationTarget
+      ) {
+        const withoutRestoration = attachRetainedTail(withoutAttachments);
+        // Remove only the restored-history delta, preserving the existing
+        // accounting for the summary and non-visible system/tool context.
+        const before = newTokenCount;
+        newTokenCount = Math.max(
+          0,
+          newTokenCount +
+            estimateContentTokens(
+              withoutRestoration,
+              slimmingConfig.imageTokenEstimate,
+            ) -
+            estimateContentTokens(
+              extraHistory,
+              slimmingConfig.imageTokenEstimate,
+            ),
+        );
+        config
+          .getDebugLogger()
+          .debug(
+            `[chat-compression] dropped restored files and images at target ${restorationTarget} (${before} -> ${newTokenCount})`,
+          );
+        extraHistory = withoutRestoration;
+      }
+      if (retainedTail.length > 0) markCompressedHistory(extraHistory, 3);
     }
 
     logChatCompression(

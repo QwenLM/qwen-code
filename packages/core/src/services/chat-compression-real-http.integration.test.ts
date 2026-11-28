@@ -170,6 +170,7 @@ describe('ChatCompressionService real local HTTP/SSE integration', () => {
       getProxy: () => undefined,
       getUsageStatisticsEnabled: () => false,
       getChatCompression: () => ({}),
+      getAutoCompactThreshold: () => undefined,
       getHookSystem: () => undefined,
       getOutputLanguage: () => 'en',
       getApprovalMode: () => ApprovalMode.DEFAULT,

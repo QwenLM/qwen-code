@@ -3141,6 +3141,134 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
     },
   );
 
+  it.each([
+    { window: 16_000, original: 18_000, newest: 2, references: true },
+    { window: 32_000, original: 18_000, newest: 4, references: true },
+    { window: 16_000, original: 21_000, newest: 0, references: false },
+    {
+      window: 16_000,
+      original: 18_000,
+      newest: 0,
+      references: true,
+      fileCharacter: '中',
+    },
+    {
+      window: 16_000,
+      original: 18_000,
+      newest: 0,
+      references: false,
+      pending: 'ท'.repeat(4000),
+    },
+  ])(
+    'restores the newest files that fit a $window window at $original tokens (#15487)',
+    async ({
+      window,
+      original,
+      newest,
+      references,
+      fileCharacter,
+      pending,
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-window-'));
+      try {
+        const history = [
+          userText('Earlier conversation '.repeat(1800)),
+          modelText('OK'),
+        ];
+        const files = Array.from({ length: 5 }, (_, i) => {
+          const file = join(dir, `file-${i}.txt`);
+          const body = (fileCharacter ?? String(i)).repeat(8000);
+          writeFileSync(file, body);
+          history.push(
+            content(
+              'model',
+              fnCall('read_file', { file_path: file }, String(i)),
+            ),
+            content(
+              'user',
+              fnResponse('read_file', { output: 'First line' }, String(i)),
+            ),
+            modelText('Read.'),
+          );
+          return { file, body };
+        });
+        spySideQuery(
+          '<state_snapshot>Inspected files.</state_snapshot>',
+          usage(13_000, 100),
+        );
+        const transcriptPath = join(dir, 'chat.jsonl');
+        const result = await compressWith(
+          fakeChat(history),
+          fakeConfig({
+            contextWindowSize: window,
+            approvalMode: ApprovalMode.PLAN,
+            extra: { getTargetDir: () => dir },
+          }),
+          {
+            originalTokenCount: original,
+            pendingUserMessage: pending ? userText(pending) : undefined,
+            getExistingTranscriptPath: async () => transcriptPath,
+          },
+        );
+        expectCompressed(result);
+        expect(result.info.newTokenCount + 3000).toBeLessThan(window);
+        const restored = result
+          .newHistory!.flatMap((entry) => entry.parts ?? [])
+          .map((part) => part.text ?? '')
+          .join('\n');
+        expect(restored).toContain('<plan-mode-active>');
+        expect(result.newHistory![0].parts?.[0].text).toContain(
+          buildCompactionTranscriptHint(transcriptPath),
+        );
+        for (const [i, { file, body }] of files.entries()) {
+          expect(restored.includes(file)).toBe(references);
+          expect(restored.includes(body)).toBe(i >= files.length - newest);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(['main', 'other', 'retry'])(
+    'bounds restored images by the window reported on the main route (%s)',
+    async (route) => {
+      const history = screenshotSession('Inspect the screenshots.', [
+        'img-1',
+        'img-2',
+        'img-3',
+      ]);
+      history.push(modelText('Done.'));
+      const summary = spySideQuery(
+        '<state_snapshot>Inspected images.</state_snapshot>',
+        usage(30_000, 100),
+      );
+      if (route === 'retry') {
+        summary.mockRejectedValueOnce(
+          new Error(
+            "This model's maximum context length is 16384 tokens. However, your prompt contains 17000 input tokens, which exceeds this limit even without any output tokens.",
+          ),
+        );
+      }
+      const result = await compressWith(
+        fakeChat(history),
+        fakeConfig({
+          extra: { getModelRouteIdentity: () => 'main' },
+        }),
+        {
+          originalTokenCount: 40_000,
+          observedServerCeiling: route === 'retry' ? undefined : 16_384,
+          observedServerCeilingKind: 'input',
+          requestRouteKey: route === 'retry' ? 'main' : route,
+        },
+      );
+      expectCompressed(result);
+      expect(JSON.stringify(result.newHistory).includes('img-3')).toBe(
+        route === 'other',
+      );
+    },
+  );
+
   it('rejects inflation when a restored file grows beyond the original context', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'qwen-restore-cost-'));
     const file = join(dir, 'context.txt');
