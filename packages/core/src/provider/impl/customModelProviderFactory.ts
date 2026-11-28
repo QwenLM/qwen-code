@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { resolveEnvVarsInObject } from '@qwen-code/resource';
 import type { SettingsService } from '@qwen-code/resource';
 
 import stripJsonComments from 'strip-json-comments';
@@ -164,7 +165,8 @@ function mergeProviderSettingsTexts(
       Object.assign(merged, block);
     }
   }
-  return merged;
+  // Raw settings texts bypass SettingsService's environment resolution.
+  return resolveEnvVarsInObject(merged);
 }
 
 /**
