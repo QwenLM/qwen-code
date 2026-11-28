@@ -168,9 +168,12 @@ const DaemonTranscriptViewport = forwardRef<
     (turnId: string) => {
       const recordId = viewport.blocks?.find((block) => block.id === turnId)
         ?.sourceRecordIds?.[0];
-      openTurnCalls?.(turnId, recordId);
+      openTurnCalls?.(turnId, recordId, undefined, undefined, {
+        sessionId: props.sourceSessionId,
+        workspaceCwd: props.workspaceCwd,
+      });
     },
-    [openTurnCalls, viewport.blocks],
+    [openTurnCalls, viewport.blocks, props.sourceSessionId, props.workspaceCwd],
   );
   const {
     historical,

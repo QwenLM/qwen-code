@@ -174,7 +174,7 @@ import {
 } from './components/TranscriptViewport';
 import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
-import { TurnCallsProvider } from './turnCallsContext';
+import { TurnCallsProvider, type TurnCallsOrigin } from './turnCallsContext';
 import { useModelConfigurations } from './hooks/useModelConfigurations';
 import { useModelRefresh } from './hooks/useModelRefresh';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
@@ -390,6 +390,7 @@ import {
 import {
   artifactDisplayName,
   resolvePendingArtifactJumpOpen,
+  resolveWorkspaceCwdForPath,
   runArtifactLibrarySessionJump,
   type PendingArtifactJumpOpenRequest,
 } from './components/artifacts/artifactUtils';
@@ -2592,6 +2593,8 @@ function parsePersistedArtifactPanelTab(
         ...common,
         id: 'turn_calls',
         kind: 'turn_calls',
+        sessionId: tab['sessionId'] as string | undefined,
+        workspaceCwd: tab['workspaceCwd'] as string | undefined,
         turnId: tab['turnId'],
         recordId: tab['recordId'] as string | undefined,
         promptId: tab['promptId'] as string | undefined,
@@ -7487,11 +7490,21 @@ export function App({
         onWorkspaceFileOpen(file.workspacePath);
         return;
       }
+      // An absolute path names its own workspace (see openFilePreview): the
+      // pre-check stat and the file tab must both use the workspace the file
+      // actually lives in, not the currently active session's workspace.
+      const resolvedWorkspaceCwd = file.workspacePath
+        ? resolveWorkspaceCwdForPath(
+            file.workspacePath,
+            workspaceCwd,
+            workspaceCapabilitiesRef.current?.workspaces,
+          )
+        : workspaceCwd;
       const open = (resolvedFile: AttachmentPreviewRequest) => {
         const workspacePath = resolvedFile.workspacePath ?? resolvedFile.name;
         const workspaceId = resolveArtifactWorkspaceOwner(
           workspaceCapabilitiesRef.current,
-          workspaceCwd,
+          resolvedWorkspaceCwd,
         )?.id;
         const previewOnly =
           resolvedFile.text !== undefined ||
@@ -7500,7 +7513,7 @@ export function App({
         const tab: ArtifactPanelTab = {
           id: previewOnly
             ? `${sourcePreview ? 'source-attachment' : 'attachment'}:${sourceSessionId ?? ''}:${resolvedFile.attachmentId ?? workspacePath}`
-            : `file:${workspaceCwd ?? ''}:${workspacePath}`,
+            : `file:${resolvedWorkspaceCwd ?? ''}:${workspacePath}`,
           kind: 'file',
           title: resolvedFile.name,
           workspacePath,
@@ -7517,7 +7530,9 @@ export function App({
           ...(sourceSessionId ? { sourceSessionId } : {}),
           ...(previewOnly ? { previewOnly: true } : {}),
           ...(sourcePreview ? { sourcePreview: true } : {}),
-          ...(workspaceCwd ? { workspaceCwd } : {}),
+          ...(resolvedWorkspaceCwd
+            ? { workspaceCwd: resolvedWorkspaceCwd }
+            : {}),
           ...(workspaceId ? { workspaceId } : {}),
         };
         setArtifactPanelTabs((tabs) =>
@@ -7568,7 +7583,7 @@ export function App({
         file.workspacePath &&
         file.text === undefined &&
         file.data === undefined &&
-        artifactWorkspaceCwdRef.current === workspaceCwd &&
+        artifactWorkspaceCwdRef.current === resolvedWorkspaceCwd &&
         artifactWorkspaceActionsRef.current
       ) {
         const owner = sessionOwnerGuard.capture();
@@ -9140,6 +9155,7 @@ export function App({
       recordId?: string,
       promptId?: string,
       promptLabel?: string,
+      origin?: TurnCallsOrigin,
     ) => {
       if (!artifactPanelOpenRef.current) {
         preserveEnvironmentPanelOnArtifactOpenRef.current = true;
@@ -9150,7 +9166,11 @@ export function App({
       const tab: ArtifactPanelTab = {
         id: 'turn_calls',
         kind: 'turn_calls',
-        sessionId: connection.sessionId,
+        // The turn belongs to the session whose view opened it, not
+        // necessarily the app-level current session (split view, or a stale
+        // current after switching workspaces). The panel resolves the
+        // turn's file links in this workspace.
+        sessionId: origin?.sessionId ?? connection.sessionId,
         title: t('turnCalls.title'),
         turnId,
         recordId: recordId ?? user?.sourceRecordIds?.[0],
@@ -9160,6 +9180,9 @@ export function App({
           (user?.kind === 'user'
             ? user.text.replace(/\s+/g, ' ').trim().slice(0, 160)
             : undefined),
+        ...(origin?.workspaceCwd || connection.workspaceCwd
+          ? { workspaceCwd: origin?.workspaceCwd || connection.workspaceCwd }
+          : {}),
       };
       // One panel follows the turn the reader asked about, so opening another
       // turn's list retargets the existing tab instead of stacking tabs.
@@ -9173,7 +9196,13 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t, store, connection.sessionId],
+    [
+      getDefaultReviewPanelWidth,
+      t,
+      store,
+      connection.sessionId,
+      connection.workspaceCwd,
+    ],
   );
   const handleTurnOutputOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
@@ -9403,13 +9432,29 @@ export function App({
         typeof change === 'string'
           ? undefined
           : getFileChangePreviewContent(change);
+      // An absolute path names its own workspace: resolve it against the
+      // registered workspaces instead of trusting the caller's workspace, so
+      // a link from another session's message opens in the workspace the file
+      // actually lives in. Relative paths keep the caller's workspace.
+      const resolvedWorkspaceCwd = resolveWorkspaceCwdForPath(
+        path,
+        previewWorkspaceCwd,
+        workspaceCapabilitiesRef.current?.workspaces,
+      );
+      const resolvedWorkspaceId =
+        resolvedWorkspaceCwd === previewWorkspaceCwd
+          ? previewWorkspaceId
+          : resolveArtifactWorkspaceOwner(
+              workspaceCapabilitiesRef.current,
+              resolvedWorkspaceCwd,
+            )?.id;
       const tab: ArtifactPanelTab = {
-        id: `file:${previewWorkspaceCwd ?? ''}:${path}`,
+        id: `file:${resolvedWorkspaceCwd ?? ''}:${path}`,
         kind: 'file',
-        title: displayPath(path, previewWorkspaceCwd),
+        title: displayPath(path, resolvedWorkspaceCwd),
         workspacePath: path,
-        ...(previewWorkspaceCwd ? { workspaceCwd: previewWorkspaceCwd } : {}),
-        ...(previewWorkspaceId ? { workspaceId: previewWorkspaceId } : {}),
+        ...(resolvedWorkspaceCwd ? { workspaceCwd: resolvedWorkspaceCwd } : {}),
+        ...(resolvedWorkspaceId ? { workspaceId: resolvedWorkspaceId } : {}),
         ...(previewContent !== undefined ? { previewContent } : {}),
       };
       setArtifactPanelTabs((tabs) =>

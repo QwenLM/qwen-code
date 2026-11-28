@@ -300,6 +300,9 @@ describe('TranscriptViewport', () => {
     expect(onOpen).toHaveBeenCalledWith(
       historicalUser.sourceBlockIds![0],
       'old',
+      undefined,
+      undefined,
+      { sessionId: 'session', workspaceCwd: undefined },
     );
   });
   it('keeps an open search and its query when the navigation host changes', async () => {

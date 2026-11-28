@@ -71,6 +71,8 @@ interface MessageItemProps {
   onToolResultOpen?: (itemId: string) => void;
   onInsightReportOpen?: (path: string) => void;
   workspaceCwd?: string;
+  /** Session whose transcript this message belongs to. */
+  sourceSessionId?: string;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   sendFailed?: boolean;
@@ -124,6 +126,7 @@ export const MessageItem = memo(function MessageItem({
   onToolResultOpen,
   onInsightReportOpen,
   workspaceCwd,
+  sourceSessionId,
   showRetryHint = false,
   onRetryClick,
   sendFailed = false,
@@ -467,7 +470,11 @@ export const MessageItem = memo(function MessageItem({
       deleteTitle={t('messageDelete.entry')}
       onOpenTurnCalls={
         openTurnCalls && turnCallsTurnId
-          ? () => openTurnCalls(turnCallsTurnId)
+          ? () =>
+              openTurnCalls(turnCallsTurnId, undefined, undefined, undefined, {
+                sessionId: sourceSessionId,
+                workspaceCwd,
+              })
           : undefined
       }
       turnCallsTitle={t('turnCalls.open')}
@@ -518,6 +525,7 @@ function areMessageItemPropsEqual(
   if (prev.onTurnOutputOpen !== next.onTurnOutputOpen) return false;
   if (prev.onToolResultOpen !== next.onToolResultOpen) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
+  if (prev.sourceSessionId !== next.sourceSessionId) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
   if (prev.sendFailed !== next.sendFailed) return false;

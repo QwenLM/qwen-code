@@ -434,6 +434,8 @@ export type ArtifactPanelTab =
       kind: 'turn_calls';
       title: string;
       sessionId?: string;
+      /** Workspace of the session whose turn this tab lists. */
+      workspaceCwd?: string;
       promptLabel?: string;
       /** Id of the turn's leading user message, whose calls this tab lists. */
       turnId: string;
@@ -1986,14 +1988,14 @@ export function ArtifactPanel({
           />
         ) : activeTab.kind === 'turn_calls' ? (
           <TurnCallsPanel
-            key={`${activeTab.sessionId}:${workspaceCwd}`}
+            key={`${activeTab.sessionId}:${activeTab.workspaceCwd ?? workspaceCwd}`}
             turnId={activeTab.turnId}
             ownerSessionId={activeTab.sessionId}
             recordId={activeTab.recordId}
             promptId={activeTab.promptId}
             promptLabel={activeTab.promptLabel}
             onSelectPrompt={onSelectTurnCallsPrompt}
-            workspaceCwd={workspaceCwd}
+            workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
             onOpenFile={onNestedRightPanelOpen}
             onOpenAgent={onOpenNestedSubagent}
           />
