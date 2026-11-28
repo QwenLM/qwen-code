@@ -69,6 +69,12 @@ describe('Chat layout relayout boundary CSS contracts', () => {
     expect(rules.some((decls) => decls.get('flex') === '1 1 auto')).toBe(false);
   });
 
+  it('keeps .chatSubtree .chatSurface as display: contents so .content and .footer stay direct flex children of .chatViewWrap', () => {
+    const surfaceRules = findRules(appCss, '.chatSubtree .chatSurface');
+    expect(surfaceRules).toHaveLength(1);
+    expect(surfaceRules[0]?.get('display')).toBe('contents');
+  });
+
   it('pins flex: 1 1 0% on ChatPane .pane .body', () => {
     const bodyRules = findRules(chatPaneCss, '.pane .body');
     expect(bodyRules.length).toBeGreaterThan(0);

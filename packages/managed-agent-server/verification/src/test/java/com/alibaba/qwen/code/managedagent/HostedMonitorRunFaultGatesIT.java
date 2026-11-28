@@ -180,7 +180,6 @@ class HostedMonitorRunFaultGatesIT {
                 "--qwen.managed-agent.harness.capability-digest=sha256:"
                         + "a".repeat(64),
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
@@ -295,7 +294,8 @@ class HostedMonitorRunFaultGatesIT {
             driverConfig.put("tenantId", tenant);
             driverConfig.put("storeUrl", "http://127.0.0.1:"
                     + spring.getWebServer().getPort());
-            driverConfig.put("brokerUrl", broker.getBaseUri().toString());
+            driverConfig.put("brokerUrl", "http://127.0.0.1:"
+                    + spring.getWebServer().getPort());
             driverConfig.put("statusGateUrl", "http://127.0.0.1:"
                     + gateServer.getAddress().getPort());
             driverConfig.put("cases", sessions);

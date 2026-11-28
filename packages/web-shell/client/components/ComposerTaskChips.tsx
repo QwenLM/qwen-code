@@ -11,6 +11,7 @@ import {
 } from 'react';
 import {
   BotIcon,
+  CalendarClockIcon,
   CircleAlertIcon,
   CircleHelpIcon,
   CirclePauseIcon,
@@ -50,6 +51,10 @@ export interface ComposerTaskChipsProps {
   onExplainTask?: (task: DaemonSessionTaskWithWorkflowStatus) => void;
   /** Hand focus back to the composer, optionally with a typed character. */
   onReturnToInput?: (text?: string) => void;
+  /** Count of active in-memory session-scoped cron jobs and pending wakeups. */
+  activeScheduledCount?: number;
+  /** Opens the environment panel's scheduled-tasks section. */
+  onOpenScheduledTasks?: () => void;
 }
 
 const LABEL_KEYS: Record<ComposerTaskChipKind, [string, string]> = {
@@ -133,6 +138,8 @@ export const ComposerTaskChips = forwardRef<
     isTaskOpen,
     onExplainTask,
     onReturnToInput,
+    activeScheduledCount = 0,
+    onOpenScheduledTasks,
   },
   ref,
 ) {
@@ -145,9 +152,11 @@ export const ComposerTaskChips = forwardRef<
   const openGroup: ComposerTaskChipGroup | undefined = groups.find(
     (group) => group.kind === openKind && group.tasks.length > 1,
   );
+  const showScheduledChip =
+    activeScheduledCount > 0 && Boolean(onOpenScheduledTasks);
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const chipRefs = useRef(new Map<ComposerTaskChipKind, HTMLButtonElement>());
+  const chipRefs = useRef(new Map<string, HTMLButtonElement>());
   const focusedElementRef = useRef<{ element: HTMLElement; root: Node } | null>(
     null,
   );
@@ -158,14 +167,15 @@ export const ComposerTaskChips = forwardRef<
     ref,
     () => ({
       focus() {
-        const first = groups[0];
-        const chip = first ? chipRefs.current.get(first.kind) : undefined;
+        const kind =
+          groups[0]?.kind ?? (showScheduledChip ? 'scheduled' : undefined);
+        const chip = kind ? chipRefs.current.get(kind) : undefined;
         if (!chip) return false;
         chip.focus({ preventScroll: true });
         return true;
       },
     }),
-    [groups],
+    [groups, showScheduledChip],
   );
 
   // A list whose group shrank to one task (or vanished) closes for good,
@@ -196,10 +206,11 @@ export const ComposerTaskChips = forwardRef<
       (focusedKind &&
         chipRefs.current.get(focusedKind as ComposerTaskChipKind)) ||
       (openKind && chipRefs.current.get(openKind)) ||
-      chipRefs.current.get(groups[0]?.kind);
+      chipRefs.current.get(groups[0]?.kind) ||
+      (showScheduledChip ? chipRefs.current.get('scheduled') : undefined);
     if (chip) chip.focus({ preventScroll: true });
     else onReturnToInput?.();
-  }, [groups, openKind, onReturnToInput]);
+  }, [groups, openKind, onReturnToInput, showScheduledChip]);
 
   const listOpen = Boolean(openGroup);
 
@@ -245,7 +256,7 @@ export const ComposerTaskChips = forwardRef<
     };
   }, [listOpen]);
 
-  if (groups.length === 0) return null;
+  if (groups.length === 0 && !showScheduledChip) return null;
 
   const selectTask = (task: ComposerChipTask, toggle = false) => {
     chipRefs.current.get(task.kind)?.focus({ preventScroll: true });
@@ -303,8 +314,13 @@ export const ComposerTaskChips = forwardRef<
   };
 
   const focusChipAt = (index: number) => {
-    const group = groups[(index + groups.length) % groups.length];
-    chipRefs.current.get(group.kind)?.focus({ preventScroll: true });
+    const kinds: (ComposerTaskChipKind | 'scheduled')[] = groups.map(
+      (group) => group.kind,
+    );
+    if (showScheduledChip) kinds.push('scheduled');
+    if (kinds.length === 0) return;
+    const kind = kinds[(index + kinds.length) % kinds.length];
+    chipRefs.current.get(kind)?.focus({ preventScroll: true });
   };
 
   const handleChipKeyDown = (
@@ -514,6 +530,30 @@ export const ComposerTaskChips = forwardRef<
             </span>
           );
         })}
+        {showScheduledChip && (
+          <span className={styles.chipWrap}>
+            <button
+              ref={(node) => {
+                if (node) chipRefs.current.set('scheduled', node);
+                else chipRefs.current.delete('scheduled');
+              }}
+              type="button"
+              className={styles.chip}
+              data-kind="scheduled"
+              data-testid="composer-scheduled-chip"
+              onKeyDown={(event) => handleChipKeyDown(event, groups.length)}
+              onClick={onOpenScheduledTasks}
+              disabled={!onOpenScheduledTasks}
+            >
+              <span className={styles.state} aria-hidden="true">
+                <CalendarClockIcon />
+              </span>
+              <span className={styles.chipLabel}>
+                {t('tasks.pill.scheduled', { count: activeScheduledCount })}
+              </span>
+            </button>
+          </span>
+        )}
       </div>
     </div>
   );

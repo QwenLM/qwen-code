@@ -40,6 +40,7 @@ if (!Element.prototype.hasPointerCapture) {
 // --- Mutable mock state, reset in beforeEach ---
 let connectionState: {
   sessionId?: string;
+  clientId?: string;
   capabilities?: DaemonCapabilities;
   workspaceCwd?: string;
   sessionContext?: DaemonProductSessionContext;
@@ -87,6 +88,7 @@ let workspaceClient: {
   exportStandaloneSession: ReturnType<typeof vi.fn>;
   archiveStandaloneSessions: ReturnType<typeof vi.fn>;
   deleteStandaloneSessions: ReturnType<typeof vi.fn>;
+  detachSession: ReturnType<typeof vi.fn>;
   updateSessionMetadata: ReturnType<typeof vi.fn>;
 };
 // Primary-workspace actions surfaced by useWorkspace / useActions.
@@ -324,6 +326,7 @@ beforeEach(() => {
       errors: [],
       fileCleanupPending: [],
     })),
+    detachSession: vi.fn(async () => {}),
     updateSessionMetadata: vi.fn(async () => ({ prs: [] })),
   };
   sessionsReload.mockClear();
@@ -4907,6 +4910,109 @@ describe('SessionOverviewPanel standalone sessions', () => {
     for (const call of workspaceClient.workspaceByCwd.mock.results) {
       expect(call.value.archiveSessionsData).not.toHaveBeenCalled();
     }
+  });
+
+  it('detaches the selected standalone session before archive succeeds', async () => {
+    useConversationsRuntimeCapabilities();
+    connectionState.sessionId = 'st1';
+    connectionState.sessionContext = { kind: 'standalone' };
+    connectionState.clientId = 'client-st1';
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+          }),
+        ],
+      },
+      { sessions: [] },
+    ];
+    let detached = false;
+    workspaceClient.detachSession.mockImplementation(
+      async (id: string, clientId: string) => {
+        expect(id).toBe('st1');
+        expect(clientId).toBe('client-st1');
+        detached = true;
+      },
+    );
+    workspaceClient.archiveStandaloneSessions.mockImplementation(
+      async (ids: string[]) => ({
+        archived: detached ? ids : [],
+        alreadyArchived: [],
+        notFound: [],
+        errors: detached
+          ? []
+          : [
+              {
+                sessionId: 'st1',
+                code: 'session_busy',
+                message: 'The standalone session is busy.',
+              },
+            ],
+      }),
+    );
+    render({ onCurrentSessionRemoved });
+    await flushAsync();
+
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(rowActionButton(row, 'Archive')));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    expect(confirm).not.toBeNull();
+    act(() => click(confirm));
+
+    await vi.waitFor(() => {
+      expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
+    });
+    expect(workspaceClient.detachSession).toHaveBeenCalledExactlyOnceWith(
+      'st1',
+      'client-st1',
+    );
+    expect(
+      workspaceClient.detachSession.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      workspaceClient.archiveStandaloneSessions.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('does not detach a different session during standalone archive', async () => {
+    useConversationsRuntimeCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st2', {
+            workspaceCwd: '/conv',
+            displayName: 'Other idle session',
+          }),
+        ],
+      },
+      { sessions: [] },
+    ];
+    render({ onCurrentSessionRemoved });
+    await flushAsync();
+
+    const row = rows().find((tr) =>
+      tr.textContent?.includes('Other idle session'),
+    )!;
+    act(() => click(rowActionButton(row, 'Archive')));
+    act(() =>
+      click(
+        document.querySelector(
+          '[data-slot="alert-dialog-action"]',
+        ) as HTMLElement,
+      ),
+    );
+
+    await vi.waitFor(() => {
+      expect(workspaceClient.archiveStandaloneSessions).toHaveBeenCalledOnce();
+    });
+    expect(workspaceClient.archiveStandaloneSessions).toHaveBeenCalledWith([
+      'st2',
+    ]);
+    expect(workspaceClient.detachSession).not.toHaveBeenCalled();
+    expect(onCurrentSessionRemoved).not.toHaveBeenCalled();
   });
 
   it('routes standalone delete through the standalone client route', async () => {
