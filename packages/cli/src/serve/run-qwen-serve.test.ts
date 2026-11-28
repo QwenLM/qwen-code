@@ -13468,6 +13468,26 @@ describe('runQwenServe runtime startup failures', () => {
     const { handle, createBridge } = await startDeferredDaemon(tmpDir, {
       serveOptions: { hostname: '0.0.0.0' },
     });
+    // Fresh socket per probe, not the global undici pool: it keeps keep-alive
+    // connections keyed by origin, and ephemeral ports are recycled across
+    // this file's daemons, so a pooled socket can outlive the daemon that
+    // answered it and reset the next probe's write.
+    const { hostname, port } = new URL(handle.url);
+    const probe = (headers: Record<string, string>) =>
+      new Promise<number | undefined>((resolve, reject) => {
+        const req = httpRequest(
+          { hostname, port, path: '/capabilities', headers, agent: false },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode);
+          },
+        );
+        req.once('error', reject);
+        req.end();
+      });
+    const pooledFetch = vi.spyOn(globalThis, 'fetch');
+    let connections = 0;
+    handle.server.on('connection', () => connections++);
     try {
       // Pin the premises, not just the statuses: the daemon really bound the
       // wildcard (read from the socket, not from the option echoed back), and
@@ -13479,24 +13499,22 @@ describe('runQwenServe runtime startup failures', () => {
       // The single-workspace bootstrap capabilities handler answers 200; a
       // multi-workspace boot would be 503, which the guard's own retry loop
       // tolerates but this exception test is not about.
-      const authed = await fetch(`${handle.url}/capabilities`, {
-        headers: {
+      expect(
+        await probe({
           Origin: handle.url,
           Authorization: 'Bearer secret-token',
-        },
-      });
-      expect(authed.status).toBe(200);
-      const unauthed = await fetch(`${handle.url}/capabilities`, {
-        headers: { Origin: handle.url },
-      });
-      expect(unauthed.status).toBe(401);
-      const crossOrigin = await fetch(`${handle.url}/capabilities`, {
-        headers: {
+        }),
+      ).toBe(200);
+      expect(await probe({ Origin: handle.url })).toBe(401);
+      expect(
+        await probe({
           Origin: 'http://evil.test',
           Authorization: 'Bearer secret-token',
-        },
-      });
-      expect(crossOrigin.status).toBe(403);
+        }),
+      ).toBe(403);
+      // Pin the transport: pooled probes reuse one socket, or call fetch.
+      expect(connections).toBe(3);
+      expect(pooledFetch).not.toHaveBeenCalled();
       expect(createBridge).not.toHaveBeenCalled();
     } finally {
       await handle.close();
