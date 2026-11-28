@@ -13,8 +13,12 @@ import type { LoadedSettings } from '../../config/settings.js';
 // Mock i18n module
 vi.mock('../../i18n/index.js', () => ({
   setLanguageAsync: vi.fn().mockResolvedValue(undefined),
+  initializeI18n: vi.fn(),
   getCurrentLanguage: vi.fn().mockReturnValue('en'),
   detectSystemLanguage: vi.fn().mockReturnValue('en'),
+  resolveLanguageSetting: vi.fn(
+    (language?: string) => process.env['QWEN_CODE_LANG'] || language || 'auto',
+  ),
   getLanguageNameFromLocale: vi.fn((locale: string) => {
     const map: Record<string, string> = {
       zh: 'Chinese',
@@ -86,6 +90,7 @@ describe('languageCommand', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubEnv('QWEN_CODE_LANG', '');
     mockContext = createMockCommandContext({
       services: {
         config: {
@@ -103,6 +108,14 @@ describe('languageCommand', () => {
 
     // Reset i18n mocks
     vi.mocked(i18n.getCurrentLanguage).mockReturnValue('en');
+    vi.mocked(i18n.setLanguageAsync).mockImplementation(async (language) => {
+      if (language !== 'auto') {
+        vi.mocked(i18n.getCurrentLanguage).mockReturnValue(language);
+      }
+    });
+    vi.mocked(i18n.initializeI18n).mockImplementation(async (language) => {
+      await i18n.setLanguageAsync(language ?? 'auto');
+    });
     vi.mocked(i18n.t).mockImplementation(
       (key: string, params?: Record<string, string>) => {
         if (!params) {
@@ -121,6 +134,7 @@ describe('languageCommand', () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
   });
 
   describe('command metadata', () => {
@@ -427,6 +441,72 @@ describe('languageCommand', () => {
         undefined,
         { throwOnWriteFailure: true },
       );
+    });
+
+    it.each(['ui de --global', 'ui de', 'de'])(
+      'keeps the effective workspace language when saving %s',
+      async (args) => {
+        if (!languageCommand.action) {
+          throw new Error('The language command must have an action.');
+        }
+        mockContext.services.settings.merged.general = { language: 'zh' };
+
+        const result = await languageCommand.action(mockContext, args);
+
+        expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+          'user',
+          'general.language',
+          'de',
+          undefined,
+          { throwOnWriteFailure: true },
+        );
+        expect(i18n.setLanguageAsync).toHaveBeenCalledWith('zh');
+        expect(i18n.initializeI18n).toHaveBeenCalledWith('zh');
+        expect(result).toMatchObject({
+          content: 'UI language changed to 中文 (Chinese) [zh-CN]',
+        });
+      },
+    );
+
+    it('resolves an automatic workspace language the way startup does', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+      mockContext.services.settings.merged.general = { language: 'auto' };
+
+      await languageCommand.action(mockContext, 'ui de --global');
+
+      expect(i18n.initializeI18n).toHaveBeenCalledWith('auto');
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('auto');
+    });
+
+    it('uses the merged language after a project write', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+      (mockContext.services.settings as { isTrusted?: boolean }).isTrusted =
+        true;
+      mockContext.services.settings.merged.general = { language: 'zh' };
+      vi.mocked(mockContext.services.settings.setValue).mockImplementation(
+        () => {
+          mockContext.services.settings.merged.general = { language: 'de' };
+        },
+      );
+
+      await languageCommand.action(mockContext, 'ui de --project');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('de');
+    });
+
+    it('keeps the environment language override after saving', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+      vi.stubEnv('QWEN_CODE_LANG', 'ja');
+
+      await languageCommand.action(mockContext, 'ui de --global');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('ja');
     });
 
     it('persists to workspace scope with --project when trusted', async () => {
