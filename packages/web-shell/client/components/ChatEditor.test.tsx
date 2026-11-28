@@ -159,6 +159,7 @@ const composerCoreState = vi.hoisted(() => ({
   slashMenu: null as SlashMenuState | null,
   focus: vi.fn(),
   closeSlashMenu: vi.fn(),
+  acceptSlashCompletion: vi.fn(),
   mobileComposer: null as unknown,
   followupState: { isVisible: false, suggestion: '' } as {
     isVisible: boolean;
@@ -342,7 +343,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         slashMenu: composerCoreState.slashMenu,
         closeSlashMenu: composerCoreState.closeSlashMenu,
         selectSlashCompletion: vi.fn(),
-        acceptSlashCompletion: vi.fn(),
+        acceptSlashCompletion: composerCoreState.acceptSlashCompletion,
         atMenu: null,
         closeAtMenu: vi.fn(),
         selectAtCompletion: vi.fn(),
@@ -413,6 +414,7 @@ afterEach(() => {
   composerCoreState.expandPastedText.mockReset();
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
+  composerCoreState.acceptSlashCompletion.mockReset();
   composerCoreState.mobileComposer = null;
   composerCoreState.followupState = { isVisible: false, suggestion: '' };
   composerCoreState.onAcceptFollowup.mockReset();
@@ -6420,6 +6422,195 @@ describe('ChatEditor mobile composer actions', () => {
     expect(
       document.querySelector('[data-web-shell-mobile-add-menu]'),
     ).toBeNull();
+  });
+
+  it('renders mobile slash menu with stacked layout, accepts on click across iOS touch-blur, and closes on expand/hide/add', async () => {
+    const backend = mobileComposer('/ver');
+    composerCoreState.slashMenu = {
+      kind: 'command',
+      query: 'ver',
+      from: 0,
+      to: 4,
+      selectedIndex: 0,
+      items: [
+        {
+          id: 'verify-pr',
+          label: '/verify-pr',
+          apply: '/verify-pr ',
+          type: 'skill',
+          category: 'skill',
+          section: 'Skills',
+          detail: 'Verify a pull request',
+        },
+      ],
+    };
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      skills: [{ name: 'verify-pr', description: 'Verify a pull request' }],
+    });
+
+    const panel = document.querySelector<HTMLElement>(
+      '[data-web-shell-slash-menu]',
+    );
+    expect(panel).not.toBeNull();
+    expect(panel?.hasAttribute('data-web-shell-mobile-slash-menu')).toBe(true);
+    expect(panel?.hasAttribute('data-web-shell-compact-overlay')).toBe(true);
+
+    const option = panel!.querySelector<HTMLButtonElement>('[role="option"]')!;
+    expect(option.textContent).toContain('/verify-pr');
+
+    // Touch hover must not spawn desktop detail popovers on mobile.
+    act(() => {
+      option.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    });
+    expect(document.querySelector('[data-web-shell-slash-detail]')).toBeNull();
+
+    // Simulate iOS tap: touchstart -> touchend -> textarea blur(relatedTarget: null) -> mousedown -> click.
+    const textarea = container.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-composer-editor]',
+    )!;
+    act(() => {
+      option.dispatchEvent(new Event('touchstart', { bubbles: true }));
+      option.dispatchEvent(new Event('touchend', { bubbles: true }));
+    });
+    act(() => {
+      textarea.dispatchEvent(
+        new FocusEvent('focusout', { bubbles: true, relatedTarget: null }),
+      );
+    });
+    expect(backend.onBlur).toHaveBeenCalledWith(expect.anything(), {
+      keepSlashMenu: true,
+    });
+
+    // mousedown preserves focus without prematurely accepting before click.
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      option.dispatchEvent(mouseDown);
+    });
+    expect(mouseDown.defaultPrevented).toBe(true);
+    expect(composerCoreState.acceptSlashCompletion).not.toHaveBeenCalled();
+
+    act(() => {
+      option.click();
+    });
+    expect(composerCoreState.acceptSlashCompletion).toHaveBeenCalledWith(
+      0,
+      true,
+    );
+
+    // Hiding the keyboard closes an open slash menu even right after panel touch.
+    act(() => {
+      textarea.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    });
+    act(() => {
+      option.dispatchEvent(new Event('touchstart', { bubbles: true }));
+      option.dispatchEvent(new Event('touchend', { bubbles: true }));
+    });
+    composerCoreState.closeSlashMenu.mockClear();
+    await clickButton('Hide keyboard');
+    expect(composerCoreState.closeSlashMenu).toHaveBeenCalled();
+
+    // Expanding the mobile editor or opening AddMenu closes an open slash menu.
+    composerCoreState.closeSlashMenu.mockClear();
+    await clickButton('Expand editor');
+    expect(composerCoreState.closeSlashMenu).toHaveBeenCalled();
+    await clickButton('Done');
+
+    composerCoreState.closeSlashMenu.mockClear();
+    await clickButton('Add to message');
+    expect(composerCoreState.closeSlashMenu).toHaveBeenCalled();
+  });
+
+  it('caps mobile slash panel max-height to visible room above composer using visualViewport', () => {
+    mobileComposer('/');
+    composerCoreState.slashMenu = {
+      kind: 'command',
+      query: '',
+      from: 0,
+      to: 1,
+      selectedIndex: 0,
+      items: [
+        {
+          id: 'verify-pr',
+          label: '/verify-pr',
+          apply: '/verify-pr ',
+          type: 'skill',
+          category: 'skill',
+          section: 'Skills',
+          detail: 'Verify a pull request',
+        },
+      ],
+    };
+
+    const listeners = new Map<string, Set<EventListener>>();
+    const fakeVisualViewport = {
+      height: 400,
+      offsetTop: 300,
+      addEventListener: (type: string, fn: EventListener) => {
+        if (!listeners.has(type)) listeners.set(type, new Set());
+        listeners.get(type)!.add(fn);
+      },
+      removeEventListener: (type: string, fn: EventListener) => {
+        listeners.get(type)?.delete(fn);
+      },
+    };
+    const originalVisualViewport = Object.getOwnPropertyDescriptor(
+      window,
+      'visualViewport',
+    );
+    const originalGetBoundingClientRect =
+      HTMLElement.prototype.getBoundingClientRect;
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      value: fakeVisualViewport,
+    });
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      if (this.hasAttribute('data-web-shell-composer-surface')) {
+        return {
+          top: 600,
+          bottom: 680,
+          left: 12,
+          right: 378,
+          width: 366,
+          height: 80,
+          x: 12,
+          y: 600,
+          toJSON: () => ({}),
+        };
+      }
+      return originalGetBoundingClientRect.call(this);
+    };
+
+    try {
+      renderChatEditor({ visibleToolbarActions: ['addMenu'] });
+      const panelInner = document.querySelector<HTMLElement>(
+        '[data-web-shell-slash-menu] > div',
+      );
+      expect(
+        panelInner?.style.getPropertyValue('--slash-panel-viewport-max-height'),
+      ).toBe('276px');
+
+      fakeVisualViewport.offsetTop = 360;
+      act(() => {
+        for (const fn of listeners.get('resize') ?? []) {
+          fn(new Event('resize'));
+        }
+      });
+      expect(
+        panelInner?.style.getPropertyValue('--slash-panel-viewport-max-height'),
+      ).toBe('216px');
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect =
+        originalGetBoundingClientRect;
+      if (originalVisualViewport) {
+        Object.defineProperty(window, 'visualViewport', originalVisualViewport);
+      } else {
+        Reflect.deleteProperty(window, 'visualViewport');
+      }
+    }
   });
 
   it('prevents mousedown default on the remaining migrated buttons', async () => {

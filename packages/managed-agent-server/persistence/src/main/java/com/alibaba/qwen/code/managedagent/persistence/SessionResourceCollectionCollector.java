@@ -176,14 +176,15 @@ public final class SessionResourceCollectionCollector {
         long current = ToolPublicationRetentionStore.now(jdbc);
         long due = current - properties.getToolPublication().getDeletionGrace().toMillis();
         // Keep every source id in the page so existing ledgers and live Sessions also advance it.
+        // Pin the source index in MySQL so the limit bounds the scan as well as the result.
         var page = jdbc.query(
                 "SELECT s.*, CASE WHEN s.retired_at <= ? AND NOT EXISTS"
                     + " (SELECT 1 FROM ma_operation o WHERE o.operation_kind = 'SESSION_RESOURCE_GC'"
                     + " AND o.tenant_id = s.tenant_id AND o.session_id = s.session_id"
                     + " LIMIT 1) THEN 1 ELSE 0 END AS needs_ledger FROM"
                     + " (SELECT id, tenant_id, session_id, retired_at"
-                    + " FROM ma_session /*! USE INDEX (uk_ma_session_id) */ WHERE id > ? AND id <= ? ORDER BY id LIMIT "
-                    + SCAN_ROWS + ") s ORDER BY s.id",
+                    + " FROM ma_session /*! FORCE INDEX (uk_ma_session_id) */"
+                    + " WHERE id > ? AND id <= ? ORDER BY id LIMIT " + SCAN_ROWS + ") s ORDER BY s.id",
                 (row, index) -> ManagedSchemaRows.read(row), due, ledgerScanId, ledgerScanRoundEnd);
         for (var row : page) {
             if (!ToolPublicationRetentionStore.flag(row, "needs_ledger")) {
