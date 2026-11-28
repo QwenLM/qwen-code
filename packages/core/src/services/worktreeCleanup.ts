@@ -64,10 +64,9 @@ function isEphemeralSlug(slug: string): boolean {
  * identities every such copy reads as work and preserves the checkout forever
  * (#12758's fail-closed rule turned into a leak). Deriving them from the
  * SOURCE keeps the shared predicate's rule: a path is waived only while the
- * worktree's copy still matches what the source holds, so an edited, staged,
- * or deleted copy inside the worktree reads as work. Only the repository root
- * is used; a worktree holding a copy from some other checkout, or a source
- * that has since moved on, conservatively stays as work.
+ * worktree's copy still matches what the source holds. Edited or staged
+ * copies count as work. These identities are inferred, so a missing path
+ * waives nothing: the worktree might never have received that copy.
  *
  * Empty on every failure (no `.worktreeinclude`, unreadable source), which
  * waives nothing and preserves the checkout.
@@ -87,6 +86,27 @@ async function resolveIncludeCarriedEntries(
     );
     return undefined;
   }
+}
+
+async function includeEntriesInWorktree(
+  worktreePath: string,
+  entries: CarriedEntry[],
+): Promise<CarriedEntry[]> {
+  const present = await Promise.all(
+    entries.map(async (entry) => {
+      try {
+        const stat = await fs.lstat(path.join(worktreePath, entry.path));
+        // Let the regular has-work check handle symlinks. Other file types
+        // and probe failures still go through the carried-identity check.
+        return stat.isSymbolicLink() ? undefined : entry;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === 'ENOENT'
+          ? undefined
+          : entry;
+      }
+    }),
+  );
+  return present.filter((entry) => entry !== undefined);
 }
 
 /**
@@ -167,7 +187,11 @@ export async function cleanupStaleAgentWorktrees(
     // Run the probes concurrently — neither depends on the other and each
     // spawns its own git invocation.
     const [dirty, unmerged] = await Promise.all([
-      worktreeHasWork(worktreePath, includeEntries),
+      includeEntries
+        ? includeEntriesInWorktree(worktreePath, includeEntries).then(
+            (entries) => worktreeHasWork(worktreePath, entries),
+          )
+        : worktreeHasWork(worktreePath),
       service.hasUnmergedWorktreeCommits(entry.name),
     ]);
     if (dirty || unmerged) {

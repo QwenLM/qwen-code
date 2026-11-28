@@ -623,35 +623,33 @@ describe('GitWorktreeService.setupWorktrees() — .worktreeinclude', () => {
     );
   });
 
-  it('reads the include file from the revision being checked out', async () => {
-    // `--worktree=#<N>` creates the worktree at the PR head while the launch
-    // checkout stays where it was. A `.worktreeinclude` that exists only on
-    // the target revision used to be invisible here (the read went to the
-    // working copy), so the worktree shipped the file and none of the paths
-    // it names.
-    // `.env` is gitignored, so it is never part of any commit — it exists
-    // only in the launch checkout's working tree, which is exactly what the
-    // include copy is for.
-    await fs.writeFile(path.join(repoRoot, '.env'), 'TOKEN=abc\n');
-    gitIn(repoRoot, 'branch', '-q', 'with-include');
-    // The include list is committed on the branch the worktree starts at...
-    gitIn(repoRoot, 'checkout', '-q', 'with-include');
-    await fs.writeFile(path.join(repoRoot, WORKTREE_INCLUDE_FILE), '.env\n');
-    gitIn(repoRoot, 'add', '-f', WORKTREE_INCLUDE_FILE);
-    gitIn(repoRoot, 'commit', '-q', '-m', 'include list', '--no-verify');
-    // ...and removed from the launch checkout, which is where the copy used
-    // to read from.
-    gitIn(repoRoot, 'checkout', '-q', 'main');
-    expect(await exists(path.join(repoRoot, WORKTREE_INCLUDE_FILE))).toBe(
-      false,
+  it('applies primary checkout include policy when creating from a linked checkout', async () => {
+    await fs.writeFile(
+      path.join(repoRoot, WORKTREE_INCLUDE_FILE),
+      '.local/preferences.txt\n',
     );
+    gitIn(repoRoot, 'add', WORKTREE_INCLUDE_FILE);
+    gitIn(repoRoot, 'commit', '-q', '-m', 'include preferences', '--no-verify');
 
-    const service = new GitWorktreeService(repoRoot, baseDir);
-    const result = await service.createUserWorktree('rev', 'with-include');
+    const source = path.join(repoParent, 'linked');
+    gitIn(repoRoot, 'worktree', 'add', '-q', '-b', 'linked', source);
+    await fs.mkdir(path.join(source, '.local'));
+    await fs.writeFile(path.join(source, '.local/preferences.txt'), 'dark\n');
+    await fs.writeFile(path.join(source, '.local/cache.txt'), 'transient\n');
+    await fs.writeFile(path.join(source, WORKTREE_INCLUDE_FILE), '.local/\n');
+    gitIn(source, 'add', WORKTREE_INCLUDE_FILE);
+    gitIn(source, 'commit', '-q', '-m', 'include local files', '--no-verify');
+
+    const service = new GitWorktreeService(source, baseDir);
+    const result = await service.createUserWorktree('child', 'linked');
 
     expect(result.success).toBe(true);
-    expect(await read(path.join(result.worktree!.path, '.env'))).toBe(
-      'TOKEN=abc\n',
+    const destination = result.worktree!.path;
+    expect(await read(path.join(destination, '.local/preferences.txt'))).toBe(
+      'dark\n',
+    );
+    expect(await exists(path.join(destination, '.local/cache.txt'))).toBe(
+      false,
     );
   });
 

@@ -234,7 +234,7 @@ config/*.json
 - **Copy, not symlink.** Editing an included file inside the worktree does not touch your main checkout.
 - **Non-fatal by design.** A missing or unreadable `.worktreeinclude`, or a failed copy, leaves the worktree usable without those files. The file is capped at 1 MB and 10,000 patterns; a larger file is ignored wholesale.
 - **Committed, so it is shared.** Everyone with push access can change which files a clone copies into its worktrees. Keep it to files you would be comfortable seeing in a colleague's worktree.
-- **Read at creation time.** A worktree created before you added a line does not retroactively receive the file.
+- **Read at creation time.** Qwen Code reads the primary checkout's `.worktreeinclude` and copies matching files from the source checkout. This applies to pull request worktrees and any worktrees created from them. A worktree created before you added a line does not retroactively receive the file.
 
 |                | `.worktreeinclude`                                                                                                      | `worktree.symlinkDirectories`                   |
 | -------------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |

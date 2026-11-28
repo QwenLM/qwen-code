@@ -2030,7 +2030,7 @@ interface SessionConfigFile {
 }
 
 /**
- * The gitignored paths a checkout's own `.worktreeinclude` selects, resolved
+ * The gitignored paths that the repository's primary `.worktreeinclude` selects, resolved
  * from that checkout. The startup sweep cannot see the include list the
  * creation copied from, so it re-derives it from the repository root before
  * handing the identities to the shared has-work predicate. Empty on any
@@ -4244,26 +4244,10 @@ export class GitWorktreeService {
           ? undefined
           : carriedBound -
             Buffer.byteLength(JSON.stringify(carriedPaths ?? []), 'utf8');
-      // The include list is read only from content the caller already
-      // controls. A PR-backed worktree (`--worktree=#<N>`) is checked out
-      // at the pull request's head, so the `.worktreeinclude` there is
-      // authored by whoever opened the PR: honouring it would let a
-      // contributor name which of the reviewer's own gitignored files
-      // (`.env`, keys) get copied into the checkout the reviewing agent then
-      // works in. Read the launch checkout instead for PR-backed worktrees
-      // and from the created revision otherwise, so the file matches the tree
-      // it configures without letting a remote branch choose the list.
-      const includeRevision = options?.prBacked
-        ? undefined
-        : await runGitCapture(worktreePath, ['rev-parse', 'HEAD']).then(
-            ({ stdout }) => stdout.trim() || undefined,
-            () => undefined,
-          );
       const includedPaths = await this.copyIncludedPathsFromRepo(
         worktreePath,
         options?.dirtyStateSource ?? this.sourceRepoPath,
         includeBudget,
-        includeRevision,
       );
       if (includedPaths.length > 0) {
         carriedPaths = [...(carriedPaths ?? []), ...includedPaths];
@@ -5109,12 +5093,10 @@ export class GitWorktreeService {
     worktreePath: string,
     sourceRoot = this.sourceRepoPath,
     maxCarriedBytes?: number,
-    revision?: string,
   ): Promise<string[]> {
     const includedPaths = await this.resolveWorktreeIncludePaths(
       sourceRoot,
       maxCarriedBytes,
-      revision,
     );
     return this.copyWorktreeIncludePaths(
       worktreePath,
@@ -5159,64 +5141,35 @@ export class GitWorktreeService {
   private async resolveWorktreeIncludePaths(
     sourceRoot = this.sourceRepoPath,
     maxCarriedBytes?: number,
-    revision?: string,
   ): Promise<{
     paths: string[];
     root: string;
   }> {
-    // `.worktreeinclude` is a repository file, so it and the listing it filters
-    // are both anchored at the repository root — a service constructed from a
-    // monorepo subdirectory would otherwise miss the file entirely and list
-    // only that subdirectory's ignored files, at subdirectory-relative paths.
+    // Enumerate ignored files from the source checkout's root, but take
+    // inclusion policy from the primary worktree. An attached checkout,
+    // its descendants, and their destination revisions can come from a PR.
     const anchor =
       sourceRoot === this.sourceRepoPath
         ? this
         : new GitWorktreeService(sourceRoot);
     const repoRoot = (await anchor.getRepoTopLevel()) ?? sourceRoot;
-    const includePath = path.join(repoRoot, WORKTREE_INCLUDE_FILE);
-
-    // `qwen --worktree=#<N>` checks the new worktree out at the PR head,
-    // while the launch checkout may not carry `.worktreeinclude` at all —
-    // reading the working copy would then find nothing and copy nothing,
-    // even though the checked-out revision names files. Read the file from
-    // the revision the worktree is created at and fall back to the working
-    // copy only when that revision has no such path.
-    let content: string | undefined;
-    if (revision !== undefined) {
-      try {
-        const shown = await runGitCapture(repoRoot, [
-          'show',
-          `${revision}:${WORKTREE_INCLUDE_FILE}`,
-        ]);
-        if (shown.stdout.length <= WORKTREE_INCLUDE_MAX_BYTES) {
-          content = shown.stdout;
-        } else {
-          debugLogger.warn(
-            `resolveWorktreeIncludePaths: ${WORKTREE_INCLUDE_FILE} at ${revision} ` +
-              `is over the ${WORKTREE_INCLUDE_MAX_BYTES}-byte cap; ignoring it`,
-          );
-          return { paths: [], root: repoRoot };
-        }
-      } catch {
-        // The revision has no `.worktreeinclude`; fall through to the
-        // working copy, which is where a not-yet-committed file lives.
-      }
-    }
+    const primaryRoot = await anchor.getMainWorktreePath();
+    if (primaryRoot === null) return { paths: [], root: repoRoot };
+    const includePath = path.join(primaryRoot, WORKTREE_INCLUDE_FILE);
+    let content: string;
     try {
-      if (content === undefined) {
-        const stat = await fs.stat(includePath);
-        if (!stat.isFile()) {
-          return { paths: [], root: repoRoot };
-        }
-        if (stat.size > WORKTREE_INCLUDE_MAX_BYTES) {
-          debugLogger.warn(
-            `resolveWorktreeIncludePaths: ${includePath} is ${stat.size} bytes, ` +
-              `over the ${WORKTREE_INCLUDE_MAX_BYTES}-byte cap; ignoring it`,
-          );
-          return { paths: [], root: repoRoot };
-        }
-        content = await fs.readFile(includePath, 'utf8');
+      const stat = await fs.stat(includePath);
+      if (!stat.isFile()) {
+        return { paths: [], root: repoRoot };
       }
+      if (stat.size > WORKTREE_INCLUDE_MAX_BYTES) {
+        debugLogger.warn(
+          `resolveWorktreeIncludePaths: ${includePath} is ${stat.size} bytes, ` +
+            `over the ${WORKTREE_INCLUDE_MAX_BYTES}-byte cap; ignoring it`,
+        );
+        return { paths: [], root: repoRoot };
+      }
+      content = await fs.readFile(includePath, 'utf8');
     } catch (error) {
       if (!(isNodeError(error) && error.code === 'ENOENT')) {
         debugLogger.warn(
