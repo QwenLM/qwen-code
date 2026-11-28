@@ -97,7 +97,7 @@ class HarnessConfigurationTest {
             sdk.when(HostedHarnessClient::builder).thenReturn(builder);
             try (var connector = new HarnessConfiguration().hostedHarnessConnector(properties,
                     sessions, mock(JdbcWorkspaceExecutionStore.class), actions, mock(JdbcManagedAgentDefinitionStore.class),
-                    resources, mock(JdbcSshWorkspaceStore.class), mock(JdbcHarnessPlacementStore.class), skills, json, extensions)) {
+                    resources, mock(JdbcSshWorkspaceStore.class), mock(JdbcHarnessPlacementStore.class), skills, json, extensions, false)) {
                 assertThat(connector.createOrLoad("tenant", sessionId, false).bootId()).isEqualTo(bootId);
                 var request = ArgumentCaptor.forClass(CreateHarnessSession.class);
                 verify(client).createSession(request.capture());
@@ -157,7 +157,7 @@ class HarnessConfigurationTest {
                         mock(JdbcManagedActionStore.class), mock(JdbcManagedAgentDefinitionStore.class),
                         mock(JdbcManagedSessionStore.class), mock(JdbcSshWorkspaceStore.class),
                         mock(JdbcHarnessPlacementStore.class), mock(JdbcManagedSessionSkills.class),
-                        new ObjectMapper(), mock(JdbcManagedExtensionRecordStore.class))) {
+                        new ObjectMapper(), mock(JdbcManagedExtensionRecordStore.class), false)) {
                     Object pool = ReflectionTestUtils.getField(connector, "delegate");
                     ReflectionTestUtils.invokeMethod(pool, "refresh");
                     accepted.put(base, ((List<?>) ReflectionTestUtils.getField(pool, "accepting")).size());
@@ -189,7 +189,7 @@ class HarnessConfigurationTest {
                 mock(JdbcManagedActionStore.class), mock(JdbcManagedAgentDefinitionStore.class),
                 mock(JdbcManagedSessionStore.class), mock(JdbcSshWorkspaceStore.class),
                 mock(JdbcHarnessPlacementStore.class), mock(JdbcManagedSessionSkills.class),
-                new ObjectMapper(), mock(JdbcManagedExtensionRecordStore.class)))
+                new ObjectMapper(), mock(JdbcManagedExtensionRecordStore.class), false))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("Harness pool discovery must be static");
     }

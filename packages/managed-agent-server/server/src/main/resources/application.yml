@@ -48,6 +48,8 @@ qwen:
       enabled: '${QWEN_MANAGED_AGENT_WAKE_DISPATCH_ENABLED:false}'
     event-ingest:
       enabled: '${QWEN_MANAGED_AGENT_EVENT_INGEST_ENABLED:false}'
+    harness-pull:
+      enabled: '${QWEN_MANAGED_AGENT_HARNESS_PULL_ENABLED:false}'
     definition-models: '${QWEN_MANAGED_AGENT_DEFINITION_MODELS:}'
     definition-tool-profiles: '${QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES:hosted-workspace-files/1}'
     trusted-actor-header: '${QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER:}'

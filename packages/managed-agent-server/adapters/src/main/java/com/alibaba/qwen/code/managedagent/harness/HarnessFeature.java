@@ -28,7 +28,8 @@ enum HarnessFeature {
     PACKAGE_PREPARATION("managed-package-preparation/1", null),
     RUNTIME_SKILL_IMPORT("managed-runtime-skill-import/1", null),
     SIDE_QUERY("side-query/1", null),
-    EVENT_INGEST("event-ingest/1", null);
+    EVENT_INGEST("event-ingest/1", null),
+    WORK_PULL("work-pull/1", null);
 
     private final String token;
     private final HarnessFeature requires;

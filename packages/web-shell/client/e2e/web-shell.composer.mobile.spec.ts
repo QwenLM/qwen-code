@@ -1334,9 +1334,8 @@ test('keeps the textarea scrollable once content exceeds the height cap', async 
 test('slash commands typed as text still execute as commands', async ({
   page,
 }, testInfo) => {
-  // The textarea backend has no slash completion menu, but commands are
-  // interpreted from the submitted text at the App layer, so typing them
-  // out still works.
+  // Typing out a slash command and tapping send executes it at the App layer
+  // and dismisses the completion menu.
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);
 
@@ -1344,11 +1343,94 @@ test('slash commands typed as text still execute as commands', async ({
   const textarea = page.locator(COMPOSER_TEXTAREA);
   await textarea.tap();
   await page.keyboard.type('/help');
+  await expect(page.locator('[data-web-shell-slash-menu]')).toBeVisible();
   await page.locator('[data-web-shell-composer-submit]').tap();
 
+  await expect(page.locator('[data-web-shell-slash-menu]')).toBeHidden();
   await expect(page.getByRole('dialog', { name: 'Help' })).toBeVisible();
   expect(daemon.promptRequests()).toHaveLength(0);
   await expect(textarea).toHaveValue('');
+});
+
+test('typing / in the touch composer opens the slash menu and selects a skill @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    supportedCommands: {
+      availableCommands: [
+        {
+          name: 'verify-pr',
+          description: 'Verify a pull request end to end',
+          input: { hint: '<pr>' },
+          _meta: { source: 'skill' },
+        },
+        {
+          name: 'review',
+          description: 'Review changed code',
+          _meta: { source: 'skill' },
+        },
+      ],
+      availableSkills: ['verify-pr', 'review'],
+    },
+    skills: {
+      skills: [
+        {
+          kind: 'skill',
+          name: 'verify-pr',
+          description: 'Verify a pull request end to end',
+          argumentHint: '<pr>',
+          level: 'project',
+          status: 'ok',
+          modelInvocable: true,
+        },
+        {
+          kind: 'skill',
+          name: 'review',
+          description: 'Review changed code',
+          level: 'bundled',
+          status: 'ok',
+          modelInvocable: true,
+        },
+      ],
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.tap();
+  await page.keyboard.type('/');
+
+  const menu = page.locator(
+    '[data-web-shell-slash-menu][data-web-shell-mobile-slash-menu]',
+  );
+  await expect(menu).toBeVisible();
+  const verifyOption = menu.getByRole('option', { name: /\/verify-pr/ });
+  const reviewOption = menu.getByRole('option', { name: /\/review/ });
+  await expect(verifyOption).toBeVisible();
+  await expect(reviewOption).toBeVisible();
+
+  const composerBox = await page
+    .locator('[data-composer]')
+    .first()
+    .boundingBox();
+  const menuBox = await menu.boundingBox();
+  expect(composerBox).not.toBeNull();
+  expect(menuBox).not.toBeNull();
+  const viewportWidth = page.viewportSize()!.width;
+  expect(menuBox!.x).toBeGreaterThanOrEqual(0);
+  expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(viewportWidth + 1);
+  expect(menuBox!.y + menuBox!.height).toBeLessThanOrEqual(composerBox!.y + 2);
+
+  await page.keyboard.type('ver');
+  await expect(verifyOption).toBeVisible();
+  await expect(reviewOption).toHaveCount(0);
+
+  await verifyOption.tap();
+  await expect(menu).toBeHidden();
+  await expect(textarea).toHaveValue('/verify-pr ');
+  await expect(textarea).toBeFocused();
+  expect(daemon.promptRequests()).toHaveLength(0);
 });
 
 test('?composer=codemirror escape hatch forces the CodeMirror path', async ({

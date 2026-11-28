@@ -59,6 +59,8 @@ public enum SurfaceRegistry {
             Surface.WEBSHELL, RuleClass.CLIENT_FILES_ACTOR, EnumSet.of(Capability.CLIENT_FILES_RESPOND)),
     INTERNAL_CLIENT_FILES_MCP(Method.POST, "/internal/managed-client-files/v1/sessions/{sessionId}/mcp",
             Surface.INTERNAL, RuleClass.INTERNAL_CLIENT_FILES, EnumSet.of(Capability.INTERNAL_CLIENT_FILES_MCP)),
+    INTERNAL_HARNESS_WORK_POLL(Method.POST, "/internal/managed-harness-work/v1/poll",
+            Surface.INTERNAL, RuleClass.INTERNAL_HARNESS_WORK, EnumSet.of(Capability.HARNESS_WORK_POLL)),
     INTERNAL_SIDE_QUERY_INPUT(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/input",
             Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
@@ -920,6 +922,7 @@ public enum SurfaceRegistry {
         STORE_SIDE_QUERY,
         CLIENT_FILES_REGISTER, CLIENT_FILES_UNREGISTER, CLIENT_FILES_STATUS, CLIENT_FILES_STREAM, CLIENT_FILES_RESPOND,
         INTERNAL_CLIENT_FILES_MCP,
+        HARNESS_WORK_POLL,
         MEMORY_STORE_CREATE, MEMORY_STORE_LIST, STORE_MEMORY_QUERY,
         SESSION_CONTEXT_USAGE, SESSION_MODEL_STATISTICS, SESSION_RESOURCES, SESSION_AGENT_TRACE,
         SESSION_ACTIVITY_STATS, SESSION_ACTIVITY,
@@ -1092,6 +1095,12 @@ public enum SurfaceRegistry {
          * caller {@code 404}.
          */
         INTERNAL_CLIENT_FILES,
+        /**
+         * The Harness work poll: no actor or tenant; the Harness bearer token,
+         * capability digest and features are the only admission ({@code 403
+         * harness_work_poller_refused} without them).
+         */
+        INTERNAL_HARNESS_WORK,
         /** Authenticated tenant actor, restricted to that actor's personal Store. */
         PERSONAL_MEMORY,
         SESSION_WORKTREE,
