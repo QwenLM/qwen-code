@@ -578,7 +578,42 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     ).rejects.toThrow(/Unsupported worktree snapshot version/);
   });
 
-  it('selects only the exact archive key and rejects missing or foreign pairs', async () => {
+  it.each(['tar.gz', 'json'] as const)(
+    'skips a %s-only remnant when selecting an unkeyed snapshot',
+    async (suffix) => {
+      const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      });
+      const stem = 'session-snap.000-orphan.worktree-snapshot';
+      await fs.copyFile(
+        suffix === 'tar.gz' ? snapshotPath : metaPath,
+        path.join(snapshotDir, `${stem}.${suffix}`),
+      );
+      const options = {
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+      };
+
+      await expect(
+        selectWorktreeSnapshot({ ...options, archiveKey: `${stem}.tar.gz` }),
+      ).resolves.toBeUndefined();
+      await expect(
+        selectWorktreeSnapshot({
+          ...options,
+          archiveKey: path.basename(snapshotPath),
+        }),
+      ).resolves.toMatchObject({ snapshotPath, metaPath });
+      await expect(selectWorktreeSnapshot(options)).resolves.toMatchObject({
+        snapshotPath,
+        metaPath,
+      });
+    },
+  );
+
+  it('selects only the exact archive key and rejects malformed or foreign pairs', async () => {
     for (let index = 0; index < 2; index++) {
       await fs.writeFile(path.join(worktree, 'committed.txt'), `edit-${index}`);
       await captureWorktreeSnapshot({
@@ -610,30 +645,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
         archiveKey: '../escape.worktree-snapshot.tar.gz',
       }),
     ).rejects.toThrow(/archive key/);
-    await fs.writeFile(
-      path.join(snapshotDir, 'session-snap.alone.worktree-snapshot.json'),
-      '{}',
-    );
-    await expect(
-      selectWorktreeSnapshot({
-        directory: snapshotDir,
-        sessionId: 'session-snap',
-        slug: 'snap',
-      }),
-    ).rejects.toThrow(/ENOENT/);
-    await expect(
-      selectWorktreeSnapshot({
-        directory: snapshotDir,
-        sessionId: 'session-snap',
-        slug: 'snap',
-        archiveKey: first,
-      }),
-    ).resolves.toMatchObject({
-      snapshotPath: path.join(snapshotDir, first),
-    });
-    await fs.rm(
-      path.join(snapshotDir, 'session-snap.alone.worktree-snapshot.json'),
-    );
     const malformed = path.join(
       snapshotDir,
       'session-snap.000-malformed.worktree-snapshot',

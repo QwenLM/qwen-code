@@ -937,7 +937,7 @@ export async function selectWorktreeSnapshot(options: {
     ),
   );
   const selected: SelectedWorktreeSnapshot[] = [];
-  for (const base of [...bases].sort()) {
+  snapshotPairs: for (const base of [...bases].sort()) {
     const snapshotPath = path.join(options.directory, `${base}.tar.gz`);
     const metaPath = path.join(options.directory, `${base}.json`);
     for (const file of [snapshotPath, metaPath]) {
@@ -945,13 +945,13 @@ export async function selectWorktreeSnapshot(options: {
       try {
         stat = await fs.lstat(file, { bigint: true });
       } catch (error) {
-        if (
-          archiveKey !== undefined &&
-          (error as NodeJS.ErrnoException).code === 'ENOENT'
-        ) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
+        if (archiveKey !== undefined) {
           return undefined;
         }
-        throw error;
+        continue snapshotPairs;
       }
       if (!stat.isFile() || stat.nlink !== 1n) {
         throw new Error(

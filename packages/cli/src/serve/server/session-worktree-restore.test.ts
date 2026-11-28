@@ -445,6 +445,41 @@ describe('session worktree snapshot restore', () => {
     }
   });
 
+  it('recovers an unbound checkout beside an incomplete snapshot', async () => {
+    const target = makeRetentionRepo(fs.realpathSync(root), 'primary');
+    configureRetention(target, 0);
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'unbound-incomplete-snapshot',
+        dirty: true,
+      }),
+    );
+    await writeWorktreeSession(state.sidecarPath, state.sidecar);
+    fs.writeFileSync(
+      path.join(
+        path.dirname(state.sidecarPath),
+        `${state.id}.000-orphan.worktree-snapshot.tar.gz`,
+      ),
+      'incomplete snapshot',
+    );
+
+    const result = await restore(target, state.id);
+    expect(result.reconstructed).toBe(true);
+    expect(git(target, state.worktreePath, 'rev-parse', 'HEAD')).toBe(
+      target.head,
+    );
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, 'tracked.txt'), 'utf8'),
+    ).toBe('dirty-unbound-incomplete-snapshot\n');
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, 'untracked.bin')),
+    ).toEqual(Buffer.from([0, 1, 2, 255]));
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, '.qwen-session'), 'utf8'),
+    ).toBe(state.id);
+  });
+
   it('attaches a named ref only while it still resolves to the captured head', async () => {
     const target = makeRetentionRepo(root, 'primary');
     configureRetention(target, 0);
