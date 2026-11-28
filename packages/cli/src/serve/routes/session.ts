@@ -3200,7 +3200,9 @@ export function registerSessionRoutes(
     ) => {
       const assertCanMutate = captureRuntimeGenerationAssertion(runtime);
       assertCanMutate?.();
-      const service = createWorkspaceRuntimeSessionService(runtime);
+      const service = createWorkspaceRuntimeSessionService(runtime, {
+        onWarning: logSessionArchiveWarning,
+      });
       const result = await runWithSessionListInvalidation(
         runtime,
         ['active', 'archived'],
