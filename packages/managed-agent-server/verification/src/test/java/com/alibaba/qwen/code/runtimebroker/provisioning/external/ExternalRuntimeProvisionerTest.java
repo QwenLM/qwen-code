@@ -25,6 +25,7 @@ import javax.sql.DataSource;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -153,6 +154,32 @@ class ExternalRuntimeProvisionerTest {
     }
 
     @Test
+    void disagreeingLeaseEndpointConflictsBeforeAnyProviderReattach() {
+        var api = new Provider();
+        var seed = RuntimeProvisionSeed.create("binding", 1);
+        try (var provider = new ExternalRuntimeProvisioner(api, "provider-a", Duration.ofSeconds(1)) {
+            @Override
+            protected boolean supportsReattach(RuntimeProvisionRequest request) {
+                return true;
+            }
+        }) {
+            var request = request(provider);
+            var handle = join(provider.ensureResource(request, seed, null));
+            var lease = join(provider.provision(request, seed));
+            // Same identity, different endpoint: the evidence guard must
+            // refuse before reattach mutates the provider at the endpoint
+            // the client just declared invalid.
+            var forged = new RuntimeLease(lease.getRuntimeInstanceId(), URI.create("https://other.example/"),
+                    lease.getToken(), lease.getLeaseId(), lease.getEpoch());
+            api.state = "UNKNOWN";
+            var observed = join(provider.reconcile(request, seed, handle, forged));
+            assertEquals(RuntimeObservation.Outcome.CONFLICT, observed.getOutcome());
+            assertEquals(0, api.reattaches);
+            assertEquals(1, api.provisions);
+        }
+    }
+
+    @Test
     void shutdownDuringReconcileAnswersUnknownInsteadOfConflict() {
         var api = new Provider();
         var provider = provisioner(api);
@@ -174,6 +201,22 @@ class ExternalRuntimeProvisionerTest {
         api.closing = provider::close;
         var failure = (RuntimeBrokerException) assertThrows(CompletionException.class,
                 () -> join(provider.provision(request, seed))).getCause();
+        assertEquals("runtime_external_unavailable", failure.getCode());
+        assertTrue(failure.isRetryable());
+    }
+
+    @Test
+    void shutdownMakesTerminalOriginalValidationRetryableInsteadOfPermanent() {
+        var api = new Provider();
+        var provider = provisioner(api);
+        var seed = RuntimeProvisionSeed.create("binding", 1);
+        var request = request(provider);
+        var binding = new RuntimeBindingRecord("binding", request, seed, 1,
+                RuntimeBindingRecord.State.LOST, null, null, 0, false, null,
+                null, 0, 1, null, null, Instant.now());
+        provider.close();
+        var failure = assertThrows(RuntimeBrokerException.class,
+                () -> provider.validateTerminalOriginal(binding));
         assertEquals("runtime_external_unavailable", failure.getCode());
         assertTrue(failure.isRetryable());
     }
@@ -465,6 +508,7 @@ class ExternalRuntimeProvisionerTest {
         private int startingLeft;
         private int provisions;
         private int observations;
+        private int reattaches;
 
         @Override
         public CompletionStage<Map<String, Object>> provision(Map<String, Object> request) {
@@ -475,6 +519,12 @@ class ExternalRuntimeProvisionerTest {
             }
             return CompletableFuture.completedFuture(Map.of("protocolVersion", 1,
                     "handle", handle == null ? request.get("handle") : handle));
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> reattach(Map<String, Object> request) {
+            reattaches++;
+            return observe(request);
         }
 
         @Override

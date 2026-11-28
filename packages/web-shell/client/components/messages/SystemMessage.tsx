@@ -1,6 +1,6 @@
-import { parseDaemonBackgroundTurn } from '@qwen-code/sdk/daemon';
 import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import { useSubagentDetails } from '../../subagentDetailsContext';
+import { parseBackgroundTurn } from '../../utils/background-turn';
 import { memo, useCallback } from 'react';
 import {
   CheckIcon,
@@ -30,11 +30,7 @@ import {
 import type { DaemonContextMemoryDetail } from '@qwen-code/web-shell/daemon-react-sdk';
 import { StatsMessage, parseStatsMessage } from './StatsMessage';
 import { StatusMessage, parseStatusMessage } from './StatusMessage';
-import { McpStatusMessage, parseMcpStatusMessage } from './McpStatusMessage';
-import {
-  TasksStatusMessage,
-  parseTasksStatusMessage,
-} from './TasksStatusMessage';
+import { useDaemonStatusCards } from './daemon-status-cards-context';
 import { GoalStatusMessage, parseGoalStatusMessage } from './GoalStatusMessage';
 import { Markdown } from './Markdown';
 import { UserMessage } from './UserMessage';
@@ -188,6 +184,7 @@ export const SystemMessage = memo(function SystemMessage({
   ) {
     content = t('subscription.loginRequired');
   }
+  const statusCards = useDaemonStatusCards();
   const subagentDetails = useSubagentDetails();
   const backgroundDetails = subagentDetails?.onOpenBackground;
   const openSession = subagentDetails?.onOpenSession;
@@ -200,7 +197,7 @@ export const SystemMessage = memo(function SystemMessage({
       .catch(warnClipboardWriteFailure);
   }, [content, flashCopied]);
   if (source === 'background_notification_turn_started') {
-    const turn = parseDaemonBackgroundTurn(data);
+    const turn = parseBackgroundTurn(data);
     const backgroundTask = (
       data as
         | {
@@ -386,23 +383,16 @@ export const SystemMessage = memo(function SystemMessage({
     );
   }
 
-  const mcpStatus = variant === 'info' ? parseMcpStatusMessage(content) : null;
-  if (mcpStatus) {
-    return (
-      <div className={styles.flushMessage}>
-        <McpStatusMessage message={mcpStatus} />
-      </div>
-    );
+  const mcpStatusCard =
+    variant === 'info' ? statusCards.renderMcpStatus?.(content) : null;
+  if (mcpStatusCard) {
+    return <div className={styles.flushMessage}>{mcpStatusCard}</div>;
   }
 
-  const tasksStatus =
-    variant === 'info' ? parseTasksStatusMessage(content) : null;
-  if (tasksStatus) {
-    return (
-      <div className={styles.flushMessage}>
-        <TasksStatusMessage message={tasksStatus} />
-      </div>
-    );
+  const tasksStatusCard =
+    variant === 'info' ? statusCards.renderTasksStatus?.(content) : null;
+  if (tasksStatusCard) {
+    return <div className={styles.flushMessage}>{tasksStatusCard}</div>;
   }
 
   const goalStatus =

@@ -43,9 +43,8 @@ export function EffortDialog({
   }));
 
   // Pre-select only a tier this model actually exposes. An unset effort starts
-  // at the top rather than highlighting 'high', and so does a tier the global
-  // `model.reasoningEffort` carried over from another model (only ACP sessions
-  // reconcile it) — either way the cursor must not read as "this tier is
+  // at the top rather than highlighting 'high', as does an unsupported
+  // fallback tier — either way the cursor must not read as "this tier is
   // current", or a bare Enter silently overwrites the stored value with it.
   const configuredIndex = currentEffort ? efforts.indexOf(currentEffort) : -1;
   const initialIndex = Math.max(0, configuredIndex);
@@ -78,7 +77,7 @@ export function EffortDialog({
         {'> '}
         {t('Reasoning Effort')}{' '}
         <Text color={theme.text.secondary}>
-          {t('(applied across all providers; clamped per model)')}
+          {t('(for the current model, within provider limits)')}
         </Text>
       </Text>
       <Box height={1} />

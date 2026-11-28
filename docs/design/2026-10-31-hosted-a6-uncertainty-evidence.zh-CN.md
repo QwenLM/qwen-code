@@ -121,7 +121,7 @@ A6 要求三个观察：缺失或未知的 producer 证据必须阻塞；不重�
 - `packages/cli/src/serve/hosted-child-wait-recovery.test.ts`（G3 fill 级用例）
 - `packages/cli/src/serve/hosted-background-launch-recovery.test.ts`（journal-only
   workflow/账本拒绝）
-- `packages/cli/src/serve/hosted-harness-session.test.ts`（G3 路由级用例）
+- `packages/cli/src/serve/hosted-harness-session.takeover-child-waits.test.ts`（G3 路由级用例）
 - `packages/cli/src/serve/hosted-approval-continuation.test.ts`（G1/G2 矩阵）
 - 本设计文档（双语）；定向证据落地时同步更新父文档 §9.1 状态注记。
 

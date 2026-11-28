@@ -8,11 +8,11 @@ import {
   useSyncExternalStore,
 } from 'react';
 import { AnchorIcon, ChevronRightIcon, MoreHorizontalIcon } from 'lucide-react';
-import {
-  summarizeHookExecutions,
-  type HookExecutionEntry,
-  type HookLifecycleSummary,
-  type HookTurnPage,
+import { summarizeHookExecutions } from '@qwen-code/qwen-code-core/telemetry/hook-lifecycle-contract.js';
+import type {
+  HookExecutionEntry,
+  HookLifecycleSummary,
+  HookTurnPage,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import { useTrajectoryLiveSnapshot } from '../../trajectory/trajectory-live-context';

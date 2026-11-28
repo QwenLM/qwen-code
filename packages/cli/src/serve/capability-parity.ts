@@ -81,11 +81,12 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   session_create: { standing: 'managed', evidence: 'surface:SESSION_CREATE' },
   hosted_harness_private_v1: {
     standing: 'managed',
-    evidence: 'docs:packages/cli/src/serve/hosted-harness-session.ts',
+    evidence: 'docs:packages/cli/src/serve/hosted-harness-contract.ts',
   },
   managed_session_journal_delta_v1: {
     standing: 'managed',
-    evidence: 'docs:packages/cli/src/serve/hosted-harness-session.ts',
+    evidence:
+      'docs:packages/cli/src/serve/hosted-harness-session/observation-routes.ts',
   },
   session_startup_config: LEGACY_ONLY(
     'a client startup config, not a Managed input',
@@ -115,6 +116,18 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed sub-session send surface',
   ),
   session_prompt: { standing: 'managed', evidence: 'surface:TURN_SUBMIT' },
+  session_retire_if_idle: NO_MANAGED_EQUIVALENT(
+    'source-native retirement is available only on trusted local daemon sessions',
+  ),
+  turn_skill_session_effects_check: NO_MANAGED_EQUIVALENT(
+    'Checks the captured native skill files before prompt enqueue',
+  ),
+  turn_extension_store_lease: NO_MANAGED_EQUIVALENT(
+    'A local Serve child holds an installed extension generation through its turn.',
+  ),
+  turn_skill_file_snapshot: NO_MANAGED_EQUIVALENT(
+    'optional snapshot support is restricted to trusted local daemon sessions',
+  ),
   session_turn_status: NO_MANAGED_EQUIVALENT(
     'Managed reads Turns by list and get, not a status route',
   ),
@@ -168,7 +181,8 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   typed_event_schema: {
     standing: 'managed',
-    evidence: 'docs:packages/cli/src/serve/hosted-harness-session.ts',
+    evidence:
+      'docs:packages/cli/src/serve/hosted-harness-session/observation-routes.ts',
   },
   session_set_model: {
     standing: 'managed',
@@ -249,6 +263,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     evidence:
       'surface:AUTOMATION_RUN,surface:STORE_AUTOMATION_CREATE,surface:STORE_AUTOMATION_LIST,surface:STORE_AUTOMATION_RETIRE',
   },
+  scheduled_task_owner_selection: NO_MANAGED_EQUIVALENT(
+    'Managed automations do not accept daemon session-owner selectors',
+  ),
   // Fixed-interval /loop: cron_create passes a gate through to the
   // definition, probed before each firing by the same gateCommandError the
   // daemon's scheduled-task gate uses, so a quiet watch spends no turn.
@@ -418,6 +435,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   workspace_git_check_ignore: NO_MANAGED_EQUIVALENT(
     'no Managed Git ignore query route',
+  ),
+  workspace_input_history: NO_MANAGED_EQUIVALENT(
+    'no Managed input history route',
   ),
   workspace_mcp_restart: {
     standing: 'managed',
@@ -599,6 +619,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   session_worktree_reset_v1: NO_MANAGED_EQUIVALENT(
     'Managed worktree inspect and cleanup do not transfer checkout ownership to a fresh replacement Session',
   ),
+  session_worktree_restore_v1: NO_MANAGED_EQUIVALENT(
+    'Managed has no retained-chat snapshot selector, Git reconstruction, and owner-attested restore session flow',
+  ),
   session_worktree_branch_v1: NO_MANAGED_EQUIVALENT(
     'Managed allocates an initial branch during worktree creation, but has no post-create create-branch-here operation',
   ),
@@ -677,6 +700,9 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   // Internal relay MCP leg the Hosted Harness connects back to, behind the
   // relay credential, never a client capability.
   'INTERNAL_CLIENT_FILES_MCP',
+  // Internal work poll the Hosted Harness calls with its bearer token to
+  // claim released Sessions, never a client capability.
+  'HARNESS_WORK_POLL',
   // Internal writer and publication routes: between the control plane and its
   // own stores, behind writer credentials, never a client capability.
   'PUB_ADMISSION_PREPARE',
@@ -696,6 +722,7 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'STORE_MODEL_CONFIG_QUERY',
   'STORE_MEMORY_QUERY',
   'STORE_USER_MESSAGE_CLAIM',
+  'STORE_EVENT_INGEST',
   'STORE_EXECUTION_AUTHORIZE',
   'STORE_LIFECYCLE_AUTHORIZE',
   'STORE_RECOVERY_BLOCK',

@@ -326,7 +326,7 @@ public final class WorkspaceRecoveryContract {
         String maintenanceStep = authority.holdForMaintenance(fixture.session.workspace(), maintenance, 1);
         authority.releaseLost(nextClaim);
         assertThat(jdbc.queryForList("SELECT maintenance_id FROM ma_storage_owner"
-                + " WHERE maintenance_id = ? AND holder_key IS NOT NULL", String.class, maintenance))
+                + " WHERE maintenance_id = ? AND holder_id IS NOT NULL", String.class, maintenance))
                 .containsExactly(maintenance);
         assertThatThrownBy(() -> authority.claim(fixture.session.workspace(), rival.session()))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class,
@@ -373,7 +373,7 @@ public final class WorkspaceRecoveryContract {
             }
             connection.commit();
             assertThatThrownBy(() -> pending.get(5, TimeUnit.SECONDS)).hasCauseInstanceOf(RuntimeBrokerException.class);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_key IS NOT NULL",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_id IS NOT NULL",
                     Long.class, original.binding().getBindingId())).isZero();
         }
     }
@@ -388,7 +388,7 @@ public final class WorkspaceRecoveryContract {
         private final String storage;
 
         public Fixture(DataSource source, JdbcTemplate jdbc, ManagedAgentStore store) {
-            this(source, jdbc, store, "recovery-" + UUID.randomUUID(), "workspace", "storage");
+            this(source, jdbc, store, UUID.randomUUID().toString(), "workspace", "storage");
         }
 
         public Fixture(DataSource source, JdbcTemplate jdbc, ManagedAgentStore store,

@@ -40,6 +40,15 @@ class SubmitHarnessTurnTest {
     }
 
     @Test
+    void requestsEventIngestOnlyWhenAsked() {
+        assertEquals(false, turn().build().toJson().containsKey("eventDelivery"));
+        assertEquals(Map.of("mode", "ingest", "turnId", "turn-1"),
+                turn().eventIngest("turn-1").build().toJson().get("eventDelivery"));
+        assertThrows(IllegalArgumentException.class, () -> turn().eventIngest(""));
+        assertThrows(IllegalArgumentException.class, () -> turn().eventIngest("t".repeat(65)));
+    }
+
+    @Test
     void hashesEveryInlineAttachmentByteRatherThanOnlyThePromptText() {
         var first = List.<Map<String, Object>>of(Map.of("type", "resource", "resource",
                 Map.of("uri", "managed-input:///a.txt", "mimeType", "text/plain", "text", "first")));

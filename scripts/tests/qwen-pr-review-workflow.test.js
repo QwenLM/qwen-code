@@ -122,10 +122,29 @@ describe('qwen pr review runner routing', () => {
     const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
 
     expect(runsOn).toBe(
-      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-review"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
+      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\' && (github.event_name != \'pull_request_target\' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(\'["self-hosted", "linux", "x64", "ecs-review"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
     );
     expect(runsOn).not.toContain('ecs-qwen');
     expect(runsOn).not.toContain('ecs-agent');
+    // A fork pull_request_target payload never reaches the persistent pool:
+    // the PR's own install/build runs in this job, and `off` containment on
+    // a shared host exposes CI_BOT_PAT + the model key AND persists whatever
+    // a postinstall plants. Comment/dispatch triggers keep the pool (no fork
+    // payload); the sandbox preflight is their fail-closed backstop.
+    expect(runsOn).toContain(
+      "github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository",
+    );
+    expect(runsOn).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+    expect(runsOn).toContain('fromJSON(\'["ubuntu-latest"]\')');
+    // The hosted toolchain setup must fire on every shape the routing sends
+    // to ubuntu-latest, the fork payload included — a hosted runner has no
+    // pool-preinstalled node.
+    const setupNode = parse(workflow).jobs['review-pr'].steps.find(
+      (s) => s.name === 'Setup Node.js for hosted review',
+    );
+    expect(setupNode.if).toContain(
+      "(github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository)",
+    );
   });
 
   it('routes the command gate to ECS for payload-less events, keeps the fork guard', () => {
@@ -3100,6 +3119,43 @@ describe('review execution sandbox opt-in (#9556)', () => {
     );
     expect(review.env.DOCKER_HOST).toBe('');
     expect(review.env.DOCKER_CONTEXT).toBe('default');
+  });
+
+  it('refuses a fork-head review when containment cannot be required', () => {
+    // `off` hands the PR's own install/build/test this step's GH_TOKEN and
+    // OPENAI_API_KEY. On the persistent pool a same-repo head keeps the
+    // documented fail-open behaviour; a cross-repository head (or an
+    // unreadable one — deleted fork, payload-less trigger) must fail closed
+    // instead. On a GitHub-hosted runner the disposable VM bounds the
+    // fallback, so the refusal is scoped to self-hosted.
+    const preflight = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Resolve review sandbox',
+    );
+    expect(preflight.env.HEAD_REPO).toBe(
+      '${{ github.event.pull_request.head.repo.full_name }}',
+    );
+    expect(preflight.env.RUNNER_ENVIRONMENT).toBe('${{ runner.environment }}');
+    // Payload-less triggers resolve the head repo through the read-only job
+    // token, never CI_BOT_PAT: this step must not need the write credential.
+    expect(preflight.env.GH_TOKEN).toBe('${{ github.token }}');
+    expect(preflight.run).toContain(
+      'gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"',
+    );
+    const refusalStart = preflight.run.indexOf(
+      `if [ "$policy" != 'required' ] && [ "\${RUNNER_ENVIRONMENT:-}" = 'self-hosted' ] && [ "\${HEAD_REPO:-}" != "$GITHUB_REPOSITORY" ]; then`,
+    );
+    expect(refusalStart).toBeGreaterThan(-1);
+    const refusal = preflight.run.slice(
+      refusalStart,
+      preflight.run.indexOf('echo "sandbox_policy=$policy"'),
+    );
+    expect(refusal).toContain('exit 1');
+    expect(refusal).toContain('::error::');
+    // The refusal precedes the policy output, so a refused run can never
+    // feed `off` into 'Run review'.
+    expect(refusalStart).toBeLessThan(
+      preflight.run.indexOf('echo "policy=$policy" >> "$GITHUB_OUTPUT"'),
+    );
   });
 });
 
@@ -7663,6 +7719,9 @@ describe('review model canary routing', () => {
     expect(step.env.REVIEW_API_KEY_CANARY).toBe(
       '${{ secrets.REVIEW_OPENAI_API_KEY_CANARY }}',
     );
+    // The runner class is wired from the runner context (not pinned), so the
+    // endpoint override can gate itself to the self-hosted pool.
+    expect(step.env.RUNNER_ENVIRONMENT).toBe('${{ runner.environment }}');
     // The env no longer carries the model itself: a literal there would make
     // every split a workflow edit, which is the thing a rollout must not need.
     expect(step.env.OPENAI_MODEL).toBeUndefined();
@@ -7871,7 +7930,15 @@ describe('review model canary routing', () => {
     const helperEnd = run.indexOf('\n}', helperStart) + '\n}'.length;
     const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}`;
 
-    const serve = (canary, percent, pr, canaryUrl, canaryKey, dflt) =>
+    const serve = (
+      canary,
+      percent,
+      pr,
+      canaryUrl,
+      canaryKey,
+      dflt,
+      runnerEnv,
+    ) =>
       execFileSync(
         'bash',
         [
@@ -7890,6 +7957,9 @@ describe('review model canary routing', () => {
             OPENAI_API_KEY: 'default-key',
             REVIEW_BASE_URL_CANARY: canaryUrl ?? '',
             REVIEW_API_KEY_CANARY: canaryKey ?? '',
+            // The endpoint override is gated to the self-hosted pool; the
+            // rows below exercise that pool unless they name another class.
+            RUNNER_ENVIRONMENT: runnerEnv ?? 'self-hosted',
           },
         },
       );
@@ -7990,6 +8060,83 @@ describe('review model canary routing', () => {
       '::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort.\n' +
         '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
         'default-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // The endpoint override is gated to the self-hosted pool: the canary
+    // gateway (CN MaaS) is unreachable from GitHub-hosted runners, the lane
+    // fork-PR reviews route to (2026-11-28, runs 46091896299 / 46091914221).
+    // A fully-configured pair on a hosted runner keeps the default cohort,
+    // and the warning records the runner.environment it resolved. The
+    // self-hosted apply is the first row above; these rows name the class as
+    // the seventh argument so one harness covers every runner class.
+    expect(
+      serve(
+        'canary-model',
+        '10',
+        '12300',
+        'https://canary.example.com/v1',
+        'canary-key',
+        undefined,
+        'github-hosted',
+      ),
+    ).toBe(
+      "::warning::canary endpoint is served only to the self-hosted pool; runner.environment='github-hosted' cannot reach it, falling back to the default cohort.\n" +
+        '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // Fail-closed: an unset runner class also keeps the default, and the
+    // warning names the unset class rather than claiming an observed one.
+    expect(
+      serve(
+        'canary-model',
+        '10',
+        '12300',
+        'https://canary.example.com/v1',
+        'canary-key',
+        undefined,
+        '',
+      ),
+    ).toBe(
+      "::warning::canary endpoint is served only to the self-hosted pool; runner.environment='<unset>' cannot reach it, falling back to the default cohort.\n" +
+        '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // Key/URL validity is checked before the runner gate, so a misconfigured
+    // pair reports the specific "unusable" reason even on a hosted runner.
+    expect(
+      serve(
+        'canary-model',
+        '10',
+        '12300',
+        'not a url',
+        'canary-key',
+        undefined,
+        'github-hosted',
+      ),
+    ).toBe(
+      '::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort.\n' +
+        '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // A model-only canary (no canary URL) is untouched by the gate: the model
+    // split still applies on a hosted runner, over the reachable default
+    // gateway.
+    expect(
+      serve(
+        'canary-model',
+        '10',
+        '12300',
+        undefined,
+        undefined,
+        undefined,
+        'github-hosted',
+      ),
+    ).toBe(
+      '::notice title=Review model::canary-model (PR #12300, canary 10%, bucket 0/10, cohort canary, endpoint default.example.com)\n' +
+        'canary-model|canary|https://default.example.com/v1|default-key',
     );
   });
 });

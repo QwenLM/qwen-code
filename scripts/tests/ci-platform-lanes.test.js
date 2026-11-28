@@ -582,6 +582,17 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
   expect(smoke.run).toMatch(
     / -- --shard=\$\{\{ matrix\.shard \}\}\/2 --workers=2$/,
   );
+  // On self-hosted runners, the smoke command runs in an isolated loopback-only
+  // network namespace so sibling Docker/veth churn cannot trigger Chromium
+  // net::ERR_NETWORK_CHANGED aborts. Keep the `-f` guard for open PRs whose
+  // checked-out head.sha predates the script.
+  expect(smoke.run).toContain(
+    'if [ ! -f .github/scripts/ci/run-in-isolated-netns.sh ]; then',
+  );
+  expect(smoke.run).toContain(
+    'bash .github/scripts/ci/run-in-isolated-netns.sh -- ',
+  );
+  expect(smoke.env.RUNNER_ENVIRONMENT).toBe('${{ runner.environment }}');
   expect(ci.jobs.web_shell_e2e_smoke.strategy.matrix.shard).toEqual([1, 2]);
   expect(ci.jobs.web_shell_e2e_smoke.strategy['fail-fast']).toBe(false);
   // Same denominator contract as the unit lane: the per-shard name must
@@ -622,6 +633,9 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
   );
   expect(transcript.env.TMPDIR).toBe('${{ runner.temp }}');
   expect(transcript.if).toBe('${{ matrix.shard == 1 }}');
+  // The transcript gate fetches the pinned legacy renderer from unpkg/npm, so
+  // it must stay outside the loopback-only netns wrapper.
+  expect(transcript.run).not.toContain('run-in-isolated-netns.sh');
   // Slow hosted browser installs took over 23 min, so reserve time in the
   // 75-minute job for transcript/smoke tests and artifact upload, while the
   // install step itself stays bounded. Two shards run half the suite each,
@@ -1909,6 +1923,16 @@ describe('platform lanes — the retired sensitivity classifier', () => {
 });
 
 describe('GitHub helper tests', () => {
+  it('includes the precheck production and real-workflow suites on both lanes', () => {
+    for (const suite of [
+      '.github/scripts/pr-safety-precheck.test.mjs',
+      '.github/scripts/pr-safety-precheck.workflow.test.mjs',
+    ]) {
+      expect(ci.env.HELPER_TESTS).toContain(suite);
+      expect(ci.env.HELPER_TESTS_DEP_FREE).toContain(suite);
+    }
+  });
+
   it('includes the disk-pressure contract suite', () => {
     expect(ci.env.HELPER_TESTS).toContain(
       '.github/scripts/ci-disk-pressure.test.mjs',
@@ -1924,6 +1948,15 @@ describe('GitHub helper tests', () => {
     );
     expect(ci.env.HELPER_TESTS_DEP_FREE).toContain(
       '.github/scripts/check-host-load.test.mjs',
+    );
+  });
+
+  it('includes the isolated-netns wrapper suite on both helper lanes', () => {
+    expect(ci.env.HELPER_TESTS).toContain(
+      '.github/scripts/ci/run-in-isolated-netns.test.mjs',
+    );
+    expect(ci.env.HELPER_TESTS_DEP_FREE).toContain(
+      '.github/scripts/ci/run-in-isolated-netns.test.mjs',
     );
   });
 

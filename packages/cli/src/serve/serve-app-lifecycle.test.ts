@@ -174,6 +174,44 @@ describe('ServeAppLifecycle', () => {
     client.destroy();
   });
 
+  it('force-closes a non-answering upgraded peer when an embed listener is already closing', async () => {
+    // waitForClosingListener() is the second force-close call site; only
+    // closeListener() had an upgraded-peer pin. The upgrade is accepted raw
+    // so no ws server owns the socket and only the tracked-destroy sweep
+    // can release it.
+    const app = express();
+    const lifecycle = installServeAppLifecycle(app);
+    const server = createServer(app);
+    servers.add(server);
+    server.on('upgrade', (_req, socket) => {
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n',
+      );
+    });
+    lifecycle.bindServer(server);
+    server.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No address');
+    const client = await new Promise<NetSocket>((resolve, reject) => {
+      const sock = netConnect(address.port, '127.0.0.1', () => {
+        sock.write(
+          'GET /acp HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n',
+        );
+      });
+      sock.once('data', () => resolve(sock));
+      sock.once('error', reject);
+    });
+    try {
+      server.close();
+      expect(server.listening).toBe(false);
+      await lifecycle.close({ timeoutMs: 0 });
+      expect(server.listening).toBe(false);
+    } finally {
+      client.destroy();
+    }
+  });
+
   it('prunes closed sockets before the shutdown force-close sweep', async () => {
     const lifecycle = installServeAppLifecycle(express());
     const server = createServer();

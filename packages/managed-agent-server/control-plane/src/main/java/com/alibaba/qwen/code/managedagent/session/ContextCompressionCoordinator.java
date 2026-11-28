@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
@@ -85,7 +87,7 @@ public class ContextCompressionCoordinator {
                 harness.readContextCompression(tenantId, sessionId, operationId);
             }
         } catch (RuntimeException error) {
-            if (evidence == null && error instanceof com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure refusal
+            if (evidence == null && error instanceof HarnessHttpFailure refusal
                     && refusal.getStatusCode() >= 400 && refusal.getStatusCode() < 500
                     && evidence(operation) == null) {
                 store.settleContextCompression(operation, owner, "failed", null,
@@ -93,7 +95,9 @@ public class ContextCompressionCoordinator {
                 return;
             }
             if (!submitted && evidence == null) {
-                if (error instanceof com.alibaba.qwen.code.managedagent.exception.ManagedAgentException refusal) {
+                // A released Session awaiting its claim retries; the claim fallback bounds that wait.
+                if (error instanceof ManagedAgentException refusal
+                        && !"harness_placement_released".equals(refusal.getCode())) {
                     store.settleContextCompression(operation, owner, "failed", null, refusal.getCode());
                 } else {
                     store.retryContextCompressionPreparation(operation, owner, clock.millis() + 1000);

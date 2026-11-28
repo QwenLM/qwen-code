@@ -1389,9 +1389,9 @@ export async function runNonInteractive(
             undefined,
             undefined,
             modSession,
-            // Core runs no UserPromptSubmit for a notification batch.
-            (options.sendMessageType ?? SendMessageType.UserQuery) ===
-              SendMessageType.UserQuery
+            !options.fromTool &&
+              (options.sendMessageType ?? SendMessageType.UserQuery) ===
+                SendMessageType.UserQuery
               ? async () => {
                   if (abortController.signal.aborted) await routeAbort();
                   promptAdmission = await llmClient.admitUserPrompt(
@@ -2866,6 +2866,18 @@ export async function runNonInteractive(
             return settled;
           },
         };
+        const ended = (result: AgentLoopResult): AgentLoopResult => {
+          if (result.reason !== 'hook_stopped') return result;
+          // The turn ends here, so the results answer the calls in history.
+          llmClient.addHistory({ role: 'user', parts: result.parts ?? [] });
+          if (outputFormat === OutputFormat.TEXT) {
+            const notice = t('A hook stopped the turn: {{reason}}', {
+              reason: sanitizeTerminalText(result.hookStopReason ?? ''),
+            });
+            process.stderr.write(`${notice}\n`);
+          }
+          return result;
+        };
         return runAgentLoop({
           client: llmClient,
           config,
@@ -3058,7 +3070,7 @@ export async function runNonInteractive(
               suppressedOutputBody(structuredSubmission !== undefined),
             endsOnTerminateTurn: scope.endsOnTerminateTurn,
           },
-        });
+        }).then(ended);
       };
 
       let currentPromptId = prompt_id;
@@ -3151,6 +3163,7 @@ export async function runNonInteractive(
         const roundOptions: SendMessageOptions = {
           type: sendType,
           modelOverride,
+          ...(options.fromTool && { skipUserPromptSubmit: true }),
           workflowModeEligible:
             isFirstTurn &&
             sendType === SendMessageType.UserQuery &&
@@ -3675,8 +3688,6 @@ export async function runNonInteractive(
             let itemIsFirstTurn = true;
             let itemModelOverride: string | undefined;
             const itemPromptId = `${prompt_id}/automatic/${turnCount}`;
-            // A Mod's prompt is a prompt like a typed one: UserPromptSubmit
-            // hears it, and the Mods hear its turn.
             let itemTurn: ModTurn | undefined;
             const firstOptions: SendMessageOptions = modPrompt
               ? {

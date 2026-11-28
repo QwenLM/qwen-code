@@ -161,7 +161,7 @@ class HostedConcurrentTurnBurstMySqlIT {
 
     private List<String> runBurst(int burst, long staggerMs)
             throws Exception {
-        String tenant = "burst-" + burst + "-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         tenants.add(tenant);
         Logger coordinator = (Logger) LoggerFactory.getLogger(
                 HarnessCoordinator.class);

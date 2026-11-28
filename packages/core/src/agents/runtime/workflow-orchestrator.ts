@@ -58,6 +58,7 @@ import {
 } from './workflow-prompts.js';
 import { AgentTerminateMode, type ToolConfig } from './agent-types.js';
 import type { ContextState } from './agent-headless.js';
+import type { SubagentExecutor } from './subagent-executor.js';
 import {
   attachJsonlTranscriptWriter,
   buildAgentTranscriptAttach,
@@ -832,9 +833,8 @@ function attachDispatchTranscript(
 /**
  * The error for a subagent that ended on anything but GOAL.
  *
- * The message is identical for every mode — it is what the operator reads and
- * what the failures list shows. What differs is the CLASS: MAX_TURNS, TIMEOUT
- * and ERROR are the agent's own failure, so they carry
+ * The message is what the operator reads and what the failures list shows.
+ * MAX_TURNS, TIMEOUT and ERROR are the agent's own failure, so they carry
  * `WorkflowAgentFailedError` and the dispatch layer settles the call to
  * `null`. CANCELLED stays a plain `Error`, because at this depth it is
  * ambiguous whether the stall watchdog or the run-wide signal aborted the
@@ -843,6 +843,7 @@ function attachDispatchTranscript(
 function terminalDispatchError(
   workflowAgentId: string,
   mode: AgentTerminateMode,
+  subagent: SubagentExecutor,
 ): Error {
   const message = `Workflow subagent ${workflowAgentId} did not complete (terminate mode: ${mode}).`;
   switch (mode) {
@@ -852,6 +853,10 @@ function terminalDispatchError(
       return new WorkflowAgentFailedError(message, 'timeout', mode);
     case AgentTerminateMode.ERROR:
       return new WorkflowAgentFailedError(message, 'error', mode);
+    case AgentTerminateMode.HOOK_STOPPED:
+      return new Error(
+        `${message} ${sanitizeForErrorMessage(subagent.getFinalText())}`,
+      );
     default:
       return new Error(message);
   }
@@ -970,7 +975,7 @@ async function runSingleDispatch(
     // would happily loop on empty results.
     const mode = subagent.getTerminateMode();
     if (mode !== AgentTerminateMode.GOAL) {
-      throw terminalDispatchError(workflowAgentId, mode);
+      throw terminalDispatchError(workflowAgentId, mode, subagent);
     }
     return toModelVisibleSubagentResult(subagent.getFinalText(), mode);
   }
@@ -1629,7 +1634,7 @@ async function runOverridePath(
           mode !== AgentTerminateMode.GOAL &&
           mode !== AgentTerminateMode.CANCELLED
         ) {
-          throw terminalDispatchError(workflowAgentId, mode);
+          throw terminalDispatchError(workflowAgentId, mode, subagent);
         }
         // The dispatch aborts via schemaState.abortController on the
         // 3rd failed submission AND on success capture. The success path
@@ -1650,7 +1655,7 @@ async function runOverridePath(
       // Non-schema mode.
       const mode = subagent.getTerminateMode();
       if (mode !== AgentTerminateMode.GOAL) {
-        throw terminalDispatchError(workflowAgentId, mode);
+        throw terminalDispatchError(workflowAgentId, mode, subagent);
       }
       let finalText: WorkflowAgentResult = toModelVisibleSubagentResult(
         subagent.getFinalText(),

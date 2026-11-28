@@ -260,6 +260,33 @@ describe('runAgentLoop event-bus parity', () => {
     expect(bus.log).toEqual(procedural.log);
   });
 
+  it('matches when a tool hook ends the turn', async () => {
+    const toolCall = {
+      type: LlmEventType.ToolCallRequest,
+      value: call('c1'),
+    } as ServerLlmStreamEvent;
+    const executor: AgentLoopToolExecutor = {
+      run: async (requests, _signal, hooks) =>
+        requests.map((request) => {
+          hooks.beforeLaunch(request, []);
+          return {
+            request,
+            response: { ...response(request), hookStopReason: 'halt' },
+            status: 'success' as const,
+            recorded: true,
+          };
+        }),
+    };
+    const { proceduralResult, busResult, procedural, bus } = await bothPaths(
+      [[toolCall]],
+      { executor },
+    );
+    expect(busResult).toEqual(proceduralResult);
+    expect(busResult.reason).toBe('hook_stopped');
+    expect(busResult.hookStopReason).toBe('halt');
+    expect(bus.log).toEqual(procedural.log);
+  });
+
   it('matches when a surface callback ends the loop', async () => {
     const toolCall = {
       type: LlmEventType.ToolCallRequest,

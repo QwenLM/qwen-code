@@ -4,9 +4,8 @@ import com.alibaba.qwen.code.managedagent.PublicationJournalFixture;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRef;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
@@ -68,8 +67,13 @@ public class ManagedSchemaPublicationStoreTest {
                 output, digest)).hasMessageContaining("sealed");
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE kind = X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'",
                 Long.class)).isEqualTo(2);
-        byte[] manifest = fixture.jdbc.queryForObject("SELECT r.inline_bytes FROM ma_output_capture c JOIN ma_resource r"
-                + " ON r.resource_key = c.seal_manifest_resource_key WHERE c.publication_id = ?", byte[].class, "pub-1");
+        String sealManifestRef = fixture.jdbc.queryForObject(
+                "SELECT seal_manifest_resource_ref FROM ma_output_capture WHERE publication_id = ?",
+                String.class, "pub-1");
+        byte[] manifest = fixture.jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
+                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", byte[].class,
+                "tenant-1", "session-1",
+                ManagedIdentityRef.decode(sealManifestRef.getBytes(StandardCharsets.US_ASCII)).get(2));
         assertThat(JdbcManagedToolResultStore.parse(new String(manifest, StandardCharsets.UTF_8)).path("seals")).hasSize(2);
         ObjectMapper json = new ObjectMapper();
         var terminal = json.createObjectNode().put("executionStatus", "error");
@@ -86,9 +90,8 @@ public class ManagedSchemaPublicationStoreTest {
         outcome.set("history", history);
         JsonNode admission = data.prepareAdmission(key, "pub-1", "writer-1", 1, WRITER_TOKEN, outcome);
         String resourceId = admission.path("resourceId").asText();
-        String resourceKey = ManagedSchemaKeys.key(ManagedSessionStore.sessionScopeKey("tenant-1", "session-1"), resourceId);
-        assertThat(fixture.jdbc.queryForObject("SELECT state FROM ma_resource WHERE resource_key = ?",
-                String.class, resourceKey)).isEqualTo("PUBLISHED");
+        assertThat(fixture.jdbc.queryForObject("SELECT state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                String.class, "tenant-1", "session-1", resourceId)).isEqualTo("PUBLISHED");
         var payload = json.createObjectNode().put("executionCallId", "execution-1")
                 .put("historyRevision", fixture.sequence + 1).putNull("resultRef");
         payload.set("toolOutcomeRef", admission);
@@ -107,10 +110,10 @@ public class ManagedSchemaPublicationStoreTest {
         assertThat(admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit)).isEqualTo(accepted);
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE resource_id = ?",
                 Long.class, resourceId)).isEqualTo(1);
-        assertThat(fixture.jdbc.queryForObject("SELECT state FROM ma_resource WHERE resource_key = ?",
-                String.class, resourceKey)).isEqualTo("REFERENCED");
-        assertThat(fixture.jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE resource_key = ?",
-                String.class, resourceKey)).isEqualTo("VERIFIED");
+        assertThat(fixture.jdbc.queryForObject("SELECT state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                String.class, "tenant-1", "session-1", resourceId)).isEqualTo("REFERENCED");
+        assertThat(fixture.jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                String.class, "tenant-1", "session-1", resourceId)).isEqualTo("VERIFIED");
     }
 
     private static final class Bucket implements ToolPublicationObjectStore {

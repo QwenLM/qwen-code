@@ -467,4 +467,30 @@ describe('ManagedDiagnosticsPanel', () => {
     expect(document.body.textContent).toContain('Nested invocation');
     expect(document.querySelectorAll('[role="treeitem"]')).toHaveLength(2);
   });
+
+  it('opens directly on initialTab="statistics" without reading context usage first', async () => {
+    await act(async () =>
+      root.render(
+        <I18nProvider language="en">
+          <ManagedDiagnosticsPanel
+            provider={provider}
+            sessionId="s1"
+            clientId="actor"
+            running={false}
+            initialTab="statistics"
+            onClose={vi.fn()}
+            restoreFocus={vi.fn()}
+            onOpenChild={onOpenChild}
+          />
+        </I18nProvider>,
+      ),
+    );
+    expect(provider.getStatistics).toHaveBeenCalledTimes(1);
+    expect(provider.getContextUsage).not.toHaveBeenCalled();
+    const statsTab = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ].find((tab) => tab.textContent === 'Statistics');
+    expect(statsTab?.getAttribute('aria-selected')).toBe('true');
+    expect(document.body.textContent).toContain('110');
+  });
 });

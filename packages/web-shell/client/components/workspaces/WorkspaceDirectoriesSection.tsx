@@ -28,12 +28,16 @@ interface DirectoriesState {
  * panel. Adds and removes go through the daemon's workspace-directory route,
  * which applies them to live sessions and persists the workspace setting.
  */
-export function WorkspaceDirectoriesSection() {
+export function WorkspaceDirectoriesSection({
+  workspaceCwd: requestedWorkspaceCwd,
+}: {
+  workspaceCwd?: string;
+} = {}) {
   const { t } = useI18n();
   const connection = useConnection();
   const workspace = useWorkspace();
   const actions = useWorkspaceActions();
-  const workspaceCwd = workspace.workspaceCwd;
+  const workspaceCwd = requestedWorkspaceCwd ?? workspace.workspaceCwd;
   // Registration rewrites an `ssh://` URL to a local mirror directory, so the
   // cwd never carries that scheme; the workspace entry's SSH marker is the
   // signal the rest of the shell uses.

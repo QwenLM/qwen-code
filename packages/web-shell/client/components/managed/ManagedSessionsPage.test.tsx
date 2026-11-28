@@ -3815,6 +3815,38 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
+  it('hides the composer stop action while a submit is in flight so it matches canCancel authority', async () => {
+    mocks.client.getSession.mockImplementation(async () =>
+      summary('s1', {
+        phase: 'agent_running',
+        capabilities: { canSend: true, canCancel: true },
+      }),
+    );
+    let finishSubmit!: (value: { sessionId: string; turnId: string }) => void;
+    mocks.client.submitPrompt.mockImplementationOnce(
+      () =>
+        new Promise<{ sessionId: string; turnId: string }>((resolve) => {
+          finishSubmit = resolve;
+        }),
+    );
+    await render('s1', 'en', provider, null);
+    const findStop = () =>
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Stop managed task',
+      );
+    expect(findStop()).toBeDefined();
+
+    await input('Steer while running');
+    await click('Send');
+    expect(findStop()).toBeUndefined();
+
+    await act(async () => {
+      finishSubmit({ sessionId: 's1', turnId: 'p1' });
+      await flush();
+    });
+    expect(findStop()).toBeDefined();
+  });
+
   it('handles Escape only for the visible Managed conversation after composition and other controls', async () => {
     mocks.client.getSession.mockImplementation(async () =>
       summary('s1', {
@@ -4330,10 +4362,14 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(respond).toHaveBeenCalledTimes(2);
-    expect(respond).toHaveBeenCalledWith(action, 'allow', {
-      clientId: expect.any(String),
-      idempotencyKey: 'tool_approval_1:allow',
-    });
+    expect(respond).toHaveBeenCalledWith(
+      action,
+      'allow',
+      expect.objectContaining({
+        clientId: expect.any(String),
+        idempotencyKey: 'tool_approval_1:allow',
+      }),
+    );
     expect(
       container.querySelector('[data-testid="managed-approval"]'),
     ).toBeNull();
@@ -4381,10 +4417,14 @@ describe('ManagedSessionsPage', () => {
       allow().click();
       await flush();
     });
-    expect(respond).toHaveBeenCalledExactlyOnceWith(first, 'allow', {
-      clientId: expect.any(String),
-      idempotencyKey: 'tool_approval_1:allow',
-    });
+    expect(respond).toHaveBeenCalledExactlyOnceWith(
+      first,
+      'allow',
+      expect.objectContaining({
+        clientId: expect.any(String),
+        idempotencyKey: 'tool_approval_1:allow',
+      }),
+    );
     expect(
       container.querySelector('[data-testid="managed-approval"]')?.textContent,
     ).toContain('Child session request · child-b');
@@ -4393,13 +4433,89 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(respond).toHaveBeenCalledTimes(2);
-    expect(respond).toHaveBeenLastCalledWith(second, 'allow', {
-      clientId: expect.any(String),
-      idempotencyKey: 'tool_approval_1:allow',
-    });
+    expect(respond).toHaveBeenLastCalledWith(
+      second,
+      'allow',
+      expect.objectContaining({
+        clientId: expect.any(String),
+        idempotencyKey: 'tool_approval_1:allow',
+      }),
+    );
     expect(
       container.querySelector('[data-testid="managed-approval"]'),
     ).toBeNull();
+  });
+
+  it('disables an expired permission card with an expired status notice on mount and on live expiry', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      }),
+    );
+    let currentPerm = {
+      ...pendingAction,
+      actionId: 'perm-expired-1',
+      sessionId: 's1',
+      expiresAt: Date.now() - 1,
+    };
+    const listPending = vi.fn(async () => [currentPerm]);
+    const respond = vi.fn(async () => undefined);
+    provider = { ...provider, actions: { listPending, respond } };
+    await render('s1');
+    await act(async () => flush());
+    const card = () =>
+      container.querySelector('[data-testid="managed-approval"]')!;
+    const allowButton = () =>
+      [
+        ...card().querySelectorAll<HTMLButtonElement>(
+          '[data-testid="approval-overlay"] button',
+        ),
+      ].find((button) => button.textContent?.includes('Yes, allow once'))!;
+    expect(allowButton().disabled).toBe(true);
+    expect(
+      [...card().querySelectorAll('[role="status"]')].some((node) =>
+        node.textContent?.includes('Expired'),
+      ),
+    ).toBe(true);
+    await act(async () => {
+      allowButton().click();
+      await flush();
+    });
+    expect(respond).not.toHaveBeenCalled();
+
+    // Live expiry timer flips an open permission card to disabled + Expired status.
+    vi.useFakeTimers();
+    try {
+      currentPerm = {
+        ...pendingAction,
+        actionId: 'perm-live-expiring',
+        sessionId: 's2',
+        expiresAt: Date.now() + 250,
+      };
+      await render('s2');
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(allowButton().disabled).toBe(false);
+      expect(
+        [...card().querySelectorAll('[role="status"]')].some((node) =>
+          node.textContent?.includes('Expired'),
+        ),
+      ).toBe(false);
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(allowButton().disabled).toBe(true);
+      expect(
+        [...card().querySelectorAll('[role="status"]')].some((node) =>
+          node.textContent?.includes('Expired'),
+        ),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('shows a question without approval buttons and retains its answers until confirmed', async () => {
@@ -4420,41 +4536,79 @@ describe('ManagedSessionsPage', () => {
     await render('s1');
     await act(async () => flush());
     const card = container.querySelector('[data-testid="managed-approval"]')!;
+    expect(
+      container.querySelector('[data-testid="chat-surface"]'),
+    ).not.toBeNull();
+    expect(mocks.client.getSession).toHaveBeenCalledTimes(1);
+    expect(mocks.client.subscribeEvents).toHaveBeenCalledTimes(1);
+    expect(listPending).toHaveBeenCalledTimes(1);
     expect(card.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(card.querySelector('[data-web-shell-ask-panel]')).not.toBeNull();
+    expect(card.querySelector('form')).toBeNull();
     expect(card.textContent).not.toContain('Yes, allow once');
     expect(card.textContent).not.toContain('Tool arguments are unavailable');
-    await act(async () => {
-      for (const [index, input] of card
-        .querySelectorAll('textarea')
-        .entries()) {
+    expect(
+      Array.from(card.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Ignore',
+      ),
+    ).toBeUndefined();
+    const askOptions = () =>
+      card.querySelectorAll<HTMLButtonElement>('[data-web-shell-ask-option]');
+    const nextQuestion = () =>
+      Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent === 'next',
+      )!;
+    const submitButton = () =>
+      card.querySelector<HTMLButtonElement>(
+        '[aria-keyshortcuts="Control+Enter Meta+Enter"]',
+      )!;
+    const fillCustom = async (value: string) => {
+      await act(async () => {
+        askOptions()[2]!.click();
+      });
+      const input = card.querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )!;
+      await act(async () => {
         Object.getOwnPropertyDescriptor(
           HTMLTextAreaElement.prototype,
           'value',
-        )!.set!.call(input, `Custom answer ${index}`);
+        )!.set!.call(input, value);
         input.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-    });
-    const submitQuestion = () =>
-      card
-        .querySelector('form')!
-        .dispatchEvent(
-          new Event('submit', { bubbles: true, cancelable: true }),
-        );
+      });
+    };
+    await fillCustom('Custom answer 0');
     await act(async () => {
-      submitQuestion();
+      nextQuestion().click();
+    });
+    await fillCustom('Custom answer 1');
+    await act(async () => {
+      submitButton().click();
       await flush();
     });
     await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
     await act(async () => flush());
-    expect(card.querySelector('textarea')?.value).toBe('Custom answer 0');
+    expect(
+      card.querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )?.value,
+    ).toBe('Custom answer 1');
     expect(container.textContent).toContain('Retry the same answers');
     await act(async () => {
-      submitQuestion();
+      submitButton().click();
       await flush();
     });
     await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(2));
     await act(async () => flush());
-    expect(respond.mock.calls[0]).toEqual(respond.mock.calls[1]);
+    expect(respond.mock.calls[0][0]).toEqual(respond.mock.calls[1][0]);
+    expect(respond.mock.calls[0][1]).toEqual(respond.mock.calls[1][1]);
+    expect({
+      clientId: respond.mock.calls[0][2]?.clientId,
+      idempotencyKey: respond.mock.calls[0][2]?.idempotencyKey,
+    }).toEqual({
+      clientId: respond.mock.calls[1][2]?.clientId,
+      idempotencyKey: respond.mock.calls[1][2]?.idempotencyKey,
+    });
     expect(respond.mock.calls[0][1]).toEqual({
       kind: 'question',
       answers: [
@@ -4496,6 +4650,16 @@ describe('ManagedSessionsPage', () => {
       container.querySelector('[data-testid="managed-approval"]')!;
     const selector = () =>
       card().querySelector('[aria-label="Pending requests"]')!;
+    const askOptions = () =>
+      card().querySelectorAll<HTMLButtonElement>('[data-web-shell-ask-option]');
+    const nextQuestion = () =>
+      Array.from(card().querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent === 'next',
+      )!;
+    const submitButton = () =>
+      card().querySelector<HTMLButtonElement>(
+        '[aria-keyshortcuts="Control+Enter Meta+Enter"]',
+      )!;
     const choose = async (text: string) => {
       await act(async () => {
         [...selector().querySelectorAll('button')]
@@ -4503,9 +4667,14 @@ describe('ManagedSessionsPage', () => {
           .click();
       });
     };
-    const fill = async (index: number, text: string) => {
+    const fillCustom = async (text: string) => {
       await act(async () => {
-        const input = card().querySelectorAll('textarea')[index]!;
+        askOptions()[2]!.click();
+      });
+      const input = card().querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )!;
+      await act(async () => {
         Object.getOwnPropertyDescriptor(
           HTMLTextAreaElement.prototype,
           'value',
@@ -4523,23 +4692,30 @@ describe('ManagedSessionsPage', () => {
     expect(
       selector().querySelector('[aria-pressed="true"]')?.textContent,
     ).toContain('child-a');
-    await fill(0, 'Keep child A');
+    await fillCustom('Keep child A\nline 2');
     await choose('child-b');
-    expect(card().querySelector('textarea')?.value).toBe('');
-    await fill(0, 'Child B answer');
-    await fill(1, 'Child B details');
+    expect(askOptions()[2]!.textContent).toBe('Other answer');
+    await fillCustom('Child B answer');
+    await act(async () => {
+      nextQuestion().click();
+    });
+    await fillCustom('Child B details');
     await choose('This session');
     expect(card().querySelector('[role="alertdialog"]')).not.toBeNull();
     await choose('child-a');
-    expect(card().querySelector('textarea')?.value).toBe('Keep child A');
-    await choose('child-b');
-    expect(card().querySelector('textarea')?.value).toBe('Child B answer');
+    expect(askOptions()[2]!.textContent).toBe('Keep child A\nline 2');
     await act(async () => {
-      card()
-        .querySelector('form')!
-        .dispatchEvent(
-          new Event('submit', { bubbles: true, cancelable: true }),
-        );
+      askOptions()[2]!.click();
+    });
+    expect(
+      card().querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )?.value,
+    ).toBe('Keep child A\nline 2');
+    await choose('child-b');
+    expect(askOptions()[2]!.textContent).toBe('Child B answer');
+    await act(async () => {
+      submitButton().click();
       await flush();
     });
     await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
@@ -4561,7 +4737,260 @@ describe('ManagedSessionsPage', () => {
     expect(
       selector().querySelector('[aria-pressed="true"]')?.textContent,
     ).toContain('child-a');
-    expect(card().querySelector('textarea')?.value).toBe('Keep child A');
+    expect(askOptions()[2]!.textContent).toBe('Keep child A\nline 2');
+  });
+
+  it('preserves option order, untrimmed text, draft across cloned refreshes, 32 KiB guard, duplicate-submit fencing, and live expiry on shared AskUserQuestion', async () => {
+    vi.stubGlobal('crypto', webcrypto);
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      }),
+    );
+    let triggerActionUpdate!: () => void;
+    const actionUpdated = new Promise<void>((resolve) => {
+      triggerActionUpdate = resolve;
+    });
+    mocks.client.subscribeEvents.mockImplementation(async function* (
+      id: string,
+      opts: { signal: AbortSignal },
+    ) {
+      if (id === 's1') {
+        await actionUpdated;
+        if (opts.signal.aborted) return;
+        yield event(4, 'Streamed message delta');
+        yield {
+          id: 5,
+          at: 5,
+          type: 'action_updated',
+          sessionId: 's1',
+          data: {},
+        };
+      }
+      await new Promise<void>((resolve) => {
+        if (opts.signal.aborted) resolve();
+        else
+          opts.signal.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+      });
+    });
+    let currentQuestion = { ...pendingQuestion(), sessionId: 's1' };
+    let resolveRespond!: () => void;
+    const respond = vi.fn().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveRespond = resolve;
+        }),
+    );
+    const listPending = vi.fn().mockImplementation(async () => [
+      {
+        ...currentQuestion,
+        questions: structuredClone(currentQuestion.questions),
+      },
+    ]);
+    provider = { ...provider, actions: { listPending, respond } };
+    await render('s1');
+    await act(async () => flush());
+    const card = () =>
+      container.querySelector('[data-testid="managed-approval"]')!;
+    const askOptions = () =>
+      card().querySelectorAll<HTMLButtonElement>('[data-web-shell-ask-option]');
+    const nextQuestion = () =>
+      Array.from(card().querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent === 'next',
+      )!;
+    const prevQuestion = () =>
+      Array.from(card().querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent === 'previous',
+      )!;
+    const submitButton = () =>
+      card().querySelector<HTMLButtonElement>(
+        '[aria-keyshortcuts="Control+Enter Meta+Enter"]',
+      )!;
+    const fillCustom = async (value: string) => {
+      await act(async () => {
+        askOptions()[2]!.click();
+      });
+      const input = card().querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )!;
+      expect(input.maxLength).toBe(8192);
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )!.set!.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    };
+
+    // 32 KiB UTF-8 byte cap disables Submit while keeping input editable.
+    await fillCustom('界'.repeat(8192));
+    await act(async () => nextQuestion().click());
+    await fillCustom('界'.repeat(8192));
+    expect(card().querySelector('[role="alert"]')?.textContent).toContain(
+      '32 KiB',
+    );
+    expect(submitButton().disabled).toBe(true);
+    expect(
+      card().querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )!.disabled,
+    ).toBe(false);
+
+    // Replace with valid multi-select (clicked in reverse order) + untrimmed multi-line text.
+    await act(async () => {
+      askOptions()[1]!.click();
+      askOptions()[0]!.click();
+    });
+    const q2Input = card().querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-ask-panel] textarea',
+    );
+    if (q2Input) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )!.set!.call(q2Input, '  also: review\npublish  ');
+        q2Input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    } else {
+      await fillCustom('  also: review\npublish  ');
+    }
+    // Streaming message delta + sliding expiresAt + cloned questions refresh while on Q2
+    // must NOT reset step or draft.
+    const readsBefore = listPending.mock.calls.length;
+    currentQuestion = {
+      ...currentQuestion,
+      expiresAt: currentQuestion.expiresAt + 120_000,
+    };
+    await act(async () => {
+      triggerActionUpdate();
+      await flush();
+    });
+    await vi.waitFor(() =>
+      expect(listPending.mock.calls.length).toBeGreaterThan(readsBefore),
+    );
+    await act(async () => flush());
+    expect(
+      mocks.messageListProps?.messages.some((message) =>
+        message.content.includes('Streamed message delta'),
+      ),
+    ).toBe(true);
+    expect(card().textContent).toContain('2/2 questions');
+    expect(
+      card().querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )?.value ?? askOptions()[2]?.textContent,
+    ).toBe('  also: review\npublish  ');
+    await act(async () => prevQuestion().click());
+    // Selecting duplicate-label option 1 on Q1 clears custom text.
+    await act(async () => askOptions()[1]!.click());
+    expect(card().querySelector('[role="alert"]')).toBeNull();
+    expect(submitButton().disabled).toBe(false);
+
+    // Trigger duplicate submit while in flight: fenced to 1 call, canonicalized option order.
+    await act(async () => {
+      submitButton().click();
+      submitButton().click();
+      await flush();
+    });
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
+    expect(submitButton().disabled).toBe(true);
+    expect(respond.mock.calls[0][1]).toEqual({
+      kind: 'question',
+      answers: [
+        { questionId: 'q1', optionIds: ['q1o2'] },
+        {
+          questionId: 'q2',
+          optionIds: ['q2o1', 'q2o2'],
+          text: '  also: review\npublish  ',
+        },
+      ],
+    });
+    await act(async () => {
+      resolveRespond();
+      await flush();
+    });
+
+    // Expired question shows role="status" expired notice and disables controls.
+    currentQuestion = {
+      ...pendingQuestion(),
+      actionId: 'expired-q',
+      sessionId: 's2',
+      expiresAt: Date.now() - 1,
+    };
+    respond.mockClear();
+    await render('s2');
+    await act(async () => flush());
+    expect(card().querySelector('[role="status"]')?.textContent).toContain(
+      'expired',
+    );
+    expect(submitButton().disabled).toBe(true);
+    expect(askOptions()[0]!.disabled).toBe(true);
+    await act(async () => {
+      submitButton().click();
+      await flush();
+    });
+    expect(respond).not.toHaveBeenCalled();
+
+    // Live expiry timer flips an open question to expired without a reload;
+    // submit-time clock check also blocks submission if wall clock passes expiresAt
+    // before the timer fires.
+    vi.useFakeTimers();
+    try {
+      const baseNow = Date.now();
+      currentQuestion = {
+        ...pendingQuestion(),
+        actionId: 'clock-jump-q',
+        sessionId: 's3',
+        expiresAt: baseNow + 60_000,
+      };
+      await render('s3');
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => nextQuestion().click());
+      await act(async () => askOptions()[0]!.click());
+      expect(submitButton().disabled).toBe(false);
+      const nowSpy = vi
+        .spyOn(Date, 'now')
+        .mockReturnValue(currentQuestion.expiresAt + 1);
+      await act(async () => {
+        submitButton().click();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(respond).not.toHaveBeenCalled();
+      nowSpy.mockRestore();
+
+      currentQuestion = {
+        ...pendingQuestion(),
+        actionId: 'live-expiring-q',
+        sessionId: 's4',
+        expiresAt: Date.now() + 250,
+      };
+      await render('s4');
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(card().querySelector('[role="status"]')).toBeNull();
+      expect(askOptions()[0]!.disabled).toBe(false);
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(card().querySelector('[role="status"]')?.textContent).toContain(
+        'expired',
+      );
+      expect(askOptions()[0]!.disabled).toBe(true);
+      expect(submitButton().disabled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each([
@@ -8295,5 +8724,103 @@ describe('ManagedSessionsPage', () => {
       'item-1',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+  });
+
+  it('gates ComposerUsageStats and onOpenContextUsage on diagnostics capability, opens the matching tab, and aborts in-flight reads on session switch', async () => {
+    // 1) Without capabilities.diagnostics: neither usage bar nor context opener mounts.
+    const getContextUsage = vi.fn().mockResolvedValue(diagnosticContext);
+    const getStatistics = vi.fn().mockResolvedValue(diagnosticStats);
+    provider = {
+      ...provider,
+      diagnostics: {
+        getContextUsage,
+        getStatistics,
+        getResources: vi.fn().mockResolvedValue(diagnosticResources),
+        listAgentTrace: vi.fn().mockResolvedValue(diagnosticTrace),
+      },
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s0', {
+        capabilities: { canSend: true, canCancel: false, diagnostics: false },
+      }),
+    );
+    await render('s0');
+    expect(
+      container.querySelector('[data-web-shell-composer-usage]'),
+    ).toBeNull();
+    expect(mocks.editorProps?.onOpenContextUsage).toBeUndefined();
+    expect(getStatistics).not.toHaveBeenCalled();
+
+    // 2) With capabilities.diagnostics=true: ComposerUsageStats renders real
+    // usage and opens Statistics tab; onOpenContextUsage opens Context tab.
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: true, canCancel: false, diagnostics: true },
+      }),
+    );
+    await render('s1');
+    await act(async () => {
+      await flush();
+    });
+    const usageBar = container.querySelector('[data-web-shell-composer-usage]');
+    expect(usageBar).not.toBeNull();
+    expect(usageBar?.textContent).toContain('110 tok');
+    expect(usageBar?.textContent).toContain('20% cache hit');
+    expect(usageBar?.textContent).toContain('11 tok/s');
+    expect(usageBar?.textContent).not.toContain('turn');
+    expect(mocks.editorProps?.onOpenContextUsage).toBeTypeOf('function');
+
+    await act(async () => {
+      usageBar!.querySelector('button')!.click();
+      await flush();
+    });
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    const statsTab = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ].find((tab) => tab.textContent === 'Statistics');
+    expect(statsTab?.getAttribute('aria-selected')).toBe('true');
+    expect(getContextUsage).not.toHaveBeenCalled();
+
+    // Close dialog via Escape, then open via onOpenContextUsage -> Context tab.
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      await flush();
+    });
+    await act(async () => {
+      mocks.editorProps?.onOpenContextUsage?.();
+      await flush();
+    });
+    const contextTab = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ].find((tab) => tab.textContent === 'Context');
+    expect(contextTab?.getAttribute('aria-selected')).toBe('true');
+    expect(getContextUsage).toHaveBeenCalledTimes(1);
+
+    // 3) Switching sessions aborts an in-flight getStatistics request and hides
+    // the usage bar when the target session does not advertise diagnostics.
+    let capturedSignal: AbortSignal | undefined;
+    getStatistics.mockImplementationOnce((_id, options) => {
+      capturedSignal = options.signal;
+      return new Promise(() => {});
+    });
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          diagnostics: id === 's2',
+        },
+      }),
+    );
+    await render('s2');
+    expect(capturedSignal).toBeInstanceOf(AbortSignal);
+    expect(capturedSignal?.aborted).toBe(false);
+    await render('s3');
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(
+      container.querySelector('[data-web-shell-composer-usage]'),
+    ).toBeNull();
+    expect(mocks.editorProps?.onOpenContextUsage).toBeUndefined();
   });
 });

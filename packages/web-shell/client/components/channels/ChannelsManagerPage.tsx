@@ -119,6 +119,8 @@ interface ChannelsManagerPageProps {
    * different workspace is a hard `400 invalid_client_id`.
    */
   sessionWorkspaceCwd?: string;
+  initialWorkspaceCwd?: string;
+  navigationRequest?: number;
 }
 
 type ChannelAction = 'start' | 'stop' | 'restart' | 'startup';
@@ -159,6 +161,8 @@ export function ChannelsManagerPage({
   initialFocusRef,
   clientId,
   sessionWorkspaceCwd,
+  initialWorkspaceCwd,
+  navigationRequest,
 }: ChannelsManagerPageProps) {
   const { t } = useI18n();
   const workspace = useWorkspace();
@@ -211,7 +215,7 @@ export function ChannelsManagerPage({
     registeredWorkspaces[0];
   const [managementWorkspaceCwd, setManagementWorkspaceCwd] = useState<
     string | undefined
-  >();
+  >(() => initialWorkspaceCwd);
   const selectedManagementWorkspace =
     registeredWorkspaces.find(
       (entry) => entry.cwd === managementWorkspaceCwd,
@@ -304,6 +308,16 @@ export function ChannelsManagerPage({
     setDeleteError(undefined);
     setDeleting(false);
   }, [activeWorkspaceCwd]);
+
+  useEffect(() => {
+    if (navigationRequest === undefined) return;
+    if (initialWorkspaceCwd !== undefined) {
+      setManagementWorkspaceCwd(initialWorkspaceCwd);
+    }
+    setEditor(undefined);
+    setDeleteTarget(undefined);
+    setDeleteError(undefined);
+  }, [initialWorkspaceCwd, navigationRequest]);
 
   useEffect(() => {
     if (

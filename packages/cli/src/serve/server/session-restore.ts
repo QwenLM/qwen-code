@@ -29,6 +29,7 @@ import {
   type SessionArchiveCoordinator,
 } from './session-archive.js';
 import { acquireWorktreeOwnershipOp } from './worktree-ownership-op.js';
+import { WorktreeRestoreUnavailableError } from './worktree-restore-errors.js';
 import {
   WorktreeMarkerMissingError,
   WorktreeResetInterruptedError,
@@ -316,6 +317,11 @@ async function reconcileRestoredSessionWorktree({
           sidecar.supersededBy,
         );
       }
+      if (sidecar.worktreeRemoved !== undefined) {
+        throw new WorktreeRestoreUnavailableError(
+          'This session has a retained worktree. Use /session/:id/worktree-restore to restore its snapshot.',
+        );
+      }
       const realWorkspace = fs.realpathSync(workspaceCwd);
       if (sidecar.workspaceCwd !== undefined) {
         let realSidecarWorkspace: string;
@@ -487,6 +493,11 @@ async function reconcileRestoredSessionWorktree({
   }
 }
 
+export interface WorktreeRestoreHandoff {
+  worktreeKey: string;
+  release: () => void;
+}
+
 export type SessionRestoreResult =
   | { kind: 'restored'; session: BridgeRestoredSession }
   | { kind: 'cancelled' };
@@ -508,6 +519,8 @@ export async function restoreSessionCore(options: {
   runtime: WorkspaceRuntime;
   workspaceCwd: string;
   sessionId: string;
+  /** Already-held ownership from the immediately preceding snapshot restore. */
+  worktreeRestoreHandoff?: WorktreeRestoreHandoff;
   archiveCoordinator: SessionArchiveCoordinator;
   requestedSessionIdAdmission: RequestedSessionIdAdmission;
   assertRuntimeGenerationOpen: (() => void) | undefined;
@@ -531,6 +544,7 @@ export async function restoreSessionCore(options: {
     runtime,
     workspaceCwd,
     sessionId,
+    worktreeRestoreHandoff,
     archiveCoordinator,
     requestedSessionIdAdmission,
     assertRuntimeGenerationOpen,
@@ -546,23 +560,23 @@ export async function restoreSessionCore(options: {
     onWorkspaceResolved,
   } = options;
   let sessionIdReservation: RequestedSessionIdReservation | undefined;
-  if (!isInternalWorkspaceRuntime(runtime)) {
-    sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
-      sessionId,
-      {
-        bridge: runtime.bridge,
-        workspaceCwd,
-        workspaceId: runtime.workspaceId,
-      },
-    );
-  }
   let restoredStorageSessionId = sessionId;
   let suppressWorktreeContextRestore = false;
   let deferRestoreAskUserQuestionPrompt = false;
   let deferAutomaticWorkUntilCwdRestore = false;
-  let releaseWorktreeRestore: (() => void) | undefined;
-  let heldWorktreeOwnershipLockKey: string | undefined;
+  let releaseWorktreeRestore = worktreeRestoreHandoff?.release;
+  let heldWorktreeOwnershipLockKey = worktreeRestoreHandoff?.worktreeKey;
   try {
+    if (!isInternalWorkspaceRuntime(runtime)) {
+      sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
+        sessionId,
+        {
+          bridge: runtime.bridge,
+          workspaceCwd,
+          workspaceId: runtime.workspaceId,
+        },
+      );
+    }
     // The coordinator canonicalizes lock keys (every case variant of a
     // caller id contends on one key), so the request spelling alone
     // covers the raw-spelled batch delete/archive/unarchive locks.
@@ -676,6 +690,17 @@ export async function restoreSessionCore(options: {
         } else {
           suppressWorktreeContextRestore = isChannelRestore;
         }
+        if (worktreeRestoreHandoff) {
+          if (!isPart4AWorktreeRestore || part4AWorktreeKey === undefined) {
+            throw new Error(
+              'Restored worktree binding changed before session load',
+            );
+          }
+          assertWorktreeOwnershipLockHeld(
+            worktreeRestoreHandoff.worktreeKey,
+            part4AWorktreeKey,
+          );
+        }
         const canDeferRestoreQuestion =
           runtime.bridge.fireDeferredRestoreAskUserQuestionPrompt !==
             undefined &&
@@ -689,9 +714,11 @@ export async function restoreSessionCore(options: {
         // the pre-existing lock-free legacy behavior.
         let sidecarStrictUnderLock = false;
         if (isPart4AWorktreeRestore && part4AWorktreeKey !== undefined) {
-          releaseWorktreeRestore =
-            await acquireWorktreeOwnershipOp(part4AWorktreeKey);
-          heldWorktreeOwnershipLockKey = part4AWorktreeKey;
+          if (!worktreeRestoreHandoff) {
+            releaseWorktreeRestore =
+              await acquireWorktreeOwnershipOp(part4AWorktreeKey);
+            heldWorktreeOwnershipLockKey = part4AWorktreeKey;
+          }
           const sidecarUnderLock = await readWorktreeSessionStrict(
             sessionService.getWorktreeSessionPath(restoredStorageSessionId),
           );
@@ -699,6 +726,11 @@ export async function restoreSessionCore(options: {
             sidecarUnderLock.state === 'valid' &&
             sidecarUnderLock.session.workspaceCwd !== undefined
           ) {
+            if (sidecarUnderLock.session.worktreeRemoved !== undefined) {
+              throw new WorktreeRestoreUnavailableError(
+                'This session has a retained worktree. Use /session/:id/worktree-restore before ordinary load or resume.',
+              );
+            }
             sidecarStrictUnderLock = true;
             if (isChannelRestore) {
               assertWorktreeOwnershipLockHeld(
