@@ -272,6 +272,7 @@ describe('no-AK integration CI wiring', () => {
       './sdk-typescript/tool-control.test.ts',
       './sdk-typescript/workflow-intent.test.ts',
       './sdk-typescript/workflow-mode.test.ts',
+      './sdk-typescript/session-id.test.ts',
     ];
     expect(packageJson.scripts[NO_AK_SCRIPT]).toBe(
       [
@@ -419,7 +420,6 @@ describe('no-AK integration CI wiring', () => {
       'sdk-typescript/mcp-server.test.ts': 'Real model required',
       'sdk-typescript/message-event-pairing.test.ts': 'Real model required',
       'sdk-typescript/multi-turn.test.ts': 'Real model required',
-      'sdk-typescript/session-id.test.ts': 'Real model required',
       'sdk-typescript/single-turn.test.ts': 'Real model required',
     };
     for (const [file, reason] of Object.entries(exemptions)) {

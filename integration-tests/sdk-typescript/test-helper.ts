@@ -84,7 +84,12 @@ export class SDKTestHelper {
     // files stay visible to the next: a `.env` written by an earlier case made a
     // later write fail the prior-read check instead of the permission check it
     // was asserting, so the suite passed locally and failed only in CI.
-    await rm(this.testDir, { recursive: true, force: true });
+    await rm(this.testDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 200,
+    });
     await mkdir(this.testDir, { recursive: true });
 
     // Optionally create .qwen/settings.json for CLI configuration
@@ -195,7 +200,12 @@ export class SDKTestHelper {
   async cleanup(): Promise<void> {
     if (this.testDir && process.env['KEEP_OUTPUT'] !== 'true') {
       try {
-        await rm(this.testDir, { recursive: true, force: true });
+        await rm(this.testDir, {
+          recursive: true,
+          force: true,
+          maxRetries: 5,
+          retryDelay: 200,
+        });
       } catch (error) {
         if (process.env['VERBOSE'] === 'true') {
           console.warn('Cleanup warning:', (error as Error).message);

@@ -153,6 +153,24 @@ export function fakeServerHostOptions(): FakeOpenAIServerOptions | undefined {
     : undefined;
 }
 
+export function fakeModelOptions(baseUrl: string) {
+  const noProxy = IS_CONTAINER_SANDBOX
+    ? CONTAINER_SANDBOX_NO_PROXY
+    : '127.0.0.1,localhost';
+  return {
+    model: 'fake-model',
+    authType: 'openai' as const,
+    env: {
+      NO_PROXY: noProxy,
+      no_proxy: noProxy,
+      OPENAI_API_KEY: 'fake-key',
+      OPENAI_BASE_URL: baseUrl,
+      OPENAI_MODEL: 'fake-model',
+      QWEN_MODEL: 'fake-model',
+    },
+  };
+}
+
 // Sets NO_PROXY so a containerized CLI reaches the host-side fake server, and
 // returns a restorer for the previous values. No-op outside a container sandbox.
 export function applyContainerSandboxNoProxy(): () => void {

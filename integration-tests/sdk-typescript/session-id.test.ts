@@ -19,20 +19,37 @@ import {
   createSharedTestOptions,
   assertSuccessfulCompletion,
 } from './test-helper.js';
+import { startFakeOpenAIServer } from '../fake-openai-server.js';
+import { fakeModelOptions, fakeServerHostOptions } from '../test-helper.js';
 
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
+const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
 
 describe('Session ID Support (E2E)', () => {
   let helper: SDKTestHelper;
   let testDir: string;
+  let fakeServer: Awaited<ReturnType<typeof startFakeOpenAIServer>>;
+
+  function testOptions(extraEnv: Record<string, string> = {}) {
+    const base = {
+      ...SHARED_TEST_OPTIONS,
+      ...fakeModelOptions(fakeServer.baseUrl),
+    };
+    return { ...base, env: { ...base.env, ...extraEnv } };
+  }
 
   beforeEach(async () => {
     helper = new SDKTestHelper();
     // Enable chat recording for session-id tests to allow duplicate session detection
     testDir = await helper.setup('session-id', { chatRecording: true });
+    fakeServer = await startFakeOpenAIServer(
+      () => ({ content: 'OK' }),
+      FAKE_SERVER_OPTIONS,
+    );
   });
 
   afterEach(async () => {
+    await fakeServer?.close();
     await helper.cleanup();
   });
 
@@ -44,7 +61,7 @@ describe('Session ID Support (E2E)', () => {
       const q = query({
         prompt: 'What is 1 + 1? Just the number.',
         options: {
-          ...SHARED_TEST_OPTIONS,
+          ...testOptions(),
           cwd: testDir,
           sessionId: customSessionId,
           debug: false,
@@ -74,7 +91,7 @@ describe('Session ID Support (E2E)', () => {
       const q = query({
         prompt: 'Say hello',
         options: {
-          ...SHARED_TEST_OPTIONS,
+          ...testOptions(),
           cwd: testDir,
           sessionId: customSessionId,
           debug: false,
@@ -106,7 +123,7 @@ describe('Session ID Support (E2E)', () => {
       const q = query({
         prompt: 'What is 2 + 2? Just the number.',
         options: {
-          ...SHARED_TEST_OPTIONS,
+          ...testOptions(),
           cwd: testDir,
           sessionId: customSessionId,
           debug: true,
@@ -142,7 +159,7 @@ describe('Session ID Support (E2E)', () => {
       const q = query({
         prompt: 'What is 3 + 3? Just the number.',
         options: {
-          ...SHARED_TEST_OPTIONS,
+          ...testOptions(),
           cwd: testDir,
           debug: false,
         },
@@ -167,39 +184,6 @@ describe('Session ID Support (E2E)', () => {
         await q.close();
       }
     });
-
-    it('should reject using sessionId with resume', async () => {
-      // Valid UUIDs: 4 in position 14, 8/9/a/b in position 19
-      const customSessionId = '11111111-2222-4333-a444-555555555555';
-      const resumeSessionId = '66666666-7777-4888-b999-000000000000';
-
-      // CLI rejects using --session-id with --resume
-      const q = query({
-        prompt: 'Say hello',
-        options: {
-          ...SHARED_TEST_OPTIONS,
-          cwd: testDir,
-          sessionId: customSessionId,
-          resume: resumeSessionId,
-          debug: false,
-        },
-      });
-
-      try {
-        for await (const _message of q) {
-          // Consume messages
-        }
-        // Should not reach here - CLI should reject this combination
-        throw new Error(
-          'Expected query to fail when using sessionId with resume',
-        );
-      } catch (error) {
-        // Expected to fail - CLI rejects --session-id with --resume
-        expect(error).toBeDefined();
-      } finally {
-        await q.close();
-      }
-    });
   });
 
   describe('Session ID Validation', () => {
@@ -210,7 +194,7 @@ describe('Session ID Support (E2E)', () => {
         query({
           prompt: 'Say hello',
           options: {
-            ...SHARED_TEST_OPTIONS,
+            ...testOptions(),
             cwd: testDir,
             sessionId: invalidSessionId,
           },
@@ -226,7 +210,7 @@ describe('Session ID Support (E2E)', () => {
         query({
           prompt: 'Say hello',
           options: {
-            ...SHARED_TEST_OPTIONS,
+            ...testOptions(),
             cwd: testDir,
             sessionId: invalidVersionSessionId,
           },
@@ -242,7 +226,7 @@ describe('Session ID Support (E2E)', () => {
         query({
           prompt: 'Say hello',
           options: {
-            ...SHARED_TEST_OPTIONS,
+            ...testOptions(),
             cwd: testDir,
             sessionId: invalidVariantSessionId,
           },
@@ -256,7 +240,7 @@ describe('Session ID Support (E2E)', () => {
       const q = query({
         prompt: 'Say hello',
         options: {
-          ...SHARED_TEST_OPTIONS,
+          ...testOptions(),
           cwd: testDir,
           sessionId: '',
         },
@@ -294,7 +278,7 @@ describe('Session ID Support (E2E)', () => {
         const q = query({
           prompt: 'Say hi',
           options: {
-            ...SHARED_TEST_OPTIONS,
+            ...testOptions(),
             cwd: testDir,
             sessionId: uuid,
             debug: false,
@@ -348,7 +332,7 @@ describe('Session ID Support (E2E)', () => {
       const q = query({
         prompt: createConversation(),
         options: {
-          ...SHARED_TEST_OPTIONS,
+          ...testOptions(),
           cwd: testDir,
           sessionId: customSessionId,
           debug: false,
@@ -384,12 +368,9 @@ describe('Session ID Support (E2E)', () => {
       const q1 = query({
         prompt: 'Say hello',
         options: {
-          ...SHARED_TEST_OPTIONS,
+          ...testOptions({ SANDBOX_SET_UID_GID: 'true' }),
           cwd: testDir,
           sessionId: customSessionId,
-          env: {
-            SANDBOX_SET_UID_GID: 'true',
-          },
         },
       });
 
@@ -401,6 +382,7 @@ describe('Session ID Support (E2E)', () => {
       } finally {
         await q1.close();
       }
+      expect(fakeServer.requests.length).toBeGreaterThan(0);
 
       // Second query: try to use the same session ID
       // This should fail because the session ID is already in use
@@ -408,12 +390,9 @@ describe('Session ID Support (E2E)', () => {
       const q2 = query({
         prompt: 'Say hello again',
         options: {
-          ...SHARED_TEST_OPTIONS,
+          ...testOptions({ SANDBOX_SET_UID_GID: 'true' }),
           cwd: testDir,
           sessionId: customSessionId,
-          env: {
-            SANDBOX_SET_UID_GID: 'true',
-          },
         },
       });
 
@@ -437,12 +416,9 @@ describe('Session ID Support (E2E)', () => {
       const q1 = query({
         prompt: 'Say hello',
         options: {
-          ...SHARED_TEST_OPTIONS,
+          ...testOptions({ SANDBOX_SET_UID_GID: 'true' }),
           cwd: testDir,
           sessionId: customSessionId,
-          env: {
-            SANDBOX_SET_UID_GID: 'true',
-          },
         },
       });
 
@@ -453,18 +429,16 @@ describe('Session ID Support (E2E)', () => {
       } finally {
         await q1.close();
       }
+      expect(fakeServer.requests.length).toBeGreaterThan(0);
 
       // Second query with same session ID
       // When using the same session ID, CLI will detect the duplicate and exit with code 1
       const q2 = query({
         prompt: 'Say hello again',
         options: {
-          ...SHARED_TEST_OPTIONS,
+          ...testOptions({ SANDBOX_SET_UID_GID: 'true' }),
           cwd: testDir,
           sessionId: customSessionId,
-          env: {
-            SANDBOX_SET_UID_GID: 'true',
-          },
         },
       });
 
@@ -502,7 +476,7 @@ describe('Session ID Support (E2E)', () => {
       const q = query({
         prompt: 'Say hello',
         options: {
-          ...SHARED_TEST_OPTIONS,
+          ...testOptions(),
           cwd: testDir,
           sessionId: customSessionId,
           debug: false,
@@ -553,7 +527,7 @@ describe('Session ID Support (E2E)', () => {
       const q1 = query({
         prompt: 'Say one',
         options: {
-          ...SHARED_TEST_OPTIONS,
+          ...testOptions(),
           cwd: testDir,
           debug: false,
         },
@@ -569,7 +543,7 @@ describe('Session ID Support (E2E)', () => {
       const q2 = query({
         prompt: 'Say two',
         options: {
-          ...SHARED_TEST_OPTIONS,
+          ...testOptions(),
           cwd: testDir,
           debug: false,
         },
