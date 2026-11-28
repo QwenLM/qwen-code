@@ -290,9 +290,7 @@ export function validateReasoningCapabilities(
   const requestedDefault = input.defaultEffort ?? inheritedDefault;
   const shouldClampDefault =
     input.defaultEffort === undefined ||
-    (known === undefined &&
-      builtinKimi !== undefined &&
-      input.profile === undefined);
+    (known === undefined && builtinKimi !== undefined);
   const defaultEffort =
     requestedDefault && efforts && shouldClampDefault
       ? clampReasoningEffort(requestedDefault, efforts)
@@ -403,6 +401,7 @@ export function hasOpenRouterReasoningEffortOverride(
   config: Pick<Config, 'getResolvedModelConfig'> | undefined,
   generation: ContentGeneratorConfig,
   model = generation.model,
+  canDisable = true,
 ): boolean {
   const flatEffort = {
     ...generation.samplingParams,
@@ -417,7 +416,8 @@ export function hasOpenRouterReasoningEffortOverride(
   return (
     isOpenRouterHostname(generation) &&
     !hasDeclaredProfile &&
-    !isReasoningEffortPlaceholder(flatEffort)
+    !isReasoningEffortPlaceholder(flatEffort) &&
+    (canDisable || flatEffort !== 'none')
   );
 }
 

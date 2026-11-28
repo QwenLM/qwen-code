@@ -161,7 +161,10 @@ For an unknown alias, declare all three fields:
 ```
 
 `efforts` replaces the supported subset of `low/medium/high/xhigh/max`.
-An explicit default must belong to that subset. Profiles reuse existing formats:
+An explicit default must belong to that subset. On a custom Kimi K3 route that
+inherits its effort ladder, a default outside that ladder is clamped to the
+nearest supported tier even when the declaration names a wire profile.
+Profiles reuse existing formats:
 Chat accepts `openai-effort`, `openai-reasoning`, `deepseek-openai`,
 `dashscope-effort`, `dashscope-thinking` and `qwen-chat-template`;
 Responses accepts `openai-reasoning`; Anthropic accepts `anthropic-manual`,
