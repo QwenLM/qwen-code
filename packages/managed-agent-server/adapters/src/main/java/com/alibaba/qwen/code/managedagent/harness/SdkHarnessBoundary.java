@@ -145,6 +145,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsTurnHostActions() {
+        return call(delegate::supportsTurnHostActions);
+    }
+
+    @Override
     public boolean supportsClientFiles(SessionRecord session) {
         return call(() -> delegate.supportsClientFiles(session));
     }

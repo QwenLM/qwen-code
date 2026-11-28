@@ -146,6 +146,7 @@ const broker = vi.hoisted(() => ({
   backgroundProcessStatus: vi.fn(),
   status: vi.fn(),
   monitorControl: vi.fn(),
+  executeHostAction: vi.fn(),
 }));
 // child_run's shell kind and monitor_run are enabled by the H3 enablement
 // slice (#13856); a case that needs a gate shut closes it here, per test,
@@ -188,6 +189,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     backgroundProcessStatus = broker.backgroundProcessStatus;
     status = broker.status;
     monitorControl = broker.monitorControl;
+    executeHostAction = broker.executeHostAction;
   },
 }));
 vi.mock(

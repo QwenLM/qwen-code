@@ -2,6 +2,9 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.contracts.hostaction.HostTurnActionReceipt;
+import com.alibaba.qwen.code.managedagent.contracts.hostaction.HostTurnActionSpec;
+import com.alibaba.qwen.code.managedagent.contracts.hostaction.HostTurnActionStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.ReplayCursorExpired;
@@ -113,6 +116,12 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private RuntimeWarmer runtimeWarmer;
     private SessionWorktreeService sessionWorktrees;
     private com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages;
+    private HostTurnActionStore hostActions;
+
+    @Autowired(required = false)
+    public void setHostActions(HostTurnActionStore value) {
+        this.hostActions = value;
+    }
 
     @Autowired(required = false)
     public void setExtensionPackages(@org.springframework.context.annotation.Lazy
@@ -778,9 +787,22 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> extensionPins,
             SessionWorktreeService.Request worktree, com.alibaba.qwen.code.managedagent.model.SessionModelConfig modelConfig,
             String memoryStoreId, String requestedToolProfile) {
+        return createWorkspaceSession(tenantId, actorId, idempotencyKey, agentId, agentRevision, title,
+                metadata, blocks, selection, approvalMode, planMode, skills, modelId, extensionPins,
+                worktree, modelConfig, memoryStoreId, requestedToolProfile, null);
+    }
+
+    public CommandAdmission createWorkspaceSession(String tenantId, String actorId, String idempotencyKey,
+            String agentId, String agentRevision, String title, Map<String, Object> metadata,
+            List<InputBlock> blocks, WorkspaceSelection selection, String approvalMode, Boolean planMode,
+            List<Map<String, Object>> skills, String modelId,
+            List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> extensionPins,
+            SessionWorktreeService.Request worktree, com.alibaba.qwen.code.managedagent.model.SessionModelConfig modelConfig,
+            String memoryStoreId, String requestedToolProfile, List<HostTurnActionSpec> turnHostActions) {
         validateIdempotencyKey(idempotencyKey);
         validateMemoryBinding(actorId, memoryStoreId);
         requireRequestedToolProfile(agentId, requestedToolProfile);
+        List<HostTurnActionSpec> validatedHostActions = validateHostActions(turnHostActions);
         if (modelId != null && modelConfig != null) {
             throw new ManagedAgentException(400, "invalid_model_config", "Choose either a model ID or a complete configuration.");
         }
@@ -790,6 +812,10 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                     "actor_required", "A trusted actor is required.");
         }
         List<Map<String, Object>> input = inputPolicy.input(blocks, false);
+        if (!validatedHostActions.isEmpty() && input.isEmpty()) {
+            throw new ManagedAgentException(400, "invalid_host_actions",
+                    "Turn-scoped host actions require initial Turn input.");
+        }
         String effectiveTitle = metadataTitle(title, metadata);
         Map<String, Object> semantic = new LinkedHashMap<>();
         semantic.put("agentId", agentId);
@@ -829,6 +855,10 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         if (worktree != null) {
             semantic.put("worktree", worktree.baseRef() == null ? Map.of() : Map.of("baseRef", worktree.baseRef()));
         }
+        if (!validatedHostActions.isEmpty()) {
+            semantic.put("hostActions", validatedHostActions.stream()
+                    .map(HostTurnActionSpec::semanticValue).toList());
+        }
         String requestDigest = digests.digest(semantic);
         String payloadDigest = input.isEmpty() ? null
                 : harnessRules.payloadDigest(input);
@@ -840,9 +870,21 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             dispatch(tenantId, recorded.get(), true);
             return response(recorded.get());
         }
+        if (!validatedHostActions.isEmpty() && requestedToolProfile != null
+                && !WorkspaceToolProfiles.EXTERNAL_FILES.equals(requestedToolProfile)) {
+            throw new ManagedAgentException(409, "host_actions_profile_unsupported",
+                    "Turn-scoped host actions are supported only on hosted-workspace-external-files/1 Sessions.");
+        }
         requireToolProfileAvailability(requestedToolProfile);
         requireMemoryConfiguration(memoryStoreId);
         requireModelConfiguration(modelConfig);
+        if (!validatedHostActions.isEmpty()) {
+            if (!externalFilesConfiguration) {
+                throw new ManagedAgentException(409, "host_actions_profile_unsupported",
+                        "Turn-scoped host actions are supported only on hosted-workspace-external-files/1 Sessions.");
+            }
+            requireHostActionSupport();
+        }
         if (externalFilesConfiguration && !workspaces.externalFilesAvailable()
                 && !((!"qwen-code".equals(agentId) || WorkspaceToolProfiles.EXTERNAL_SHELL.equals(requestedToolProfile))
                         && workspaces.externalShellAvailable())) {
@@ -924,7 +966,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         boolean approvalSelectionSupported = harness.supportsApprovalSelection()
                 && ("qwen-code".equals(agentId) || harness.supportsAgentDefinitionApprovalSelection());
         try {
-            admission = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+            SessionCreationCommand creationCommand = SessionCreationCommand.builder()
                     .tenantId(tenantId)
                     .actorId(actorId)
                     .idempotencyKey(idempotencyKey)
@@ -950,7 +992,19 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                     .modelConfig(modelConfig)
                     .memoryStoreId(memoryStoreId)
                     .requestedToolProfile(requestedToolProfile)
-                    .build());
+                    .build();
+            if (validatedHostActions.isEmpty()) {
+                admission = store.insertWorkspaceSessionCommand(creationCommand);
+            } else {
+                admission = hostActions.inTransaction(() -> {
+                    Admission created = store.insertWorkspaceSessionCommand(creationCommand);
+                    if (!created.replayed() && created.turnId() != null) {
+                        hostActions.saveForTurn(tenantId, created.sessionId(),
+                                created.turnId(), validatedHostActions);
+                    }
+                    return created;
+                });
+            }
         } catch (DuplicateKeyException error) {
             admission = store.replayWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest);
@@ -1129,7 +1183,14 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             String idempotencyKey, String sessionId,
             List<InputBlock> blocks) {
         return submitTurn(null, actorId, tenantId, idempotencyKey, sessionId,
-                blocks);
+                blocks, null);
+    }
+
+    public CommandAdmission submitTurn(String tenantId, String actorId,
+            String idempotencyKey, String sessionId,
+            List<InputBlock> blocks, List<HostTurnActionSpec> turnHostActions) {
+        return submitTurn(null, actorId, tenantId, idempotencyKey, sessionId,
+                blocks, turnHostActions);
     }
 
     public CommandAdmission submitTurn(SessionPrincipal principal,
@@ -1137,7 +1198,15 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             List<InputBlock> blocks) {
         return submitTurn(principal, principal == null ? null : principal.userId(),
                 principal == null ? null : principal.tenantId(),
-                idempotencyKey, sessionId, blocks);
+                idempotencyKey, sessionId, blocks, null);
+    }
+
+    public CommandAdmission submitTurn(SessionPrincipal principal,
+            String idempotencyKey, String sessionId,
+            List<InputBlock> blocks, List<HostTurnActionSpec> turnHostActions) {
+        return submitTurn(principal, principal == null ? null : principal.userId(),
+                principal == null ? null : principal.tenantId(),
+                idempotencyKey, sessionId, blocks, turnHostActions);
     }
 
     // The queue dispatcher's entry: a bound Session's queued actor stays
@@ -1147,7 +1216,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             SessionPrincipal principal, String actorId, String idempotencyKey,
             String sessionId, List<InputBlock> blocks) {
         return submitTurn(principal, actorId, tenantId, idempotencyKey,
-                sessionId, blocks);
+                sessionId, blocks, null);
     }
 
     // The raw-actor request path keeps its actor verbatim: a principal is
@@ -1156,11 +1225,19 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     // principal overload passes its supplied principal through unchanged.
     private CommandAdmission submitTurn(SessionPrincipal principal,
             String rawActorId, String tenantId, String idempotencyKey,
-            String sessionId, List<InputBlock> blocks) {
+            String sessionId, List<InputBlock> blocks,
+            List<HostTurnActionSpec> turnHostActions) {
         validateIdempotencyKey(idempotencyKey);
+        List<HostTurnActionSpec> validatedHostActions = validateHostActions(turnHostActions);
         List<Map<String, Object>> input = inputPolicy.input(blocks, true);
-        String requestDigest = digests.digest(Map.of(
-                "sessionId", sessionId, "input", input));
+        Map<String, Object> digestInput = new LinkedHashMap<>();
+        digestInput.put("sessionId", sessionId);
+        digestInput.put("input", input);
+        if (!validatedHostActions.isEmpty()) {
+            digestInput.put("hostActions", validatedHostActions.stream()
+                    .map(HostTurnActionSpec::semanticValue).toList());
+        }
+        String requestDigest = digests.digest(digestInput);
         SessionRecord session = store.requireSession(tenantId, sessionId);
         // The role gate stays above the replay: an idempotency key answers
         // its recorded outcome only to an actor authorized for the Session.
@@ -1204,16 +1281,40 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
         requireReadyWorktree(session);
         requireHarness();
+        if (!validatedHostActions.isEmpty()) {
+            if (!WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())) {
+                throw new ManagedAgentException(409, "host_actions_profile_unsupported",
+                        "Turn-scoped host actions are supported only on hosted-workspace-external-files/1 Sessions.");
+            }
+            requireHostActionSupport();
+        }
         String payloadDigest = harnessRules.payloadDigest(input);
         Admission admission;
         try {
-            admission = principal == null
-                    ? store.insertTurnCommand(tenantId, SUBMIT,
-                            idempotencyKey, requestDigest, sessionId, input,
-                            payloadDigest, rawActorId)
-                    : store.insertTurnCommand(tenantId, SUBMIT,
-                            idempotencyKey, requestDigest, sessionId, input,
-                            payloadDigest, principal);
+            if (validatedHostActions.isEmpty()) {
+                admission = principal == null
+                        ? store.insertTurnCommand(tenantId, SUBMIT,
+                                idempotencyKey, requestDigest, sessionId, input,
+                                payloadDigest, rawActorId)
+                        : store.insertTurnCommand(tenantId, SUBMIT,
+                                idempotencyKey, requestDigest, sessionId, input,
+                                payloadDigest, principal);
+            } else {
+                admission = hostActions.inTransaction(() -> {
+                    Admission inserted = principal == null
+                            ? store.insertTurnCommand(tenantId, SUBMIT,
+                                    idempotencyKey, requestDigest, sessionId, input,
+                                    payloadDigest, rawActorId)
+                            : store.insertTurnCommand(tenantId, SUBMIT,
+                                    idempotencyKey, requestDigest, sessionId, input,
+                                    payloadDigest, principal);
+                    if (!inserted.replayed()) {
+                        hostActions.saveForTurn(tenantId, sessionId,
+                                inserted.turnId(), validatedHostActions);
+                    }
+                    return inserted;
+                });
+            }
         } catch (DuplicateKeyException error) {
             admission = replayForCreator(tenantId, SUBMIT, idempotencyKey,
                     requestDigest, session, principal, rawActorId);
@@ -1229,6 +1330,43 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         CommandAdmission body = response(tenantId, admission);
         dispatch(tenantId, admission, session.workspace() != null);
         return body;
+    }
+
+    public List<HostTurnActionReceipt> listTurnHostActionReceipts(String tenantId,
+            String actorId, String sessionId, String turnId) {
+        requireReadableSession(tenantId, actorId, sessionId);
+        if (hostActions == null) {
+            return List.of();
+        }
+        return hostActions.listReceipts(tenantId, sessionId, turnId);
+    }
+
+    public List<HostTurnActionReceipt> listTurnHostActionReceipts(
+            SessionPrincipal principal, String sessionId, String turnId) {
+        SessionRecord session = requireReadableSession(principal, sessionId);
+        if (hostActions == null) {
+            return List.of();
+        }
+        return hostActions.listReceipts(session.tenantId(), sessionId, turnId);
+    }
+
+    private static List<HostTurnActionSpec> validateHostActions(List<HostTurnActionSpec> specs) {
+        try {
+            return HostTurnActionSpec.validateList(specs);
+        } catch (IllegalArgumentException invalid) {
+            throw new ManagedAgentException(400, "invalid_host_actions", invalid.getMessage());
+        }
+    }
+
+    private void requireHostActionSupport() {
+        if (hostActions == null || !hostActions.isAvailable()) {
+            throw new ManagedAgentException(409, "host_actions_unavailable",
+                    "Turn-scoped host actions require an enabled Runtime Broker and a HostTurnActionExecutor.");
+        }
+        if (!harness.supportsTurnHostActions()) {
+            throw new ManagedAgentException(409, "unsupported_feature",
+                    "The Hosted Harness does not support Turn-scoped host actions.");
+        }
     }
 
     public CommandAdmission cancelTurn(String tenantId, String actorId,

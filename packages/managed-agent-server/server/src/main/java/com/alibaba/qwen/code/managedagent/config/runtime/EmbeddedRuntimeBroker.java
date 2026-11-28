@@ -367,6 +367,23 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
         coordinator.configureExtensions(packages);
     }
 
+    public void configureHostActions(
+            com.alibaba.qwen.code.managedagent.contracts.hostaction.HostTurnActionStore hostActions) {
+        if (hostActions == null) {
+            server.configureHostActions(null);
+            return;
+        }
+        server.configureHostActions((sessionId, body) -> {
+            CompletableFuture<java.util.Map<String, Object>> future = new CompletableFuture<>();
+            try {
+                future.complete(hostActions.executeFromBroker(sessionId, body));
+            } catch (Throwable error) {
+                future.completeExceptionally(error);
+            }
+            return future;
+        });
+    }
+
     @Override
     public CompletionStage<Void> warm(String sessionId) {
         return coordinator.warm(sessionId);

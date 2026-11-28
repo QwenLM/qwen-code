@@ -23,6 +23,7 @@ import {
   readHostedAgentInstructions,
 } from '../hosted-agent-definition.js';
 import { readHostedTurnApprovalSelection } from '../hosted-approval-selection.js';
+import { readHostedTurnHostActions } from '../hosted-turn-host-actions.js';
 import {
   commitHostedFileHistory,
   dropPendingHostedFileHistoryTurn,
@@ -437,6 +438,10 @@ export function registerHostedTakeoverRoutes({
             session.workspaceContext = undefined;
           },
         };
+        const turnHostActions = await readHostedTurnHostActions(
+          session.managed,
+          promptId,
+        );
         toolTurn = new HostedWorkspaceToolTurn(
           brokerOptions,
           session.managed,
@@ -455,6 +460,16 @@ export function registerHostedTakeoverRoutes({
             memoryOnly: !session.toolProfile,
             mcp: session.mcp,
             clientFiles: session.clientFiles,
+            hostActions: turnHostActions
+              ? {
+                  actions: turnHostActions,
+                  ...(session.stores
+                    ? {
+                        writer: () => session.stores!.publication.owner(),
+                      }
+                    : {}),
+                }
+              : undefined,
             skills: session.skills,
             extensionConfig: session.extensionBundle
               ? {

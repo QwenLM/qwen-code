@@ -486,6 +486,9 @@ public class HarnessPoolConnector implements HarnessConnector {
     public boolean supportsClientFiles() { return feature(HarnessFeature.CLIENT_FILES); }
 
     @Override
+    public boolean supportsTurnHostActions() { return feature(HarnessFeature.TURN_HOST_ACTIONS); }
+
+    @Override
     public boolean supportsClientFiles(SessionRecord session) {
         if (!feature(HarnessFeature.CLIENT_FILES)) {
             return false;

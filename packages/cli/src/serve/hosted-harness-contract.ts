@@ -12,6 +12,7 @@ import {
   HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
   HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
 } from './hosted-workspace-profiles.js';
+import { HOSTED_TURN_HOST_ACTIONS_FEATURE } from './hosted-turn-host-actions.js';
 
 export const HOSTED_HARNESS_CAPABILITY_DIGEST_ENV =
   'QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST';
@@ -118,6 +119,7 @@ export function createHostedHarnessContract(
       // is committed, so a client may bound a stream by its silence.
       'event-keepalive/1',
       'web-fetch/1',
+      HOSTED_TURN_HOST_ACTIONS_FEATURE,
       HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
       HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
     ]),
