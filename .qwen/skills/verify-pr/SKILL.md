@@ -1723,7 +1723,8 @@ depend on stays a fine harness. When the touched module's instructions — a
 nested `AGENTS.md`, or the test-profile section of its README — say that a
 substitute does not establish some behaviour, that settles it. The claim
 counts as tested only when the round ran the real runtime inside its
-boundary; otherwise the environment prevented the test: name the CI lane or
+boundary, and the report names that runtime beside the result so a reader
+can check it; otherwise the environment prevented the test: name the CI lane or
 profile that owns the real runtime under _Not covered_, and when it is the
 central claim the verdict is `inconclusive`, never `merge-ready`. Instance:
 `packages/managed-agent-server/AGENTS.md` states that H2 does not establish
@@ -1738,14 +1739,19 @@ toolchain or service missing from the round is never evidence that nothing
 needed it. Find the CI suites the diff triggers that need something the
 round lacks, from the **base** revision's workflow `on:` path filters, job
 conditions and any scope script those workflows call
-(`git show <base>:<path>`), never the head's copies, which the PR can edit.
+(`git show <base>:<path>`). The base is the floor: the head's copies, which
+the PR can edit, may add a suite but never remove one. Run a scope script
+the way its workflow invokes it, input format included.
 List each one the round did not run under _Not covered_, with its workflow
 and job. Instance: the verify lane provisions a JDK only for diffs under
 `packages/sdk-java/` and `packages/managed-agent-server/`, while
 `.github/scripts/managed-agent-gate-scope.mjs` also gives
 `packages/cli/src/serve/` and `packages/core/src/managed-runtime/` the
 `daemon` coverage that runs the `Real daemon E2E / Java 11` job in
-`sdk-java.yml`.
+`sdk-java.yml`. That script splits its input on NUL: the gate pipes it the
+output of `git diff --name-only --no-renames -z`. Measured example: a real
+commit touching `packages/cli/src/serve/` and design docs classified as
+`daemon` that way, and as `none` from a newline-separated list.
 
 **Module instructions bind the evidence, not the round's budget.** A nested
 `AGENTS.md` may cap local verification time for everyday changes, sometimes
@@ -1755,8 +1761,9 @@ contract's budget; a cap that admits no exception is followed, and what it
 left out goes under _Not covered_. The module's evidence rules still bind —
 which checks a change requires, environment preflight, isolated dependency
 caches, which full profiles stay with CI — and they feed the runtime rule
-above. When the diff edits those instructions, take the rules from the base
-revision and review the edit as part of the diff.
+above. When the diff edits those instructions, the round follows the base
+revision's copy, reviews the head's edit as part of the diff, and says so in
+the report.
 
 ## Method
 
