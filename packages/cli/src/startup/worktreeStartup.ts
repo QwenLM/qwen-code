@@ -40,6 +40,11 @@ import {
 } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
+import {
+  DEFAULT_WORKTREE_ROOT,
+  isPathInsideWorktreeRoot,
+  parseWorktreeRoot,
+} from '@qwen-code/qwen-code-core/utils/worktree-root.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { WorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 
@@ -133,6 +138,11 @@ export interface SetupStartupWorktreeOptions {
    * symlinks as `enter_worktree` and agent isolation worktrees do.
    */
   symlinkDirectories?: readonly string[];
+  /**
+   * Mirrors `worktree.root` (P7). Repository-relative directory where
+   * managed worktrees are created (default: `.qwen/worktrees`).
+   */
+  worktreeRoot?: string;
 }
 
 export async function setupStartupWorktree(
@@ -141,6 +151,16 @@ export async function setupStartupWorktree(
 ): Promise<SetupStartupWorktreeResult | null> {
   if (rawInput === undefined) return null;
 
+  let worktreeRoot: string;
+  try {
+    worktreeRoot = parseWorktreeRoot(options?.worktreeRoot).normalized;
+  } catch (error) {
+    return {
+      ok: false,
+      error: `--worktree: invalid worktree.root setting (${error instanceof Error ? error.message : String(error)}).`,
+    };
+  }
+
   // yargs delivers bare `--worktree` as an empty string (mirrors --resume).
   // We accept it and fall through to auto-slug below.
   const trimmed = rawInput.trim();
@@ -148,7 +168,7 @@ export async function setupStartupWorktree(
   // Probe service rooted at the launch cwd so we can locate the repo top
   // level before the chdir; the chdir target lives under that top level.
   const launchCwd = process.cwd();
-  const probe = new GitWorktreeService(launchCwd);
+  const probe = new GitWorktreeService(launchCwd, { worktreeRoot });
 
   const gitCheck = await probe.checkGitAvailable();
   if (!gitCheck.available) {
@@ -159,9 +179,12 @@ export async function setupStartupWorktree(
   }
 
   // Refuse nested creation: launching with --worktree from inside an existing
-  // worktree creates `<otherRepo>/.qwen/worktrees/<slug>/`, which is rarely
+  // worktree creates `<otherRepo>/<worktree.root>/<slug>/`, which is rarely
   // what the user wants and corrupts ownership tracking.
-  if (/[\\/]\.qwen[\\/]worktrees[\\/]/.test(launchCwd)) {
+  if (
+    isPathInsideWorktreeRoot(launchCwd, worktreeRoot) ||
+    isPathInsideWorktreeRoot(launchCwd, DEFAULT_WORKTREE_ROOT)
+  ) {
     return {
       ok: false,
       error: `--worktree: cannot start a new worktree from inside another worktree (cwd: ${launchCwd}). Run from the main checkout.`,
@@ -184,7 +207,9 @@ export async function setupStartupWorktree(
   // downstream `startsWith` checks don't mix `/` and `\` on Windows.
   const repoRoot = path.resolve(rawRepoRoot);
   const service =
-    repoRoot === launchCwd ? probe : new GitWorktreeService(repoRoot);
+    repoRoot === launchCwd
+      ? probe
+      : new GitWorktreeService(repoRoot, { worktreeRoot });
 
   // Resolve slug. Branch on PR reference first so `#123` / URLs don't fall
   // through to slug validation (which would reject `#`). For PR refs we

@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  DEFAULT_WORKTREE_ROOT,
+  validateWorktreeRoot,
+} from '@qwen-code/qwen-code-core/utils/worktree-root.js';
 import type {
   MCPServerConfig,
   BugCommandSettings,
@@ -112,6 +116,8 @@ export interface SettingDefinition {
   maximum?: number;
   /** Values rejected even when they fall within the declared range. */
   excludedValues?: ReadonlyArray<string | number>;
+  /** Optional custom value validator returning an error message when invalid. */
+  validate?: (value: unknown) => string | undefined;
   /**
    * Primitive shapes a field accepted before it was expanded to its current
    * type. The exported JSON Schema wraps the field in `anyOf` so values from
@@ -4937,6 +4943,21 @@ const SETTINGS_SCHEMA = {
           'explicit mode selection and the daemon API are unchanged.',
         showInDialog: false,
       },
+      root: {
+        type: 'string',
+        label: 'Worktree Root Directory',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: DEFAULT_WORKTREE_ROOT,
+        validate: validateWorktreeRoot,
+        description:
+          'Repository-relative directory where general-purpose CLI worktrees ' +
+          'and Web Shell session worktrees are created (default: ' +
+          '`.qwen/worktrees`). Must stay inside the repository: absolute ' +
+          'paths, `..` traversal, `.git`, and `.qwen` directly are rejected. ' +
+          'Does NOT affect Agent Arena worktrees (`agents.arena.worktreeBaseDir`).',
+        showInDialog: true,
+      },
       symlinkDirectories: {
         type: 'array',
         label: 'Symlink Directories Into Worktrees',
@@ -4949,11 +4970,10 @@ const SETTINGS_SCHEMA = {
           'large opt-in dirs like `node_modules` so the model can run ' +
           'tests / builds inside the worktree without a fresh install. ' +
           'Paths must be relative to the repo root; absolute paths, ' +
-          'anything containing `..`, and any path inside `.git` or ' +
-          '`.qwen` (the CLI-managed metadata tree, which contains ' +
-          'the worktrees directory itself) are rejected. Missing ' +
-          'source dirs and existing destination paths are silently ' +
-          'skipped (no overwrite, no failure).',
+          'anything containing `..`, any path inside `.git` or `.qwen`, ' +
+          'and any path overlapping the configured `worktree.root` are ' +
+          'rejected. Missing source dirs and existing destination paths ' +
+          'are silently skipped (no overwrite, no failure).',
         showInDialog: false,
       },
       maxRetained: {

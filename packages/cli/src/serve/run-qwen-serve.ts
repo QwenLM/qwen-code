@@ -122,6 +122,7 @@ import {
   installSelfOriginStripMiddleware,
   installRemoteSelfOriginMiddleware,
 } from './server/self-origin.js';
+import { resolveRuntimeWorktreeRootSetting } from './server/worktree-root.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import { resolveRemoteServeToken } from './serve-token.js';
 import { createDaemonUpdateRestarter } from './daemon-update-restart.js';
@@ -6959,6 +6960,7 @@ async function runQwenServeImpl(
         sessionService: await createBranchRecoverySessionService(
           workspaceRuntimes[0],
         ),
+        worktreeRoot: resolveRuntimeWorktreeRootSetting(workspaceRuntimes[0]),
         assertGenerationOpen: () => primaryGenerationGuard.assertOpen(),
         isWorktreeOccupied: (worktreePath) =>
           bridgeHasLiveSessionWithin(bridge, boundWorkspace, worktreePath),
@@ -8749,6 +8751,7 @@ async function runQwenServeImpl(
         await recoverBranchWorktreePreparations({
           workspaceCwd: cwd,
           sessionService: await createBranchRecoverySessionService(wsRuntime),
+          worktreeRoot: resolveRuntimeWorktreeRootSetting(wsRuntime),
           assertGenerationOpen: () => generationGuard.assertOpen(),
           isWorktreeOccupied: (worktreePath) =>
             bridgeHasLiveSessionWithin(wsBridge, cwd, worktreePath),

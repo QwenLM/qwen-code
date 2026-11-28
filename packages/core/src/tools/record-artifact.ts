@@ -176,7 +176,12 @@ class RecordArtifactInvocation extends BaseToolInvocation<
   private async expandDirectoryLocator(
     locator: WorkspaceLocatorSuccess,
   ): Promise<ToolResult> {
-    if (pathHasSkippedDirectoryComponent(locator.workspacePath)) {
+    if (
+      pathHasSkippedDirectoryComponent(
+        locator.workspacePath,
+        this.config.getWorktreeRoot?.(),
+      )
+    ) {
       const message = [
         `Failed to record artifact: "${locator.workspacePath}" is a skipped directory and cannot be recorded.`,
         WORKSPACE_PATH_HINT,
@@ -449,6 +454,7 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
       const workspacePathError = validateWorkspacePath(
         params.workspacePath,
         this.config.getTargetDir(),
+        this.config.getWorktreeRoot?.(),
       );
       if (workspacePathError) {
         return workspacePathError;
@@ -597,7 +603,11 @@ export function hasUnsafeDisplayPayload(value: string): boolean {
   );
 }
 
-function validateWorkspacePath(value: string, cwd: string): string | null {
+function validateWorkspacePath(
+  value: string,
+  cwd: string,
+  worktreeRoot?: string,
+): string | null {
   const trimmed = value.trim();
   if (!trimmed) {
     return 'Missing or empty "workspacePath"';
@@ -616,6 +626,7 @@ function validateWorkspacePath(value: string, cwd: string): string | null {
     }
     const root = resolveBoundWorkspaceRoot(
       tryResolveForContainment(path.resolve(cwd)) ?? path.resolve(cwd),
+      worktreeRoot,
     );
     const comparable = tryResolveForContainment(path.resolve(trimmed));
     if (comparable && !isWithinRoot(comparable, root)) {
@@ -923,8 +934,11 @@ async function resolveWorkspaceArtifactLocator(
   rawPath: string,
   config: Config,
 ): Promise<WorkspaceLocatorResult> {
+  const worktreeRoot = config.getWorktreeRoot?.();
   const cwd = await resolveExistingDir(config.getTargetDir());
-  const root = await resolveExistingDir(resolveBoundWorkspaceRoot(cwd));
+  const root = await resolveExistingDir(
+    resolveBoundWorkspaceRoot(cwd, worktreeRoot),
+  );
   const first = workspacePathCandidate(rawPath, cwd, root, true);
   if (!first.ok) {
     return first;
@@ -934,6 +948,7 @@ async function resolveWorkspaceArtifactLocator(
     rawPath,
     cwd,
     root,
+    worktreeRoot,
   );
   if (
     inspected.ok ||
@@ -947,7 +962,13 @@ async function resolveWorkspaceArtifactLocator(
   if (!fallback.ok || fallback.path === first.path) {
     return inspected;
   }
-  return inspectWorkspaceCandidate(fallback.path, rawPath, cwd, root);
+  return inspectWorkspaceCandidate(
+    fallback.path,
+    rawPath,
+    cwd,
+    root,
+    worktreeRoot,
+  );
 }
 
 function workspacePathCandidate(
@@ -986,6 +1007,7 @@ async function inspectWorkspaceCandidate(
   rawPath: string,
   cwd: string,
   root: string,
+  worktreeRoot?: string,
 ): Promise<WorkspaceLocatorResult> {
   if (pathHasRedirectorHop(candidate)) {
     return locatorFailure(
@@ -1049,7 +1071,11 @@ async function inspectWorkspaceCandidate(
     );
   }
 
-  const workspacePath = toCanonicalWorkspaceArtifactPath(resolved, cwd);
+  const workspacePath = toCanonicalWorkspaceArtifactPath(
+    resolved,
+    cwd,
+    worktreeRoot,
+  );
   if (!workspacePath) {
     if (st.isDirectory()) {
       return locatorFailure(

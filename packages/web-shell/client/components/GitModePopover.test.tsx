@@ -67,6 +67,7 @@ describe('GitModePopover worktree selection', () => {
     status?: DaemonWorkspaceGitStatus,
     compact = false,
     showDetails = true,
+    worktreeRoot?: string,
   ) {
     await act(async () => {
       root.render(
@@ -78,6 +79,7 @@ describe('GitModePopover worktree selection', () => {
             showDetails={showDetails}
             intent={intent}
             onIntentChange={onIntentChange}
+            worktreeRoot={worktreeRoot}
           />
         </I18nProvider>,
       );
@@ -109,6 +111,15 @@ describe('GitModePopover worktree selection', () => {
       mode: 'worktree',
     });
     expect(document.querySelector('[data-slot="popover-content"]')).toBeNull();
+  });
+
+  it('displays the configured custom worktreeRoot in the command preview', async () => {
+    await render({ mode: 'worktree' }, undefined, false, true, '.worktrees');
+    await openPopover();
+
+    expect(document.body.textContent).toContain(
+      '$ git worktree add --detach .worktrees/<slug>',
+    );
   });
 
   it('restores the checked worktree option and command when reopened', async () => {

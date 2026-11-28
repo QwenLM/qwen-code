@@ -384,6 +384,7 @@ async function exportSessionAction(
         ? toCanonicalWorkspaceArtifactPath(
             target.filepath,
             config.getTargetDir(),
+            config.getWorktreeRoot?.(),
           )
         : null;
     const artifacts: ToolArtifact[] = workspacePath

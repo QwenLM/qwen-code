@@ -3095,6 +3095,7 @@ export async function loadCliConfig(
       : undefined,
     worktree: settings.worktree
       ? {
+          root: settings.worktree.root,
           symlinkDirectories: settings.worktree.symlinkDirectories,
         }
       : undefined,

@@ -190,6 +190,15 @@ import {
   type ArtifactLibraryRemovalResult,
   type WorkspaceSessionArtifactsEnvelope,
 } from '../server/session-artifact-library.js';
+import {
+  InvalidWorktreeRootError,
+  type ParsedWorktreeRoot,
+} from '@qwen-code/qwen-code-core/utils/worktree-root.js';
+import {
+  isWorktreePathInManagedRoots,
+  readRuntimeWorktreeRoot,
+  resolveRuntimeWorktreeRootSetting,
+} from '../server/worktree-root.js';
 import { WorkspaceArtifactCache } from '../server/workspace-artifact-cache.js';
 import { ArtifactLibraryStream } from '../server/artifact-library-stream.js';
 import type { SseAdmissionCaps } from '../daemon-status.js';
@@ -3476,6 +3485,7 @@ export function registerSessionRoutes(
       | undefined;
     let worktreeBaseBranch: string | undefined;
     let worktreeBaseCommit: string | undefined;
+    let worktreeRootParsed: ParsedWorktreeRoot | undefined;
     let worktreeCarriedEntries: WorktreeSession['carriedEntries'];
     let worktreeDurablyAttached = false;
     let spawnCompleted = false;
@@ -3702,10 +3712,31 @@ export function registerSessionRoutes(
           return;
         }
         const wtReq = rawWorktree as Record<string, unknown>;
+        try {
+          worktreeRootParsed = readRuntimeWorktreeRoot(runtime);
+        } catch (error) {
+          res.status(400).json({
+            error:
+              error instanceof Error
+                ? error.message
+                : 'Invalid worktree.root setting',
+            code: 'invalid_worktree_root',
+          });
+          return;
+        }
         let wtService: GitWorktreeService;
         try {
-          wtService = new GitWorktreeService(workspaceCwd);
-        } catch {
+          wtService = new GitWorktreeService(workspaceCwd, {
+            worktreeRoot: worktreeRootParsed.normalized,
+          });
+        } catch (error) {
+          if (error instanceof InvalidWorktreeRootError) {
+            res.status(400).json({
+              error: error.message,
+              code: 'invalid_worktree_root',
+            });
+            return;
+          }
           res.status(500).json({
             error: 'Failed to initialize worktree service',
             code: 'worktree_init_failed',
@@ -3773,6 +3804,13 @@ export function registerSessionRoutes(
         if (!wtResult.success || !wtResult.worktree) {
           // An in-progress merge/rebase is a state the user can clear, not a
           // daemon fault: answer a readable 409 rather than a 500 (R12-1).
+          if (wtResult.code === 'invalid_worktree_root') {
+            res.status(400).json({
+              error: wtResult.error ?? 'Invalid worktree.root setting',
+              code: 'invalid_worktree_root',
+            });
+            return;
+          }
           if (wtResult.code === 'worktree_merge_in_progress') {
             res.status(409).json({
               error: wtResult.error ?? 'The workspace has an in-progress merge',
@@ -3865,7 +3903,9 @@ export function registerSessionRoutes(
         // Otherwise the branch/worktree created for this request is orphaned
         // and inFlightBranchWorkspaces permanently blocks the workspace.
         if (worktreeMeta) {
-          await new GitWorktreeService(workspaceCwd)
+          await new GitWorktreeService(workspaceCwd, {
+            worktreeRoot: worktreeRootParsed?.normalized,
+          })
             .removeUserWorktree(worktreeMeta.slug, {
               deleteBranch: true,
               baseCommit: worktreeBaseCommit,
@@ -3916,7 +3956,9 @@ export function registerSessionRoutes(
         // the directory, its git registration, and its branch permanently.
         if (worktreeMeta) {
           const rollbackSlug = worktreeMeta.slug;
-          await new GitWorktreeService(workspaceCwd)
+          await new GitWorktreeService(workspaceCwd, {
+            worktreeRoot: worktreeRootParsed?.normalized,
+          })
             .removeUserWorktree(rollbackSlug, {
               deleteBranch: true,
               baseCommit: worktreeBaseCommit,
@@ -4061,23 +4103,22 @@ export function registerSessionRoutes(
       // before any subsequent prompt is processed.
       if (worktreeMeta) {
         try {
-          // Compute allowed roots for the sessionCd containment check.
-          // Narrow to <root>/.qwen/worktrees (not the whole repo) so a
-          // symlink .qwen/worktrees/task -> <repo>/src is rejected.
+          const parsedRoot =
+            worktreeRootParsed ?? readRuntimeWorktreeRoot(runtime);
           const createAllowedRoots = [
-            path.join(workspaceCwd, '.qwen', 'worktrees'),
+            path.join(workspaceCwd, ...parsedRoot.segments),
           ];
           let createRepoTop: string | null = null;
           try {
-            createRepoTop = await new GitWorktreeService(
-              workspaceCwd,
-            ).getRepoTopLevel();
+            createRepoTop = await new GitWorktreeService(workspaceCwd, {
+              worktreeRoot: parsedRoot.normalized,
+            }).getRepoTopLevel();
           } catch {
             // Not a git repo or getRepoTopLevel unavailable.
           }
           if (createRepoTop && createRepoTop !== workspaceCwd) {
             createAllowedRoots.push(
-              path.join(createRepoTop, '.qwen', 'worktrees'),
+              path.join(createRepoTop, ...parsedRoot.segments),
             );
           }
           const expectedWorktreePath = fs.realpathSync(worktreeMeta.path);
@@ -4116,7 +4157,9 @@ export function registerSessionRoutes(
           // complete after this rejection. Remove the checkout only when the
           // session was definitively removed.
           if (removedSession) {
-            await new GitWorktreeService(workspaceCwd)
+            await new GitWorktreeService(workspaceCwd, {
+              worktreeRoot: worktreeRootParsed?.normalized,
+            })
               .removeUserWorktree(worktreeMeta.slug, {
                 deleteBranch: true,
                 baseCommit: worktreeBaseCommit,
@@ -4178,7 +4221,9 @@ export function registerSessionRoutes(
             // Preserve the live session and its worktree when ownership is uncertain.
           }
           if (removed) {
-            await new GitWorktreeService(workspaceCwd)
+            await new GitWorktreeService(workspaceCwd, {
+              worktreeRoot: worktreeRootParsed?.normalized,
+            })
               .removeUserWorktree(worktreeMeta.slug, {
                 deleteBranch: true,
                 baseCommit: worktreeBaseCommit,
@@ -4214,7 +4259,9 @@ export function registerSessionRoutes(
       // and branch are orphaned (the agent-* stale cleanup won't collect
       // user-named worktrees).
       if (worktreeMeta && !worktreeDurablyAttached && !spawnCompleted) {
-        await new GitWorktreeService(workspaceCwd)
+        await new GitWorktreeService(workspaceCwd, {
+          worktreeRoot: worktreeRootParsed?.normalized,
+        })
           .removeUserWorktree(worktreeMeta.slug, {
             deleteBranch: true,
             baseCommit: worktreeBaseCommit,
@@ -4597,8 +4644,16 @@ export function registerSessionRoutes(
     if (!workspaceRoots.includes(realOriginalCwd)) {
       throw invalidState('sidecar original cwd is outside the accepted roots');
     }
+    let parsedWorktreeRoot: ParsedWorktreeRoot;
+    try {
+      parsedWorktreeRoot = readRuntimeWorktreeRoot(runtime);
+    } catch (error) {
+      throw invalidState(
+        error instanceof Error ? error.message : 'invalid worktree.root',
+      );
+    }
     const candidateRoots = workspaceRoots.map((root) =>
-      path.join(root, '.qwen', 'worktrees'),
+      path.join(root, ...parsedWorktreeRoot.segments),
     );
     // Also the ownership lock key, so it must keep the rule stated in
     // `server/worktree-ownership-op.ts`.
@@ -4608,19 +4663,11 @@ export function registerSessionRoutes(
     } catch {
       throw invalidState('worktree checkout is missing or inaccessible');
     }
-    const contained = candidateRoots.some((root) => {
-      try {
-        const realRoot = fs.realpathSync(root);
-        const relative = path.relative(realRoot, realTarget);
-        return (
-          relative.length > 0 &&
-          !relative.startsWith('..') &&
-          !path.isAbsolute(relative)
-        );
-      } catch {
-        return false;
-      }
-    });
+    const contained = isWorktreePathInManagedRoots(
+      realTarget,
+      workspaceRoots,
+      parsedWorktreeRoot,
+    );
     if (!contained) {
       throw invalidState('worktree path failed containment');
     }
@@ -5887,7 +5934,9 @@ export function registerSessionRoutes(
                 });
                 return;
               }
-              const wtService = new GitWorktreeService(workspaceCwd);
+              const wtService = new GitWorktreeService(workspaceCwd, {
+                worktreeRoot: readRuntimeWorktreeRoot(runtime).normalized,
+              });
               const wtCheckoutService = new GitWorktreeService(realTarget);
               // gateBase describes originalCwd's checkout (the local HEAD
               // the gate compares against); base is the commit the worktree
@@ -6425,6 +6474,20 @@ export function registerSessionRoutes(
               });
               return;
             }
+            let handoffWorktreeRoot: ParsedWorktreeRoot;
+            try {
+              handoffWorktreeRoot = readRuntimeWorktreeRoot(runtime);
+            } catch (error) {
+              res.status(400).json({
+                error:
+                  error instanceof Error
+                    ? error.message
+                    : 'Invalid worktree.root setting',
+                code: 'invalid_worktree_root',
+                sessionId: storageSessionId,
+              });
+              return;
+            }
             const slug = GitWorktreeService.generateAutoSlug();
             // Place the worktree under the workspace's managed root (the
             // same root POST /session uses), not the session's effective
@@ -6434,7 +6497,9 @@ export function registerSessionRoutes(
             // worktree on the recorded SHA, not a branch name: the service
             // resolves names in the placement repository, so a branch name
             // could start the worktree at a different commit than recorded.
-            const placementService = new GitWorktreeService(workspaceCwd);
+            const placementService = new GitWorktreeService(workspaceCwd, {
+              worktreeRoot: handoffWorktreeRoot.normalized,
+            });
             const created = await placementService.createUserWorktree(
               slug,
               baseCommit,
@@ -6445,6 +6510,14 @@ export function registerSessionRoutes(
               },
             );
             if (!created.success || !created.worktree) {
+              if (created.code === 'invalid_worktree_root') {
+                res.status(400).json({
+                  error: created.error ?? 'Invalid worktree.root setting',
+                  code: 'invalid_worktree_root',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
               // An in-progress merge/rebase is a user-clearable state, not a
               // daemon fault: surface the typed 409 here too (R13-2).
               if (created.code === 'worktree_merge_in_progress') {
@@ -6788,6 +6861,19 @@ export function registerSessionRoutes(
             return;
           }
 
+          let branchWorktreeRoot: ParsedWorktreeRoot;
+          try {
+            branchWorktreeRoot = readRuntimeWorktreeRoot(runtime);
+          } catch (error) {
+            res.status(400).json({
+              error:
+                error instanceof Error
+                  ? error.message
+                  : 'Invalid worktree.root setting',
+              code: 'invalid_worktree_root',
+            });
+            return;
+          }
           const sessionService = createWorkspaceRuntimeSessionService(runtime);
           if (runtime.bridge.getSessionSummary(sessionId).hasActivePrompt) {
             throw new BranchWhilePromptActiveError(sessionId);
@@ -6799,6 +6885,7 @@ export function registerSessionRoutes(
             sessionId,
             snapshot,
             sidecarPath: sessionService.getWorktreeSessionPath(sessionId),
+            worktreeRoot: branchWorktreeRoot.normalized,
           });
           if (!base) {
             res.status(409).json({
@@ -6808,7 +6895,12 @@ export function registerSessionRoutes(
             });
             return;
           }
-          if (!(await isBranchWorktreeCreationSupported(base))) {
+          if (
+            !(await isBranchWorktreeCreationSupported(
+              base,
+              branchWorktreeRoot.normalized,
+            ))
+          ) {
             res.status(500).json({
               error: 'Worktree creation is not available for this checkout',
               code: 'worktree_create_failed',
@@ -6826,7 +6918,9 @@ export function registerSessionRoutes(
               let mutationDispatched = false;
               let published: BridgePersistedBranchedSession | undefined;
               let restored: BridgeBranchedSession | undefined;
-              const worktreeService = new GitWorktreeService(base.repoTop);
+              const worktreeService = new GitWorktreeService(base.repoTop, {
+                worktreeRoot: branchWorktreeRoot.normalized,
+              });
               const sidecarPath =
                 sessionService.getWorktreeSessionPath(targetSessionId);
               const journalPath = getBranchWorktreeJournalPath(
@@ -7032,6 +7126,14 @@ export function registerSessionRoutes(
                   // a daemon fault: surface the typed 409 here too, and keep
                   // the service's refusal text rather than a generic one
                   // (R13-2).
+                  if (worktreeResult.code === 'invalid_worktree_root') {
+                    res.status(400).json({
+                      error:
+                        worktreeResult.error ?? 'Invalid worktree.root setting',
+                      code: 'invalid_worktree_root',
+                    });
+                    return;
+                  }
                   if (worktreeResult.code === 'worktree_merge_in_progress') {
                     res.status(409).json({
                       error:
@@ -7169,9 +7271,7 @@ export function registerSessionRoutes(
                   targetSessionId,
                   {
                     path: worktree.path,
-                    allowedRoots: [
-                      path.join(base.repoTop, '.qwen', 'worktrees'),
-                    ],
+                    allowedRoots: [worktreeService.getUserWorktreesDir()],
                   },
                 );
                 runtime.generationGuard?.assertOpen();
@@ -12009,6 +12109,7 @@ export function registerSessionRoutes(
                       mergeLive: !readOnlySecondary,
                       allowSidecarWrite: runtime.trusted,
                       runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+                      worktreeRoot: resolveRuntimeWorktreeRootSetting(runtime),
                       signal: controller.signal,
                     },
                   ),
@@ -12169,6 +12270,7 @@ export function registerSessionRoutes(
                 { ...(maxResults !== undefined ? { maxResults } : {}) },
                 {
                   runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+                  worktreeRoot: resolveRuntimeWorktreeRootSetting(runtime),
                   signal: controller.signal,
                   isSessionRetirementFenced: (id) =>
                     isBridgeSessionRetirementFenced(runtime.bridge, id),

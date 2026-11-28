@@ -29,6 +29,10 @@ import {
   type SessionArchiveCoordinator,
 } from './session-archive.js';
 import { acquireWorktreeOwnershipOp } from './worktree-ownership-op.js';
+import {
+  isWorktreePathInManagedRoots,
+  readRuntimeWorktreeRoot,
+} from './worktree-root.js';
 import { WorktreeRestoreUnavailableError } from './worktree-restore-errors.js';
 import {
   WorktreeMarkerMissingError,
@@ -210,27 +214,20 @@ async function reconcileRestoredSessionWorktree({
           workspaceRoots.push(realRepoTop);
         }
       }
+      const parsedWorktreeRoot = readRuntimeWorktreeRoot(runtime);
       const realOriginalCwd = fs.realpathSync(sidecar.originalCwd);
       if (!workspaceRoots.includes(realOriginalCwd)) {
         throw new Error('legacy sidecar belongs to another workspace');
       }
       candidateRoots = workspaceRoots.map((root) =>
-        path.join(root, '.qwen', 'worktrees'),
+        path.join(root, ...parsedWorktreeRoot.segments),
       );
       realTarget = fs.realpathSync(sidecar.worktreePath);
-      const contained = candidateRoots.some((root) => {
-        try {
-          const realRoot = fs.realpathSync(root);
-          const relative = path.relative(realRoot, realTarget!);
-          return (
-            relative.length > 0 &&
-            !relative.startsWith('..') &&
-            !path.isAbsolute(relative)
-          );
-        } catch {
-          return false;
-        }
-      });
+      const contained = isWorktreePathInManagedRoots(
+        realTarget,
+        workspaceRoots,
+        parsedWorktreeRoot,
+      );
       if (!contained) {
         throw new Error('worktree sidecar path failed containment');
       }
@@ -357,8 +354,9 @@ async function reconcileRestoredSessionWorktree({
       if (!workspaceRoots.includes(realOriginalCwd)) {
         throw new Error('Worktree sidecar belongs to another workspace');
       }
+      const parsedWorktreeRoot = readRuntimeWorktreeRoot(runtime);
       const candidateRoots = workspaceRoots.map((root) =>
-        path.join(root, '.qwen', 'worktrees'),
+        path.join(root, ...parsedWorktreeRoot.segments),
       );
       // Compared with the ownership lock key below, so it must keep the
       // rule stated in `server/worktree-ownership-op.ts`.
@@ -371,19 +369,11 @@ async function reconcileRestoredSessionWorktree({
       // Again on the path the checks below act on, in case the
       // checkout appeared since the key was derived from the raw path.
       assertWorktreeOwnershipLockHeld(heldWorktreeOwnershipLockKey, realTarget);
-      const contained = candidateRoots.some((root) => {
-        try {
-          const realRoot = fs.realpathSync(root);
-          const relative = path.relative(realRoot, realTarget);
-          return (
-            relative.length > 0 &&
-            !relative.startsWith('..') &&
-            !path.isAbsolute(relative)
-          );
-        } catch {
-          return false;
-        }
-      });
+      const contained = isWorktreePathInManagedRoots(
+        realTarget,
+        workspaceRoots,
+        parsedWorktreeRoot,
+      );
       if (!contained) {
         throw new Error('Worktree sidecar path failed containment');
       }

@@ -16,6 +16,7 @@ import {
   isBranchWorktreeCreationSupported,
   resolveBranchWorktreeBaseCheckout,
 } from '../branch-worktree-preparation.js';
+import { readRuntimeWorktreeRoot } from '../server/worktree-root.js';
 import {
   resolveSessionManagedGitCwdForRoute,
   resolveTrustedRuntime,
@@ -145,6 +146,7 @@ export function registerWorkspaceQualifiedGitRoutes(
     if (parsedSessionId.kind === 'valid') {
       const sessionId = parsedSessionId.sessionId;
       try {
+        const worktreeRoot = readRuntimeWorktreeRoot(runtime).normalized;
         const base = await resolveBranchWorktreeBaseCheckout({
           workspaceCwd: runtime.workspaceCwd,
           sessionId,
@@ -153,9 +155,11 @@ export function registerWorkspaceQualifiedGitRoutes(
             createWorkspaceRuntimeSessionService(
               runtime,
             ).getWorktreeSessionPath(sessionId),
+          worktreeRoot,
         });
         worktreeSupported =
-          base !== null && (await isBranchWorktreeCreationSupported(base));
+          base !== null &&
+          (await isBranchWorktreeCreationSupported(base, worktreeRoot));
       } catch {
         worktreeSupported = false;
       }

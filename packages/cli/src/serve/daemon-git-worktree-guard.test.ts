@@ -2464,6 +2464,40 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
       ).resolves.toMatchObject({ allowed: false });
     });
 
+    it('contains a sub-agent to an in-project custom worktree.root checkout', async () => {
+      const agentWorktree = path.join(
+        effectiveCwd,
+        '.worktrees',
+        'agent-abc1234',
+      );
+      const sibling = path.join(effectiveCwd, '.worktrees', 'agent-def5678');
+      await mkdir(path.join(agentWorktree, 'src'), { recursive: true });
+      await mkdir(sibling, { recursive: true });
+      await writeFile(
+        path.join(agentWorktree, '.git'),
+        `gitdir: ${path.join(outsideRepo, '.git', 'worktrees', 'agent-abc1234')}\n`,
+      );
+      await mkdir(
+        path.join(outsideRepo, '.git', 'worktrees', 'agent-abc1234'),
+        { recursive: true },
+      );
+      await writeFile(
+        path.join(outsideRepo, '.git', 'worktrees', 'agent-abc1234', 'gitdir'),
+        `${path.join(agentWorktree, '.git')}\n`,
+      );
+
+      const guard = createDaemonToolGuard();
+      await expect(
+        guard(call('cd src && git commit -m x', agentWorktree)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(call(`git -C ${sibling} reset --hard`, agentWorktree)),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard(call(`git -C ${effectiveCwd} reset --hard`, agentWorktree)),
+      ).resolves.toMatchObject({ allowed: false });
+    });
+
     it('contains a sub-agent to the worktree it reports', async () => {
       // A session id unique to this test: `getWorktreesDir` resolves under the
       // user's global Qwen dir, so a shared id would have this test create and

@@ -25,6 +25,11 @@ import {
   type CarriedEntry,
 } from './gitWorktreeService.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import {
+  assertWorktreeRootContainmentSync,
+  parseWorktreeRoot,
+  type ParsedWorktreeRoot,
+} from '../utils/worktree-root.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('WORKTREE_SESSION_SERVICE');
@@ -1014,6 +1019,7 @@ export async function restoreWorktreeContext(
   sidecarPath: string,
   onWarn?: (error: unknown) => void,
   expectedSessionId?: string,
+  worktreeRoot?: string,
 ): Promise<WorktreeRestoreResult> {
   let session: WorktreeSession | null = null;
   try {
@@ -1067,20 +1073,45 @@ export async function restoreWorktreeContext(
   }
 
   // Structural sanity check: the worktreePath MUST live under
-  // `<originalCwd>/.qwen/worktrees/`. Schema validation (readWorktreeSession)
-  // already ensures the fields are strings, but a manually-edited or
-  // copy-pasted sidecar could still point worktreePath at an arbitrary
-  // existing directory — the model would then be directed to operate
-  // there. Restrict to the Qwen-managed worktrees subtree so a
-  // tampered sidecar can't redirect file operations to /etc, ~/, etc.
+  // `<originalCwd>/<worktree.root>` (default `<originalCwd>/.qwen/worktrees`).
+  // Schema validation (readWorktreeSession) already ensures the fields are
+  // strings, but a manually-edited or copy-pasted sidecar could still point
+  // worktreePath at an arbitrary existing directory — the model would then be
+  // directed to operate there. Restrict to the Qwen-managed worktrees subtree
+  // so a tampered sidecar can't redirect file operations to /etc, ~/, etc.
   // (PR #4174 review #3256839787.)
+  let parsedRoot: ParsedWorktreeRoot;
+  try {
+    parsedRoot = parseWorktreeRoot(worktreeRoot);
+  } catch (error) {
+    // An invalid worktree.root setting must not destroy a valid sidecar.
+    onWarn?.(error);
+    return { contextMessage: null, session: null };
+  }
   const hasParentTraversalSegment = (value: string) =>
     value.split(/[/\\]/).includes('..');
-  const expectedParent = path.join(session.originalCwd, '.qwen', 'worktrees');
+  const expectedParent = path.join(session.originalCwd, ...parsedRoot.segments);
   const foldsCase =
     process.platform === 'win32' || process.platform === 'darwin';
   const normalizeForContainment = (value: string) =>
     foldsCase ? value.toLowerCase() : value;
+  let rootContainmentOk = true;
+  if (
+    path.isAbsolute(session.originalCwd) &&
+    !hasParentTraversalSegment(session.originalCwd)
+  ) {
+    try {
+      assertWorktreeRootContainmentSync(
+        session.originalCwd,
+        expectedParent,
+        parsedRoot,
+        path.join(session.originalCwd, '.git'),
+      );
+    } catch (error) {
+      rootContainmentOk = false;
+      onWarn?.(error);
+    }
+  }
   const realExpectedParent = normalizeForContainment(
     resolveExistingOrAncestor(expectedParent),
   );
@@ -1089,6 +1120,7 @@ export async function restoreWorktreeContext(
   );
   const relWorktree = path.relative(realExpectedParent, realWorktree);
   const isContained =
+    rootContainmentOk &&
     path.isAbsolute(session.originalCwd) &&
     path.isAbsolute(session.worktreePath) &&
     !hasParentTraversalSegment(session.originalCwd) &&
@@ -1098,6 +1130,12 @@ export async function restoreWorktreeContext(
     !relWorktree.startsWith(`..${path.sep}`) &&
     !path.isAbsolute(relWorktree);
   if (!isContained) {
+    if (!rootContainmentOk) {
+      // Containment failed because the configured worktree root itself is
+      // unsafe (e.g. symlink escaping the repo) — refuse without destroying
+      // the sidecar.
+      return { contextMessage: null, session: null };
+    }
     onWarn?.(
       new Error(
         `worktreePath ${session.worktreePath} is outside ${expectedParent}; ` +

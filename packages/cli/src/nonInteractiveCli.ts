@@ -1669,6 +1669,7 @@ export async function runNonInteractive(
             sessionPath,
             (error) => debugLogger.warn('worktree restore warning:', error),
             sessionId,
+            config.getWorktreeRoot(),
           );
           if (restored.contextMessage) {
             remind(restored.contextMessage);

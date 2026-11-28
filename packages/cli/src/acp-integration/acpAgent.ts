@@ -7230,6 +7230,7 @@ class QwenAgent implements Agent {
         sessionPath,
         (error) => debugLogger.warn(`ACP worktree restore warning: ${error}`),
         config.getSessionId(),
+        config.getWorktreeRoot(),
       );
       if (restored.contextMessage) {
         session.pendingWorktreeNotice = restored.contextMessage;

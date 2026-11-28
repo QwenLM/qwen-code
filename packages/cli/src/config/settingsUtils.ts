@@ -256,6 +256,10 @@ export function validateSettingValue(
   ) {
     return `Value must not be ${String(value)}`;
   }
+  if (def.validate) {
+    const customError = def.validate(value);
+    if (customError) return customError;
+  }
   return undefined;
 }
 

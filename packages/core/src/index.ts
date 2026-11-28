@@ -261,6 +261,21 @@ export {
   toCanonicalWorkspaceArtifactPath,
 } from './utils/workspace-artifact-path.js';
 export {
+  DEFAULT_WORKTREE_ROOT,
+  DEFAULT_WORKTREE_ROOT_SEGMENTS,
+  WORKTREE_ROOT_MAX_LENGTH,
+  InvalidWorktreeRootError,
+  assertWorktreeRootContainment,
+  assertWorktreeRootContainmentSync,
+  extractWorktreeFromPath,
+  getWorktreeRootPrefixes,
+  isPathInsideWorktreeRoot,
+  parseWorktreeRoot,
+  resolveWorktreeRootPath,
+  validateWorktreeRoot,
+  type ParsedWorktreeRoot,
+} from './utils/worktree-root.js';
+export {
   MAX_DIRECTORY_ARTIFACT_DEPTH,
   MAX_DIRECTORY_ARTIFACT_FILES,
   OFFICE_DOCUMENT_EXTENSIONS,

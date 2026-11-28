@@ -10,6 +10,7 @@ import {
   type SessionServiceOptions,
 } from '@qwen-code/qwen-code-core';
 import type { WorkspaceRuntime } from './workspace-registry.js';
+import { resolveRuntimeWorktreeRootSetting } from './server/worktree-root.js';
 
 export function runWithWorkspaceRuntimeStorage<T>(
   runtime: Pick<WorkspaceRuntime, 'sessionRuntimeBaseDir'>,
@@ -25,8 +26,14 @@ export function createWorkspaceRuntimeSessionService(
   runtime: WorkspaceRuntime,
   options: Omit<SessionServiceOptions, 'runtimeBaseDir'> = {},
 ): SessionService {
+  const worktreeRoot =
+    options.worktreeRoot ??
+    (runtime.env !== undefined
+      ? resolveRuntimeWorktreeRootSetting(runtime)
+      : undefined);
   return new SessionService(runtime.workspaceCwd, {
     ...options,
+    ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
     runtimeBaseDir: runtime.sessionRuntimeBaseDir,
   });
 }

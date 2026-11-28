@@ -422,6 +422,7 @@ async function reconcileSessionArchiveState(params: {
       sessionId,
       action === 'archive' ? 'archived' : 'active',
       isSessionLive,
+      service.getWorktreeRoot?.(),
     );
   } catch (error) {
     errors.push(error);
@@ -642,6 +643,7 @@ export async function deleteDaemonSessions(params: {
       service,
       sessionId,
       runtimeWorkspaceCwd,
+      { worktreeRoot: service.getWorktreeRoot?.() },
     );
     if (!cleanupPlan) {
       return coordinator.runExclusiveMany([sessionId], mutateSession);

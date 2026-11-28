@@ -169,6 +169,62 @@ describe('setupStartupWorktree', () => {
     }
   });
 
+  it('creates, re-attaches, and blocks nesting under a custom worktreeRoot', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const created = await setupStartupWorktree('custom-slug', {
+      worktreeRoot: '.worktrees',
+    });
+    expect(created).not.toBeNull();
+    expect(created!.ok).toBe(true);
+    if (created!.ok) {
+      expect(created!.context.worktreePath).toBe(
+        path.join(tempRepo, '.worktrees', 'custom-slug'),
+      );
+      expect(process.cwd()).toBe(created!.context.worktreePath);
+    }
+
+    // Launching nested --worktree from inside the custom-root worktree is rejected.
+    const nested = await setupStartupWorktree('nested-slug', {
+      worktreeRoot: '.worktrees',
+    });
+    expect(nested).not.toBeNull();
+    expect(nested!.ok).toBe(false);
+    if (!nested!.ok) {
+      expect(nested!.error).toContain('inside another worktree');
+    }
+
+    // Re-attach from the main checkout finds the custom-root worktree.
+    process.chdir(tempRepo);
+    const reattached = await setupStartupWorktree('custom-slug', {
+      worktreeRoot: '.worktrees',
+    });
+    expect(reattached).not.toBeNull();
+    expect(reattached!.ok).toBe(true);
+    if (reattached!.ok) {
+      expect(reattached!.context.wasReattached).toBe(true);
+      expect(reattached!.context.worktreePath).toBe(
+        path.join(tempRepo, '.worktrees', 'custom-slug'),
+      );
+    }
+  });
+
+  it('fails closed when worktreeRoot option is invalid', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const res = await setupStartupWorktree('bad-root', {
+      worktreeRoot: '../escape',
+    });
+    expect(res).not.toBeNull();
+    expect(res!.ok).toBe(false);
+    if (!res!.ok) {
+      expect(res!.error).toContain('invalid worktree.root');
+    }
+    expect(process.cwd()).toBe(tempRepo);
+  });
+
   it('rejects invalid slug characters before any git operation', async () => {
     tempRepo = await makeTempRepo();
     process.chdir(tempRepo);

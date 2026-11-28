@@ -10,6 +10,10 @@ import path from 'node:path';
 import { GitWorktreeService } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { selectWorktreeSnapshot } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import {
+  assertWorktreeRootContainmentSync,
+  parseWorktreeRoot,
+} from '@qwen-code/qwen-code-core/utils/worktree-root.js';
+import {
   readWorktreeSessionStrict,
   writeWorktreeSession,
 } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
@@ -64,7 +68,24 @@ export async function assertRestoreCoordinates(
       'Snapshot restore requires a registered workspace owner',
     );
   }
-  const source = new GitWorktreeService(plan.sidecar.originalCwd);
+  const parsedRoot = parseWorktreeRoot(plan.worktreeRoot);
+  const source = new GitWorktreeService(plan.sidecar.originalCwd, {
+    worktreeRoot: parsedRoot.normalized,
+  });
+  try {
+    assertWorktreeRootContainmentSync(
+      plan.sidecar.originalCwd,
+      source.getUserWorktreesDir(),
+      parsedRoot,
+      path.join(plan.sidecar.originalCwd, '.git'),
+    );
+  } catch (error) {
+    throw new WorktreeRestoreUnavailableError(
+      error instanceof Error
+        ? error.message
+        : 'Snapshot restore worktree.root failed containment',
+    );
+  }
   const expected = resolveManagedWorktreePath(
     source.getUserWorktreePath(plan.sidecar.slug),
   );
@@ -144,11 +165,13 @@ export async function reconcileUnrecordedRemovedWorktree(
   expectedManagedRoot: string | undefined,
   // Archive callers may lack a live registry: unknown ownership stays preserved.
   isSessionLive: (sessionId: string) => boolean = () => true,
+  worktreeRoot?: string,
 ): Promise<boolean> {
   const latest = await preclassifyWorktreeCleanup(
     service,
     sessionId,
     service.getProjectRoot(),
+    { worktreeRoot },
   );
   if (
     !latest ||
@@ -159,9 +182,9 @@ export async function reconcileUnrecordedRemovedWorktree(
     (expectedManagedRoot === undefined
       ? true
       : resolveManagedWorktreePath(
-          new GitWorktreeService(
-            latest.sidecar.originalCwd,
-          ).getUserWorktreesDir(),
+          new GitWorktreeService(latest.sidecar.originalCwd, {
+            worktreeRoot: latest.worktreeRoot,
+          }).getUserWorktreesDir(),
         ) !== resolveManagedWorktreePath(expectedManagedRoot))
   ) {
     return false;

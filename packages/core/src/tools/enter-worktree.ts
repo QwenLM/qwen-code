@@ -13,6 +13,11 @@ import {
   writeWorktreeSessionMarker,
 } from '../services/gitWorktreeService.js';
 import { writeWorktreeSession } from '../services/worktreeSessionService.js';
+import {
+  DEFAULT_WORKTREE_ROOT,
+  isPathInsideWorktreeRoot,
+  parseWorktreeRoot,
+} from '../utils/worktree-root.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { raceWithAbort } from '../utils/race-with-abort.js';
 
@@ -71,19 +76,24 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
   async execute(signal: AbortSignal): Promise<ToolResult> {
     signal.throwIfAborted();
     const cwd = this.config.getTargetDir();
+    let parsedWorktreeRoot;
+    try {
+      parsedWorktreeRoot = parseWorktreeRoot(this.config.getWorktreeRoot?.());
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      debugLogger.warn(`enter_worktree: invalid worktree.root: ${reason}`);
+      return errorResult(`Invalid worktree.root setting: ${reason}`);
+    }
+    const worktreeRoot = parsedWorktreeRoot.normalized;
 
     // Refuse nested worktree creation. If the caller's cwd is itself
-    // already inside `.qwen/worktrees/<slug>/`, a fresh worktree would
-    // be provisioned at `<repo>/.qwen/worktrees/<new>/` — but the
-    // model's mental model and inherited file paths would still
-    // reference the outer worktree. The resulting handle confusion
-    // typically leaves the inner worktree orphaned on exit.
-    //
-    // The check is conservative: any path component named
-    // `.qwen/worktrees` somewhere in cwd qualifies. We also forbid
-    // sentinel "inside a worktree" markers that an `enter_worktree`
-    // session leaves behind (writeSessionMarker, below).
-    if (/\.qwen[\\/]worktrees[\\/]/.test(cwd)) {
+    // already inside `<worktree.root>/<slug>/` (or legacy `.qwen/worktrees/<slug>/`),
+    // a fresh worktree would be provisioned at `<repo>/<worktree.root>/<new>/`
+    // while the model's inherited file paths still reference the outer worktree.
+    if (
+      isPathInsideWorktreeRoot(cwd, worktreeRoot) ||
+      isPathInsideWorktreeRoot(cwd, DEFAULT_WORKTREE_ROOT)
+    ) {
       const reason =
         'Already inside a git worktree. Call exit_worktree first, ' +
         'or return to the main repository checkout before creating a ' +
@@ -94,10 +104,10 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
 
     // First-pass service rooted at cwd, only to find the repo top-level.
     // We can't use cwd as the worktree anchor because launching from a
-    // monorepo subdirectory would scatter `.qwen/worktrees/` under each
-    // package's directory, and the startup sweep at `Config.initialize`
-    // would never find them.
-    const probe = new GitWorktreeService(cwd);
+    // monorepo subdirectory would scatter worktrees under each package's
+    // directory, and the startup sweep at `Config.initialize` would never
+    // find them.
+    const probe = new GitWorktreeService(cwd, { worktreeRoot });
 
     const gitCheck = await raceWithAbort(signal, () =>
       probe.checkGitAvailable(),
@@ -121,7 +131,9 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
     const projectRoot =
       (await raceWithAbort(signal, () => probe.getRepoTopLevel())) ?? cwd;
     const service =
-      projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
+      projectRoot === cwd
+        ? probe
+        : new GitWorktreeService(projectRoot, { worktreeRoot });
 
     // Treat an empty `name` ('') the same as undefined — some models pass
     // `{ name: '' }` when the schema marks `name` as optional, expecting

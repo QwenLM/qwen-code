@@ -1146,6 +1146,11 @@ export function SettingsMessage({
         }
         value={value}
         disabled={disabled}
+        className={
+          setting.type === 'number' || setting.type === 'integer'
+            ? undefined
+            : 'w-[min(220px,50vw)] max-md:w-full'
+        }
         onCommit={(next) => handleSetValue(setting.key, next)}
         onInvalid={() => setMessage(t('settings.invalidNumber'))}
       />

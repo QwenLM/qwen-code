@@ -7,7 +7,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Application, RequestHandler, Response } from 'express';
-import { GitWorktreeService } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { getGitWorkingTreeStatus } from '@qwen-code/qwen-code-core/utils/gitDiff.js';
 import {
   commitIsReachable,
@@ -41,6 +40,10 @@ import {
   resolveTrustedRuntime,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
+import {
+  resolveContainedWorktreeRoot,
+  tryReadRuntimeWorktreeRoot,
+} from '../server/worktree-root.js';
 import { applyReadHeaders } from './workspace-file-read.js';
 import {
   gitErrorText,
@@ -222,8 +225,9 @@ function staysInside(relative: string): boolean {
 
 function managedSlug(
   entry: GitWorktreeEntry,
-  managedDir: string,
+  managedDir: string | undefined,
 ): string | undefined {
+  if (!managedDir) return undefined;
   const relative = path.relative(
     realpathOnDiskOrSelf(managedDir),
     realpathOnDiskOrSelf(entry.path),
@@ -236,7 +240,7 @@ function managedSlug(
 function toWire(
   entry: GitWorktreeEntry,
   runtime: WorkspaceRuntime,
-  managedDir: string,
+  managedDir: string | undefined,
 ): Record<string, unknown> {
   const slug = managedSlug(entry, managedDir);
   // `git worktree lock --reason` text: written by anyone who can run git in
@@ -468,9 +472,18 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
         });
         return;
       }
-      const managedDir = new GitWorktreeService(
-        runtime.workspaceCwd,
-      ).getUserWorktreesDir();
+      const parsedWorktreeRoot = tryReadRuntimeWorktreeRoot(runtime);
+      let managedDir: string | undefined;
+      if (parsedWorktreeRoot !== undefined) {
+        try {
+          managedDir = resolveContainedWorktreeRoot(
+            runtime.workspaceCwd,
+            parsedWorktreeRoot,
+          );
+        } catch {
+          managedDir = undefined;
+        }
+      }
       // Listing a repository takes as long as git takes, and the workspace
       // can be replaced meanwhile. Answering then would describe a
       // repository this connection no longer owns.

@@ -5,21 +5,47 @@
  */
 
 import path from 'node:path';
+import {
+  DEFAULT_WORKTREE_ROOT_SEGMENTS,
+  parseWorktreeRoot,
+} from './worktree-root.js';
 
-const WORKTREE_DIR_RE = /^(.*)[\\/]\.qwen[\\/]worktrees[\\/][^\\/]+$/;
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildWorktreeDirRegex(segments: readonly string[]): RegExp {
+  const joined = segments.map(escapeRegex).join('[\\\\/]');
+  return new RegExp(`^(.*)[\\\\/]${joined}[\\\\/][^\\\\/]+$`);
+}
+
+const WORKTREE_DIR_RE = buildWorktreeDirRegex(DEFAULT_WORKTREE_ROOT_SEGMENTS);
 
 /**
- * Session cwd may be a worktree (`<root>/.qwen/worktrees/<slug>`). Artifact
- * consumers (`GET /file`, SessionArtifactStore) always resolve workspacePath
- * against the bound workspace root, so producers must strip that suffix.
+ * Session cwd may be a worktree (`<root>/<worktree.root>/<slug>`, default
+ * `<root>/.qwen/worktrees/<slug>`). Artifact consumers (`GET /file`,
+ * SessionArtifactStore) always resolve workspacePath against the bound
+ * workspace root, so producers must strip that suffix.
  *
  * Both sides of a comparison should use the same path namespace: either both
  * realpath'd or both unresolved. Mixing them on macOS (`/var` vs `/private/var`)
  * makes a valid file look like it escaped the workspace.
  */
-export function resolveBoundWorkspaceRoot(targetDir: string): string {
+export function resolveBoundWorkspaceRoot(
+  targetDir: string,
+  worktreeRoot?: string,
+): string {
   const resolved = path.resolve(targetDir);
-  const match = resolved.match(WORKTREE_DIR_RE);
+  let match: RegExpMatchArray | null = null;
+  if (worktreeRoot !== undefined) {
+    try {
+      const parsed = parseWorktreeRoot(worktreeRoot);
+      match = resolved.match(buildWorktreeDirRegex(parsed.segments));
+    } catch {
+      // Invalid worktree.root — do not strip a custom prefix.
+    }
+  }
+  match ??= resolved.match(WORKTREE_DIR_RE);
   if (!match) {
     return resolved;
   }
@@ -45,8 +71,9 @@ export function resolveBoundWorkspaceRoot(targetDir: string): string {
 export function toCanonicalWorkspaceArtifactPath(
   absoluteFilePath: string,
   targetDir: string,
+  worktreeRoot?: string,
 ): string | null {
-  const baseDir = resolveBoundWorkspaceRoot(targetDir);
+  const baseDir = resolveBoundWorkspaceRoot(targetDir, worktreeRoot);
   const relativePath = path.relative(baseDir, path.resolve(absoluteFilePath));
   if (
     !relativePath ||

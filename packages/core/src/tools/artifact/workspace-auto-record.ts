@@ -151,14 +151,16 @@ function resolveRecordedWorkspaceFile(
   } catch {
     // Keep the lexical path when the file or root cannot be realpath'd yet.
   }
+  const worktreeRoot = config.getWorktreeRoot?.();
   const workspacePath = toCanonicalWorkspaceArtifactPath(
     resolvedFile,
     resolvedRoot,
+    worktreeRoot,
   );
   if (!workspacePath) {
     return null;
   }
-  if (pathHasSkippedDirectoryComponent(workspacePath)) {
+  if (pathHasSkippedDirectoryComponent(workspacePath, worktreeRoot)) {
     return null;
   }
   return { filePath: resolvedFile, workspacePath };

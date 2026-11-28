@@ -1342,6 +1342,7 @@ export const AppContainer = (props: AppContainerProps) => {
                 console.debug('worktree session restore warning:', err);
               },
               config.getSessionId(),
+              config.getWorktreeRoot(),
             );
             if (restored.contextMessage) {
               // UI: show the notice in the transcript so the user knows.
@@ -2418,7 +2419,9 @@ export const AppContainer = (props: AppContainerProps) => {
           // subdir but the worktree lives at `<repoRoot>/.qwen/worktrees/`,
           // so a service rooted at the subdir would never find it. (PR
           // #4174 review finding 3252368637.)
-          const svc = new GitWorktreeService(activeWorktree.originalCwd);
+          const svc = new GitWorktreeService(activeWorktree.originalCwd, {
+            worktreeRoot: config.getWorktreeRoot(),
+          });
           // Ownership guard — read the in-worktree session marker and
           // refuse to remove a worktree owned by a different session
           // (stale sidecar, copied state from another machine, etc.).

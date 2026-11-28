@@ -1037,6 +1037,7 @@ export async function main() {
   {
     const startupRes = await setupStartupWorktree(argv.worktree, {
       symlinkDirectories: settings.merged.worktree?.symlinkDirectories,
+      worktreeRoot: settings.merged.worktree?.root,
     });
     if (startupRes !== null) {
       if (!startupRes.ok) {
@@ -1067,7 +1068,9 @@ export async function main() {
       resolvedSessionId = await showResumeSessionPicker();
     } else if (!cliConfig.isValidSessionId(argv.resume)) {
       // Non-UUID argument — treat as custom title search
-      const sessionService = new SessionService(process.cwd());
+      const sessionService = new SessionService(process.cwd(), {
+        worktreeRoot: settings.merged.worktree?.root,
+      });
       const matches = await sessionService.findSessionsByTitle(argv.resume);
       if (matches.length === 1) {
         resolvedSessionId = matches[0].sessionId;

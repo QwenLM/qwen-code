@@ -27,6 +27,11 @@ import { gitEnv, gitRemoteEnv } from '../utils/git-branches.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { raceWithAbort } from '../utils/race-with-abort.js';
+import {
+  assertWorktreeRootContainment,
+  parseWorktreeRoot,
+  type ParsedWorktreeRoot,
+} from '../utils/worktree-root.js';
 
 const debugLogger = createDebugLogger('GIT_WORKTREE_SERVICE');
 
@@ -1919,6 +1924,13 @@ interface SessionConfigFile {
   [key: string]: unknown;
 }
 
+export interface GitWorktreeServiceOptions {
+  /** Optional custom base directory override for Arena worktrees. */
+  customBaseDir?: string;
+  /** Repository-relative root for user/session worktrees (default: '.qwen/worktrees'). */
+  worktreeRoot?: string;
+}
+
 /**
  * Service for managing git worktrees.
  *
@@ -1929,10 +1941,22 @@ export class GitWorktreeService {
   private sourceRepoPath: string;
   private gitPromise: Promise<SimpleGit> | undefined;
   private readonly customBaseDir?: string;
+  private readonly userWorktreeRoot: ParsedWorktreeRoot;
 
-  constructor(sourceRepoPath: string, customBaseDir?: string) {
+  constructor(
+    sourceRepoPath: string,
+    optionsOrCustomBaseDir?: string | GitWorktreeServiceOptions,
+  ) {
     this.sourceRepoPath = path.resolve(sourceRepoPath);
-    this.customBaseDir = customBaseDir;
+    if (typeof optionsOrCustomBaseDir === 'string') {
+      this.customBaseDir = optionsOrCustomBaseDir;
+      this.userWorktreeRoot = parseWorktreeRoot(undefined);
+    } else {
+      this.customBaseDir = optionsOrCustomBaseDir?.customBaseDir;
+      this.userWorktreeRoot = parseWorktreeRoot(
+        optionsOrCustomBaseDir?.worktreeRoot,
+      );
+    }
   }
 
   private getGit(): Promise<SimpleGit> {
@@ -3336,11 +3360,19 @@ export class GitWorktreeService {
   // ──────────────────────────────────────────────────────────────────────
 
   /**
+   * Returns the parsed relative root for general-purpose and Web Shell
+   * managed worktrees (default `.qwen/worktrees`).
+   */
+  getUserWorktreeRoot(): ParsedWorktreeRoot {
+    return this.userWorktreeRoot;
+  }
+
+  /**
    * Returns the directory holding all general-purpose worktrees for this
-   * repo: `<projectRoot>/.qwen/worktrees`.
+   * repo: `<projectRoot>/<worktree.root>` (default `<projectRoot>/.qwen/worktrees`).
    */
   getUserWorktreesDir(): string {
-    return path.join(this.sourceRepoPath, '.qwen', WORKTREES_DIR);
+    return path.join(this.sourceRepoPath, ...this.userWorktreeRoot.segments);
   }
 
   /**
@@ -3952,6 +3984,32 @@ export class GitWorktreeService {
 
       const git = await raceWithAbort(signal, () => this.getGit());
       signal?.throwIfAborted();
+      const rawGitDir = await raceWithAbort(signal, () =>
+        git
+          .raw(['rev-parse', '--absolute-git-dir'])
+          .then((out) => out.trim())
+          .catch(() => ''),
+      );
+      signal?.throwIfAborted();
+      try {
+        await assertWorktreeRootContainment(
+          this.sourceRepoPath,
+          worktreesDir,
+          this.userWorktreeRoot,
+          rawGitDir || undefined,
+        );
+      } catch (containmentError) {
+        const message =
+          containmentError instanceof Error
+            ? containmentError.message
+            : String(containmentError);
+        debugLogger.warn(`createUserWorktree: ${message}`);
+        return {
+          success: false,
+          error: message,
+          code: 'invalid_worktree_root',
+        };
+      }
       await fs.mkdir(worktreesDir, { recursive: true });
       signal?.throwIfAborted();
       // Keep managed checkouts out of the parent repo's status and file walks.
@@ -4682,6 +4740,13 @@ export class GitWorktreeService {
     }
     const gitDirAbs = path.join(repoRootAbs, '.git');
     const qwenDirAbs = path.join(repoRootAbs, '.qwen');
+    const worktreesDirAbs = path.join(
+      repoRootAbs,
+      ...this.userWorktreeRoot.segments,
+    );
+    const realWorktreesDirAbs = await fs
+      .realpath(worktreesDirAbs)
+      .catch(() => worktreesDirAbs);
     // Same canonical-vs-canonical requirement for the dest side. The
     // worktree was just created by `git worktree add`, so the path
     // should exist; fall back to the input path on realpath error so a
@@ -4762,6 +4827,16 @@ export class GitWorktreeService {
         );
         continue;
       }
+      if (
+        isWithinRoot(sourceAbs, worktreesDirAbs) ||
+        isWithinRoot(worktreesDirAbs, sourceAbs)
+      ) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — ` +
+            `overlaps configured worktree root "${this.userWorktreeRoot.normalized}"`,
+        );
+        continue;
+      }
 
       // Confirm the source exists. We don't insist on it being a directory
       // specifically — `node_modules` is canonically a dir, but a user
@@ -4815,6 +4890,17 @@ export class GitWorktreeService {
       if (isWithinRoot(realSource, qwenDirAbs)) {
         debugLogger.warn(
           `symlinkConfiguredDirectories: refusing path "${raw}" — real source ${realSource} resolves inside .qwen`,
+        );
+        continue;
+      }
+      if (
+        isWithinRoot(realSource, worktreesDirAbs) ||
+        isWithinRoot(worktreesDirAbs, realSource) ||
+        isWithinRoot(realSource, realWorktreesDirAbs) ||
+        isWithinRoot(realWorktreesDirAbs, realSource)
+      ) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — real source ${realSource} overlaps configured worktree root "${this.userWorktreeRoot.normalized}"`,
         );
         continue;
       }
@@ -4947,7 +5033,9 @@ export class GitWorktreeService {
   private async ensureWorktreesGitignored(): Promise<void> {
     try {
       await this.ensureWorktreesExcludeRule();
-      await this.migrateLegacyWorktreeGitignore();
+      if (this.userWorktreeRoot.isDefault) {
+        await this.migrateLegacyWorktreeGitignore();
+      }
     } catch (error) {
       // Best-effort: if writing the exclude fails (read-only fs, etc.)
       // it is not worth aborting the worktree creation.
@@ -4981,7 +5069,7 @@ export class GitWorktreeService {
       (await this.getRepoTopLevel().catch(() => null)) ?? realRoot;
     const rel = path.relative(
       repoTop,
-      path.join(realRoot, '.qwen', WORKTREES_DIR),
+      path.join(realRoot, ...this.userWorktreeRoot.segments),
     );
     // The rule is a gitignore pattern, not a path: escape the pattern
     // metacharacters per segment (a route directory like app/[id]
@@ -5035,7 +5123,7 @@ export class GitWorktreeService {
     // pathspec. Probe a FILE path, not the directory: a directory-form
     // re-include negation only applies to paths git knows are directories.
     const probe = path
-      .join(realRoot, '.qwen', WORKTREES_DIR, 'probe')
+      .join(realRoot, ...this.userWorktreeRoot.segments, 'probe')
       .split(path.sep)
       .join('/');
     // The legacy daemon .qwen/.gitignore outranks info/exclude and is the
@@ -5051,18 +5139,20 @@ export class GitWorktreeService {
       '.gitignore',
     );
     let legacyMoved: string | null = null;
-    const legacyContent = await fs
-      .readFile(legacyGitignore, 'utf8')
-      .catch(() => null);
-    if (
-      legacyContent === `# Auto-generated by qwen-code.\n${WORKTREES_DIR}/\n`
-    ) {
-      const moved = `${legacyGitignore}.probe-tmp`;
-      try {
-        await fs.rename(legacyGitignore, moved);
-        legacyMoved = moved;
-      } catch {
-        // Leave it in place; the probe below will attribute conservatively.
+    if (this.userWorktreeRoot.isDefault) {
+      const legacyContent = await fs
+        .readFile(legacyGitignore, 'utf8')
+        .catch(() => null);
+      if (
+        legacyContent === `# Auto-generated by qwen-code.\n${WORKTREES_DIR}/\n`
+      ) {
+        const moved = `${legacyGitignore}.probe-tmp`;
+        try {
+          await fs.rename(legacyGitignore, moved);
+          legacyMoved = moved;
+        } catch {
+          // Leave it in place; the probe below will attribute conservatively.
+        }
       }
     }
     let verdict = '';
@@ -5375,8 +5465,7 @@ export class GitWorktreeService {
       const canonicalRepo = await fs.realpath(this.sourceRepoPath);
       const canonicalExpectedPath = path.join(
         canonicalRepo,
-        '.qwen',
-        WORKTREES_DIR,
+        ...this.userWorktreeRoot.segments,
         slug,
       );
       if (

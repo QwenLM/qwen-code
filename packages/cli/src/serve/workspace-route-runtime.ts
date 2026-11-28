@@ -12,10 +12,12 @@ import { promisify } from 'node:util';
 import type { Request, Response } from 'express';
 import { WORKTREE_SESSION_FILE } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { gitEnv } from '@qwen-code/qwen-code-core/utils/git-branches.js';
+import { assertWorktreeRootContainment } from '@qwen-code/qwen-code-core/utils/worktree-root.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import { canonicalizeWorkspace } from './acp-session-bridge.js';
 import { parseCallerSuppliedSessionId } from '../config/session-id.js';
 import type { SendBridgeError } from './server/error-response.js';
+import { tryReadRuntimeWorktreeRoot } from './server/worktree-root.js';
 import { createWorkspaceRuntimeSessionService } from './workspace-runtime-storage.js';
 import type {
   WorkspaceEntry,
@@ -717,10 +719,29 @@ export async function resolveSessionManagedGitCwd(
   const repoTop = await fsPromises.realpath(stdout.trim()).catch(() => null);
   if (repoTop === null) return null;
   if (requested === workspace) return requested;
-  const managedRoot = path.join(repoTop, '.qwen', 'worktrees');
+  const parsedWorktreeRoot = tryReadRuntimeWorktreeRoot(runtime);
+  let managedRoot: string | null = null;
+  if (parsedWorktreeRoot !== undefined) {
+    const candidateManagedRoot = path.join(
+      repoTop,
+      ...parsedWorktreeRoot.segments,
+    );
+    const contained = await assertWorktreeRootContainment(
+      repoTop,
+      candidateManagedRoot,
+      parsedWorktreeRoot,
+      path.join(repoTop, '.git'),
+    ).then(
+      () => true,
+      () => false,
+    );
+    if (contained) {
+      managedRoot = candidateManagedRoot;
+    }
+  }
   if (
     isWithinRoot(requested, workspace) &&
-    !isWithinRoot(requested, managedRoot)
+    (managedRoot === null || !isWithinRoot(requested, managedRoot))
   ) {
     if (!(await isLinkedWorktreeOrUnknown(requested))) {
       return requested;
@@ -737,7 +758,9 @@ export async function resolveSessionManagedGitCwd(
       return requested;
     }
   }
-  if (!isWithinRoot(requested, managedRoot)) return null;
+  if (managedRoot === null || !isWithinRoot(requested, managedRoot)) {
+    return null;
+  }
   const [workspaceCommonDir, requestedCommonDir] = await Promise.all([
     resolveGitCommonDir(workspace),
     resolveGitCommonDir(requested),

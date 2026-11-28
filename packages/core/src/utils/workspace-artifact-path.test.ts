@@ -37,6 +37,23 @@ describe('resolveBoundWorkspaceRoot', () => {
     );
     expect(resolveBoundWorkspaceRoot(worktree)).toBe(path.parse(worktree).root);
   });
+  it('strips a configured custom worktree root suffix', () => {
+    const customWorktree = `${agent}/.worktrees/my-feature`;
+    expect(resolveBoundWorkspaceRoot(customWorktree, '.worktrees')).toBe(
+      path.resolve(agent),
+    );
+    const multiSegment = `${agent}/tmp/wts/my-feature`;
+    expect(resolveBoundWorkspaceRoot(multiSegment, 'tmp/wts')).toBe(
+      path.resolve(agent),
+    );
+  });
+
+  it('does not strip a custom prefix when worktreeRoot is invalid', () => {
+    const customWorktree = `${agent}/.worktrees/my-feature`;
+    expect(resolveBoundWorkspaceRoot(customWorktree, '../escape')).toBe(
+      path.resolve(customWorktree),
+    );
+  });
 });
 
 describe('toCanonicalWorkspaceArtifactPath', () => {
@@ -50,6 +67,14 @@ describe('toCanonicalWorkspaceArtifactPath', () => {
     expect(
       toCanonicalWorkspaceArtifactPath(`${myWorktree}/report.csv`, myWorktree),
     ).toBe('.qwen/worktrees/my-feature/report.csv');
+    const customWorktree = `${agent}/.worktrees/my-feature`;
+    expect(
+      toCanonicalWorkspaceArtifactPath(
+        `${customWorktree}/report.csv`,
+        customWorktree,
+        '.worktrees',
+      ),
+    ).toBe('.worktrees/my-feature/report.csv');
   });
 
   it('returns null when the file is outside the bound workspace', () => {

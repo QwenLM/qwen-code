@@ -29,6 +29,10 @@ import {
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { isNodeError } from '../utils/errors.js';
+import {
+  extractWorktreeFromPath,
+  parseWorktreeRoot,
+} from '../utils/worktree-root.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { raceWithAbort } from '../utils/race-with-abort.js';
 
@@ -152,11 +156,23 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     // which never exists, and every call would return "Worktree not
     // found" even when the worktree is alive.
     const cwd = this.config.getTargetDir();
-    const probe = new GitWorktreeService(cwd);
+    let worktreeRoot: string;
+    try {
+      worktreeRoot = parseWorktreeRoot(
+        this.config.getWorktreeRoot?.(),
+      ).normalized;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      debugLogger.warn(`exit_worktree: invalid worktree.root: ${reason}`);
+      return errorResult(`Invalid worktree.root setting: ${reason}`);
+    }
+    const probe = new GitWorktreeService(cwd, { worktreeRoot });
     const projectRoot =
       (await raceWithAbort(signal, () => probe.getRepoTopLevel())) ?? cwd;
     let service =
-      projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
+      projectRoot === cwd
+        ? probe
+        : new GitWorktreeService(projectRoot, { worktreeRoot });
 
     let worktreePath = service.getUserWorktreePath(this.params.name);
     let branch = worktreeBranchForSlug(this.params.name);
@@ -181,7 +197,7 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     }
     if (!exists) {
       const resolved = await raceWithAbort(signal, () =>
-        this.resolveCurrentSessionWorktree(),
+        this.resolveCurrentSessionWorktree(worktreeRoot),
       );
       if (resolved) {
         service = resolved.service;
@@ -191,10 +207,10 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
         exists = true;
       } else {
         const current = await raceWithAbort(signal, () =>
-          resolveManagedWorktreeFromCwd(cwd, this.params.name),
+          resolveManagedWorktreeFromCwd(cwd, this.params.name, worktreeRoot),
         );
         if (current) {
-          service = new GitWorktreeService(current.repoRoot);
+          service = new GitWorktreeService(current.repoRoot, { worktreeRoot });
           worktreePath = current.worktreePath;
           branch = worktreeBranchForSlug(this.params.name);
           currentSessionInWorktree = true;
@@ -484,7 +500,7 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     }
   }
 
-  private async resolveCurrentSessionWorktree(): Promise<{
+  private async resolveCurrentSessionWorktree(worktreeRoot?: string): Promise<{
     service: GitWorktreeService;
     worktreePath: string;
     branch: string;
@@ -494,7 +510,9 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     if (!session || session.slug !== this.params.name) {
       return null;
     }
-    const service = new GitWorktreeService(session.originalCwd);
+    const service = new GitWorktreeService(session.originalCwd, {
+      worktreeRoot,
+    });
     const expectedPath = service.getUserWorktreePath(this.params.name);
     if (!samePath(session.worktreePath, expectedPath)) {
       return null;
@@ -522,10 +540,20 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     branch: string;
   }> {
     const cwd = this.config.getTargetDir();
-    const probe = new GitWorktreeService(cwd);
+    let worktreeRoot: string | undefined;
+    try {
+      worktreeRoot = parseWorktreeRoot(
+        this.config.getWorktreeRoot?.(),
+      ).normalized;
+    } catch {
+      worktreeRoot = undefined;
+    }
+    const probe = new GitWorktreeService(cwd, { worktreeRoot });
     const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
     const service =
-      projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
+      projectRoot === cwd
+        ? probe
+        : new GitWorktreeService(projectRoot, { worktreeRoot });
     const worktreePath = service.getUserWorktreePath(this.params.name);
     try {
       if (await isDirectory(worktreePath)) {
@@ -541,7 +569,7 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
       };
     }
 
-    const resolved = await this.resolveCurrentSessionWorktree();
+    const resolved = await this.resolveCurrentSessionWorktree(worktreeRoot);
     if (resolved) {
       return {
         worktreePath: resolved.worktreePath,
@@ -549,7 +577,11 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
       };
     }
 
-    const current = await resolveManagedWorktreeFromCwd(cwd, this.params.name);
+    const current = await resolveManagedWorktreeFromCwd(
+      cwd,
+      this.params.name,
+      worktreeRoot,
+    );
     if (current) {
       return {
         worktreePath: current.worktreePath,
@@ -591,27 +623,19 @@ function samePath(a: string, b: string): boolean {
 async function resolveManagedWorktreeFromCwd(
   cwd: string,
   slug: string,
+  worktreeRoot?: string,
 ): Promise<{ repoRoot: string; worktreePath: string } | null> {
-  let cursor = path.resolve(cwd);
-  while (true) {
-    if (
-      path.basename(cursor) === slug &&
-      path.basename(path.dirname(cursor)) === 'worktrees' &&
-      path.basename(path.dirname(path.dirname(cursor))) === '.qwen'
-    ) {
-      const repoRoot = path.dirname(path.dirname(path.dirname(cursor)));
-      if (await isDirectory(cursor)) {
-        return { repoRoot, worktreePath: cursor };
-      }
-      return null;
-    }
-
-    const parent = path.dirname(cursor);
-    if (parent === cursor) {
-      return null;
-    }
-    cursor = parent;
+  const extracted = extractWorktreeFromPath(cwd, worktreeRoot);
+  if (!extracted || extracted.slug !== slug) {
+    return null;
   }
+  if (await isDirectory(extracted.worktreePath)) {
+    return {
+      repoRoot: extracted.repoRoot,
+      worktreePath: extracted.worktreePath,
+    };
+  }
+  return null;
 }
 
 export class ExitWorktreeTool extends BaseDeclarativeTool<

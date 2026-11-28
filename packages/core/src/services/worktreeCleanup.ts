@@ -12,6 +12,10 @@ import {
   worktreeBranchForSlug,
   worktreeHasWork,
 } from './gitWorktreeService.js';
+import {
+  assertWorktreeRootContainment,
+  parseWorktreeRoot,
+} from '../utils/worktree-root.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('WORKTREE_CLEANUP');
@@ -69,13 +73,38 @@ function isEphemeralSlug(slug: string): boolean {
  */
 export async function cleanupStaleAgentWorktrees(
   projectRoot: string,
-  options: { cutoffMs?: number } = {},
+  options: { cutoffMs?: number; worktreeRoot?: string } = {},
 ): Promise<number> {
   const cutoffMs = options.cutoffMs ?? STALE_WORKTREE_CUTOFF_MS;
   const cutoffDate = Date.now() - cutoffMs;
 
-  const service = new GitWorktreeService(projectRoot);
+  let parsedRoot;
+  try {
+    parsedRoot = parseWorktreeRoot(options.worktreeRoot);
+  } catch (error) {
+    debugLogger.warn(
+      `Stale worktree sweep skipped due to invalid worktree.root: ${error}`,
+    );
+    return 0;
+  }
+
+  const service = new GitWorktreeService(projectRoot, {
+    worktreeRoot: parsedRoot.normalized,
+  });
   const worktreesDir = service.getUserWorktreesDir();
+  try {
+    await assertWorktreeRootContainment(
+      projectRoot,
+      worktreesDir,
+      parsedRoot,
+      path.join(projectRoot, '.git'),
+    );
+  } catch (error) {
+    debugLogger.warn(
+      `Stale worktree sweep skipped due to unsafe worktree.root containment: ${error}`,
+    );
+    return 0;
+  }
 
   // Fast bail-out for the common case (user has never used worktrees):
   // skip the dynamic readdir entirely instead of relying on the catch

@@ -84,6 +84,24 @@ describe('collectRecordableWorkspaceFiles', () => {
       ),
     ).toBe(true);
     expect(pathHasSkippedDirectoryComponent('.qwen/skills')).toBe(true);
+    expect(
+      pathHasSkippedDirectoryComponent(
+        '.worktrees/my-feature/reports',
+        '.worktrees',
+      ),
+    ).toBe(false);
+    expect(
+      pathHasSkippedDirectoryComponent(
+        '.worktrees/my-feature/.hidden/report.md',
+        '.worktrees',
+      ),
+    ).toBe(true);
+    expect(
+      pathHasSkippedDirectoryComponent(
+        '.worktrees/my-feature/reports',
+        '../invalid',
+      ),
+    ).toBe(true);
   });
 
   it('records a regular file named after a skipped directory', async () => {

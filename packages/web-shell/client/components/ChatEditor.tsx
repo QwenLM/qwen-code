@@ -311,6 +311,8 @@ interface ChatEditorProps {
   gitModeIntent?: SessionGitIntent;
   /** Callback when the user changes the git mode intent via the composer chip popover. */
   onGitModeIntentChange?: (intent: SessionGitIntent) => void;
+  /** Effective repository-relative worktree root directory (default `.qwen/worktrees`). */
+  gitWorktreeRoot?: string;
   /** Enriched working-tree summary (dirty / ahead-behind / stash / operation). */
   gitStatus?: DaemonWorkspaceGitStatus;
   /** Opens the working-tree Changes dialog; makes the git chip clickable. */
@@ -2023,6 +2025,7 @@ export const ChatEditor = memo(
       gitCwd,
       gitModeIntent,
       onGitModeIntentChange,
+      gitWorktreeRoot,
       gitStatus,
       onOpenGitDiff,
       onOpenCommit,
@@ -3360,6 +3363,7 @@ export const ChatEditor = memo(
             showDetails={showDetails}
             intent={gitModeIntent}
             onIntentChange={onGitModeIntentChange}
+            worktreeRoot={gitWorktreeRoot}
             open={activeContextMenu === 'git'}
             onOpenChange={(open) => setContextMenuOpen('git', open)}
             draft={gitModeDraft}
@@ -3759,6 +3763,7 @@ export const ChatEditor = memo(
       gitBranch,
       gitChipInToolbar,
       gitModeIntent,
+      gitWorktreeRoot,
       gitStatus,
       isRunning,
       modelLabelReady,

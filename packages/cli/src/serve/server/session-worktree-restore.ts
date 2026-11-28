@@ -117,6 +117,7 @@ async function namedRefAtHead(
 }
 
 import { WorktreeRestoreUnavailableError } from './worktree-restore-errors.js';
+import { readRuntimeWorktreeRoot } from './worktree-root.js';
 export { WorktreeRestoreUnavailableError };
 
 export interface RestoredWorktreeBinding {
@@ -141,18 +142,31 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
       'Non-primary snapshot restore requires an explicit registered workspace owner',
     );
   }
-  const service = createWorkspaceRuntimeSessionService(runtime);
+  let worktreeRoot: string;
+  try {
+    worktreeRoot = readRuntimeWorktreeRoot(runtime).normalized;
+  } catch (error) {
+    throw new WorktreeRestoreUnavailableError(
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  const service = createWorkspaceRuntimeSessionService(runtime, {
+    worktreeRoot,
+  });
   const initial = await preclassifyWorktreeCleanup(
     service,
     sessionId,
     runtime.workspaceCwd,
+    { worktreeRoot },
   );
   if (!initial)
     throw new WorktreeRestoreUnavailableError(
       'No owned snapshot restoration candidate',
     );
   await assertRestoreCoordinates(initial);
-  const source = new GitWorktreeService(initial.sidecar.originalCwd);
+  const source = new GitWorktreeService(initial.sidecar.originalCwd, {
+    worktreeRoot,
+  });
   const expected = canonicalPathForTesting(
     source.getUserWorktreePath(initial.sidecar.slug),
   );
@@ -199,6 +213,7 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
         service,
         sessionId,
         runtime.workspaceCwd,
+        { worktreeRoot },
       );
       if (
         !latest ||

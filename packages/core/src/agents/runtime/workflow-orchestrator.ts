@@ -35,6 +35,11 @@ import type {
 } from './workflow-sandbox.js';
 import { WorkflowBudgetExceededError } from './workflow-budget.js';
 import {
+  DEFAULT_WORKTREE_ROOT,
+  isPathInsideWorktreeRoot,
+  parseWorktreeRoot,
+} from '../../utils/worktree-root.js';
+import {
   isWorkflowAgentFailedError,
   isWorkflowRunLevelError,
   WorkflowAgentCapExceededError,
@@ -1755,6 +1760,7 @@ interface WorkflowWorktreeIsolation {
   path: string;
   branch: string;
   repoRoot: string;
+  worktreeRoot: string;
 }
 
 /**
@@ -1771,14 +1777,18 @@ async function provisionWorkflowWorktree(
   config: Config,
 ): Promise<WorkflowWorktreeIsolation> {
   const cwd = config.getTargetDir();
-  if (/\.qwen[\\/]worktrees[\\/]/.test(cwd)) {
+  const worktreeRoot = parseWorktreeRoot(config.getWorktreeRoot?.()).normalized;
+  if (
+    isPathInsideWorktreeRoot(cwd, worktreeRoot) ||
+    isPathInsideWorktreeRoot(cwd, DEFAULT_WORKTREE_ROOT)
+  ) {
     throw new Error(
       `agent({isolation:'worktree'}): parent is already inside a worktree ` +
         `(${cwd}). Nested isolation worktrees are not supported — the ` +
         `subagent's inherited paths would still reference the outer worktree.`,
     );
   }
-  const probe = new GitWorktreeService(cwd);
+  const probe = new GitWorktreeService(cwd, { worktreeRoot });
   const gitCheck = await probe.checkGitAvailable();
   if (!gitCheck.available) {
     throw new Error(
@@ -1792,7 +1802,9 @@ async function provisionWorkflowWorktree(
   }
   const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
   const wtService =
-    projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
+    projectRoot === cwd
+      ? probe
+      : new GitWorktreeService(projectRoot, { worktreeRoot });
 
   let parentDirty = false;
   try {
@@ -1845,6 +1857,7 @@ async function provisionWorkflowWorktree(
     path: created.worktree.path,
     branch: created.worktree.branch,
     repoRoot: projectRoot,
+    worktreeRoot,
   };
 }
 
@@ -1862,7 +1875,9 @@ async function provisionWorkflowWorktree(
 async function cleanupWorkflowWorktree(
   isolation: WorkflowWorktreeIsolation,
 ): Promise<WorktreePreservedInfo | null> {
-  const wtService = new GitWorktreeService(isolation.repoRoot);
+  const wtService = new GitWorktreeService(isolation.repoRoot, {
+    worktreeRoot: isolation.worktreeRoot,
+  });
   const [hasChanges, hasUnmerged] = await Promise.all([
     wtService.hasWorktreeChanges(isolation.path).catch((error) => {
       debugLogger.warn(

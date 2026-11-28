@@ -24,6 +24,11 @@ import {
 import type { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { gitEnv } from '@qwen-code/qwen-code-core/utils/git-branches.js';
 import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
+import {
+  assertWorktreeRootContainment,
+  getWorktreeRootPrefixes,
+  parseWorktreeRoot,
+} from '@qwen-code/qwen-code-core/utils/worktree-root.js';
 import type { BridgeSessionExecutionSnapshot } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isWithinRoot } from '../config/path-comparison.js';
 
@@ -380,6 +385,7 @@ function isPreparationJournal(
 export function recoverBranchWorktreePreparations(args: {
   workspaceCwd: string;
   sessionService: SessionService;
+  worktreeRoot?: string;
   assertGenerationOpen?: () => void;
   isWorktreeOccupied?: (worktreePath: string) => boolean;
   warn?: (message: string, fields?: Record<string, unknown>) => void;
@@ -393,9 +399,21 @@ export function recoverBranchWorktreePreparations(args: {
   const recovery = (async () => {
     const entries = await fs.readdir(chatsDir).catch(() => []);
     if (!entries.some((name) => name.startsWith('.branch-worktree-'))) return;
+    let parsedWorktreeRoot;
+    try {
+      parsedWorktreeRoot = parseWorktreeRoot(args.worktreeRoot);
+    } catch (error) {
+      args.warn?.('branch worktree recovery skipped: invalid worktree.root', {
+        workspace: args.workspaceCwd,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
     const workspaceCwd = await fs.realpath(args.workspaceCwd).catch(() => null);
     const discoveredRepoTop = workspaceCwd
-      ? await new GitWorktreeService(workspaceCwd)
+      ? await new GitWorktreeService(workspaceCwd, {
+          worktreeRoot: parsedWorktreeRoot.normalized,
+        })
           .getRepoTopLevel()
           .catch(() => null)
       : null;
@@ -428,7 +446,9 @@ export function recoverBranchWorktreePreparations(args: {
         journal.sidecarPath,
         journal.targetSessionId,
       );
-      const worktreeService = new GitWorktreeService(runtimeRepoTop);
+      const worktreeService = new GitWorktreeService(runtimeRepoTop, {
+        worktreeRoot: parsedWorktreeRoot.normalized,
+      });
       const journalRepoTop = await fs
         .realpath(journal.repoTop)
         .catch(() => null);
@@ -437,8 +457,11 @@ export function recoverBranchWorktreePreparations(args: {
         journal.sidecarPath !==
           args.sessionService.getWorktreeSessionPath(journal.targetSessionId) ||
         journalRepoTop !== runtimeRepoTop ||
-        path.resolve(journal.repoTop, '.qwen', 'worktrees', journal.slug) !==
-          path.resolve(journal.worktreePath) ||
+        path.resolve(
+          journal.repoTop,
+          ...parsedWorktreeRoot.segments,
+          journal.slug,
+        ) !== path.resolve(journal.worktreePath) ||
         // Detached managed worktrees record '' (no branch ref); named
         // ones must still match their canonical worktree-<slug> branch.
         (journal.worktreeBranch !== '' &&
@@ -662,7 +685,14 @@ export async function resolveBranchWorktreeBaseCheckout(args: {
   sessionId: string;
   snapshot: BridgeSessionExecutionSnapshot;
   sidecarPath: string;
+  worktreeRoot?: string;
 }): Promise<BranchWorktreeBaseCheckout | null> {
+  let parsedWorktreeRoot;
+  try {
+    parsedWorktreeRoot = parseWorktreeRoot(args.worktreeRoot);
+  } catch {
+    return null;
+  }
   const workspaceCwd = await fs.realpath(args.workspaceCwd).catch(() => null);
   const snapshotWorkspace = await fs
     .realpath(args.snapshot.workspaceCwd)
@@ -678,14 +708,18 @@ export async function resolveBranchWorktreeBaseCheckout(args: {
     return null;
   }
 
-  const workspaceGit = new GitWorktreeService(workspaceCwd);
+  const workspaceGit = new GitWorktreeService(workspaceCwd, {
+    worktreeRoot: parsedWorktreeRoot.normalized,
+  });
   if (!(await workspaceGit.isGitRepository())) return null;
   const repoTop = await workspaceGit.getRepoTopLevel().catch(() => null);
   if (repoTop === null) return null;
   const canonicalRepoTop = await fs.realpath(repoTop).catch(() => null);
   if (canonicalRepoTop === null) return null;
 
-  const effectiveGit = new GitWorktreeService(effectiveCwd);
+  const effectiveGit = new GitWorktreeService(effectiveCwd, {
+    worktreeRoot: parsedWorktreeRoot.normalized,
+  });
   if (!(await effectiveGit.isGitRepository())) return null;
   const checkoutTop = await effectiveGit.getRepoTopLevel().catch(() => null);
   if (checkoutTop === null) return null;
@@ -706,9 +740,34 @@ export async function resolveBranchWorktreeBaseCheckout(args: {
     const snapshotPath = args.snapshot.worktree
       ? await fs.realpath(args.snapshot.worktree.path).catch(() => null)
       : null;
-    const managedRoot = path.join(canonicalRepoTop, '.qwen', 'worktrees');
-    const workspaceManagedRoot = path.join(workspaceCwd, '.qwen', 'worktrees');
+    const managedRoot = path.join(
+      canonicalRepoTop,
+      ...parsedWorktreeRoot.segments,
+    );
+    const workspaceManagedRoot = path.join(
+      workspaceCwd,
+      ...parsedWorktreeRoot.segments,
+    );
+    const managedRootOk = await assertWorktreeRootContainment(
+      canonicalRepoTop,
+      managedRoot,
+      parsedWorktreeRoot,
+      path.join(canonicalRepoTop, '.git'),
+    ).then(
+      () => true,
+      () => false,
+    );
+    const workspaceRootOk = await assertWorktreeRootContainment(
+      workspaceCwd,
+      workspaceManagedRoot,
+      parsedWorktreeRoot,
+      path.join(workspaceCwd, '.git'),
+    ).then(
+      () => true,
+      () => false,
+    );
     const workspaceOwnsCheckout =
+      workspaceRootOk &&
       isWithinRoot(canonicalCheckoutTop, workspaceManagedRoot) &&
       sidecar?.workspaceCwd !== undefined &&
       (await fs.realpath(sidecar.workspaceCwd).catch(() => null)) ===
@@ -722,7 +781,7 @@ export async function resolveBranchWorktreeBaseCheckout(args: {
       snapshotPath !== canonicalCheckoutTop ||
       markerOwner !== args.sessionId ||
       (!workspaceOwnsCheckout &&
-        !isWithinRoot(canonicalCheckoutTop, managedRoot))
+        !(managedRootOk && isWithinRoot(canonicalCheckoutTop, managedRoot)))
     ) {
       return null;
     }
@@ -753,11 +812,15 @@ export async function resolveBranchWorktreeBaseCheckout(args: {
 
 export async function isBranchWorktreeCreationSupported(
   base: BranchWorktreeBaseCheckout,
+  worktreeRoot?: string,
 ): Promise<boolean> {
-  const qwenDir = path.join(base.repoTop, '.qwen');
   try {
+    const parsedWorktreeRoot = parseWorktreeRoot(worktreeRoot);
     let writableTarget = base.repoTop;
-    for (const candidate of [qwenDir, path.join(qwenDir, 'worktrees')]) {
+    for (const candidate of getWorktreeRootPrefixes(
+      base.repoTop,
+      parsedWorktreeRoot.normalized,
+    )) {
       const stat = await fs
         .lstat(candidate)
         .catch((error: NodeJS.ErrnoException) => {

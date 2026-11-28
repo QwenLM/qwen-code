@@ -6168,6 +6168,9 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.label.omni.enabled': '啟用 Omni 媒體投遞',
   'settings.description.omni.enabled':
     '啟用 omni 媒體管線。用 @ 引用的媒體檔案（影片、圖片、音訊）以及 @https:// URL 提供的媒體會被識別（ffprobe）、以內容定址儲存在 .qwen/omni/objects/ 下，經 DashScope 臨時上傳通道上傳，並以 oss:// URL 投遞，而不是內聯 base64。僅對 DashScope 相容端點生效。也可透過 QWEN_CODE_ENABLE_OMNI=1 啟用。',
+  'settings.label.worktree.root': 'Worktree 根目錄',
+  'settings.description.worktree.root':
+    '建立通用 CLI worktree 與 Web Shell 會話 worktree 的倉庫內相對目錄（預設 .qwen/worktrees）。必須位於倉庫內部，拒絕絕對路徑、.. 穿越、.git 以及直接設為 .qwen。不影響 Arena worktree（agents.arena.worktreeBaseDir）。',
   'settings.label.worktree.maxRetained': '保留的會話 Worktree 上限',
   'settings.description.worktree.maxRetained':
     '每個歸屬唯一的管理根保留最近相應數量的合規會話 worktree，預設 15。活躍及置頂會話不佔刪除候選配額。設為 0 只關閉自動清掃，不禁止明確復原快照。歸屬不明、根重疊或設定不可讀時保留；不順帶刪除孤立快照。不影響工具/agent worktree。',

@@ -20,6 +20,10 @@ import {
   type PreparedUsageBeforeTranscriptDeletion,
 } from './usageHistoryService.js';
 import { getProjectHash } from '../utils/paths.js';
+import {
+  extractWorktreeFromPath,
+  validateWorktreeRoot,
+} from '../utils/worktree-root.js';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -518,6 +522,7 @@ export interface UnarchiveSessionsOptions {
 export interface SessionServiceOptions {
   onWarning?: (message: string) => void;
   runtimeBaseDir?: string;
+  worktreeRoot?: string;
 }
 
 /**
@@ -974,6 +979,7 @@ export class SessionService {
   private readonly storage: Storage;
   private readonly projectHash: string;
   private readonly projectRoot: string;
+  private readonly worktreeRoot: string | undefined;
   private readonly onWarning: ((message: string) => void) | undefined;
   private readonly transcriptReader: SessionTranscriptReader;
   private sessionPrBoundCallback?: (
@@ -986,6 +992,7 @@ export class SessionService {
     this.storage = new Storage(cwd, options.runtimeBaseDir);
     this.projectRoot = cwd;
     this.projectHash = getProjectHash(cwd);
+    this.worktreeRoot = options.worktreeRoot;
     this.onWarning = options.onWarning;
     this.transcriptReader = new SessionTranscriptReader(
       cwd,
@@ -1000,6 +1007,10 @@ export class SessionService {
    * scheduled-tasks file without re-plumbing the workspace path. */
   getProjectRoot(): string {
     return this.projectRoot;
+  }
+
+  getWorktreeRoot(): string | undefined {
+    return this.worktreeRoot;
   }
 
   async acquireSessionWriterLease(
@@ -1210,6 +1221,19 @@ export class SessionService {
     // Use lastIndexOf to handle nested worktrees: for
     // /repo/.qwen/worktrees/parent/.qwen/worktrees/child, the innermost
     // marker gives repoRoot = /repo/.qwen/worktrees/parent (the workspace).
+    if (
+      this.worktreeRoot !== undefined &&
+      validateWorktreeRoot(this.worktreeRoot) === undefined
+    ) {
+      const extracted = extractWorktreeFromPath(recordCwd, this.worktreeRoot);
+      if (
+        extracted &&
+        getProjectHash(extracted.repoRoot) === this.projectHash
+      ) {
+        return true;
+      }
+    }
+
     const worktreesMarker = `${path.sep}.qwen${path.sep}worktrees${path.sep}`;
     const markerIdx = recordCwd.lastIndexOf(worktreesMarker);
     if (markerIdx > 0) {

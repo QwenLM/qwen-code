@@ -74,6 +74,8 @@ interface GitModePopoverProps {
   showDetails?: boolean;
   intent: SessionGitIntent;
   onIntentChange: (intent: SessionGitIntent) => void;
+  /** Effective repository-relative worktree root directory (default `.qwen/worktrees`). */
+  worktreeRoot?: string;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   draft?: GitModePopoverDraft;
@@ -89,6 +91,7 @@ export function GitModePopover({
   showDetails = true,
   intent,
   onIntentChange,
+  worktreeRoot = '.qwen/worktrees',
   open: openProp,
   onOpenChange,
   draft,
@@ -389,7 +392,7 @@ export function GitModePopover({
               {selectedMode === 'branch'
                 ? `$ git checkout -b ${branchName || '…'} ← ${branch}`
                 : selectedMode === 'worktree'
-                  ? '$ git worktree add --detach .qwen/worktrees/<slug>'
+                  ? `$ git worktree add --detach ${worktreeRoot}/<slug>`
                   : `$ git checkout ${branch}`}
             </span>
             {selectedMode === 'branch' && (
