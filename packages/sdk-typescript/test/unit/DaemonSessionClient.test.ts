@@ -5451,4 +5451,62 @@ describe('DaemonSessionClient clientId self-heal', () => {
     expect(resumeCalls).toBe(1);
     expect(session.clientId).toBe('client-2');
   });
+
+  it('accepts workspace-less standalone metadata while keeping workspaceCwd a string', () => {
+    const client = new DaemonClient({ baseUrl: 'http://daemon' });
+    const standalone = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'sa-1',
+        attached: false,
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+      },
+    });
+    expect(standalone.restoreStrategy).toEqual({ kind: 'standalone' });
+    expect(standalone.workspaceCwd).toBe('');
+    expect(standalone.session.workspaceCwd).toBe('');
+  });
+
+  it('waits for accepted event stream readiness and resets when the stream closes', async () => {
+    let releaseStream: (() => void) | undefined;
+    let notifyAccepted: ((streamId?: string) => void) | undefined;
+    const client = new DaemonClient({ baseUrl: 'http://daemon' });
+    vi.spyOn(client, 'subscribeEvents').mockImplementation(
+      async function* (_sessionId, opts) {
+        notifyAccepted = opts.onSseStreamAccepted;
+        await new Promise<void>((resolve) => {
+          releaseStream = resolve;
+        });
+        yield* [];
+      },
+    );
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'sa-stream',
+        attached: false,
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+      },
+    });
+
+    const controller = new AbortController();
+    const waitPromise = session.waitForEventStream(controller.signal);
+    const iter = session.events();
+    const nextPromise = iter.next();
+    await Promise.resolve();
+
+    notifyAccepted?.('stream-1');
+    await expect(waitPromise).resolves.toBeUndefined();
+
+    // Closing the stream clears readiness so a subsequent wait respects abort.
+    releaseStream?.();
+    await nextPromise;
+
+    const aborted = new AbortController();
+    const secondWait = session.waitForEventStream(aborted.signal);
+    aborted.abort(new DOMException('Cancelled', 'AbortError'));
+    await expect(secondWait).rejects.toThrow('Cancelled');
+  });
 });
