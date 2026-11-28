@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { resolve } from 'node:path';
 import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
@@ -15,6 +16,7 @@ import {
 } from './resumeHistoryUtils.js';
 import { MessageType, ToolCallStatus } from '../types.js';
 import { buildApiHistoryFromConversation } from '@qwen-code/qwen-code-core';
+import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
 import { computeApiTruncationIndex } from './historyMapping.js';
 import { SUPERSEDED_FINDINGS_MESSAGE } from './findings-coalescing.js';
 import type {
@@ -51,6 +53,52 @@ describe('resumeHistoryUtils', () => {
       description: 'Replace text',
       build: vi.fn().mockReturnValue(mockInvocation),
     } as unknown as AnyDeclarativeTool;
+  });
+
+  it('restores an aliased read description and displays the original arguments', () => {
+    const args = { path: resolve('fixture.txt') };
+    const readFile = new ReadFileTool({
+      getTargetDir: () => process.cwd(),
+      getFileSystemService: () => ({ textFileIo: {} }),
+    } as unknown as Config);
+    const conversation = {
+      messages: [
+        {
+          type: 'assistant',
+          message: {
+            parts: [
+              { functionCall: { id: 'read', name: readFile.name, args } },
+            ],
+          },
+        },
+        {
+          type: 'tool_result',
+          toolCallResult: {
+            callId: 'read',
+            resultDisplay: 'fixture',
+            status: 'success',
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({ [readFile.name]: readFile }),
+    );
+    expect(items).toMatchObject([
+      {
+        type: 'tool_group',
+        tools: [
+          {
+            description: 'fixture.txt',
+            args: { path: resolve('fixture.txt') },
+            status: ToolCallStatus.Success,
+          },
+        ],
+      },
+    ]);
+    expect(args).toEqual({ path: resolve('fixture.txt') });
   });
 
   it('restores lifecycle cards without per-turn Goal bookkeeping', () => {

@@ -6,6 +6,7 @@
 
 import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
 import { isShellResultDisplay } from '@qwen-code/qwen-code-core/shellResult';
+import { applyRegisteredToolArgAliases } from '@qwen-code/qwen-code-core/tools/tool-registry.js';
 import type { Part } from '@google/genai';
 import {
   formatVisionBridgeNoticeDisplay,
@@ -264,7 +265,9 @@ function resolveToolMetadata(
 
   if (tool?.build && args) {
     try {
-      const invocation = tool.build(args);
+      const invocationArgs = structuredClone(args);
+      applyRegisteredToolArgAliases(tool, invocationArgs);
+      const invocation = tool.build(invocationArgs);
       title = `${title}: ${invocation.getDescription()}`;
       locations = invocation.toolLocations().map((loc) => ({
         path: loc.path,

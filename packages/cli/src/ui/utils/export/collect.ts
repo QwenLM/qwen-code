@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   ChatRecord,
   Config,
+  FileDiff,
   GoalStateRecordPayloadV2,
 } from '@qwen-code/qwen-code-core';
 import { parseGoalStateRecordPayloadV2 } from '@qwen-code/qwen-code-core/goals/goal-reducer.js';
@@ -167,31 +168,18 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
       typeof resultDisplay === 'object' &&
       'fileName' in resultDisplay
     ) {
-      const display = resultDisplay as {
-        fileName: string;
-        fileDiff?: string;
-        originalContent?: string | null;
-        newContent?: string;
-        diffStat?: { model_added_lines?: number; model_removed_lines?: number };
-        truncatedForSession?: boolean;
-      };
+      const display = resultDisplay as Partial<FileDiff>;
 
       // Determine operation type based on content fields
       const hasOriginalContent = 'originalContent' in display;
       const hasNewContent = 'newContent' in display;
 
-      // For write/edit operations, use full path from args if available
-      let filePath: string;
-      if (typeof display.fileName === 'string') {
-        // Prefer args.file_path for full path, fallback to fileName (which may be basename)
-        filePath = (args?.['file_path'] as string) || display.fileName;
-      } else {
-        // Fallback if fileName is not a string
-        filePath = 'unknown';
-      }
-
       if (hasOriginalContent || hasNewContent) {
-        // This is a write/edit operation
+        const modelPath = args?.['file_path'];
+        const filePath =
+          (typeof display.filePath === 'string' && display.filePath) ||
+          (typeof modelPath === 'string' && modelPath) ||
+          (typeof display.fileName === 'string' ? display.fileName : 'unknown');
         stats.filesWritten++;
         stats.writtenFilePaths.add(filePath);
 

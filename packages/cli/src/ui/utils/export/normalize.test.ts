@@ -5,7 +5,13 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
+import { resolve } from 'node:path';
+import type {
+  AnyDeclarativeTool,
+  ChatRecord,
+  Config,
+} from '@qwen-code/qwen-code-core';
+import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
 import { collectSessionData } from './collect.js';
 import { normalizeSessionData } from './normalize.js';
 import type { ExportConfig } from './types.js';
@@ -14,6 +20,82 @@ describe('normalizeSessionData', () => {
   const config = {
     getToolRegistry: vi.fn().mockReturnValue(undefined),
   } as unknown as Config;
+
+  it.each(['separate call record', 'inline call in result'] as const)(
+    'exports aliased read metadata with a %s',
+    async (shape) => {
+      const rawArgs = { path: resolve('fixture.txt') };
+      const readFile = new ReadFileTool({
+        getTargetDir: () => process.cwd(),
+        getFileSystemService: () => ({ textFileIo: {} }),
+      } as unknown as Config);
+      const exportConfig: ExportConfig = {
+        getToolRegistry: () => ({
+          getTool: (name): AnyDeclarativeTool | undefined =>
+            name === readFile.name ? readFile : undefined,
+        }),
+      };
+      const base = {
+        timestamp: '2026-11-27T00:00:00.000Z',
+        sessionId: 'session-read',
+        cwd: process.cwd(),
+        version: 'test',
+      };
+      const functionCall = { id: 'read', name: readFile.name, args: rawArgs };
+      const result: ChatRecord = {
+        ...base,
+        uuid: 'result',
+        parentUuid: null,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'read',
+                name: readFile.name,
+                response: { output: 'fixture' },
+              },
+            },
+          ],
+        },
+        toolCallResult: { callId: 'read', resultDisplay: 'fixture' },
+      };
+      const session = { sessionId: base.sessionId, startTime: base.timestamp };
+      const records: ChatRecord[] = [result];
+      if (shape === 'separate call record') {
+        records.unshift({
+          ...base,
+          uuid: 'call',
+          parentUuid: null,
+          type: 'assistant',
+          message: { role: 'model', parts: [{ functionCall }] },
+        });
+        result.parentUuid = 'call';
+      } else {
+        result.message?.parts?.push({ functionCall });
+      }
+      const collected =
+        shape === 'separate call record'
+          ? await collectSessionData(
+              { ...session, messages: records },
+              exportConfig,
+            )
+          : { ...session, messages: [] };
+      const normalized = normalizeSessionData(collected, records, exportConfig);
+
+      expect(
+        normalized.messages.find((message) => message.toolCall),
+      ).toMatchObject({
+        toolCall: {
+          title: `${readFile.displayName}: fixture.txt`,
+          locations: [{ path: resolve('fixture.txt'), line: null }],
+          rawInput: { path: resolve('fixture.txt') },
+        },
+      });
+      expect(rawArgs).toEqual({ path: resolve('fixture.txt') });
+    },
+  );
 
   it('normalizes outer results without inventing calls for internal evidence', () => {
     const records: ChatRecord[] = [

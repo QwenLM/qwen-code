@@ -139,6 +139,13 @@ export class AcpFileSystemService implements FileSystemService {
     private readonly options: AcpFileSystemServiceOptions = {},
   ) {}
 
+  get usesHostFilesystem(): true | undefined {
+    if (!this.capabilities.readTextFile && !this.capabilities.writeTextFile) {
+      return this.fallback.usesHostFilesystem;
+    }
+    return undefined;
+  }
+
   async readTextFile(
     params: CoreReadTextFileRequest,
   ): Promise<ReadTextFileResponse> {

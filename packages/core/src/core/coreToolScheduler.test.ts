@@ -9,6 +9,10 @@ import {
   measureToolOutput,
 } from '../tools/tool-output-size.js';
 import { enforceFunctionResponseBudget } from '../tools/tool-response-finalizer.js';
+import {
+  getToolOutputRecovery,
+  NATIVE_FILE_RESULT_PATH,
+} from '../tools/tool-output-recovery.js';
 import { buildTranscriptMarker } from '../tools/agent/transcript-marker.js';
 import * as outputTruncation from '../tools/truncation.js';
 import * as sizeLoggers from '../telemetry/loggers.js';
@@ -101,7 +105,7 @@ import { IdeClient } from '../ide/ide-client.js';
 import { WriteFileTool } from '../tools/write-file.js';
 import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
 import { CreateSubSessionTool } from '../tools/create-sub-session.js';
-import { ToolRegistry } from '../tools/tool-registry.js';
+import { DiscoveredTool, ToolRegistry } from '../tools/tool-registry.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
@@ -117,6 +121,7 @@ import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import {
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  ToolCallTool,
 } from '../tools/tool-call.js';
 import {
   getChannelWorkflowOrigin,
@@ -5568,6 +5573,103 @@ describe('CoreToolScheduler', () => {
       'invalid-permission-rewrite',
       'tool_exception',
     );
+  });
+
+  describe('tool argument aliases', () => {
+    it('runs a read_file call that names its path `path`', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        ...textResult('hello'),
+        [NATIVE_FILE_RESULT_PATH]: '/repo/a.txt',
+      });
+      const tool = new MockTool({
+        name: ToolNames.READ_FILE,
+        params: {
+          type: 'object',
+          properties: { file_path: { type: 'string' } },
+          required: ['file_path'],
+        },
+        execute,
+      });
+      const messageBus = hookBus(async (request) =>
+        hookResponse(request.eventName, {}),
+      );
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName: toolMap(tool),
+          messageBus,
+          disableHooks: false,
+        });
+      Object.assign(
+        (scheduler as unknown as { config: Record<string, unknown> }).config,
+        {
+          getConditionalRulesRegistry: () => undefined,
+          getSkillManager: () => undefined,
+        },
+      );
+      const modelArgs = { path: '/repo/a.txt' };
+      await scheduleBatch(
+        scheduler,
+        toolRequest('alias', tool.name, modelArgs, 'p-alias'),
+      );
+
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+      const completed = firstBatch(onAllToolCallsComplete)[0];
+      expectStatus(completed, 'success');
+      expect(execute.mock.calls[0][0]).toEqual({ file_path: '/repo/a.txt' });
+      expect(completed.request.args).toEqual({ file_path: '/repo/a.txt' });
+      const result = completed.response.responseParts[0];
+      expect(getToolOutputRecovery(result)?.nativeFilePath).toBe('/repo/a.txt');
+      expect(JSON.stringify(result)).not.toContain('/repo/a.txt');
+      const preToolUse = messageBus.request.mock.calls
+        .map(([request]) => request as HookRequest)
+        .find((request) => request.eventName === 'PreToolUse');
+      expect(preToolUse?.input).toEqual(
+        expect.objectContaining({ tool_input: { file_path: '/repo/a.txt' } }),
+      );
+      // The model's own call, which the chat history holds, is unchanged.
+      expect(modelArgs).toEqual({ path: '/repo/a.txt' });
+    });
+
+    it('keeps the declared path for a discovered tool with a built-in name', async () => {
+      const tool = new DiscoveredTool(
+        makeFakeConfig({
+          toolDiscoveryCommand: 'discover',
+          toolCallCommand: 'call',
+        }),
+        ToolNames.READ_FILE,
+        'Discovered tool',
+        {
+          type: 'object',
+          properties: { path: { type: 'string' } },
+          required: ['path'],
+          additionalProperties: false,
+        },
+      );
+      const build = tool.build.bind(tool);
+      vi.spyOn(tool, 'build').mockImplementation((args) => {
+        const invocation = build(args);
+        vi.spyOn(invocation, 'execute').mockResolvedValue(textResult('found'));
+        return invocation;
+      });
+      const { scheduler, ensureTool, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({ toolsByName: new Map() });
+      ensureTool.mockResolvedValue(tool);
+
+      const args = { path: '/repo/a.txt' };
+      await scheduleBatch(
+        scheduler,
+        toolRequest('discovered', tool.name, args, 'p-discovered'),
+      );
+
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+      const completed = firstBatch(onAllToolCallsComplete)[0];
+      expectStatus(completed, 'success');
+      expect(completed.request.args).toEqual(args);
+      expect(
+        getToolOutputRecovery(completed.response.responseParts[0])
+          ?.nativeFilePath,
+      ).toBeUndefined();
+    });
   });
 
   describe('PreToolUse updatedInput', () => {
@@ -16500,6 +16602,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
           getApprovalMode: () => ApprovalMode.YOLO,
           getTruncateToolOutputThreshold: () => 100,
           getTruncateToolOutputLines: () => 10,
+          getMaxSubagentDepth: () => DEFAULT_MAX_SUBAGENT_DEPTH,
           setApprovalMode: vi.fn(),
         },
       ),
@@ -16569,6 +16672,47 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(await send(invalid('c2'))).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
     // Turn 3: same bad params — should trigger directive
     expect(await send(invalid('c3'))).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('counts the same validation error even as the unrecognized parameter changes', async () => {
+    const tool = createStrictTool(
+      ToolNames.SHELL,
+      'Shell',
+      'A tool that requires a command.',
+      'command',
+    );
+    const send = createRetryScheduler([tool]);
+
+    for (const [index, key] of ['cmd', 'shell', 'exec'].entries()) {
+      const message = await send(
+        makeRequest(`missing-command-${index}`, tool.name, {
+          [key]: 'echo ok',
+        }),
+      );
+      expect(message).toContain("params must have required property 'command'");
+      expect(message).toContain(
+        `Unrecognized parameters: ${key}. Accepted parameters: command.`,
+      );
+      expect(message?.includes(RETRY_LOOP_STOP_DIRECTIVE)).toBe(index === 2);
+    }
+  });
+
+  it('counts malformed tool_call envelopes with different unrecognized parameters', async () => {
+    const tool = new ToolCallTool();
+    const send = createRetryScheduler([tool]);
+
+    for (const [index, key] of ['tool', 'target', 'function'].entries()) {
+      const message = await send(
+        makeRequest(`missing-target-${index}`, tool.name, {
+          [key]: 'deferred_tool',
+          arguments: {},
+        }),
+      );
+      expect(message).toContain(DEFERRED_TOOL_CALL_REFUSAL_PREFIX);
+      expect(message).toContain("params must have required property 'name'");
+      expect(message).toContain(`Unrecognized parameters: ${key}.`);
+      expect(message?.includes(RETRY_LOOP_STOP_DIRECTIVE)).toBe(index === 2);
+    }
   });
 
   it('counts malformed structured output retries across different payloads', async () => {

@@ -5,10 +5,26 @@
  */
 
 import type { Part } from '@google/genai';
+import type { FileSystemService } from '../services/fileSystemService.js';
+
+// In-process only. A result from another runtime cannot authorize a host read.
+export const NATIVE_FILE_RESULT_PATH = Symbol('native file result path');
+
+export function withNativeFileResultPath<T extends object>(
+  result: T,
+  filesystem: FileSystemService,
+  path: string,
+): T {
+  if (filesystem.usesHostFilesystem) {
+    Object.assign(result, { [NATIVE_FILE_RESULT_PATH]: path });
+  }
+  return result;
+}
 
 export interface ToolOutputRecovery {
   text?: string;
   persistedOutputFiles?: string[];
+  nativeFilePath?: string;
 }
 
 const recoveryKey = Symbol('tool-output-recovery');

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { NATIVE_FILE_RESULT_PATH } from './tool-output-recovery.js';
 import type { ToolOutputSize } from './tool-output-size.js';
 import type { ApprovalMode } from '../config/approval-mode.js';
 import type { SubscriptionQuotaDisplay } from '../utils/subscription-quota.js';
@@ -535,7 +536,7 @@ export abstract class BaseDeclarativeTool<
     );
 
     if (errors) {
-      return errors;
+      return errors + describeUnrecognizedParams(this.parameterSchema, params);
     }
     return this.validateToolParamValues(params);
   }
@@ -548,6 +549,62 @@ export abstract class BaseDeclarativeTool<
   protected abstract createInvocation(
     params: TParams,
   ): ToolInvocation<TParams, TResult>;
+}
+
+// Keywords that can accept an argument the top-level `properties` do not
+// list; a schema using one gets no unrecognized-argument note.
+const OPEN_SCHEMA_KEYWORDS = [
+  'patternProperties',
+  'allOf',
+  'anyOf',
+  'oneOf',
+  '$ref',
+  'if',
+  'dependentSchemas',
+  'dependencies',
+  'unevaluatedProperties',
+];
+
+const UNRECOGNIZED_PARAMS_PREFIX = '. Unrecognized parameters: ';
+
+export function getToolValidationRetryKey(errorMessage: string): string {
+  const hintStart = errorMessage.indexOf(UNRECOGNIZED_PARAMS_PREFIX);
+  return hintStart === -1 ? errorMessage : errorMessage.slice(0, hintStart);
+}
+
+/**
+ * Names the top-level arguments a schema does not declare, and the ones it
+ * does: a model that used another harness's name for an argument otherwise
+ * only learns which argument is missing. Required names can be declared
+ * independently of `properties` when the schema permits additional keys.
+ */
+function describeUnrecognizedParams(schema: unknown, params: unknown): string {
+  if (typeof params !== 'object' || params === null) return '';
+  if (typeof schema !== 'object' || schema === null) return '';
+  const record = schema as Record<string, unknown>;
+  const { properties, additionalProperties, required } = record;
+  if (
+    typeof properties !== 'object' ||
+    properties === null ||
+    (additionalProperties !== undefined && additionalProperties !== false) ||
+    OPEN_SCHEMA_KEYWORDS.some((keyword) => record[keyword] !== undefined) ||
+    (additionalProperties === undefined &&
+      Array.isArray(required) &&
+      required.some(
+        (key) => typeof key === 'string' && !Object.hasOwn(properties, key),
+      ))
+  ) {
+    return '';
+  }
+  const accepted = Object.keys(properties);
+  const unrecognized = Object.keys(params).filter(
+    (key) => !Object.hasOwn(properties, key),
+  );
+  if (unrecognized.length === 0) return '';
+  const hint = `${UNRECOGNIZED_PARAMS_PREFIX}${unrecognized.join(', ')}.`;
+  return accepted.length > 0
+    ? `${hint} Accepted parameters: ${accepted.join(', ')}.`
+    : hint;
 }
 
 /**
@@ -598,6 +655,9 @@ export interface ToolArtifact {
 }
 
 export interface ToolResult {
+  /** Actual path accessed by a successful native file operation. */
+  [NATIVE_FILE_RESULT_PATH]?: string;
+
   /** Numeric size before a producer reduces its semantic result. */
   rawOutputSize?: ToolOutputSize | null;
   /**

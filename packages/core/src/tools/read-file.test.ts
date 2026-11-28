@@ -26,6 +26,9 @@ import type {
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { ToolResult } from './tools.js';
+import { NATIVE_FILE_RESULT_PATH } from './tool-output-recovery.js';
+import { convertToFunctionResponse } from '../core/coreToolScheduler.js';
+import { composePostCompactHistory } from '../services/postCompactAttachments.js';
 import type { VisionBridgeNoticeDisplay } from '../services/visionBridge/vision-bridge-service.js';
 import { normalizeParts } from '../services/visionBridge/image-part-utils.js';
 import { createHash } from 'node:crypto';
@@ -1209,6 +1212,7 @@ describe('ReadFileTool', () => {
       expect(await read(filePath)).toEqual({
         llmContent: fileContent,
         returnDisplay: '',
+        [NATIVE_FILE_RESULT_PATH]: filePath,
       });
     });
 
@@ -1216,13 +1220,28 @@ describe('ReadFileTool', () => {
       'should read a file with spaces in its name when given an escaped path',
       async () => {
         const fileContent = 'Content with spaces in filename.';
-        await put('my spaced read.txt', fileContent);
+        const filePath = await put('my spaced read.txt', fileContent);
 
         // Pass an ESCAPED path (as the LLM might from at-completion)
-        expect(await read(inRoot('my\\ spaced\\ read.txt'))).toEqual({
+        const result = await read(inRoot('my\\ spaced\\ read.txt'));
+        expect(result).toEqual({
           llmContent: fileContent,
           returnDisplay: '',
+          [NATIVE_FILE_RESULT_PATH]: filePath,
         });
+
+        const response = convertToFunctionResponse(
+          'read_file',
+          '1',
+          result.llmContent,
+          result,
+        );
+        const history = await composePostCompactHistory(
+          [{ role: 'user', parts: response }],
+          'Summary.',
+          { workspaceRoot: tempRootDir },
+        );
+        expect(JSON.stringify(history)).toContain(fileContent);
       },
     );
 

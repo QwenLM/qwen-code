@@ -55,6 +55,7 @@ import {
   type StructuredError,
 } from '@qwen-code/qwen-code-core/core/turn.js';
 import { toolCallArgumentsWereIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
+import { applyRegisteredToolArgAliases } from '@qwen-code/qwen-code-core/tools/tool-registry.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import {
@@ -17788,6 +17789,9 @@ export class Session implements SessionContext {
     mcpServerName =
       tool instanceof DiscoveredMCPTool ? tool.serverName : undefined;
     const policyToolName = tool.name;
+    // The legacy ACP path dispatches directly. Keep the model's call in history.
+    args = structuredClone(args);
+    applyRegisteredToolArgAliases(tool, args);
     guardContext.policyToolName = policyToolName;
 
     const toolSpan = startToolSpan(

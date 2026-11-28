@@ -10,8 +10,13 @@ import type { ClearContextOnIdleSettings } from '../../config/config.js';
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearContextDefaults.js';
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames, canonicalToolName } from '../../tools/tool-names.js';
+import { applyToolArgAliases } from '../../tools/tool-arg-aliases.js';
 import { isPersistedOutputStub } from '../../tools/truncation.js';
-import { getToolOutputRecovery } from '../../tools/tool-output-recovery.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from '../../tools/tool-output-recovery.js';
+import { unescapePath } from '../../utils/paths.js';
 
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
@@ -200,14 +205,29 @@ export function getFunctionCallIdentity(
   const name = resolveTrackedToolName(call.name);
   const args = asRecord(call.args);
   if (name !== ToolNames.TOOL_CALL) {
-    return { name, args };
+    return { name, args: canonicalArgs(name, args) };
   }
   const targetName = args['name'];
   if (typeof targetName !== 'string') return undefined;
+  const target = resolveTrackedToolName(targetName);
   return {
-    name: resolveTrackedToolName(targetName),
-    args: asRecord(args['arguments']),
+    name: target,
+    args: canonicalArgs(target, asRecord(args['arguments'])),
   };
+}
+
+/**
+ * The history keeps the model's own argument names; the tool ran with the
+ * scheduler's canonical ones (`applyToolArgAliases`), so a read that said
+ * `path` is keyed by its `file_path` here too. Copies: history is not changed.
+ */
+function canonicalArgs(
+  name: string,
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  const copy = { ...args };
+  applyToolArgAliases(name, copy);
+  return copy;
 }
 
 /**
@@ -264,8 +284,9 @@ function getResponseToolIdentity(
  * lives on the request-side tool args (inside `tool_call.arguments` for a
  * bridged call), not on the
  * `functionResponse` microcompaction blanks, so this is the only way
- * to recover which file a cleared result referred to. Calls missing an
- * id or file_path are absent (the caller treats that as unresolvable).
+ * to recover which file a cleared result referred to. Match the file
+ * tools' trimming and unescaping so cache invalidation reaches the path
+ * they used. Calls missing an id or path are treated as unresolvable.
  *
  * Paths accumulate per id rather than overwrite: if a (malformed or
  * resumed) history reuses a `functionCall.id` across different files,
@@ -280,12 +301,13 @@ function buildCallIdToFilePath(
   for (const [callId, identities] of callIdentityById) {
     for (const identity of identities) {
       if (!FILE_PATH_TOOLS.has(identity.name)) continue;
-      const filePath = identity.args['file_path'];
-      if (typeof filePath === 'string' && filePath.length > 0) {
-        const existing = map.get(callId);
-        if (existing) existing.push(filePath);
-        else map.set(callId, [filePath]);
-      }
+      const modelPath = identity.args['file_path'];
+      if (typeof modelPath !== 'string') continue;
+      const filePath = unescapePath(modelPath.trim());
+      if (!filePath) continue;
+      const existing = map.get(callId);
+      if (existing) existing.push(filePath);
+      else map.set(callId, [filePath]);
     }
   }
   return map;
@@ -1076,12 +1098,16 @@ export function microcompactHistory(
               }
             }
           }
-          return {
+          const cleared: Part = {
             functionResponse: {
               ...stripNestedMedia(part.functionResponse),
               response: { output: MICROCOMPACT_CLEARED_MESSAGE },
             },
           };
+          const nativeFilePath = getToolOutputRecovery(part)?.nativeFilePath;
+          if (nativeFilePath)
+            setToolOutputRecovery(cleared, { nativeFilePath });
+          return cleared;
         }
 
         if (

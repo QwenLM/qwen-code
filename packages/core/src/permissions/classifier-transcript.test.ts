@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { getAutoMemorySnapshot } from '../memory/request-context.js';
 import type { CallableTool, Content } from '@google/genai';
+import type { Config } from '../config/config.js';
+import { EditTool } from '../tools/edit.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
+import { WriteFileTool } from '../tools/write-file.js';
 import {
   buildClassifierContents,
   MAX_HISTORICAL_ACTION_CHARS,
@@ -20,7 +23,7 @@ import {
   type ToolInvocation,
   type ToolResult,
 } from '../tools/tools.js';
-import type { ToolRegistry } from '../tools/tool-registry.js';
+import { DiscoveredTool, type ToolRegistry } from '../tools/tool-registry.js';
 import { Kind } from '../tools/tools.js';
 import { ToolCallTool } from '../tools/tool-call.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -300,6 +303,143 @@ describe('buildClassifierContents', () => {
     );
     // Raw secret value must not leak through to the historical turn.
     expectText(priorText, ['<redacted>', '_saw'], ['"leak"', 'rm -rf /tmp']);
+  });
+
+  it('projects the aliased path of a historical write without changing the stored args', () => {
+    const tool = new WriteFileTool({} as Config);
+    const content = `${'a'.repeat(300)}unprojected suffix`;
+    const args = { path: '/a.ts', content };
+    const prior = firstText(
+      [modelCall(tool.name, args)],
+      read(),
+      makeRegistry({ [tool.name]: tool }),
+    );
+
+    expectText(
+      prior,
+      ['"file_path":"/a.ts"', '"content_truncated":true'],
+      ['unprojected suffix'],
+    );
+    expect(args).toEqual({ path: '/a.ts', content });
+  });
+
+  it('bounds aliased edit previews when the replacement uses a coercible value', () => {
+    const tool = new EditTool({} as Config);
+    const preview = 'a'.repeat(300);
+    const args = {
+      path: '/a.ts',
+      old_str: preview + 'longer text',
+      new_str: 123,
+    };
+    const prior = firstText(
+      [modelCall(tool.name, args)],
+      read(),
+      makeRegistry({ [tool.name]: tool }),
+    );
+
+    expectText(
+      prior,
+      [
+        '"file_path":"/a.ts"',
+        `"old_string_preview":"${preview}"`,
+        '"new_string_preview":"123"',
+        '"old_string_truncated":true',
+      ],
+      ['"old_str"', '"new_str"', 'longer text'],
+    );
+    expect(args.new_str).toBe(123);
+  });
+
+  it('omits arguments when a registered projector throws', () => {
+    const tool = new StubTool('example_tool');
+    vi.spyOn(tool, 'toAutoClassifierInput').mockImplementation(() => {
+      throw new Error('fixture projection error');
+    });
+    const registry = makeRegistry({ [tool.name]: tool });
+    const args = { content: 'fixture without a projection' };
+    const result = build(
+      [modelCall(tool.name, args)],
+      { toolName: tool.name, toolParams: args },
+      registry,
+    );
+
+    expect(textOf(result[0])).toBe('Prior action: example_tool({})');
+    expect(textOf(result[1])).toContain('{}');
+    expect(JSON.stringify(result)).not.toContain(args.content);
+  });
+
+  it('projects an aliased historical replace through the registered edit tool', () => {
+    const tool = new EditTool({} as Config);
+    const args = { path: '/a.ts', old_str: 'before', new_str: 'after' };
+    const prior = firstText(
+      [modelCall('replace', args)],
+      read(),
+      makeRegistry({ [tool.name]: tool }),
+    );
+
+    expectText(
+      prior,
+      ['"file_path":"/a.ts"', 'before', 'after'],
+      ['"old_str"', '"new_str"'],
+    );
+    expect(args).toEqual({
+      path: '/a.ts',
+      old_str: 'before',
+      new_str: 'after',
+    });
+  });
+
+  it.each([
+    { route: 'registered bridge', makeTools: bridgeRegistry },
+    { route: 'history fallback', makeTools: makeRegistry },
+  ])(
+    'projects an aliased historical write through the $route',
+    ({ makeTools }) => {
+      const tool = new WriteFileTool({} as Config);
+      const args = {
+        path: '/a.ts',
+        content: 'example',
+        secret: 'must-not-leak',
+      };
+
+      expectBridged(
+        makeTools({ [tool.name]: tool }),
+        { name: 'WRITE_FILE', arguments: args },
+        [
+          '"name":"write_file"',
+          '"file_path":"/a.ts"',
+          '"content_preview":"example"',
+        ],
+        ['must-not-leak'],
+      );
+      expect(args).toEqual({
+        path: '/a.ts',
+        content: 'example',
+        secret: 'must-not-leak',
+      });
+    },
+  );
+
+  it('uses the registered arguments of a discovered tool for prior-action projection', () => {
+    const tool = new DiscoveredTool(
+      {
+        getToolDiscoveryCommand: () => 'discover',
+        getToolCallCommand: () => 'call',
+      } as Config,
+      ToolNames.WRITE_FILE,
+      'Discovered writer',
+      { properties: { path: { type: 'string' } }, required: ['path'] },
+    );
+    const project = vi.spyOn(tool, 'toAutoClassifierInput');
+    const args = { path: '/a.ts' };
+    const prior = firstText(
+      [modelCall(tool.name, args)],
+      read(),
+      makeRegistry({ [tool.name]: tool }),
+    );
+
+    expect(project).toHaveBeenCalledExactlyOnceWith(args);
+    expect(prior).toBe('Prior action: write_file({})');
   });
 
   it('projects bridged history through the target tool without leaking raw arguments', () => {
