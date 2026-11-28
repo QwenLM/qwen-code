@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, cast, get_args
 
 import pytest
+from qwen_code_sdk import query, query_sync
 from qwen_code_sdk.errors import ValidationError
 from qwen_code_sdk.types import PermissionMode, QueryOptions, TimeoutOptions
 from qwen_code_sdk.validation import validate_query_options
@@ -247,6 +248,14 @@ def test_timeout_rejects_negative_value() -> None:
 def test_timeout_rejects_boolean_value() -> None:
     with pytest.raises(TypeError, match=r"timeout\.stream_close must be a positive"):
         TimeoutOptions.from_mapping({"stream_close": True})
+
+
+@pytest.mark.parametrize("value", [30, "30", [], True, TimeoutOptions()])
+@pytest.mark.parametrize("synchronous", [False, True])
+def test_query_rejects_non_mapping_timeout(value: Any, synchronous: bool) -> None:
+    factory = query_sync if synchronous else query
+    with pytest.raises(TypeError, match="timeout must be a mapping"):
+        factory("hello", {"timeout": value})
 
 
 def test_rejects_invalid_max_tool_calls() -> None:

@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from inspect import Parameter, Signature, iscoroutinefunction, signature
+from math import isfinite
+from threading import TIMEOUT_MAX
 from typing import (
     Any,
     Literal,
@@ -14,6 +16,8 @@ from typing import (
 )
 
 from typing_extensions import NotRequired
+
+_SYNC_TIMEOUT_MARGIN = 5.0
 
 PermissionMode: TypeAlias = Literal["default", "plan", "auto-edit", "auto", "yolo"]
 AuthType: TypeAlias = Literal[
@@ -85,23 +89,35 @@ class TimeoutOptions:
     control_request: float = 60.0
     stream_close: float = 60.0
 
+    def __post_init__(self) -> None:
+        for name in ("can_use_tool", "control_request", "stream_close"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"timeout.{name} must be a positive finite number")
+            try:
+                finite = isfinite(value)
+            except OverflowError:
+                finite = False
+            if not finite or value <= 0:
+                raise ValueError(f"timeout.{name} must be a positive finite number")
+
+        if self.control_request > TIMEOUT_MAX - _SYNC_TIMEOUT_MARGIN:
+            raise ValueError(
+                "timeout.control_request must not exceed "
+                f"{TIMEOUT_MAX - _SYNC_TIMEOUT_MARGIN} seconds"
+            )
+
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any] | None) -> TimeoutOptions:
         if value is None:
             return cls()
-
-        def _read(name: str, default: float) -> float:
-            raw = value.get(name, default)
-            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-                raise TypeError(f"timeout.{name} must be a positive number")
-            if raw <= 0:
-                raise ValueError(f"timeout.{name} must be a positive number")
-            return float(raw)
+        if not isinstance(value, Mapping):
+            raise TypeError("timeout must be a mapping")
 
         return cls(
-            can_use_tool=_read("can_use_tool", 60.0),
-            control_request=_read("control_request", 60.0),
-            stream_close=_read("stream_close", 60.0),
+            can_use_tool=value.get("can_use_tool", 60.0),
+            control_request=value.get("control_request", 60.0),
+            stream_close=value.get("stream_close", 60.0),
         )
 
 
