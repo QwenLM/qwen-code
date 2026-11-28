@@ -42,6 +42,7 @@ import {
   symlinkSync,
   truncateSync,
   unlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
@@ -62,6 +63,9 @@ const MAX_IMAGE_SIZE_MIB = 16 * 1024;
 const TOOL_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
 // Real non-root `debugfs rdump` prints the version banner plus per-directory
 // `rdump:` and per-file `dump_file:` ownership warnings while exiting 0.
+const DEBUGFS_BANNER_LINE = /^debugfs \d/;
+const DEBUGFS_OWNERSHIP_WARN_LINE =
+  /^(?:rdump|dump_file): Operation not permitted while changing ownership of /;
 const BENIGN_DEBUGFS_STDERR_LINE =
   /^(?:debugfs \d|(?:rdump|dump_file): Operation not permitted while changing ownership of )/;
 
@@ -291,6 +295,123 @@ function escapeDebugfsArg(value) {
     throw new Error('extract tree path must not contain newlines or NUL bytes');
   }
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function collectExtractTreeEntries(extractTree) {
+  const realTree = realpathSync(extractTree);
+  const dirs = ['/'];
+  const entries = ['/'];
+  const queue = [{ hostPath: realTree, guestPath: '/' }];
+  while (queue.length > 0) {
+    const { hostPath, guestPath } = queue.shift();
+    const children = readdirSync(hostPath).sort();
+    for (const name of children) {
+      const childHost = join(hostPath, name);
+      const childGuest =
+        guestPath === '/' ? `/${name}` : `${guestPath}/${name}`;
+      const st = lstatSync(childHost);
+      entries.push(childGuest);
+      if (st.isDirectory() && !st.isSymbolicLink()) {
+        dirs.push(childGuest);
+        queue.push({ hostPath: childHost, guestPath: childGuest });
+      }
+    }
+  }
+  return { dirs, entries };
+}
+
+function readBaseOwnershipMap(debugfsBin, baseImagePath, dirs, workDir) {
+  const cmdLines = [];
+  for (const dir of dirs) {
+    cmdLines.push(`cd "${escapeDebugfsArg(dir)}"`, 'pwd', 'ls -p');
+  }
+  const cmdPath = join(workDir, 'read-owners.debugfs');
+  writeFileSync(cmdPath, `${cmdLines.join('\n')}\n`, { mode: 0o600 });
+  const res = runToolFull(debugfsBin, ['-f', cmdPath, baseImagePath]);
+  const fatalLine = res.stderr
+    .split(/\r?\n/)
+    .find((line) => line.trim() !== '' && !DEBUGFS_BANNER_LINE.test(line));
+  if (fatalLine !== undefined) {
+    throw new Error(
+      `debugfs ownership inspection failed: ${fatalLine.trim().slice(0, 600)}`,
+    );
+  }
+  const owners = new Map();
+  let currentDir = null;
+  for (const rawLine of res.stdout.split(/\r?\n/)) {
+    const pwdMatch = /^\[pwd\]\s+INODE:\s+\d+\s+PATH:\s+(.+)$/.exec(rawLine);
+    if (pwdMatch) {
+      currentDir = pwdMatch[1];
+      continue;
+    }
+    if (currentDir === null) continue;
+    const lsMatch = /^\/(\d+)\/([0-7]+)\/(\d+)\/(\d+)\/(.+)\/(\d*)\/$/.exec(
+      rawLine,
+    );
+    if (!lsMatch) continue;
+    const uid = Number(lsMatch[3]);
+    const gid = Number(lsMatch[4]);
+    const name = lsMatch[5];
+    if (name === '.') {
+      owners.set(currentDir, { uid, gid });
+    } else if (name !== '..') {
+      const childGuest =
+        currentDir === '/' ? `/${name}` : `${currentDir}/${name}`;
+      owners.set(childGuest, { uid, gid });
+    }
+  }
+  return owners;
+}
+
+function restoreOutputOwnership(
+  debugfsBin,
+  outputImagePath,
+  { finalEntries, baseOwners, injectedTargets, bundleHostPython, workDir },
+) {
+  const builderUid =
+    typeof process.getuid === 'function' ? process.getuid() : null;
+  const builderGid =
+    typeof process.getgid === 'function' ? process.getgid() : null;
+  const paths = new Set(finalEntries);
+  paths.add('/lost+found');
+
+  const cmdLines = [];
+  for (const guestPath of Array.from(paths).sort()) {
+    const isBundledPython =
+      bundleHostPython &&
+      (guestPath === '/opt/python' || guestPath.startsWith('/opt/python/'));
+    let desired;
+    if (injectedTargets.has(guestPath) || isBundledPython) {
+      desired = { uid: 0, gid: 0 };
+    } else if (baseOwners.has(guestPath)) {
+      desired = baseOwners.get(guestPath);
+    } else {
+      desired = { uid: 0, gid: 0 };
+    }
+    if (
+      builderUid === null ||
+      builderGid === null ||
+      desired.uid !== builderUid ||
+      desired.gid !== builderGid
+    ) {
+      const quoted = `"${escapeDebugfsArg(guestPath)}"`;
+      cmdLines.push(`set_inode_field ${quoted} uid ${desired.uid}`);
+      cmdLines.push(`set_inode_field ${quoted} gid ${desired.gid}`);
+    }
+  }
+  if (cmdLines.length === 0) return;
+
+  const cmdPath = join(workDir, 'restore-owners.debugfs');
+  writeFileSync(cmdPath, `${cmdLines.join('\n')}\n`, { mode: 0o600 });
+  const res = runToolFull(debugfsBin, ['-w', '-f', cmdPath, outputImagePath]);
+  const fatalLine = res.stderr
+    .split(/\r?\n/)
+    .find((line) => line.trim() !== '' && !DEBUGFS_BANNER_LINE.test(line));
+  if (fatalLine !== undefined) {
+    throw new Error(
+      `debugfs ownership restoration failed: ${fatalLine.trim().slice(0, 600)}`,
+    );
+  }
 }
 
 function bundleHostPythonIntoTree(
@@ -552,6 +673,30 @@ export function deriveExt4GuestImage({
       throw new Error('debugfs extraction produced an empty rootfs tree');
     }
 
+    // When non-root `debugfs rdump` could not chown extracted files on the host,
+    // capture exact UID/GID ownership from the read-only golden source now so
+    // we can restore every preserved inode after `mkfs.ext4 -d` repacks them.
+    const hasOwnershipWarnings = extract.stderr
+      .split(/\r?\n/)
+      .some((line) => DEBUGFS_OWNERSHIP_WARN_LINE.test(line));
+    let baseOwners = null;
+    if (hasOwnershipWarnings) {
+      const extractedTree = collectExtractTreeEntries(extractTree);
+      baseOwners = readBaseOwnershipMap(
+        resolvedDebugfs,
+        baseInfo.path,
+        extractedTree.dirs,
+        workDir,
+      );
+      for (const guestPath of extractedTree.entries) {
+        if (!baseOwners.has(guestPath)) {
+          throw new Error(
+            `cannot preserve non-root UID/GID ownership: missing base metadata for ${guestPath}`,
+          );
+        }
+      }
+    }
+
     if (bundleHostPython) {
       const resolvedLdd = findExecutable(lddBin, ['ldd']);
       if (!resolvedLdd) {
@@ -644,6 +789,17 @@ export function deriveExt4GuestImage({
           ]
         : ['-F', '-b', '4096', '-U', 'random', '-d', extractTree, tmpOut];
     runTool(resolvedMkfs, mkfsArgs);
+    if (baseOwners !== null) {
+      const finalTree = collectExtractTreeEntries(extractTree);
+      const injectedTargets = new Set(verifiedInjects.map((i) => i.target));
+      restoreOutputOwnership(resolvedDebugfs, tmpOut, {
+        finalEntries: finalTree.entries,
+        baseOwners,
+        injectedTargets,
+        bundleHostPython,
+        workDir,
+      });
+    }
     chmodSync(tmpOut, 0o644);
 
     const afterBase = sha256SingleLinkRegularFile(
@@ -655,8 +811,14 @@ export function deriveExt4GuestImage({
       throw new Error('golden baseImagePath changed digest during derivation');
     }
 
-    // Publish via hard link + best-effort temp unlink so a concurrently created
-    // output is never clobbered and finally always cleans the temp name.
+    // Hash and verify tmpOut BEFORE publishing so linkSync is the single
+    // publication point and a transient EBUSY on temp unlink cannot fail the call.
+    const outInfo = sha256SingleLinkRegularFile(
+      tmpOut,
+      'outputImagePath',
+      realVault,
+    );
+
     try {
       linkSync(tmpOut, safeOut);
     } catch (error) {
@@ -670,12 +832,6 @@ export function deriveExt4GuestImage({
     } catch {
       // Best-effort cleanup; finally also attempts temp-name removal.
     }
-
-    const outInfo = sha256SingleLinkRegularFile(
-      safeOut,
-      'outputImagePath',
-      realVault,
-    );
 
     return {
       outputImagePath: safeOut,

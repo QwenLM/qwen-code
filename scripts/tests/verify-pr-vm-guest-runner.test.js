@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildFirecrackerLaunchPlan,
+  buildVfkitLaunchPlan,
   deriveCollectorAcceptDeadlineMs,
   runHardwareRound,
 } from '../verify-pr-vm-runner.mjs';
@@ -159,6 +160,7 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
     expect(badSkillRes.stderr).toMatch(/invalid cmdline qwen\.skill/);
 
     // deriveCollectorAcceptDeadlineMs aligns collector accept window with qwen.workload_timeout
+    // including real buildVfkitLaunchPlan plans where cmdline="..." wraps the token at start or end.
     expect(
       deriveCollectorAcceptDeadlineMs(
         {
@@ -171,18 +173,35 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
         {},
       ),
     ).toBe(150_000);
-    expect(
-      deriveCollectorAcceptDeadlineMs(
-        {
-          argv: [
-            'vfkit',
-            '--bootloader',
-            'linux,cmdline=qwen.workload_timeout=90',
-          ],
-        },
-        {},
-      ),
-    ).toBe(120_000);
+    const vfBaseOpts = {
+      pocDir: join(root, 'vf-poc'),
+      socketDir: join(root, 'vf-sock'),
+      homeDir: join(root, 'vf-home'),
+      tmpDir: join(root, 'vf-tmp'),
+      vfkitBin: '/opt/homebrew/bin/vfkit',
+      seatbeltProfile: join(root, 'vf.sb'),
+      kernelPath: join(root, 'vf-poc', 'vmlinuz'),
+      initramfsPath: join(root, 'vf-poc', 'initramfs.gz'),
+      rootfsPath: join(root, 'vf-poc', 'work.img'),
+      guestLogPath: join(root, 'vf-poc', 'guest.log'),
+      pidFile: join(root, 'vf-poc', 'vfkit.pid'),
+    };
+    const realVfkitTailPlan = buildVfkitLaunchPlan({
+      ...vfBaseOpts,
+      runId: 'vf-tail-90',
+      cmdline: 'console=hvc0 root=/dev/vda rw qwen.workload_timeout=90',
+    });
+    expect(deriveCollectorAcceptDeadlineMs(realVfkitTailPlan, {})).toBe(
+      120_000,
+    );
+    const realVfkitHeadPlan = buildVfkitLaunchPlan({
+      ...vfBaseOpts,
+      runId: 'vf-head-90',
+      cmdline: 'qwen.workload_timeout=90 console=hvc0 root=/dev/vda rw',
+    });
+    expect(deriveCollectorAcceptDeadlineMs(realVfkitHeadPlan, {})).toBe(
+      120_000,
+    );
     expect(
       deriveCollectorAcceptDeadlineMs(
         { bootArgs: 'qwen.workload_timeout=120' },

@@ -23,7 +23,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   deriveExt4GuestImage,
   normalizeImageTargetPath,
@@ -426,18 +426,42 @@ describe('verify-pr-vm-image offline golden ext4 derivation', () => {
       );
 
       // 4. debugfs stderr handling: benign non-root ownership warnings (both rdump: and dump_file:)
-      // MUST succeed, while fatal lines (standalone or trailing after benign lines) and empty trees fail closed.
+      // MUST preserve original UID/GID via debugfs ls -p + set_inode_field (and fail closed if
+      // ownership metadata cannot be captured), while fatal lines and empty trees fail closed.
+      const chownLog = join(root, 'nonroot-chown.log');
       const nonRootBenignDebugfs = join(root, 'nonroot-benign-debugfs');
       writeExecutable(
         nonRootBenignDebugfs,
         [
           '#!/bin/sh',
           'set -eu',
+          'if [ "$1" = "-f" ]; then',
+          '  echo "debugfs 1.47.2 (1-Jan-2025)" >&2',
+          '  printf "[pwd]   INODE: 2  PATH: /\\n"',
+          '  printf "/2/040755/0/0/.//\\n"',
+          '  printf "/2/040755/0/0/..//\\n"',
+          '  printf "/11/040700/0/0/lost+found//\\n"',
+          '  printf "/12/040755/0/0/bin//\\n"',
+          '  printf "/13/100600/14001/14002/app-state/6/\\n"',
+          '  printf "[pwd]   INODE: 12  PATH: /bin\\n"',
+          '  printf "/12/040755/0/0/.//\\n"',
+          '  printf "/14/100644/0/0/base-marker/12/\\n"',
+          '  printf "[pwd]   INODE: 11  PATH: /lost+found\\n"',
+          '  printf "/11/040700/0/0/.//\\n"',
+          '  exit 0',
+          'fi',
+          'if [ "$1" = "-w" ] && [ "$2" = "-f" ]; then',
+          '  echo "debugfs 1.47.2 (1-Jan-2025)" >&2',
+          `  cp "$3" "${chownLog}"`,
+          '  exit 0',
+          'fi',
           'TREE=$(printf "%s" "$2" | sed -e "s|^rdump / ||" -e \'s|^"||\' -e \'s|"$||\')',
           'mkdir -p "$TREE/bin" "$TREE/lost+found"',
           'printf "base-marker\\n" > "$TREE/bin/base-marker"',
+          'printf "state\\n" > "$TREE/app-state"',
           'echo "debugfs 1.47.2 (1-Jan-2025)" >&2',
           'echo "rdump: Operation not permitted while changing ownership of $TREE//lost+found" >&2',
+          'echo "dump_file: Operation not permitted while changing ownership of $TREE//app-state" >&2',
           'echo "dump_file: Operation not permitted while changing ownership of $TREE//bin/base-marker" >&2',
           'echo "rdump: Operation not permitted while changing ownership of $TREE/" >&2',
         ].join('\n') + '\n',
@@ -469,6 +493,48 @@ describe('verify-pr-vm-image offline golden ext4 derivation', () => {
       });
       expect(existsSync(nonRootRes.outputImagePath)).toBe(true);
       expect(readFileSync(nonRootOut, 'utf8').trim()).toBe('base-marker');
+      const recordedChowns = readFileSync(chownLog, 'utf8');
+      expect(recordedChowns).toContain(
+        'set_inode_field "/app-state" uid 14001',
+      );
+      expect(recordedChowns).toContain(
+        'set_inode_field "/app-state" gid 14002',
+      );
+      if (typeof process.getuid === 'function' && process.getuid() !== 0) {
+        expect(recordedChowns).toContain(
+          'set_inode_field "/opt/poc/init" uid 0',
+        );
+      }
+
+      // Non-root rdump with ownership warnings whose debugfs cannot report base metadata MUST fail closed
+      const missingMetaDebugfs = join(root, 'missing-meta-debugfs');
+      writeExecutable(
+        missingMetaDebugfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'if [ "$1" = "-f" ]; then',
+          '  echo "debugfs 1.47.2 (1-Jan-2025)" >&2',
+          '  exit 0',
+          'fi',
+          'TREE=$(printf "%s" "$2" | sed -e "s|^rdump / ||" -e \'s|^"||\' -e \'s|"$||\')',
+          'mkdir -p "$TREE/bin"',
+          'printf "base-marker\\n" > "$TREE/bin/base-marker"',
+          'echo "debugfs 1.47.2 (1-Jan-2025)" >&2',
+          'echo "dump_file: Operation not permitted while changing ownership of $TREE//bin/base-marker" >&2',
+        ].join('\n') + '\n',
+      );
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'missing-meta.ext4'),
+          approvedRoots: [approved],
+          debugfsBin: missingMetaDebugfs,
+          mkfsExt4Bin: fakeMkfs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/cannot preserve non-root UID\/GID ownership/);
+      expect(existsSync(join(approved, 'missing-meta.ext4'))).toBe(false);
 
       const mixedFatalDebugfs = join(root, 'mixed-fatal-debugfs');
       writeExecutable(
@@ -968,5 +1034,83 @@ describe('verify-pr-vm-image offline golden ext4 derivation', () => {
       expect(existsSync(mutExtraOut)).toBe(false);
     },
     20_000,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'succeeds cleanly and leaves nlink=1 with no temp residue when the first temp unlinkSync after linkSync throws EBUSY',
+    async () => {
+      const root = makeTempDir('vimg-ebusy-');
+      const approved = join(root, 'approved');
+      mkdirSync(approved, { mode: 0o700 });
+      const golden = join(root, 'golden.ext4');
+      writeFileSync(golden, 'golden-ebusy', { mode: 0o444 });
+
+      const fakeDebugfs = join(root, 'fake-debugfs');
+      writeExecutable(
+        fakeDebugfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'TREE=$(printf "%s" "$2" | sed -e "s|^rdump / ||" -e \'s|^"||\' -e \'s|"$||\')',
+          'mkdir -p "$TREE/bin"',
+          'printf "ok\\n" > "$TREE/bin/ok"',
+        ].join('\n') + '\n',
+      );
+      const fakeMkfs = join(root, 'fake-mkfs.ext4');
+      writeExecutable(
+        fakeMkfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'OUT=""',
+          'while [ $# -gt 0 ]; do OUT="$1"; shift; done',
+          'printf "published-bytes\\n" > "$OUT"',
+        ].join('\n') + '\n',
+      );
+
+      let injectedEbusy = false;
+      vi.resetModules();
+      vi.doMock('node:fs', async () => {
+        const actual = await vi.importActual('node:fs');
+        return {
+          ...actual,
+          unlinkSync(target) {
+            if (
+              !injectedEbusy &&
+              typeof target === 'string' &&
+              /\.derive\.\d+\.\d+\.tmp$/.test(target)
+            ) {
+              injectedEbusy = true;
+              const err = new Error(`EBUSY: resource busy: ${target}`);
+              err.code = 'EBUSY';
+              throw err;
+            }
+            return actual.unlinkSync(target);
+          },
+        };
+      });
+      const outPath = join(approved, 'ebusy-out.ext4');
+      let result;
+      try {
+        const imgMod = await import('../verify-pr-vm-image.mjs');
+        result = imgMod.deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: outPath,
+          approvedRoots: [approved],
+          debugfsBin: fakeDebugfs,
+          mkfsExt4Bin: fakeMkfs,
+          tempParentDir: root,
+        });
+      } finally {
+        vi.doUnmock('node:fs');
+        vi.resetModules();
+      }
+      expect(injectedEbusy).toBe(true);
+      expect(result.outputImagePath).toBe(outPath);
+      expect(result.imageSha256).toBe(sha256File(outPath));
+      expect(lstatSync(outPath).nlink).toBe(1);
+      expect(readdirSync(approved)).toEqual(['ebusy-out.ext4']);
+    },
+    15_000,
   );
 });

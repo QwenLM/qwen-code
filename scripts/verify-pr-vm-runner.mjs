@@ -1133,7 +1133,11 @@ export function deriveCollectorAcceptDeadlineMs(plan, collectorOptions = {}) {
       if (typeof arg !== 'string') continue;
       const idx = arg.indexOf('cmdline=');
       if (idx !== -1) {
-        cmdlines.push(arg.slice(idx + 'cmdline='.length));
+        let raw = arg.slice(idx + 'cmdline='.length);
+        if (raw.startsWith('"') && raw.endsWith('"') && raw.length >= 2) {
+          raw = raw.slice(1, -1);
+        }
+        cmdlines.push(raw);
       }
     }
   }
