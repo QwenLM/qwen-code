@@ -311,6 +311,18 @@ describe('isCommandAllowed', () => {
         await expectAllowed('echo hello # $(rm -rf /)');
       });
 
+      it.each([
+        "echo $${x # don't\ncat $(printf /tmp/protected)",
+        "echo $$\\\n{x # don't\ncat $(printf /tmp/protected)",
+        'echo $$$\\\n{x:- #$(printf /tmp/protected)}',
+        'echo $\\\n{x:- #$(printf /tmp/protected)}',
+      ])(
+        'keeps PID and parameter introductions distinct in %s',
+        async (command) => {
+          await expectSubstitutionBlocked(command);
+        },
+      );
+
       it('should not treat # inside a word as a comment starter', async () => {
         await expectSubstitutionBlocked('echo foo#$(rm -rf /)');
       });
@@ -545,6 +557,15 @@ describe('getCommandRoots', () => {
   it('should filter out empty segments from consecutive newlines', async () => {
     expect(getCommandRoots('ls\n\ngrep foo')).toEqual(['ls', 'grep']);
   });
+
+  it.each(['&>', '&>>'])(
+    'keeps the command intact through combined output redirection %s',
+    async (operator) => {
+      const command = `git ${operator} /tmp/log push origin main`;
+      expect(splitCommands(command)).toEqual([command]);
+      expect(getCommandRoots(command)).toEqual(['git']);
+    },
+  );
 
   it('should not treat file descriptor redirection as a command separator', async () => {
     const result = getCommandRoots('npm run build 2>&1 | head -100');
@@ -1021,11 +1042,11 @@ describe('normalizeMonitorCommand', () => {
     );
   });
 
-  it('unwraps shell wrappers with option operands for safety analysis', () => {
+  it('retains shell option operands in the safety command', () => {
     expectNormalized(
       `/bin/bash -o pipefail -c 'echo $(cat secret.txt)'`,
       'echo $(cat secret.txt)',
-      'echo $(cat secret.txt)',
+      `/bin/bash -o pipefail -c 'echo $(cat secret.txt)'`,
     );
   });
 

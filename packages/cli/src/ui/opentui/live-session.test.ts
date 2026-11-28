@@ -4101,6 +4101,21 @@ describe('approval-mode helpers', () => {
     expect(approved.map((c) => c.callId)).toEqual(['a', 'b']);
   });
 
+  it('keeps YOLO approval separate from an empty persistent rule set', () => {
+    const call = waitingCall('no-persistent-rule', 'run_shell_command');
+    const waiting = [
+      {
+        ...call,
+        confirmationDetails: {
+          ...call.confirmationDetails,
+          permissionRules: [],
+        },
+      },
+    ];
+    expect(selectAutoApprovals(ApprovalMode.YOLO, waiting)).toEqual(waiting);
+    expect(selectAutoApprovals(ApprovalMode.DEFAULT, waiting)).toEqual([]);
+  });
+
   it('AUTO_EDIT auto-approves only edit tools', () => {
     const waiting = [
       waitingCall('a', 'run_shell_command'),

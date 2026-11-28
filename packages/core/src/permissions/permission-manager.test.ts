@@ -3793,8 +3793,13 @@ describe('PermissionManager — compound shell write attribution', () => {
   );
 
   it('ordinary writes after `cd` into project subdirs stay unmatched by self-mod rules', () => {
-    const ctx = sh("cd src && bash -lc 'echo ok > generated.txt'", '/repo');
+    const ctx = sh("cd src && bash -c 'echo ok > generated.txt'", '/repo');
     expect(repoPm(denySettings).hasRelevantRules(ctx)).toBe(false);
+  });
+
+  it('keeps self-mod rules relevant to uninspected login shell startup files', () => {
+    const ctx = sh("cd src && bash -lc 'echo ok > generated.txt'", '/repo');
+    expect(repoPm(denySettings).hasRelevantRules(ctx)).toBe(true);
   });
 
   it('does not treat canonical-only allow matches as relevant', () =>

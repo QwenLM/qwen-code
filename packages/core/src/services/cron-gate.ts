@@ -16,6 +16,7 @@
 import stripAnsi from 'strip-ansi';
 import { ApprovalMode } from '../config/approval-mode.js';
 import type { Config } from '../config/config.js';
+import { suggestCommandRules } from '../permissions/command-rule-suggestions.js';
 import { executeRuntimeShell } from '../sandbox/runtime-shell.js';
 import type {
   ShellExecutionResult,
@@ -24,17 +25,14 @@ import type {
 import { sanitizeMonitorLine } from '../tools/monitor.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
-import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
   backgroundsAnyPart,
   normalizeMonitorCommand,
   runsOnlyComments,
+  splitCommands,
 } from '../utils/shell-utils.js';
-import { extractCommandRules } from '../utils/shellAstParser.js';
 import type { CronJob } from './cronScheduler.js';
-
-const debugLogger = createDebugLogger('CRON_GATE');
 
 export const CRON_GATE_TIMEOUT_MS = 60_000;
 /** Delivered stdout is cut here; the head is kept and the cut is noted. */
@@ -153,10 +151,11 @@ export function gateCommandError(gate: unknown): string | null {
   // and joined into one line can differ from what the shell runs (adjacent
   // quotes, a trailing `\`, an open quote, a command after the script), so
   // a gate must be a command the normalization leaves as it is. A gate
-  // already runs in a shell; the wrapper adds nothing. The error names what
-  // the rules would check, as the normalization also misreads a few plain
-  // commands (`bash /opt/probe.sh -c x` reads as `x`).
-  const checked = normalizeMonitorCommand(gate).safetyCommand;
+  // already runs in a shell; the wrapper adds nothing. If an unmodeled wrapper
+  // keeps its original safety string, the separate analysis view still makes
+  // the wrapper visible to this refusal.
+  const normalized = normalizeMonitorCommand(gate);
+  const checked = normalized.safetyCommand;
   if (checked !== gate.trim()) {
     let shown = checked;
     if (checked.length > 80) {
@@ -165,6 +164,9 @@ export function gateCommandError(gate: unknown): string | null {
       shown = `${checked.slice(0, high >= 0xd800 && high <= 0xdbff ? 78 : 79)}…`;
     }
     return `must be the command itself, not wrapped in a shell such as \`bash -c\`: the permission rules would check ${JSON.stringify(shown)}, not the command as written`;
+  }
+  if (normalized.analysisCommand !== gate.trim()) {
+    return 'must be the command itself, not wrapped in a shell such as `bash -c`';
   }
   return null;
 }
@@ -175,17 +177,20 @@ export function gateCommandError(gate: unknown): string | null {
  * permission manager matches against, so a rule saved from this hint matches:
  * for `bash -c "./probe.sh"` that is `./probe.sh`, not the wrapper.
  */
-export async function suggestedGateRule(gate: string): Promise<string> {
+export async function suggestedGateRule(
+  gate: string,
+): Promise<string | undefined> {
   const command = normalizeMonitorCommand(gate).safetyCommand;
-  try {
-    const rules = await extractCommandRules(command);
-    if (rules.length > 0) {
-      return rules.map((rule) => `Monitor(${rule})`).join(', ');
-    }
-  } catch (error) {
-    debugLogger.warn('Failed to extract gate command rules:', error);
+  const { permissionRules = [] } = await suggestCommandRules(
+    command,
+    'Monitor',
+  );
+  if (permissionRules.length === 0) return undefined;
+  for (const part of splitCommands(command)) {
+    const suggested = await suggestCommandRules(part, 'Monitor');
+    if (!suggested.permissionRules?.length) return undefined;
   }
-  return `Monitor(${command})`;
+  return permissionRules.join(', ');
 }
 
 /**

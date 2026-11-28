@@ -30,7 +30,7 @@ import {
   getCommandRoot,
   normalizeMonitorCommand,
 } from '../utils/shell-utils.js';
-import { extractCommandRules } from '../utils/shellAstParser.js';
+import { suggestCommandRules } from '../permissions/command-rule-suggestions.js';
 
 /** "1 day" / "7 days" / "0.5 days". Callers handle the Infinity case. */
 function formatDays(days: number): string {
@@ -103,23 +103,16 @@ class CronCreateInvocation extends BaseToolInvocation<
     const gate = this.params.gate?.trim();
     if (!gate) return super.getConfirmationDetails(abortSignal);
     const normalized = normalizeMonitorCommand(gate);
-    let permissionRules: string[] = [];
-    try {
-      permissionRules = [
-        ...new Set(await extractCommandRules(normalized.safetyCommand)),
-      ].map((rule) => `Monitor(${rule})`);
-    } catch {
-      // Conservative fallback below: a rule for the whole command.
-    }
-    if (permissionRules.length === 0) {
-      permissionRules = [`Monitor(${normalized.safetyCommand})`];
-    }
+    const suggested = await suggestCommandRules(
+      normalized.safetyCommand,
+      'Monitor',
+    );
     const details: ToolExecuteConfirmationDetails = {
       type: 'exec',
       title: 'Schedule a gated task',
       command: gate,
       rootCommand: getCommandRoot(normalized.safetyCommand) ?? gate,
-      permissionRules,
+      ...suggested,
       warnings: [
         `Runs unattended on this schedule (${humanReadableCron(this.params.cron)}) without further approval; the task prompt runs only when the command prints output.`,
         ...(buildShellExecWarnings(normalized.safetyCommand, gate) ?? []),

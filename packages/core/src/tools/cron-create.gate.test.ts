@@ -101,6 +101,28 @@ describe('CronCreateTool gate', () => {
     expect(taskHasLegacyCondition(task!)).toBe(false);
   });
 
+  it('retains each subcommand when a gate mixes extracted and fallback rules', async () => {
+    const gate = 'npm install && git <&- push origin';
+    const details = (await tool
+      .build({ ...params, gate })
+      .getConfirmationDetails(signal())) as ToolExecuteConfirmationDetails;
+    expect(details.permissionRules).toEqual([
+      'Monitor(npm install)',
+      'Monitor(git <&- push origin)',
+    ]);
+    const reloaded = new PermissionManager({
+      getPermissionsAllow: () => details.permissionRules ?? [],
+      getPermissionsDeny: () => [],
+      getPermissionsAsk: () => [],
+      getProjectRoot: () => tmpDir,
+      getCwd: () => tmpDir,
+    });
+    reloaded.initialize();
+    expect(
+      await reloaded.evaluate({ toolName: 'monitor', command: gate }),
+    ).toBe('allow');
+  });
+
   it('shows the exec dialog with Monitor rules for a gate and the info dialog otherwise', async () => {
     const details = (await tool
       .build(params)

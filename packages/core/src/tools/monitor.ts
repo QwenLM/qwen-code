@@ -33,6 +33,7 @@ import type {
   ToolConfirmationOutcome,
   ToolConfirmationPayload,
 } from './tools.js';
+import { suggestCommandRules } from '../permissions/command-rule-suggestions.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
@@ -53,10 +54,7 @@ import {
   type MonitorTaskRegistration,
 } from '../services/monitorRegistry.js';
 import { MAX_CONCURRENT_MONITORS } from '../services/monitorRegistry.js';
-import {
-  extractCommandRules,
-  isShellCommandReadOnlyASTInDirectory,
-} from '../utils/shellAstParser.js';
+import { isShellCommandReadOnlyASTInDirectory } from '../utils/shellAstParser.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
@@ -270,20 +268,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
       ),
     ];
 
-    let permissionRules: string[] = [];
-    try {
-      const allRules: string[] = [];
-      for (const sub of effectiveSubCommands) {
-        const rules = await extractCommandRules(sub);
-        allRules.push(...rules);
-      }
-      permissionRules = [...new Set(allRules)].map(
-        (rule) => `Monitor(${rule})`,
-      );
-    } catch (e) {
-      debugLogger.warn('Failed to extract monitor command rules:', e);
-      permissionRules = [`Monitor(${normalized.safetyCommand})`];
-    }
+    const suggested = await suggestCommandRules(
+      normalized.safetyCommand,
+      'Monitor',
+      effectiveSubCommands,
+    );
 
     // Flag command substitution ($(), backticks, <(), >()) so the user
     // sees a visible warning in the confirmation dialog. Mirrors the
@@ -309,7 +298,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       rootCommand:
         rootCommands.join(', ') ||
         (getCommandRoot(normalized.safetyCommand) ?? normalized.spawnCommand),
-      permissionRules,
+      ...suggested,
       onConfirm: async (
         _outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,

@@ -8,6 +8,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import type { PermissionCheckContext } from '../permissions/types.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
+import { suggestCommandRules } from '../permissions/command-rule-suggestions.js';
 import type { ShellOutputEvent } from './shellExecutionService.js';
 import {
   buildGateBlockedNotice,
@@ -19,12 +21,26 @@ import {
   CRON_GATE_STDERR_LINES,
   gateCommandError,
   MAX_CRON_GATE_CHARS,
+  suggestedGateRule,
 } from './cron-gate.js';
 
 const mockRuntimeShell = vi.hoisted(() => vi.fn());
 vi.mock('../sandbox/runtime-shell.js', () => ({
   executeRuntimeShell: mockRuntimeShell,
 }));
+
+vi.mock('../utils/shell-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/shell-utils.js')>();
+  return {
+    ...actual,
+    getShellConfiguration: () => ({
+      executable: '/bin/bash',
+      argsPrefix: ['-c'],
+      shell: 'bash',
+    }),
+  };
+});
 
 interface ShellScript {
   stdout?: string;
@@ -474,6 +490,61 @@ describe('createCronGateRunner', () => {
       });
     });
 
+    it.each([
+      'git > /dev/null push origin main',
+      'npm > /tmp/log install',
+      'npm install && git status',
+      "echo 'done'>>build.log",
+    ])('runs %s after saving the rules displayed by its hint', async (gate) => {
+      const { permissionRules = [] } = await suggestCommandRules(
+        gate,
+        'Monitor',
+      );
+      expect(permissionRules.length).toBeGreaterThan(0);
+      expect(await suggestedGateRule(gate)).toBe(permissionRules.join(', '));
+      const manager = new PermissionManager({
+        getPermissionsAllow: () => [...permissionRules],
+        getPermissionsDeny: () => [],
+        getPermissionsAsk: () => [],
+        getProjectRoot: () => '/work',
+        getCwd: () => '/work',
+        getShellExecutionSandbox: () => true,
+      });
+      manager.initialize();
+      expect(
+        await manager.evaluate({ toolName: 'monitor', command: gate }),
+      ).toBe('allow');
+      expect(
+        await manager.evaluate({
+          toolName: 'monitor',
+          command: 'git reset --hard',
+        }),
+      ).not.toBe('allow');
+      const result = await createCronGateRunner(
+        makeConfig({ evaluate: (ctx) => manager.evaluate(ctx) }),
+      )(gate, { signal: signal(), approvedInProcess: false });
+      expect(result.kind).toBe('output');
+    });
+
+    it.each([
+      'git log --oneline $(date)',
+      'git push origin main 3>/tmp/protected',
+      'npm install && git log $(date)',
+    ])('omits a hint that cannot approve the whole gate: %s', async (gate) => {
+      expect(await suggestedGateRule(gate)).toBeUndefined();
+      const result = await createCronGateRunner(makeConfig())(gate, {
+        signal: signal(),
+        approvedInProcess: false,
+      });
+      expect(result.kind).toBe('blocked');
+      if (result.kind !== 'blocked') throw new Error('Expected blocked gate');
+      expect(result.rule).toBeUndefined();
+      expect(buildGateBlockedNotice({ ...job, gate }, result)).not.toContain(
+        'add the permission rule',
+      );
+      expect(mockRuntimeShell).not.toHaveBeenCalled();
+    });
+
     it('runs in default mode when the gate was confirmed in this process', async () => {
       expect((await run(makeConfig(), true)).kind).toBe('output');
     });
@@ -746,13 +817,13 @@ describe('gateCommandError', () => {
       "bash -c './probe.sh --gate'",
       'not wrapped in a shell such as `bash -c`: the permission rules would check "./probe.sh --gate", not the command as written',
     ],
-    // The normalization takes a `/`-word for a flag and the `-c` after it
-    // for a wrapper's: the rules would check `config.yml`. Refused, and the
-    // error shows what they would read.
+    // The analysis parser misreads the script's -c argument as a wrapper.
+    // The safety view now retains the unmodeled script invocation; the gate
+    // still refuses the mismatch without naming config.yml as its rule input.
     [
       'a script by absolute path given a -c argument',
       'bash /opt/probe.sh -c config.yml',
-      'the permission rules would check "config.yml", not',
+      'not wrapped in a shell',
     ],
     [
       'an env-prefixed wrapper',

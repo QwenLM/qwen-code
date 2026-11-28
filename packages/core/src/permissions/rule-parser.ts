@@ -15,6 +15,28 @@ import {
   normalizeMcpToolName,
 } from '../utils/tool-name-utils.js';
 import { isNodeError } from '../utils/errors.js';
+import {
+  detectCommandSubstitution,
+  getShellConfiguration,
+  hasUnmodeledShellCommandString,
+  stripShellCommandNegation,
+  stripShellCommandPrefixes,
+  stripShellWrapper,
+} from '../utils/shell-utils.js';
+import {
+  getMapfileCallback,
+  MAX_SHELL_UNWRAP_DEPTH,
+  SHELL_ASSIGNMENT_PREFIX,
+  SHELL_EXECUTION_ENV_VARIABLE,
+} from '../utils/shell-command-prefixes.js';
+import { tokenizeShellWords } from '../utils/shell-word-tokenizer.js';
+import { ShellCommentContext } from '../utils/shell-comment-context.js';
+
+import {
+  maskConstantArithmetic,
+  removeShellLineContinuations,
+  staticShellCommand,
+} from './shell-command-syntax.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
 
@@ -1041,20 +1063,23 @@ export interface CompoundCommandSegment {
  * See {@link splitCompoundCommand} for the string-only form and for examples;
  * this is the same split, and that function is a projection of this one.
  *
- * Scanned twice and split wherever either scan finds an operator: comments,
- * backtick bodies and heredocs are not modelled, and quotes inside them can
+ * Scanned twice and split wherever either scan finds an operator: backtick
+ * bodies and heredocs are not modelled, and quotes inside them can
  * fool bash's backslash reading where the pre-fix reading still splits.
+ * Comment removal is opt-in: reconstructed Monitor commands and non-Bash
+ * invocations must keep the conservative default.
  */
 export function splitCompoundCommandSegments(
   command: string,
+  respectComments = false,
 ): CompoundCommandSegment[] {
   // The two readings differ only at a backslash, so one scan is enough without.
   const boundaries = command.includes('\\')
     ? [
-        ...findOperatorBoundaries(command, 'bash'),
-        ...findOperatorBoundaries(command, 'escape-everywhere'),
+        ...findOperatorBoundaries(command, 'bash', respectComments),
+        ...findOperatorBoundaries(command, 'escape-everywhere', false),
       ].sort((a, b) => a.start - b.start)
-    : findOperatorBoundaries(command, 'bash');
+    : findOperatorBoundaries(command, 'bash', respectComments);
 
   const segments: CompoundCommandSegment[] = [];
   let lastSplit = 0;
@@ -1097,6 +1122,7 @@ type BackslashReading = 'bash' | 'escape-everywhere';
 function findOperatorBoundaries(
   command: string,
   reading: BackslashReading,
+  respectComments: boolean,
 ): OperatorBoundary[] {
   const boundaries: OperatorBoundary[] = [];
   let inSingle = false;
@@ -1104,6 +1130,8 @@ function findOperatorBoundaries(
   let inAnsiC = false;
   let dollarPending = false;
   let escaped = false;
+  const comments = new ShellCommentContext();
+  let retainedCommentEnd = -1;
   // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
   // bitwise AND, not the async operator, so `$(( FLAGS & MASK ))` is one word.
   let arithmeticDepth = 0;
@@ -1113,9 +1141,39 @@ function findOperatorBoundaries(
     const ansiCIntroducer: boolean = dollarPending;
     dollarPending = false;
 
+    if (i === retainedCommentEnd) {
+      boundaries.push({ start: i, end: i + 1, operator: '\n' });
+      inSingle = false;
+      inDouble = false;
+      inAnsiC = false;
+      escaped = false;
+      arithmeticDepth = 0;
+      retainedCommentEnd = -1;
+      continue;
+    }
     if (escaped) {
       escaped = false;
       continue;
+    }
+    const comment = comments.read(
+      command,
+      i,
+      inSingle,
+      inDouble || arithmeticDepth > 0,
+    );
+    if (comment && i === comment.start) {
+      if (respectComments) {
+        boundaries.push({
+          start: i,
+          end: Math.min(comment.end + 1, command.length),
+          operator: comment.end < command.length ? '\n' : '',
+        });
+        i = comment.end;
+        continue;
+      }
+      // Retain the conservative reading of comment text, but its backslashes
+      // and quotes cannot consume the next executable physical line.
+      retainedCommentEnd = comment.end;
     }
     // In bash a backslash is literal inside a plain `'…'` (so `'a\'` closes)
     // but escapes inside ANSI-C `$'…'` (so `$'a\''` closes at the third quote).
@@ -1124,7 +1182,7 @@ function findOperatorBoundaries(
       (reading === 'escape-everywhere' || !(inSingle && !inAnsiC))
     ) {
       // `$\⏎'…'` is still ANSI-C, so the pending `$` survives a continuation.
-      if (command[i + 1] === '\n') {
+      if (command[i + 1] === '\n' && i + 1 !== retainedCommentEnd) {
         dollarPending = ansiCIntroducer;
         i++;
         continue;
@@ -1209,8 +1267,11 @@ function findOperatorBoundaries(
  *   "build &> log.txt"       → ["build &> log.txt"]  (redirection, not async)
  *   "x=$(( a & b ))"         → ["x=$(( a & b ))"]  (arithmetic, not async)
  */
-export function splitCompoundCommand(command: string): string[] {
-  const commands = splitCompoundCommandSegments(command).map(
+export function splitCompoundCommand(
+  command: string,
+  respectComments = false,
+): string[] {
+  const commands = splitCompoundCommandSegments(command, respectComments).map(
     (segment) => segment.command,
   );
   return commands.length > 0 ? commands : [command];
@@ -1239,10 +1300,348 @@ export function matchesCommandPattern(
   pattern: string,
   command: string,
 ): boolean {
+  if (getShellConfiguration().shell === 'bash') {
+    pattern = removeShellLineContinuations(pattern);
+    command = removeShellLineContinuations(command);
+  }
+  // A full-command fallback must remain usable even when shell-quote
+  // reconstructs its operators differently (e.g. <&- or <>).
+  if (pattern === command || pattern === trimCommandPadding(command)) {
+    return true;
+  }
   // This function matches a single pattern against a single simple command.
   // Compound command splitting is handled by the caller (PermissionManager).
-  const normalizedCommand = stripLeadingVariableAssignments(command);
+  return matchesCommandText(pattern, stripLeadingVariableAssignments(command));
+}
 
+function trimCommandPadding(command: string): string {
+  // A final unpaired backslash makes the trailing whitespace an argument.
+  return /(?:^|[^\\])(?:\\\\)*\\[ \t]*$/.test(command)
+    ? command.replace(/^[ \t]+/, '')
+    : command.replace(/^[ \t]+|[ \t]+$/g, '');
+}
+
+/** Keep persistent grants within syntax the file-operation tracker can see. */
+export function hasUnsupportedShellSyntax(
+  command: string,
+  depth = 0,
+  restrictFileEffects = false,
+  homeUnknown = false,
+): boolean {
+  command = removeShellLineContinuations(command);
+  const substitutionView = maskConstantArithmetic(command);
+  if (detectCommandSubstitution(substitutionView)) return true;
+  // Match the tracker's per-segment shell unwrapping, including its depth cap.
+  for (const segment of splitCompoundCommand(command, true)) {
+    // CDPATH can send a relative cd outside the tracked cwd. A shell-local
+    // assignment persists for later segments, so this is not transparent.
+    for (const word of tokenizeShellWords(segment)) {
+      if (!SHELL_ASSIGNMENT_PREFIX.test(word)) break;
+      if (SHELL_EXECUTION_ENV_VARIABLE.test(word)) return true;
+    }
+    const environment = { homeUnknown };
+    const unprefixed = stripShellCommandPrefixes(segment, false, environment);
+    if (unprefixed === undefined) return true;
+    const expansions = new Set<number>();
+    const bares: string[] = [];
+    const literalWords = tokenizeShellWords(
+      unprefixed,
+      undefined,
+      undefined,
+      bares,
+      true,
+      expansions,
+    );
+    const simpleVariable =
+      /^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$/;
+    // Echo's simple variable arguments are data. Complex expansions can mutate
+    // shell state, and other builtins can interpret an expanded option.
+    const echoArgumentsAreData =
+      literalWords[0] === 'echo' &&
+      [...expansions].every((index) =>
+        simpleVariable.test(literalWords[index]!),
+      );
+    if (
+      literalWords.includes('') ||
+      (homeUnknown &&
+        literalWords.some((word, index) =>
+          word
+            .split('')
+            .some(
+              (char, offset) => char === '~' && bares[index]![offset] === '1',
+            ),
+        )) ||
+      (restrictFileEffects &&
+        ((expansions.size > 0 && !echoArgumentsAreData) ||
+          literalWords.some((word, index) => {
+            const bare = bares[index]!;
+            return (
+              (word[0] === '~' &&
+                bare[0] === '1' &&
+                word !== '~' &&
+                !word.startsWith('~/')) ||
+              word
+                .split('')
+                .some(
+                  (char, offset) =>
+                    bare[offset] === '1' && '*?[]{}'.includes(char),
+                )
+            );
+          })))
+    )
+      return true;
+    const words = tokenizeShellWords(unprefixed);
+    const firstWord = words[0];
+    if (
+      ['eval', 'source', '.', 'trap'].includes(firstWord ?? '') ||
+      // Enabling shopt options (notably lastpipe) changes pipeline scope.
+      // Queries remain ordinary commands; dynamic enabling flags are unknown.
+      (firstWord === 'shopt' &&
+        words
+          .slice(1)
+          .some((word) => /^-[^-]*s/.test(word) || word.includes('$'))) ||
+      // printf -v can assign CDPATH or a nameref; its output is shell state.
+      (firstWord === 'printf' && words[1]?.startsWith('-v')) ||
+      // mapfile/readarray callbacks are shell code, not ordinary input data.
+      getMapfileCallback(words) !== undefined ||
+      ([
+        'export',
+        'declare',
+        'typeset',
+        'local',
+        'readonly',
+        'unset',
+        'read',
+        'mapfile',
+        'readarray',
+      ].includes(firstWord ?? '') &&
+        words
+          .slice(1)
+          .some((word) => SHELL_EXECUTION_ENV_VARIABLE.test(word))) ||
+      hasUnmodeledShellCommandString(unprefixed) ||
+      ['xargs', 'parallel'].includes(firstWord?.split('/').at(-1) ?? '') ||
+      // find callbacks share the tracker's recursion bound. Known operations
+      // still enforce denies; an unexpanded callback must not become a grant.
+      (firstWord?.split('/').at(-1) === 'find' &&
+        words
+          .slice(1)
+          .some((word) =>
+            ['-exec', '-execdir', '-ok', '-okdir'].includes(word),
+          )) ||
+      /^[^\s()]+\s*\(\s*\)/.test(unprefixed) ||
+      /^(?:[({]|(?:if|then|elif|else|fi|while|until|for|select|case|esac|do|done|function)(?:\s|$))/.test(
+        unprefixed,
+      ) ||
+      (unprefixed !== stripShellCommandNegation(segment).trim() &&
+        (firstWord === 'cd' || firstWord === 'pushd' || firstWord === 'popd'))
+    ) {
+      return true;
+    }
+    const inner = stripShellWrapper(unprefixed);
+    if (inner === unprefixed && /[<>]/.test(segment)) {
+      const staticView = staticShellCommand(segment);
+      if (staticView) {
+        // The restrictive view can locate a payload behind redirections that
+        // the raw tracker cannot unwrap. Use it only to veto that mismatch.
+        const redirectFree = staticView.words
+          .split(' ')
+          .map((word) => {
+            const decoded = word.replace(/%([0-9a-f]{4})/g, (_, unit: string) =>
+              String.fromCharCode(Number.parseInt(unit, 16)),
+            );
+            return `'${decoded.replaceAll("'", "'\\''")}'`;
+          })
+          .join(' ');
+        const execution = stripShellCommandPrefixes(redirectFree);
+        if (
+          redirectFree !== segment &&
+          (execution === undefined ||
+            stripShellWrapper(execution) !== execution ||
+            hasUnsupportedShellSyntax(
+              redirectFree,
+              depth,
+              restrictFileEffects,
+              environment.homeUnknown,
+            ))
+        ) {
+          return true;
+        }
+      }
+    }
+    if (
+      inner !== unprefixed &&
+      (depth >= MAX_SHELL_UNWRAP_DEPTH ||
+        hasUnsupportedShellSyntax(
+          inner,
+          depth + 1,
+          restrictFileEffects,
+          environment.homeUnknown,
+        ))
+    ) {
+      return true;
+    }
+  }
+  let quote = '';
+  // A bare number is an IO descriptor; an ordinary word ends at the operator.
+  let token: '' | '1' | '2' | 'descriptor' | undefined = '';
+  let tokenStart = 0;
+  let tokenHasExpansion = false;
+  let redirectTarget: 'pending' | 'word' | undefined;
+  let redirectStart: number | undefined;
+  let retainedFrom = 0;
+  const executableParts: string[] = [];
+  const finishRedirect = (end: number) => {
+    if (redirectStart === undefined) return;
+    executableParts.push(command.slice(retainedFrom, redirectStart));
+    retainedFrom = end;
+    redirectStart = undefined;
+  };
+  const comments = new ShellCommentContext();
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]!;
+    const ansiCQuote =
+      character === '$' ? /^\$(?:\\\n)*'/.exec(command.slice(index)) : null;
+    const comment = comments.read(
+      command,
+      index,
+      quote === "'" || quote === "$'",
+      quote === '"',
+    );
+    if (comment) {
+      if (redirectTarget === 'word') finishRedirect(index);
+      index = comment.end;
+      token = '';
+      tokenStart = index + 1;
+      tokenHasExpansion = false;
+      if (redirectTarget === 'word') redirectTarget = undefined;
+      continue;
+    }
+    if (redirectTarget === 'pending' && !/[ \t\n]/.test(character)) {
+      if (
+        /^~[^/ \t\n'"\\;&|<>(){}]+(?=\/|[ \t\n;&|<>(){}]|$)/.test(
+          command.slice(index),
+        )
+      ) {
+        return true;
+      }
+      redirectTarget = 'word';
+    }
+    if (
+      redirectTarget === 'word' &&
+      quote !== "'" &&
+      quote !== "$'" &&
+      ((character === '$' && !ansiCQuote) ||
+        character === '`' ||
+        (!quote && /[*?[\]{}]/.test(character)))
+    ) {
+      return true;
+    }
+    if (character === '$' && !ansiCQuote && quote !== "'" && quote !== "$'") {
+      tokenHasExpansion = true;
+    }
+    if (character === '\\' && quote !== "'") {
+      token = undefined;
+      index++;
+    } else if (
+      quote !== "'" &&
+      quote !== "$'" &&
+      (character === '`' ||
+        (character === '$' &&
+          substitutionView[index] === '$' &&
+          /^(?:\\\n)*\(/.test(command.slice(index + 1))) ||
+        (character === '$' &&
+          /^\$\{[A-Za-z_][A-Za-z0-9_]*@P\}/.test(command.slice(index))) ||
+        (!quote &&
+          (character === '<' || character === '>') &&
+          command[index + 1] === '('))
+    ) {
+      // Keep escaped whitespace from turning a later substitution into a
+      // comment in the legacy detector's raw-character boundary check.
+      return true;
+    } else if (quote) {
+      if (character === quote || (quote === "$'" && character === "'")) {
+        quote = '';
+      }
+    } else if (ansiCQuote) {
+      quote = "$'";
+      token = undefined;
+      index += ansiCQuote[0].length - 1;
+    } else if (character === "'" || character === '"') {
+      quote = character;
+      token = undefined;
+    } else if (
+      /[ \t\n;|()]/.test(character) ||
+      (character === '&' && command[index + 1] !== '>')
+    ) {
+      token = '';
+      tokenStart = index + 1;
+      tokenHasExpansion = false;
+      if (redirectTarget === 'word') {
+        finishRedirect(index);
+        redirectTarget = undefined;
+      }
+    } else if (
+      character === '<' ||
+      character === '>' ||
+      (character === '&' && command[index + 1] === '>')
+    ) {
+      const supportedDescriptor =
+        redirectTarget !== 'word' &&
+        character === '>' &&
+        (token === '1' || token === '2');
+      if (
+        (token !== '' &&
+          token !== undefined &&
+          !supportedDescriptor &&
+          redirectTarget !== 'word') ||
+        tokenHasExpansion ||
+        /^\{[^}]+\}$/.test(command.slice(tokenStart, index)) ||
+        command.startsWith('<<', index) ||
+        command.startsWith('<>', index) ||
+        // The operation tracker does not model every adjacent-word spelling.
+        // Keep explicit file restrictions conservative until it can do so.
+        (restrictFileEffects &&
+          (token === undefined || redirectTarget === 'word'))
+      )
+        return true;
+      finishRedirect(index);
+      redirectStart = index - (supportedDescriptor ? 1 : 0);
+      const operator = /^(?:&>>?|>>|>\||[<>]&-|>&|>|<&|<)/.exec(
+        command.slice(index),
+      )![0];
+      index += operator.length - 1;
+      token = '';
+      tokenStart = index + 1;
+      tokenHasExpansion = false;
+      if (operator.endsWith('&-')) {
+        finishRedirect(index + 1);
+        redirectTarget = undefined;
+      } else {
+        redirectTarget = 'pending';
+      }
+    } else {
+      token =
+        token !== undefined && /[0-9]/.test(character)
+          ? token === '' && (character === '1' || character === '2')
+            ? character
+            : 'descriptor'
+          : undefined;
+    }
+  }
+  finishRedirect(command.length);
+  if (executableParts.length === 0) return false;
+  executableParts.push(command.slice(retainedFrom));
+  // Keep raw argument syntax: an unrelated `{}` or expansion must not hide
+  // the executable behind a leading redirect from the unsupported-form veto.
+  return hasUnsupportedShellSyntax(
+    executableParts.join(' '),
+    depth,
+    restrictFileEffects,
+    homeUnknown,
+  );
+}
+
+function matchesCommandText(pattern: string, command: string): boolean {
   // Special case: lone `*` matches any single command
   if (pattern === '*') {
     return true;
@@ -1252,10 +1651,7 @@ export function matchesCommandPattern(
     // No wildcards: prefix matching (backward compat).
     // "git commit" matches "git commit" and "git commit -m test"
     // but NOT "gitcommit".
-    return (
-      normalizedCommand === pattern ||
-      normalizedCommand.startsWith(pattern + ' ')
-    );
+    return command === pattern || command.startsWith(pattern + ' ');
   }
 
   // Build regex from glob pattern with word-boundary semantics.
@@ -1304,10 +1700,111 @@ export function matchesCommandPattern(
   regex += '$';
 
   try {
-    return new RegExp(regex, 's').test(normalizedCommand);
+    return new RegExp(regex, 's').test(command);
   } catch {
-    return normalizedCommand === pattern;
+    return command === pattern;
   }
+}
+
+/** Normalize only unquoted operator padding, retaining glob word boundaries. */
+function normalizeRedirectSpacing(command: string, pattern = false): string {
+  let result = '';
+  let quote = '';
+  let escaped = false;
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]!;
+    if (escaped) {
+      result += character;
+      escaped = false;
+    } else if (character === '\\' && quote !== "'") {
+      result += character;
+      escaped = true;
+    } else if (quote) {
+      result += character;
+      if (character === quote) quote = '';
+    } else if (character === "'" || character === '"') {
+      result += character;
+      quote = character;
+    } else if ('<>&|'.includes(character)) {
+      let end = index + 1;
+      while (end < command.length && '<>&|'.includes(command[end]!)) end++;
+      // An adjacent numeric descriptor is not a command argument. Keep it
+      // distinct from the spaced numeric word in `git 2 > file`.
+      const descriptor =
+        index > 0 &&
+        !/[ \t]/.test(command[index - 1]!) &&
+        /(?:^|[ \t])\d+$/.test(result);
+      result = result.replace(/[ \t]+$/, '');
+      if (result && !descriptor) result += ' ';
+      result += command.slice(index, end);
+      const adjacentStar = pattern && command[end] === '*';
+      while (command[end] === ' ' || command[end] === '\t') end++;
+      if (end < command.length && !adjacentStar) result += ' ';
+      index = end - 1;
+    } else {
+      result += character;
+    }
+  }
+  return result;
+}
+
+/** Compare command words and required file effects, only for deny/ask rules. */
+function matchesStaticShellCommand(
+  pattern: string,
+  command: string,
+  cwd?: string,
+): boolean {
+  const expected = staticShellCommand(pattern, true, cwd);
+  const actual = staticShellCommand(command, false, cwd);
+  if (
+    !expected ||
+    !actual ||
+    !matchesCommandText(
+      expected.words,
+      // Empty argument words cannot erase a restrictive command pattern.
+      // Keep an empty first word: it must never promote argv[1] to executable.
+      actual.words
+        .split(' ')
+        .filter((word, index) => index === 0 || word !== '')
+        .join(' '),
+    )
+  ) {
+    return false;
+  }
+  return expected.redirects.every((redirect) =>
+    actual.redirects.some(
+      (candidate) =>
+        (candidate.kind === redirect.kind || candidate.kind === 'readwrite') &&
+        matchesCommandText(redirect.target, candidate.target),
+    ),
+  );
+}
+
+/** Preserve inner restrictions when Monitor must retain the outer wrapper. */
+function matchesRestrictiveShellPayload(
+  pattern: string,
+  command: string,
+  depth = 0,
+): boolean {
+  if (depth >= MAX_SHELL_UNWRAP_DEPTH) return false;
+  const inner = stripShellWrapper(command);
+  if (inner === command || inner === command.trim()) return false;
+  const literal = stripShellWrapper(command, true) === inner;
+  // Keep the old textual restriction view of an expanded payload, but never
+  // descend into it as a known program. Positional arguments are not payloads.
+  return splitCompoundCommand(inner, literal).some(
+    (segment) =>
+      matchesCommandPattern(pattern, segment) ||
+      matchesCommandText(pattern, trimCommandPadding(segment)) ||
+      matchesCommandText(
+        normalizeRedirectSpacing(pattern, true),
+        normalizeRedirectSpacing(segment),
+      ) ||
+      // Startup files and earlier segments can change cwd. Compare explicit
+      // paths without resolving a relative target against the invocation cwd.
+      matchesStaticShellCommand(pattern, segment) ||
+      (literal && matchesRestrictiveShellPayload(pattern, segment, depth + 1)),
+  );
 }
 
 /**
@@ -2148,6 +2645,18 @@ export function matchesRule(
     return false;
   }
 
+  // Prefix/glob rules can also match additional redirect arguments. Such
+  // writes must not inherit approval when virtual file checks cannot see them.
+  if (
+    !restrictive &&
+    SHELL_TOOL_NAMES.has(canonicalCtxToolName) &&
+    command !== undefined &&
+    getShellConfiguration().shell === 'bash' &&
+    hasUnsupportedShellSyntax(command)
+  ) {
+    return false;
+  }
+
   // ── No specifier and no param matchers → match any invocation ────────
   if (!rule.specifier && !rule.toolParamMatchers?.length) {
     return true;
@@ -2164,7 +2673,32 @@ export function matchesRule(
         if (command === undefined) {
           return false;
         }
-        specifierMatched = matchesCommandPattern(rule.specifier, command);
+        specifierMatched =
+          matchesCommandPattern(rule.specifier, command) ||
+          // Restrictive rules must also recognize the original redirect
+          // spelling. Do not add raw glob matching to allow rules: a quoted
+          // wildcard redirect target could otherwise cover a substitution.
+          (restrictive &&
+            (matchesCommandText(rule.specifier, command) ||
+              matchesCommandText(rule.specifier, trimCommandPadding(command))));
+        if (
+          !specifierMatched &&
+          restrictive &&
+          getShellConfiguration().shell === 'bash'
+        ) {
+          specifierMatched = matchesCommandText(
+            normalizeRedirectSpacing(rule.specifier, true),
+            normalizeRedirectSpacing(trimCommandPadding(command)),
+          );
+          specifierMatched ||= matchesStaticShellCommand(
+            rule.specifier,
+            command,
+            pathContext?.cwd,
+          );
+          specifierMatched ||=
+            SHELL_TOOL_NAMES.has(canonicalCtxToolName) &&
+            matchesRestrictiveShellPayload(rule.specifier, command);
+        }
         break;
       }
 

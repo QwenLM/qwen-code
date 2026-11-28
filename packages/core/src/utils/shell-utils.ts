@@ -18,6 +18,12 @@ import {
 } from 'node:child_process';
 import { accessSync, constants as fsConstants } from 'node:fs';
 import { resolveWorkspacePath } from './workspaceContext.js';
+import {
+  envSplitStringCommand,
+  getShellPrefixCommand,
+  SHELL_ASSIGNMENT_PREFIX,
+} from './shell-command-prefixes.js';
+import { ShellCommentContext } from './shell-comment-context.js';
 
 const SHELL_TOOL_NAMES = ['run_shell_command', 'ShellTool'];
 
@@ -107,7 +113,7 @@ export interface ShellConfiguration {
 }
 
 let cachedBashPath: string | undefined;
-const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const ENV_ASSIGNMENT_REGEX = SHELL_ASSIGNMENT_PREFIX;
 
 /**
  * Attempts to find the Git Bash executable path on Windows.
@@ -400,7 +406,7 @@ export function splitCommands(command: string): string[] {
         currentCommand = '';
       } else if (char === '&') {
         const prevChar = previousNonWhitespaceChar(i);
-        if (prevChar === '>' || prevChar === '<') {
+        if (prevChar === '>' || prevChar === '<' || nextChar === '>') {
           currentCommand += char;
         } else {
           commands.push(currentCommand.trim());
@@ -1012,7 +1018,124 @@ function restAfterOptionTerminator(rest: string): string | null {
   return takeLeadingToken(terminator.rest) ? terminator.rest : null;
 }
 
-export function stripShellWrapper(command: string): string {
+export function stripShellCommandNegation(command: string): string {
+  return command.replace(/^(?:[ \t]*![ \t]+)+/, '');
+}
+
+/** Remove transparent prefixes while retaining the shell payload's quoting. */
+export function stripShellCommandPrefixes(
+  command: string,
+  restrictive = false,
+  environment?: { homeUnknown: boolean },
+): string | undefined {
+  const words: string[] = [];
+  const tails: string[] = [];
+  let rest = trimBashEdgeSeparators(stripShellCommandNegation(command));
+  while (true) {
+    const word = takeLeadingToken(rest);
+    if (!word) break;
+    tails.push(rest);
+    words.push(resolveShellWord(word.token));
+    rest = word.rest;
+  }
+  let start = 0;
+  while (words[start] && isEnvAssignmentToken(words[start]!)) start++;
+  for (;;) {
+    if (takeLeadingToken(tails[start] ?? '')?.token === '!') {
+      if (!restrictive) return undefined;
+      start++;
+      continue;
+    }
+    const prefix = getShellPrefixCommand(words, start);
+    if (prefix?.homeRemoved && environment) environment.homeUnknown = true;
+    if (prefix?.hasUnsupportedOption && !restrictive) return undefined;
+    if (prefix?.splitString !== undefined) {
+      return envSplitStringCommand(
+        prefix.splitString,
+        words.slice(prefix.commandIndex),
+      );
+    }
+    if (prefix === undefined || prefix.commandIndex >= words.length) break;
+    start = prefix.commandIndex;
+  }
+  return tails[start]?.trimStart() ?? trimBashEdgeSeparators(command);
+}
+
+/** Shell programs that the operation tracker cannot inspect. */
+export function hasUnmodeledShellCommandString(command: string): boolean {
+  const head = takeLeadingToken(command);
+  if (!head) return false;
+  const name = getShellWrapperBase(resolveShellWord(head.token));
+  if (name === 'busybox') {
+    const applet = takeLeadingToken(head.rest);
+    return !applet || resolveShellWord(applet.token) !== 'echo';
+  }
+  // These dispatchers can run another program with untracked argv, cwd,
+  // namespace or startup code. Their payload is not a transparent prefix.
+  if (
+    [
+      'taskset',
+      'chroot',
+      'flock',
+      'setpriv',
+      'unshare',
+      'prlimit',
+      'chrt',
+      'watch',
+      'script',
+    ].includes(name ?? '')
+  ) {
+    return true;
+  }
+  // Recognize shell families, including restricted/ksh variants, without
+  // treating arbitrary programs' -c as shell code.
+  if (
+    !/^(?:r?(?:ba|z|k)?sh(?:93)?|[om]ksh|pdksh|yash|dash|ash|msh|hush|fish|t?csh)(?:\.exe)?$/.test(
+      name ?? '',
+    )
+  ) {
+    return false;
+  }
+  const modeledCommandString = isKnownMonitorWrapperToken(head.token);
+  let rest = head.rest;
+  for (;;) {
+    const token = takeLeadingToken(rest);
+    // No script argument means that stdin is a program, including a pipe or
+    // an outer input redirect. A script filename is likewise uninspected.
+    if (!token) return true;
+    const word = resolveShellWord(token.token);
+    if (word === '--version' || word === '--help') return false;
+    // Only options that keep the same explicit command string are transparent.
+    // Startup files, option operands and unknown shell flags require review.
+    if (
+      !['--noprofile', '--norc'].includes(word) &&
+      !/^-[cefnuvx]+$/.test(word) &&
+      !/^\+[efnuvx]+$/.test(word)
+    ) {
+      return true;
+    }
+    if (isMonitorCommandMarker(head.token, word)) {
+      const payload = takeLeadingToken(token.rest);
+      if (
+        payload &&
+        !isOptionTerminatorWord(payload.token) &&
+        /^[-+]/.test(resolveShellWord(payload.token))
+      ) {
+        // Bash continues parsing options after -c, before the script word.
+        return true;
+      }
+      return (
+        !modeledCommandString || stripShellWrapper(command) === command.trim()
+      );
+    }
+    rest = token.rest;
+  }
+}
+
+export function stripShellWrapper(
+  command: string,
+  literalPayloadOnly = false,
+): string {
   const trimmed = trimBashEdgeSeparators(command);
   let rest = trimmed;
 
@@ -1051,6 +1174,16 @@ export function stripShellWrapper(command: string): string {
       }
       const commandToken = takeLeadingToken(markerRest);
       if (!commandToken) return trimmed;
+      if (literalPayloadOnly) {
+        const removed = shellWordQuoteRemoval(commandToken.token);
+        if (
+          removed === null ||
+          removed.hasExpansion ||
+          shellWrapperCommandConsumesRest(wrapperToken.token)
+        ) {
+          return trimmed;
+        }
+      }
       const { value, quote } = stripSymmetricQuotes(commandToken.token);
       // The resolved word, not its spelling: an ANSI-C or locale payload
       // (`$'cat > /etc/motd'`, `$"…"`) is the script bash runs, so the
@@ -1874,6 +2007,19 @@ function takeLeadingToken(
       continue;
     }
 
+    if ((char === '(' || char === ')') && commandSubstitutionDepth === 0) {
+      // Bare grouping operators delimit words. Keep substitutions whole, but
+      // let consumers inspect a wrapper inside `( bash -c '...' )`.
+      if (idx === 0) idx++;
+      break;
+    }
+
+    if (char === '(') {
+      commandSubstitutionDepth++;
+      idx++;
+      continue;
+    }
+
     if (char === ')' && commandSubstitutionDepth > 0) {
       commandSubstitutionDepth--;
       idx++;
@@ -1955,7 +2101,7 @@ function isShellWrapperFlagToken(normalizedToken: string): boolean {
   return (
     normalizedToken.startsWith('-') ||
     normalizedToken.startsWith('/') ||
-    normalizedToken === '+o'
+    /^\+[a-z]+$/i.test(normalizedToken)
   );
 }
 
@@ -2123,8 +2269,9 @@ export function normalizeMonitorCommand(
     stripTrailingBackgroundAmp(rawInnerArgsSuffix);
   // Permission safety focuses on command text that the shell may expand or
   // execute: leading env assignments, the -c script, and argv suffixes. Wrapper
-  // flags are preserved in spawnCommand, but are not converted into Bash(...)
-  // command-rule surface.
+  // flags for modeled wrappers are preserved in spawnCommand without becoming
+  // Bash(...) command-rule surface. Unmodeled execution options must stay in
+  // the safety surface so normalization cannot hide their execution semantics.
   // An unresolvable payload keeps the WHOLE wrapper as the safety surface:
   // appending the following word surfaces the script bash may run, so a
   // `Bash(bash -c *)` wildcard no longer covers the unreadable spelling
@@ -2166,10 +2313,17 @@ export function normalizeMonitorCommand(
         .filter(Boolean)
         .join(' ')
     : analysisCommand;
+  const unprefixedWrapper = wrapperTokens
+    ? stripShellCommandPrefixes(command)
+    : undefined;
+  const preserveWrapperForSafety =
+    wrapperTokens &&
+    (unprefixedWrapper === undefined ||
+      hasUnmodeledShellCommandString(unprefixedWrapper));
 
   return {
     analysisCommand,
-    safetyCommand,
+    safetyCommand: preserveWrapperForSafety ? spawnCommand : safetyCommand,
     spawnCommand,
     strippedTrailingAmp,
   };
@@ -2346,20 +2500,6 @@ export function detectCommandSubstitution(command: string): boolean {
     delimiter: string;
     isQuotedDelimiter: boolean;
     stripLeadingTabs: boolean;
-  };
-
-  const isCommentStart = (index: number): boolean => {
-    if (command[index] !== '#') return false;
-    if (index === 0) return true;
-
-    const prev = command[index - 1]!;
-    if (prev === ' ' || prev === '\t' || prev === '\n' || prev === '\r') {
-      return true;
-    }
-
-    // `#` starts a comment when it begins a word. In practice this includes
-    // common command separators/operators where a new word can begin.
-    return [';', '&', '|', '(', ')', '<', '>'].includes(prev);
   };
 
   const isWordBoundary = (char: string): boolean => {
@@ -2586,7 +2726,7 @@ export function detectCommandSubstitution(command: string): boolean {
   let inSingleQuotes = false;
   let inDoubleQuotes = false;
   let inBackticks = false;
-  let inComment = false;
+  const comments = new ShellCommentContext();
   const pendingHeredocs: PendingHeredoc[] = [];
   let i = 0;
 
@@ -2599,7 +2739,6 @@ export function detectCommandSubstitution(command: string): boolean {
     // consume heredoc bodies sequentially before continuing.
     if (!inSingleQuotes && !inDoubleQuotes && !inBackticks) {
       if (char === '\r' && nextChar === '\n') {
-        inComment = false;
         if (pendingHeredocs.length > 0) {
           const result = consumeHeredocBodies(i + 2, pendingHeredocs);
           if (result.hasSubstitution) return true;
@@ -2608,7 +2747,6 @@ export function detectCommandSubstitution(command: string): boolean {
           continue;
         }
       } else if (char === '\n' || char === '\r') {
-        inComment = false;
         if (pendingHeredocs.length > 0) {
           const result = consumeHeredocBodies(i + 1, pendingHeredocs);
           if (result.hasSubstitution) return true;
@@ -2619,17 +2757,10 @@ export function detectCommandSubstitution(command: string): boolean {
       }
     }
 
-    if (!inSingleQuotes && !inDoubleQuotes && !inBackticks) {
-      if (!inComment && isCommentStart(i)) {
-        inComment = true;
-        i++;
-        continue;
-      }
-
-      if (inComment) {
-        i++;
-        continue;
-      }
+    const comment = comments.read(command, i, inSingleQuotes, inDoubleQuotes);
+    if (comment) {
+      i = comment.end;
+      continue;
     }
 
     // Handle escaping - only works outside single quotes
