@@ -56,6 +56,14 @@ export interface SkillConfig {
   allowedTools?: string[];
 
   /**
+   * Optional list of MCP server names this skill depends on. Checked at
+   * activation: servers missing from the registered MCP config are named
+   * in the activation output with how to add them, so a missing dependency
+   * surfaces before the first tool call fails (#17317).
+   */
+  mcpServers?: string[];
+
+  /**
    * Hooks to register when this skill is invoked.
    * Hooks are registered as session-scoped hooks that persist
    * for the duration of the session.
@@ -308,6 +316,31 @@ export function parseAllowedToolsField(
     throw new Error('"allowedTools" must be an array');
   }
   return raw.map(String);
+}
+
+/**
+ * Parses the optional `mcp` frontmatter field: MCP server names this skill
+ * depends on. Accepts a single string or a list of strings; entries are
+ * trimmed and comma-joined shorthand (`mcp: "github, notion"`) is split,
+ * so padded or comma-separated values never invent a server name no
+ * configuration can match (#17323 F4). Anything else is ignored so
+ * malformed entries never break skill loading (#17317).
+ */
+export function parseMcpServersField(
+  frontmatter: Record<string, unknown>,
+): string[] | undefined {
+  const raw = frontmatter['mcp'];
+  const normalize = (v: string): string[] =>
+    v
+      .split(',')
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0);
+  const parsed = Array.isArray(raw)
+    ? raw.flatMap((v) => (typeof v === 'string' ? normalize(v) : []))
+    : typeof raw === 'string'
+      ? normalize(raw)
+      : undefined;
+  return parsed && parsed.length > 0 ? parsed : undefined;
 }
 
 /**

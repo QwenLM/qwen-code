@@ -389,6 +389,34 @@ describe('SkillCommandLoader', () => {
     });
   });
 
+  it('carries the MCP dependency warning on the user-invoked path (#17323 F3)', async () => {
+    // The slash path must warn exactly like the Skill tool: a dependency
+    // the canonical classifier names is unusable, and the user is told the
+    // actionable fix rather than left to hit an opaque tool-not-found.
+    const skill = makeSkill({ mcpServers: ['jira'] });
+    mockSkillManager.listSkills.mockImplementation(
+      ({ level }: { level: string }) =>
+        Promise.resolve(level === 'user' ? [skill] : []),
+    );
+    (
+      mockConfig as unknown as {
+        getMcpServerUnavailableReason: ReturnType<typeof vi.fn>;
+      }
+    ).getMcpServerUnavailableReason = vi.fn().mockReturnValue('not_allowed');
+
+    const loader = new SkillCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+    const result = await commands[0].action!(
+      { invocation: { raw: '/my-skill', args: '' } } as never,
+      '',
+    );
+
+    const text =
+      (result as { content: Array<{ text?: string }> }).content[0]?.text ?? '';
+    expect(text).toContain('configured but currently unusable');
+    expect(text).toContain('add them to mcp.allowed');
+  });
+
   it('should append raw invocation when args are provided', async () => {
     // The args file is written relative to the process's directory; without a
     // temp cwd this suite would write into the real repository.

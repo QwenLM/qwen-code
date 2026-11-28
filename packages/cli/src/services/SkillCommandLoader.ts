@@ -15,6 +15,7 @@ import {
   recordAutoSkillUsage,
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
+import { buildMcpDependencyWarning } from '@qwen-code/qwen-code-core/tools/skill-utils.js';
 import type { ICommandLoader } from './types.js';
 import {
   writeSkillArgs,
@@ -227,6 +228,17 @@ export class SkillCommandLoader implements ICommandLoader {
               if (!clearSkillArgs(skill.name)) {
                 content = appendToLastTextPart(content, staleArgsWarning());
               }
+            }
+            // Same MCP dependency warning the Skill tool emits, so a
+            // user-invoked activation also learns before the first tool
+            // call fails opaquely (#17323 F3). The config is nullable on
+            // this loader — without it there is nothing to check (#17323
+            // R7-1).
+            const mcpWarning = this.config
+              ? buildMcpDependencyWarning(this.config, skill)
+              : '';
+            if (mcpWarning) {
+              content = appendToLastTextPart(content, mcpWarning);
             }
 
             return {
