@@ -439,18 +439,26 @@ describe('BaseJsonOutputAdapter', () => {
       expect(state.blocks).toHaveLength(1);
     });
 
-    it('should finalize and start new message when block type changes', () => {
+    it('continues the same message id and block numbering when block type changes', () => {
       adapter.startAssistantMessage();
       const state = adapter['mainAgentMessageState'];
+      const messageId = state.messageId;
       adapter.processEvent({
         type: LlmEventType.Content,
         value: 'text',
       });
+      const usage = state.usage;
+      usage.input_tokens = 10;
 
       adapter.exposeEnsureBlockTypeConsistency(state, 'thinking', null);
 
       expect(state.currentBlockType).toBe('thinking');
       expect(state.blocks.length).toBe(0);
+      expect(state.messageId).toBe(messageId);
+      expect(state.emittedBlockCount).toBe(1);
+      // The message spans both snapshots, so the usage accumulated on the
+      // first one still describes the last snapshot emitted for the same id.
+      expect(state.usage).toBe(usage);
     });
   });
 
@@ -460,6 +468,7 @@ describe('BaseJsonOutputAdapter', () => {
       state.messageId = 'old-id';
       state.blocks = [{ type: 'text', text: 'old' }];
       state.openBlocks.add(0);
+      state.emittedBlockCount = 2;
       state.usage = { input_tokens: 100, output_tokens: 50 };
       state.messageStarted = true;
       state.finalized = true;
@@ -471,6 +480,10 @@ describe('BaseJsonOutputAdapter', () => {
       expect(state.messageId).not.toBe('old-id');
       expect(state.blocks).toEqual([]);
       expect(state.openBlocks.size).toBe(0);
+      // A new message restarts the block numbering that spans one turn's
+      // snapshots; carrying the count over would number this message's first
+      // block after blocks an earlier message already emitted.
+      expect(state.emittedBlockCount).toBe(0);
       expect(state.usage).toEqual({ input_tokens: 0, output_tokens: 0 });
       expect(state.messageStarted).toBe(false);
       expect(state.finalized).toBe(false);
