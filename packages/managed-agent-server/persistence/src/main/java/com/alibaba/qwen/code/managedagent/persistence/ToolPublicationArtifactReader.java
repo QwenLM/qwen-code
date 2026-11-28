@@ -36,13 +36,17 @@ public class ToolPublicationArtifactReader
     public Map<String, Boolean> availability(List<Artifact> artifacts) {
         Map<String, Boolean> result = new HashMap<>();
         var data = publications.getIfAvailable();
+        var groups = artifacts.stream().collect(Collectors.groupingBy(
+                artifact -> artifact.source().sessionKey(),
+                Collectors.mapping(Artifact::publicationId, Collectors.toSet())));
+        var scopes = groups.keySet().stream().collect(
+                Collectors.toMap(key -> key, ToolPublicationDataStore::scope));
         var rows = data == null ? Map.<ToolPublicationDataStore.ScopedPublication, Map<String, Object>>of()
-                : data.referencedPublications(artifacts.stream().collect(Collectors.groupingBy(
-                        artifact -> artifact.source().sessionKey(),
-                        Collectors.mapping(Artifact::publicationId, Collectors.toSet()))));
+                : data.referencedPublications(groups);
         for (var artifact : artifacts) {
             var source = artifact.source();
-            var publication = new ToolPublicationDataStore.ScopedPublication(source.sessionKey(), artifact.publicationId());
+            var publication = new ToolPublicationDataStore.ScopedPublication(
+                    scopes.get(source.sessionKey()), artifact.publicationId());
             result.put(artifact.descriptor().path("id").asText(), ToolPublicationRequirements.referenced(
                     rows.get(publication), source.outcomeRef(), source.journalRevision(), source.receiptSequence()));
         }

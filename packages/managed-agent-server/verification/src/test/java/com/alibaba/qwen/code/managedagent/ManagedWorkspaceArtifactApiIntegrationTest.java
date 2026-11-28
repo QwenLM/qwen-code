@@ -67,6 +67,7 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
     JsonNode stdout;
     JsonNode stderr;
     String realOperationSource;
+    boolean denySessionTwoContent;
 
     protected javax.sql.DataSource dataSource() {
         return null;
@@ -93,7 +94,8 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
             public boolean publishOriginal(String tenant, String workspace, String session) { return true; }
             public boolean publishPreview(String tenant, String workspace, String session) { return true; }
             public boolean readOriginal(String tenant, String actor, String workspace, String session) {
-                return "reader".equals(actor) && !"session-2".equals(session);
+                return "reader".equals(actor)
+                        && (!denySessionTwoContent || !"session-2".equals(session));
             }
         };
         mvc = mvc(new ManagedArtifactService(sessions, fixture.results(), fixture.reader(),
@@ -220,6 +222,28 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
                 + " stream_id, creation_sequence FROM ma_artifact WHERE artifact_id = ? LIMIT 1",
                 artifactId, resultId, scope, descriptor.toString(), stdout.path("id").asText());
         return artifactId;
+    }
+
+    private int copyPublicationReceipt(String sessionId, String publicationId) {
+        String scope = ManagedIdentityRefs.publicationScopeRef(TENANT, WORKSPACE, sessionId);
+        return fixture.jdbc().update("INSERT INTO ma_output_capture (scope_ref, tenant_id, workspace_id, session_id,"
+                + " publication_id, execution_call_id, capture_id, binding_json, binding_digest, token_hash, state,"
+                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, admission_resource_id,"
+                + " receipt_revision, receipt_sequence, is_quarantined)"
+                + " SELECT ?, tenant_id, workspace_id, ?, publication_id, execution_call_id, capture_id,"
+                + " binding_json, binding_digest, token_hash, state, capture_bytes, producer_bytes, admission_bytes,"
+                + " producer_phase, admission_resource_id, receipt_revision, receipt_sequence, is_quarantined"
+                + " FROM ma_output_capture WHERE publication_id = ?",
+                scope.getBytes(StandardCharsets.UTF_8), sessionId, publicationId);
+    }
+
+    private static JsonNode row(JsonNode page, String artifactId) {
+        for (var row : page.required("data")) {
+            if (artifactId.equals(row.required("artifact").required("id").asText())) {
+                return row;
+            }
+        }
+        throw new AssertionError("Artifact is missing from page: " + artifactId);
     }
 
     @Test
@@ -537,19 +561,11 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
         String third = seedArtifactSession("session-3", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
         String publicationId = fixture.results().findArtifact(TENANT, "session-1", stdout.path("id").asText())
                 .orElseThrow().publicationId();
-        String scope = ManagedIdentityRefs.publicationScopeRef(TENANT, WORKSPACE, "session-2");
-        fixture.jdbc().update("INSERT INTO ma_output_capture (scope_ref, tenant_id, workspace_id, session_id,"
-                + " publication_id, execution_call_id, capture_id, binding_json, binding_digest, token_hash, state,"
-                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, admission_resource_id,"
-                + " receipt_revision, receipt_sequence, is_quarantined)"
-                + " SELECT ?, tenant_id, workspace_id, ?, publication_id, execution_call_id, capture_id,"
-                + " binding_json, binding_digest, token_hash, state, capture_bytes, producer_bytes, admission_bytes,"
-                + " producer_phase, admission_resource_id, receipt_revision, receipt_sequence, is_quarantined"
-                + " FROM ma_output_capture WHERE publication_id = ?",
-                scope.getBytes(StandardCharsets.UTF_8), "session-2", publicationId);
+        assertThat(copyPublicationReceipt("session-2", publicationId)).isEqualTo(1);
         var jdbc = spy(fixture.jdbc());
         ReflectionTestUtils.setField(fixture.publications(), "jdbc", jdbc);
 
+        denySessionTwoContent = true;
         var response = page("reader", body(null, null));
         assertThat(ids(response)).containsExactlyInAnyOrder(second, third,
                 stdout.path("id").asText(), stderr.path("id").asText());
@@ -562,6 +578,24 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
         }
         verify(jdbc).query(ArgumentMatchers.contains("FROM ma_output_capture"),
                 ArgumentMatchers.any(RowMapper.class), ArgumentMatchers.any(Object[].class));
+    }
+
+    @Test
+    void excludesReceiptsFromRetiredSourceSessions() throws Exception {
+        String retired = seedArtifactSession(
+                "session-retired", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
+        String publicationId = fixture.results().findArtifact(TENANT, "session-1", stdout.path("id").asText())
+                .orElseThrow().publicationId();
+        assertThat(copyPublicationReceipt("session-retired", publicationId)).isEqualTo(1);
+        fixture.jdbc().update("UPDATE ma_session SET retired_at = 1 WHERE tenant_id = ? AND session_id = ?",
+                TENANT, "session-retired");
+
+        var response = page("reader", body(null, null));
+
+        assertThat(row(response, retired).required("artifact").required("availability").asText())
+                .isEqualTo("unavailable");
+        assertThat(row(response, stdout.path("id").asText()).required("artifact").required("availability").asText())
+                .isEqualTo("available");
     }
 
     @Test
