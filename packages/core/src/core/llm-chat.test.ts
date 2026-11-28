@@ -8662,6 +8662,9 @@ describe('LlmChat', async () => {
         schema: { type: 'object' },
       },
     };
+    const nestedReportFormat = {
+      chat_template_kwargs: { response_format: reportResponseFormat },
+    };
     const textResponseFormat = { type: 'text' };
     const responseAwareTemplate =
       '{{ response_format | default("none") }}{{ messages }}';
@@ -8879,6 +8882,55 @@ describe('LlmChat', async () => {
           response_format: textResponseFormat,
         },
         output: kimiRoute.primaryOutput,
+      },
+      {
+        name: 'a repeated MiniMax response schema',
+        primaryBody: nestedReportFormat,
+        body: {
+          ...nestedReportFormat,
+          response_format: structuredClone(reportResponseFormat),
+        },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a repeated Kimi response schema after the body override',
+        primaryBody: nestedReportFormat,
+        sampling: { response_format: { type: 'json_object' } },
+        body: {
+          ...nestedReportFormat,
+          response_format: structuredClone(reportResponseFormat),
+        },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a different response schema overriding the nested schema',
+        primaryBody: nestedReportFormat,
+        body: {
+          ...nestedReportFormat,
+          response_format: {
+            ...reportResponseFormat,
+            json_schema: {
+              ...reportResponseFormat.json_schema,
+              schema: { type: 'object', additionalProperties: false },
+            },
+          },
+        },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        name: 'a repeated response schema with a custom template',
+        primaryBody: {
+          ...nestedReportFormat,
+          chat_template: responseAwareTemplate,
+        },
+        body: {
+          ...nestedReportFormat,
+          chat_template: responseAwareTemplate,
+          response_format: reportResponseFormat,
+        },
+        output: 4_000,
       },
     ])(
       'matches warmed fallback usage against $name',

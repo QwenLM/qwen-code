@@ -1068,14 +1068,28 @@ function openAIChatPromptSource(
       : undefined;
   const responseFormat = body['response_format'] ?? undefined;
   const plainText = { type: 'text' };
+  const wireModel = model.trim().toLowerCase();
+  const pinnedMiniMax = wireModel === 'minimaxai/minimax-m2.5:digitalocean';
   // Renderers can use explicit text to replace a nested or server default.
   // The pinned MiniMax template does not consume the top-level text setting.
   const omitPlainText =
     chatTemplate === undefined &&
     isDeepStrictEqual(responseFormat, plainText) &&
     (isDeepStrictEqual(templateResponseFormat, plainText) ||
-      (templateResponseFormat === undefined &&
-        model.trim().toLowerCase() === 'minimaxai/minimax-m2.5:digitalocean'));
+      (templateResponseFormat === undefined && pinnedMiniMax));
+  const structuredFormat = responseFormat as
+    | { type?: unknown; json_schema?: { schema?: unknown } }
+    | undefined;
+  const responseSchema = structuredFormat?.json_schema?.schema;
+  // These renderers use one prompt schema when the two declarations agree.
+  const omitRedundantSchema =
+    chatTemplate === undefined &&
+    (pinnedMiniMax || wireModel === 'moonshotai/kimi-k3:fireworks') &&
+    structuredFormat?.type === 'json_schema' &&
+    responseSchema !== null &&
+    typeof responseSchema === 'object' &&
+    !Array.isArray(responseSchema) &&
+    isDeepStrictEqual(responseFormat, templateResponseFormat);
   // The Chat pipeline installs generated tools after sampling params and before
   // the provider applies extra_body. Only compare the tools that survive.
   const generatedTools =
@@ -1091,7 +1105,8 @@ function openAIChatPromptSource(
       chat_template: chatTemplate,
       chat_template_kwargs: templateOptions,
       documents: body['documents'] ?? undefined,
-      response_format: omitPlainText ? undefined : responseFormat,
+      response_format:
+        omitPlainText || omitRedundantSchema ? undefined : responseFormat,
       add_generation_prompt: addGenerationPrompt,
       continue_final_message: continueFinalMessage,
       add_special_tokens: addSpecialTokens,
