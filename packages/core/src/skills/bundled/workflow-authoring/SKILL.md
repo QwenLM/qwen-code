@@ -117,12 +117,25 @@ say explicitly what each one should read and whether it may edit files.
   `phase()` between groups rather than per dispatch.
 - `schema` (JSON Schema object) — the subagent must deliver its result by
   calling `structured_output` with arguments matching the schema; agent()
-  resolves to the validated object. A schema that does not compile, or that
-  requires a property its own object forbids, makes agent() resolve to null
-  without starting the agent. Each failed submission hands its error back to
-  the agent, and the third failed submission stops it. With no valid result
-  agent() resolves to null and the failure states how many submissions failed
-  and the last error; check for null.
+  resolves to the validated object. The schema must be a JSON Schema object
+  whose root accepts an object, and it is compiled strictly. A schema that is
+  not an object, fails strict compilation (for example an unknown keyword),
+  uses `$async`, or carries a contradiction the pre-flight check can prove (a
+  root `type`/`const`/`enum` that excludes objects, a required list longer than
+  `maxProperties` allows, or a required property its own object forbids) makes
+  agent() resolve to null without starting the agent. The check reads only a
+  node's own property rules and skips a node carrying reference, combinator,
+  conditional, dependency, unevaluated-property or property-name keywords;
+  newer-dialect spellings need the root `$schema` set to
+  `https://json-schema.org/draft/2020-12/schema`. A schema with no `$schema`,
+  or with the draft-07 URI, is compiled as draft-07, so those keywords are
+  refused as unknown; every other `$schema` URI is refused outright.
+  Otherwise the agent is dispatched and
+  the failure arrives as failed submissions. Each failed submission hands its
+  error back to the agent, and
+  the third failed submission stops it. With no valid result agent() resolves
+  to null and the failure states how many submissions failed and the last
+  error; check for null.
 - `agentType` (string) — resolves against the declarative-agents registry
   (`.qwen/agents/<name>.md`, project then user then built-in). Unresolved names
   make the admitted agent() resolve to null and record "agent({agentType}):
