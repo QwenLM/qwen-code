@@ -956,8 +956,7 @@ describe('OpenTuiToolConfirmation', () => {
       typeChars('typed');
       press({ name: 'return', sequence: '\r' });
       settleAdvance();
-      // ink mounts a TextInput whose own Enter subscriber fires alongside the
-      // dialog's, so one keystroke skips this question entirely.
+      // One keystroke, one tab: the next question is shown, not skipped.
       expect(container.textContent ?? '').toContain('Pick channels?');
       expect(onConfirm).not.toHaveBeenCalled();
     });
