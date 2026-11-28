@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { TodoWriteParams } from './todoWrite.js';
 import { TodoWriteTool, listTodoSessions } from './todoWrite.js';
 import type { ToolResult } from './tools.js';
+import { ToolErrorType } from './tool-error.js';
 import { DefaultHookOutput, HookPhase, type TodoItem } from '../hooks/types.js';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
@@ -725,6 +726,12 @@ describe('TodoWriteTool', () => {
       expect(result.llmContent).toContain('Todo list modification failed');
       expect(result.llmContent).toContain('Write failed');
       expect(result.returnDisplay).toContain('Error writing todos');
+      // The display string is the only place a failure used to be visible:
+      // status, telemetry, the persisted record and replay all read `error`.
+      expect(result.error).toMatchObject({
+        message: 'Error writing todos: Write failed',
+        type: 'execution_failed',
+      });
     });
 
     it('should handle empty todos array', async () => {
@@ -753,6 +760,12 @@ describe('TodoWriteTool', () => {
       expect(mockAtomicWrite).not.toHaveBeenCalled();
       expect(result.llmContent).toContain(message);
       expect(result.returnDisplay).toBe(message);
+      // A blocked hook must classify as a failure, or Session.runTool
+      // persists the call as success and no failure frame reaches the wire.
+      expect(result.error).toEqual({
+        message,
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
     }
 
     it('should block todo creation when validation hook returns block', async () => {
