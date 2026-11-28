@@ -244,6 +244,35 @@ jobs:
         run: |-
           echo "bot_login=${{ vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot' }}" >> "$GITHUB_OUTPUT"
 
+  review-trust:
+    if: |-
+      github.event_name != 'issue_comment' || github.event.issue.pull_request
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+      pull-requests: 'read'
+    outputs:
+      untrusted: '${{ steps.trust.outputs.untrusted }}'
+      pr_number: '${{ steps.trust.outputs.pr_number }}'
+      head_sha: '${{ steps.trust.outputs.head_sha }}'
+    steps:
+      - name: 'Checkout trusted publisher scripts'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.sha }}'
+          persist-credentials: false
+      - name: 'Resolve PR trust before executing its code'
+        id: 'trust'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          GITHUB_EVENT_JSON: '${{ toJSON(github.event) }}'
+        run: |-
+          config_dir="$(mktemp -d "${RUNNER_TEMP:?}/review-trust-gh.XXXXXX")"
+          trap 'rm -rf "$config_dir"' EXIT
+          export GH_CONFIG_DIR="$config_dir"
+          node .github/scripts/ci/review-pr-trust.mjs
+
   delay-automatic-review:
     needs: ['authorize']
     if: |-
@@ -482,7 +511,8 @@ jobs:
           esac
 
   review-pr:
-    needs: ['review-config', 'delay-automatic-review', 'authorize']
+    needs:
+      ['review-config', 'delay-automatic-review', 'authorize', 'review-trust']
     # pull_request_target routing (all paths additionally pass through
     # `authorize`; automatic PR events are precheck-gated, while explicit
     # review_requested events check the requester and skip delay):
@@ -492,6 +522,9 @@ jobs:
     # including the fromJSON newline/CR pair, explained there.
     if: |-
       !cancelled() &&
+      needs.review-trust.result == 'success' &&
+      needs.review-trust.outputs.untrusted != '' &&
+      needs.review-trust.outputs.head_sha != '' &&
       ((github.event_name == 'workflow_dispatch' &&
        (github.event.inputs.command == 'review' || github.event.inputs.command == '')) ||
       (github.event_name == 'pull_request_target' &&
@@ -534,17 +567,32 @@ jobs:
     # retry plus posting never hit the cap.
     timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'
     # The schedule switches the managed fleet to `ecs-review` at 17:00
-    # Asia/Shanghai and back to CI at 05:00. Reviews queue while the pool
-    # is closed. Fork pull_request_target payloads route to the disposable
-    # hosted runner: `off` containment on the shared pool hands PR-controlled
-    # install/build scripts CI_BOT_PAT + the model key and persists plants
-    # for the next run. Comment/dispatch triggers keep the pool; the sandbox
-    # preflight below is their fail-closed backstop.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request_target'' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Trust is resolved before the head repo is known for comment/dispatch
+    # events. Every fork lane uses a disposable VM, not only lifecycle events.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && needs.review-trust.outputs.untrusted != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    container: >-
+      ${{ needs.review-trust.outputs.untrusted == 'true' &&
+          fromJSON('{"image":"node:22-bookworm","options":"--init --user root"}') ||
+          null }}
     permissions:
       contents: 'read'
       pull-requests: 'write'
       issues: 'write'
+    outputs:
+      pr_number: '${{ steps.context.outputs.pr_number }}'
+      expected_head_sha: '${{ steps.review.outputs.expected_head_sha }}'
+      review_completed: '${{ steps.review.outputs.review_completed }}'
+      docs_only_medium: '${{ steps.review.outputs.docs_only_medium }}'
+      auto_review: '${{ steps.context.outputs.auto_review }}'
+      review_mode: '${{ steps.context.outputs.review_mode }}'
+      review_failed: '${{ steps.marker_failed.outputs.review_failed || steps.marker_ok.outputs.review_failed }}'
+      docs_only_failed: '${{ steps.marker_failed.outputs.docs_only_failed || steps.marker_ok.outputs.docs_only_failed }}'
+      failure_reason: '${{ steps.review.outputs.failure_reason }}'
+      failure_kind: '${{ steps.review.outputs.failure_kind }}'
+      effective_timeout_minutes: '${{ steps.review.outputs.effective_timeout_minutes || steps.context.outputs.timeout_minutes }}'
+      salvage_post: "${{ steps.review.outputs.salvaged == 'true' }}"
+      salvage_moved_to: '${{ steps.review.outputs.salvage_moved_to }}'
+      completion_line: '${{ steps.review.outputs.completion_line }}'
     steps:
       # The runner worker dies in FinalizeJob with EACCES when it loses write
       # access to its own directories (observed: '/home/github-runner' no
@@ -609,6 +657,12 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      - name: 'Install isolated review tools'
+        if: "needs.review-trust.outputs.untrusted == 'true'"
+        run: |-
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git gh jq util-linux
 
       # Self-hosted runners reuse $HOME, /tmp and the workspace, so a prior run
       # can bleed into this one: its agent session/memory (under QWEN_HOME),
@@ -814,6 +868,7 @@ jobs:
         with:
           ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
+          persist-credentials: false
 
       - name: 'Reset workspace after failed checkout'
         if: "steps.checkout.outcome == 'failure'"
@@ -856,6 +911,7 @@ jobs:
         with:
           ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
+          persist-credentials: false
 
       - name: 'Resolve PR context'
         id: 'context'
@@ -935,6 +991,7 @@ jobs:
           {
             echo "should_run=true"
             echo "pr_number=$PR_NUMBER"
+            echo "pr_repo=${{ github.repository }}"
             echo "review_mode=$REVIEW_MODE"
             echo "timeout_minutes=$TIMEOUT_MINUTES"
             echo "timeout_explicit=$TIMEOUT_EXPLICIT"
@@ -943,7 +1000,7 @@ jobs:
 
       - name: 'Setup Node.js for hosted review'
         # KEEP IN SYNC with review-pr.runs-on: every hosted shape needs this.
-        if: "steps.context.outputs.should_run == 'true' && (github.repository != 'QwenLM/qwen-code' || vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true' || (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository))"
+        if: "steps.context.outputs.should_run == 'true' && (github.repository != 'QwenLM/qwen-code' || vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true' || needs.review-trust.outputs.untrusted == 'true')"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
@@ -1239,8 +1296,12 @@ jobs:
         id: 'review'
         if: "steps.context.outputs.should_run == 'true'"
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          UNTRUSTED_PR: '${{ needs.review-trust.outputs.untrusted }}'
+          SECURITY_GITHUB_TOKEN: "${{ needs.review-trust.outputs.untrusted != 'true' && secrets.CI_BOT_PAT || '' }}"
+          OPENAI_API_KEY: "${{ needs.review-trust.outputs.untrusted != 'true' && secrets.REVIEW_OPENAI_API_KEY || '' }}"
+          FORK_OPENAI_API_KEY: "${{ needs.review-trust.outputs.untrusted == 'true' && secrets.REVIEW_OPENAI_API_KEY || '' }}"
+          GITHUB_TOKEN: "${{ needs.review-trust.outputs.untrusted != 'true' && secrets.CI_BOT_PAT || '' }}"
+          JOB_GH_TOKEN: '${{ github.token }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           # Review model, plus the canary split that sends a PR-number slice
           # of reviews to a second model. All three arrive as variables so a
@@ -1248,15 +1309,20 @@ jobs:
           # an empty canary or percent keeps today's single model, and
           # the bucket selection below turns them into OPENAI_MODEL.
           REVIEW_MODEL_DEFAULT: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-          REVIEW_MODEL_CANARY: '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY }}'
-          REVIEW_MODEL_CANARY_PERCENT: '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}'
+          # Fork lanes run on hosted runners that cannot reach the internal
+          # canary endpoint (connect ETIMEDOUT from the VM), and every failed
+          # fork review is a PR-visible comment storm, so the canary split is
+          # trusted-lane only until the canary endpoint is publicly routable.
+          REVIEW_MODEL_CANARY: "${{ needs.review-trust.outputs.untrusted == 'true' && '' || vars.QWEN_PR_REVIEW_MODEL_CANARY }}"
+          REVIEW_MODEL_CANARY_PERCENT: "${{ needs.review-trust.outputs.untrusted == 'true' && '0' || vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}"
           # The canary cohort may also carry its own endpoint: a second
           # gateway with its own quota, or a provider the default gateway
           # does not serve. The pair is all-or-nothing — a URL without its
           # own key would send the default key to another provider, so the
           # override below refuses that shape and keeps the default cohort.
           REVIEW_BASE_URL_CANARY: '${{ vars.QWEN_PR_REVIEW_BASE_URL_CANARY }}'
-          REVIEW_API_KEY_CANARY: '${{ secrets.REVIEW_OPENAI_API_KEY_CANARY }}'
+          REVIEW_API_KEY_CANARY: "${{ needs.review-trust.outputs.untrusted != 'true' && secrets.REVIEW_OPENAI_API_KEY_CANARY || '' }}"
+          FORK_OPENAI_API_KEY_CANARY: "${{ needs.review-trust.outputs.untrusted == 'true' && secrets.REVIEW_OPENAI_API_KEY_CANARY || '' }}"
           # Runner class gates the canary endpoint override below: the canary
           # gateway is reachable only from the self-hosted pool, so a
           # GitHub-hosted runner keeps the default cohort. Passed as env (not
@@ -1320,6 +1386,11 @@ jobs:
           # the body is plain bash the runner never templates. See the
           # workflow-expression-length test in
           # scripts/tests/qwen-pr-review-workflow.test.js.
+          FORK_LIFECYCLE_REVIEW: '${{ needs.review-trust.outputs.untrusted }}'
+          # The head SHA captured at trust resolution; the untrusted lane pins
+          # the review to it so a push racing trust resolution cannot swap the
+          # reviewed tree.
+          TRUSTED_HEAD_SHA: '${{ needs.review-trust.outputs.head_sha }}'
           EVENT_NAME: '${{ github.event_name }}'
           EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
           MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'
@@ -1399,6 +1470,7 @@ jobs:
           LOG_PATH="${RUNNER_TEMP:-/tmp}/qwen-review-pr-${PR_NUMBER}.jsonl"
           # Set by configure_qwen_network once the wrapper dir exists.
           PROXY_BIN=""
+          OPENAI_PROXY_PID=""
           # WATCHER_PID/SALVAGE_DIR are set once the supersede watcher exists.
           # The trap must reap the watcher on EVERY exit path (fail() included):
           # a background watcher outliving this step on the reused self-hosted
@@ -1413,12 +1485,9 @@ jobs:
           # and the wait spans a ceding watcher's TERM-immune wind-down
           # (<= 15s) so the group KILL it owes lands before the step exits
           # (R30-1).
-          trap '[ -z "${WATCHER_PID:-}" ] || { kill "${WATCHER_PID}" 2>/dev/null || true; wait "${WATCHER_PID}" 2>/dev/null || true; }; "${QWEN_CI_REAL_RM:-rm}" -rf "$LOG_PATH" 2>/dev/null || true; [ -z "$PROXY_BIN" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "$PROXY_BIN" 2>/dev/null || true; [ -z "${SALVAGE_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}" 2>/dev/null || true; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SUPERSEDE_KILL_DIR}" 2>/dev/null || true' EXIT
+          trap '[ -z "${OPENAI_PROXY_PID:-}" ] || { kill "$OPENAI_PROXY_PID" 2>/dev/null || true; wait "$OPENAI_PROXY_PID" 2>/dev/null || true; }; [ -z "${WATCHER_PID:-}" ] || { kill "${WATCHER_PID}" 2>/dev/null || true; wait "${WATCHER_PID}" 2>/dev/null || true; }; "${QWEN_CI_REAL_RM:-rm}" -rf "$LOG_PATH" 2>/dev/null || true; [ -z "$PROXY_BIN" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "$PROXY_BIN" 2>/dev/null || true; [ -z "${SALVAGE_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}" 2>/dev/null || true; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SUPERSEDE_KILL_DIR}" 2>/dev/null || true' EXIT
 
-          if [ -z "${GH_TOKEN:-}" ]; then
-            fail "CI_BOT_PAT secret is required for Qwen PR review."
-          fi
-          if [ -z "${OPENAI_API_KEY:-}" ]; then
+          if [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${FORK_OPENAI_API_KEY:-}" ]; then
             fail "REVIEW_OPENAI_API_KEY secret is required for Qwen PR review."
           fi
           if [ -z "${OPENAI_BASE_URL:-}" ]; then
@@ -1427,6 +1496,25 @@ jobs:
           if ! command -v qwen >/dev/null 2>&1; then
             fail "qwen CLI is required on the review runner."
           fi
+          # The trusted lane publishes from this same step, so GH_TOKEN must be
+          # exported for its own gh calls; the fork lane strips it again at the
+          # qwen invocation via `env -u`.
+          GH_TOKEN="$SECURITY_GITHUB_TOKEN"
+          if [ "$UNTRUSTED_PR" != 'true' ] && [ -z "${GH_TOKEN:-}" ]; then
+            fail "CI_BOT_PAT is required on the trusted review lane."
+          fi
+          # Fork lane: gh needs a working read credential for its PR state/head
+          # reads. The job token is safe here because the untrusted lane's job
+          # permissions are read-only; a sentinel credential makes every read
+          # fail with Bad credentials (R1-12).
+          if [ "$UNTRUSTED_PR" = 'true' ]; then
+            GH_TOKEN="$JOB_GH_TOKEN"
+            OPENAI_API_KEY="$FORK_OPENAI_API_KEY"
+            REVIEW_API_KEY_CANARY="$FORK_OPENAI_API_KEY_CANARY"
+          fi
+          unset FORK_OPENAI_API_KEY FORK_OPENAI_API_KEY_CANARY
+          export GH_TOKEN
+          readonly SECURITY_GITHUB_TOKEN GH_TOKEN
 
           # shellcheck disable=SC2016
           # Shared by the proxy bypass below and the cohort notice, so the
@@ -1687,6 +1775,30 @@ jobs:
 
           configure_qwen_network
 
+          if [ "$UNTRUSTED_PR" = 'true' ]; then
+            # Keep fork reads public and deterministic: an empty GH_TOKEN would
+            # otherwise let gh fall back to whatever hosts.yml the runner HOME
+            # happens to carry. Give it a private config carrying the read-only
+            # job token — not a sentinel (which fails every read as Bad
+            # credentials), and not the bot PAT (which the fork lane must never
+            # hold).
+            export GH_CONFIG_DIR="${PROXY_BIN}/public-gh-config"
+            mkdir -p "$GH_CONFIG_DIR"
+            printf 'hosts:\n  github.com:\n    oauth_token: %s\n' \
+              "$GH_TOKEN" > "$GH_CONFIG_DIR/hosts.yml"
+            chmod 600 "$GH_CONFIG_DIR/hosts.yml"
+            mkdir -p "$QWEN_HOME"
+            chown -R node:node "$GITHUB_WORKSPACE" "$QWEN_HOME" "$PROXY_BIN" "$TMPDIR"
+            chown node:node "$GITHUB_OUTPUT" "$GITHUB_ENV" "$GITHUB_PATH" "$GITHUB_STEP_SUMMARY"
+            runuser -u node -- git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            runuser -u node -- mkdir -p /home/node/.local/bin /home/node/.cache/qwen-tools
+            if [ -r /etc/profile.d/github_path.sh ]; then
+              export QWEN_REVIEW_AGENT_PATH="$(printf '%s\n' "$PATH"; cat /etc/profile.d/github_path.sh):/usr/local/bin:/usr/bin:/bin"
+            else
+              export QWEN_REVIEW_AGENT_PATH="$PATH:/usr/local/bin:/usr/bin:/bin"
+            fi
+          fi
+
           case "$TIMEOUT_MINUTES" in
             ''|*[!0-9]*)
               fail "Invalid timeout_minutes: ${TIMEOUT_MINUTES}"
@@ -1828,6 +1940,10 @@ jobs:
             exit 0
           fi
           EXPECTED_HEAD_SHA="$CURRENT_HEAD_SHA"
+          if [ "$UNTRUSTED_PR" = 'true' ] && [ "$CURRENT_HEAD_SHA" != "$TRUSTED_HEAD_SHA" ]; then
+            echo 'The pull request moved after trust resolution; skip this historical review.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if [ "$EVENT_NAME" = "pull_request_target" ]; then
             if [ "$CURRENT_HEAD_SHA" != "$EVENT_HEAD_SHA" ]; then
               echo "Skipping stale review run: event head ${EVENT_HEAD_SHA} is no longer current (current head ${CURRENT_HEAD_SHA})." | tee -a "$GITHUB_STEP_SUMMARY"
@@ -1838,6 +1954,7 @@ jobs:
           export QWEN_CI_REVIEW_REPO="$REPO"
           export QWEN_CI_REVIEW_PR_NUMBER="$PR_NUMBER"
           export QWEN_CI_REVIEW_EXPECTED_HEAD_SHA="$EXPECTED_HEAD_SHA"
+          printf 'expected_head_sha=%s\n' "$EXPECTED_HEAD_SHA" >> "$GITHUB_OUTPUT"
           {
             echo "expected_head_sha=$EXPECTED_HEAD_SHA"
             echo "effective_timeout_minutes=$EFFECTIVE_TIMEOUT_MINUTES"
@@ -1903,8 +2020,18 @@ jobs:
           PROMPT="/review ${REVIEW_URL}"
           if [ "$DOCS_ONLY_MEDIUM" = "true" ]; then
             PROMPT="${PROMPT} --effort medium"
+          elif [ "$UNTRUSTED_PR" = "true" ]; then
+            # The publisher owns fork writes. The credential-less agent runs a
+            # report-only review and leaves its validated draft as an artifact.
+            PROMPT="${PROMPT}"
           elif [ "$REVIEW_MODE" = "comment" ]; then
             PROMPT="${PROMPT} --comment"
+          fi
+
+          if [ "$UNTRUSTED_PR" = 'true' ]; then
+            # Do not let a recorded invocation read as publication authority in
+            # the untrusted environment. The publisher authorizes the relay.
+            "${QWEN_CI_REAL_RM:-rm}" -f .qwen/tmp/qwen-skill-args-review.txt
           fi
 
           # The percent both consumers read — the bucket test and the cohort
@@ -2009,6 +2136,34 @@ jobs:
           fi
           export OPENAI_MODEL OPENAI_BASE_URL OPENAI_API_KEY
           REVIEW_ENDPOINT_HOST="$(openai_base_host)"
+          if [ "$FORK_LIFECYCLE_REVIEW" = 'true' ]; then
+            # Root owns the key file and proxy; the agent runs as node.
+            proxy_key="$(mktemp /tmp/qwen-review-key.XXXXXX)"
+            chmod 600 "$proxy_key"
+            printf '%s' "$OPENAI_API_KEY" > "$proxy_key"
+            unset OPENAI_API_KEY
+            PROXY_TOKEN="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            proxy_port_file="$(mktemp /tmp/qwen-review-port.XXXXXX)"
+            chmod 600 "$proxy_port_file"
+            PROXY_TOKEN="$PROXY_TOKEN" UPSTREAM_API_KEY_FILE="$proxy_key" \
+              UPSTREAM_BASE_URL="$OPENAI_BASE_URL" OPENAI_PROXY_PORT=0 \
+              OPENAI_PROXY_PORT_FILE="$proxy_port_file" \
+              HTTPS_PROXY="${QWEN_CI_HTTPS_PROXY:-${QWEN_CI_https_proxy:-}}" \
+              HTTP_PROXY="${QWEN_CI_HTTP_PROXY:-${QWEN_CI_http_proxy:-}}" \
+              NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost \
+              node .github/scripts/ci/review-openai-proxy.cjs &
+            OPENAI_PROXY_PID="$!"
+            for _ in {1..20}; do [ -s "$proxy_port_file" ] && break; sleep 0.5; done
+            OPENAI_PROXY_PORT="$(cat "$proxy_port_file" 2>/dev/null || true)"
+            [ "${OPENAI_PROXY_PORT:-}" ] || fail 'The model proxy did not publish a loopback port.'
+            OPENAI_PROXY_HEALTH="$(curl --retry 10 --retry-connrefused --retry-delay 1 --noproxy '*' -fsS "http://127.0.0.1:${OPENAI_PROXY_PORT}/__health")"
+            [ "$OPENAI_PROXY_HEALTH" = 'ok' ] || fail 'The model proxy health check failed.'
+            OPENAI_BASE_URL="http://127.0.0.1:${OPENAI_PROXY_PORT}"
+            OPENAI_API_KEY="${PROXY_TOKEN}"
+            unset REVIEW_API_KEY_CANARY REVIEW_BASE_URL_CANARY
+            export OPENAI_API_KEY OPENAI_BASE_URL
+            trap '[ -n "${proxy_key:-}" ] && rm -f "$proxy_key"; [ -z "${OPENAI_PROXY_PID:-}" ] || { kill "$OPENAI_PROXY_PID" 2>/dev/null || true; wait "$OPENAI_PROXY_PID" 2>/dev/null || true; }; [ -z "${WATCHER_PID:-}" ] || { kill "${WATCHER_PID}" 2>/dev/null || true; wait "${WATCHER_PID}" 2>/dev/null || true; }; [ -z "$PROXY_BIN" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "$PROXY_BIN" 2>/dev/null || true; [ -z "${SALVAGE_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}" 2>/dev/null || true; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SUPERSEDE_KILL_DIR}" 2>/dev/null || true' EXIT
+          fi
           # The run's own record of which cohort served this review: the model
           # is not carried anywhere else a later comparison could read it (the
           # cost ledger has tokens, not a model), so a rollout that cannot be
@@ -2016,6 +2171,7 @@ jobs:
           # one — the raw percent would certify a split the bucket test
           # clamped away.
           echo "::notice title=Review model::${OPENAI_MODEL:-<CLI default>} (PR #${PR_NUMBER:-?}, canary ${CANARY_PERCENT_EFFECTIVE}%, bucket ${REVIEW_BUCKET}/${REVIEW_BUCKET_COUNT}, cohort ${REVIEW_COHORT}, endpoint ${REVIEW_ENDPOINT_HOST})"
+          # The agent never runs as root in the credential-bearing fork job.
 
           MODEL_ARGS=()
           if [ -n "${OPENAI_MODEL:-}" ]; then
@@ -2157,6 +2313,47 @@ jobs:
               QWEN_REVIEW_DEADLINE_RESERVE_SECONDS=4800
             fi
             export QWEN_REVIEW_DEADLINE_RESERVE_SECONDS
+            AGENT_LAUNCH=(env
+              -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL
+              -u ACTIONS_RUNTIME_TOKEN -u ACTIONS_CACHE_URL -u ACTIONS_RUNTIME_URL
+              -u REVIEW_API_KEY_CANARY -u REVIEW_BASE_URL_CANARY
+              -u SECURITY_GITHUB_TOKEN -u GITHUB_TOKEN
+            )
+            if [ "$UNTRUSTED_PR" = 'true' ]; then
+              AGENT_ENV=(
+                "HOME=/home/node" "USER=node" "PATH=$QWEN_REVIEW_AGENT_PATH" "TMPDIR=$TMPDIR"
+                "GH_TOKEN=$GH_TOKEN"
+                "PROXY_BIN=$PROXY_BIN" "PWD=$GITHUB_WORKSPACE"
+                "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+                "GITHUB_SERVER_URL=$GITHUB_SERVER_URL" "GITHUB_API_URL=$GITHUB_API_URL"
+                "GITHUB_ACTIONS=true" "GITHUB_RUN_ID=$GITHUB_RUN_ID" "CI=true"
+                "GH_HOST=${GH_HOST:-github.com}" "GH_CONFIG_DIR=$GH_CONFIG_DIR"
+                "OPENAI_API_KEY=$OPENAI_API_KEY" "OPENAI_BASE_URL=$OPENAI_BASE_URL"
+                "OPENAI_MODEL=${OPENAI_MODEL:-}" "QWEN_HOME=$QWEN_HOME"
+                "NO_PROXY=${NO_PROXY:-}" "no_proxy=${no_proxy:-}"
+                "QWEN_CI_HTTPS_PROXY=${QWEN_CI_HTTPS_PROXY:-}" "QWEN_CI_https_proxy=${QWEN_CI_https_proxy:-}"
+                "QWEN_CI_HTTP_PROXY=${QWEN_CI_HTTP_PROXY:-}" "QWEN_CI_http_proxy=${QWEN_CI_http_proxy:-}"
+                "QWEN_CI_REAL_DATE=$QWEN_CI_REAL_DATE" "QWEN_CI_REAL_GH=${QWEN_CI_REAL_GH:-}"
+                "QWEN_CI_REAL_GIT=${QWEN_CI_REAL_GIT:-}" "QWEN_CI_REAL_RM=$QWEN_CI_REAL_RM"
+                "QWEN_CI_REAL_TEE=$QWEN_CI_REAL_TEE" "QWEN_CI_REAL_SLEEP=$QWEN_CI_REAL_SLEEP"
+                "QWEN_CI_REAL_TIMEOUT=$QWEN_CI_REAL_TIMEOUT" "QWEN_CI_REAL_HEAD=$QWEN_CI_REAL_HEAD"
+                "QWEN_CI_REAL_NODE=$QWEN_CI_REAL_NODE" "QWEN_CI_REAL_MKTEMP=$QWEN_CI_REAL_MKTEMP"
+                "QWEN_CI_REAL_MV=$QWEN_CI_REAL_MV"
+                "QWEN_SANDBOX_IMAGE=${QWEN_SANDBOX_IMAGE:-}" "QWEN_REVIEW_ASSETS_REPO=${QWEN_REVIEW_ASSETS_REPO:-}"
+                "QWEN_REVIEW_PREBUILD=${QWEN_REVIEW_PREBUILD:-}" "QWEN_REVIEW_SANDBOX=${QWEN_REVIEW_SANDBOX:-}"
+                "QWEN_CODE_API_TIMEOUT_MS=${QWEN_CODE_API_TIMEOUT_MS:-}"
+                "QWEN_STREAM_IDLE_TIMEOUT_MS=${QWEN_STREAM_IDLE_TIMEOUT_MS:-}"
+                "QWEN_STREAM_MAX_LIFETIME_MS=${QWEN_STREAM_MAX_LIFETIME_MS:-}"
+                "QWEN_CI_REVIEW_REPO=$QWEN_CI_REVIEW_REPO"
+                "QWEN_CI_REVIEW_PR_NUMBER=$QWEN_CI_REVIEW_PR_NUMBER"
+                "QWEN_CI_REVIEW_EXPECTED_HEAD_SHA=$QWEN_CI_REVIEW_EXPECTED_HEAD_SHA"
+                "QWEN_CI_REVIEW_SALVAGE_OK_FILE=$QWEN_CI_REVIEW_SALVAGE_OK_FILE"
+                "QWEN_REVIEW_DEADLINE_EPOCH=$QWEN_REVIEW_DEADLINE_EPOCH"
+                "QWEN_REVIEW_DEADLINE_RESERVE_SECONDS=$QWEN_REVIEW_DEADLINE_RESERVE_SECONDS"
+              )
+              AGENT_LAUNCH=(runuser -u node -- env -i "${AGENT_ENV[@]}"
+                /bin/bash --noprofile --norc -c 'exec "$@"' agent-launch)
+            fi
             set +e
             # The agent streams its ENTIRE transcript to stdout, and the runner
             # scans every line for workflow commands. A tool result that quotes
@@ -2193,7 +2390,9 @@ jobs:
             GITHUB_ENV="$PROXY_BIN/decoy.github-env" \
             GITHUB_OUTPUT="$PROXY_BIN/decoy.github-output" \
             GITHUB_STEP_SUMMARY="$PROXY_BIN/decoy.github-step-summary" \
-            timeout --kill-after=10s "${attempt_timeout}s" qwen \
+            timeout --kill-after=10s "${attempt_timeout}s" \
+              "${AGENT_LAUNCH[@]}" \
+              qwen \
               --auth-type openai \
               --approval-mode yolo \
               "${MODEL_ARGS[@]}" \
@@ -2848,6 +3047,29 @@ jobs:
           # relay must not announce a review that never ran.
           echo "review_completed=true" >> "$GITHUB_OUTPUT"
 
+      # failure() is not allowed in job outputs, so the two failure-derived
+      # outcomes are produced by this pair of always()-gated marker steps:
+      # exactly one runs, mirroring the original output expressions.
+      - name: 'Mark review failure (failed path)'
+        id: 'marker_failed'
+        if: "always() && failure() && steps.context.outputs.should_run == 'true' && steps.context.outputs.pr_number != ''"
+        env:
+          REVIEW_DOCS_ONLY_MEDIUM: '${{ steps.review.outputs.docs_only_medium }}'
+        run: |-
+          {
+            echo "review_failed=true"
+            echo "docs_only_failed=${REVIEW_DOCS_ONLY_MEDIUM}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 'Mark review failure (success path)'
+        id: 'marker_ok'
+        if: "always() && steps.marker_failed.conclusion != 'success'"
+        run: |-
+          {
+            echo "review_failed=false"
+            echo "docs_only_failed=false"
+          } >> "$GITHUB_OUTPUT"
+
       # A salvaged review just posted against a head that is no longer
       # current (#10110). The review body itself carries the CLI's head-drift
       # annotation and verdict cap (classifyHeadDrift), but that gate samples
@@ -2859,6 +3081,7 @@ jobs:
       - name: 'Report salvaged historical-head review'
         if: |-
           steps.context.outputs.should_run == 'true' &&
+          needs.review-trust.outputs.untrusted != 'true' &&
           steps.review.outcome == 'success' &&
           steps.review.outputs.review_completed == 'true' &&
           steps.review.outputs.salvaged == 'true' &&
@@ -2904,6 +3127,7 @@ jobs:
       - name: 'Report docs-only medium outcome'
         if: |-
           steps.context.outputs.should_run == 'true' &&
+          needs.review-trust.outputs.untrusted != 'true' &&
           steps.review.outcome == 'success' &&
           steps.review.outputs.review_completed == 'true' &&
           steps.review.outputs.docs_only_medium == 'true' &&
@@ -2995,6 +3219,7 @@ jobs:
         # same SHA the badge describes).
         if: |-
           !cancelled() &&
+          needs.review-trust.outputs.untrusted != 'true' &&
           steps.context.outputs.should_run == 'true' &&
           steps.context.outputs.pr_number != '' &&
           (
@@ -3082,6 +3307,7 @@ jobs:
       - name: 'Post fallback comment on failure'
         if: |-
           failure() &&
+          needs.review-trust.outputs.untrusted != 'true' &&
           steps.context.outputs.should_run == 'true' &&
           steps.context.outputs.review_mode == 'comment' &&
           steps.context.outputs.pr_number != ''
@@ -3550,6 +3776,68 @@ jobs:
   # result, so one accurate body covers both flavors. The PR number comes
   # from the event payload, not the dead job's outputs, which do not
   # survive a crash.
+  publish-review:
+    needs: ['review-trust', 'review-pr']
+    if: |-
+      always() &&
+      needs.review-trust.result == 'success' &&
+      needs.review-trust.outputs.untrusted == 'true' &&
+      ((needs.review-pr.outputs.review_completed == 'true' &&
+        needs.review-pr.outputs.review_mode == 'comment') ||
+       needs.review-pr.outputs.review_failed == 'true') &&
+      github.event.inputs.review_mode != 'dry-run'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    permissions:
+      contents: 'read'
+      pull-requests: 'write'
+      issues: 'write'
+    steps:
+      - name: 'Checkout trusted publisher scripts'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.sha }}'
+          persist-credentials: false
+      - name: 'Download the untrusted review artifact'
+        # A failed review stages nothing (the upload side is best-effort), so
+        # the artifact may legitimately not exist; the failure branch must
+        # still post its comment.
+        continue-on-error: true
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'qwen-review-pr-${{ needs.review-pr.outputs.pr_number || needs.review-trust.outputs.pr_number }}-attempt-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/qwen-review-input'
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+      - name: 'Prepare the PR CLI'
+        run: |-
+          corepack pnpm install --frozen-lockfile
+          npm run generate
+      - name: 'Validate and publish COMMENT only'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          GH_CONFIG_DIR: '${{ runner.temp }}/qwen-review-publisher-gh'
+          GITHUB_REPOSITORY: '${{ github.repository }}'
+          PR_NUMBER: '${{ needs.review-pr.outputs.pr_number || needs.review-trust.outputs.pr_number }}'
+          EXPECTED_HEAD_SHA: '${{ needs.review-pr.outputs.expected_head_sha || needs.review-trust.outputs.head_sha }}'
+          REVIEW_COMPLETED: '${{ needs.review-pr.outputs.review_completed }}'
+          REVIEW_MODE: '${{ needs.review-pr.outputs.review_mode }}'
+          COMPLETION_LINE: '${{ needs.review-pr.outputs.completion_line }}'
+          ALLOW_STALE: '${{ needs.review-pr.outputs.salvage_post }}'
+          DOCS_ONLY: "${{ needs.review-pr.outputs.docs_only_medium == 'true' }}"
+          MOVED_TO: '${{ needs.review-pr.outputs.salvage_moved_to }}'
+          DOCS_ONLY_FAILED: '${{ needs.review-pr.outputs.docs_only_failed }}'
+          SUPERSEDE_DOCS_ONLY: "${{ needs.review-pr.outputs.docs_only_medium == 'false' }}"
+          REVIEW_FAILED: '${{ needs.review-pr.outputs.review_failed }}'
+          FAILURE_REASON: '${{ needs.review-pr.outputs.failure_reason }}'
+          FAILURE_KIND: '${{ needs.review-pr.outputs.failure_kind }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          mkdir -p "$GH_CONFIG_DIR"
+          node .github/scripts/ci/review-publish-comment.mjs "${RUNNER_TEMP}/qwen-review-input"
+
   fallback-comment:
     needs:
       [

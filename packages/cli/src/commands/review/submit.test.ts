@@ -3439,6 +3439,53 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(sent.event).toBe('COMMENT');
     expect(sent.body.length).toBeGreaterThan(0);
   });
+
+  it('downgrades a verified blocking review to COMMENT in the publisher', () => {
+    vi.stubEnv('GITHUB_ACTIONS', 'true');
+    const review = file('comment-only-critical.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, planPath: verifiedPlan() },
+      comments: [
+        { path: 'a.ts', line: 12, body: '**[Critical]** Drops the error.' },
+      ],
+    });
+    withVerifyEnv(() => runSubmit(authorized({ review, commentOnly: true })));
+    expect(ghMock).toHaveBeenCalledOnce();
+    expect(posted().event).toBe('COMMENT');
+  });
+});
+
+describe('trusted CI COMMENT-only publication', () => {
+  it('COMMENT-only alone never authorizes an unapproved review', () => {
+    runSubmit(args({ commentOnly: true }));
+    expect(process.exitCode).toBe(3);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('discloses fixed rulings left unapplied under COMMENT-only publication', () => {
+    vi.stubEnv('GITHUB_ACTIONS', 'true');
+    runSubmit(
+      args({
+        userAuthorized: true,
+        commentOnly: true,
+        review: file(
+          `review-${seq++}.json`,
+          JSON.stringify({
+            ...REVIEW,
+            state: {
+              ...REVIEW.state,
+              fixedFindings: [{ id: 'R1-1', by: 'the reworked guard' }],
+            },
+          }),
+        ),
+      }),
+    );
+    expect(process.exitCode).toBeUndefined();
+    const stderr = writeStderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(stderr).toContain(
+      'COMMENT-only publication leaves 1 historical thread(s) unchanged; resolve them separately.',
+    );
+  });
 });
 
 // The failure this whole change exists for.

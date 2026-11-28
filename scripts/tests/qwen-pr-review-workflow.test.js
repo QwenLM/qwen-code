@@ -117,23 +117,30 @@ const realPkillPath = realUtilityPath('pkill');
 const realPgrepPath = realUtilityPath('pgrep');
 
 describe('qwen pr review runner routing', () => {
+  it('admits only a positively identified trusted head to the write-capable review job', () => {
+    const review = parse(workflow).jobs['review-pr'];
+    expect(review.if).toMatch(
+      /needs\.review-trust\.result == 'success' &&\s+needs\.review-trust\.outputs\.untrusted != '' &&\s+needs\.review-trust\.outputs\.head_sha != '' &&/,
+    );
+    expect(review.permissions).toEqual({
+      contents: 'read',
+      'pull-requests': 'write',
+      issues: 'write',
+    });
+  });
+
   it('isolates the long-running review job on the schedule-sized review pool', () => {
     // Review and autofix use separate runner pools.
     const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
 
-    expect(runsOn).toBe(
-      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\' && (github.event_name != \'pull_request_target\' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(\'["self-hosted", "linux", "x64", "ecs-review"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
-    );
+    expect(runsOn).toContain("needs.review-trust.outputs.untrusted != 'true'");
     expect(runsOn).not.toContain('ecs-qwen');
     expect(runsOn).not.toContain('ecs-agent');
     // A fork pull_request_target payload never reaches the persistent pool:
-    // the PR's own install/build runs in this job, and `off` containment on
-    // a shared host exposes CI_BOT_PAT + the model key AND persists whatever
-    // a postinstall plants. Comment/dispatch triggers keep the pool (no fork
-    // payload); the sandbox preflight is their fail-closed backstop.
-    expect(runsOn).toContain(
-      "github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository",
-    );
+    // Every fork event, including comment and dispatch, resolves trust in a
+    // checkout-free job and uses a disposable hosted VM. Same-host Docker
+    // does not isolate a privileged CI process or same-UID filesystem reads.
+    expect(runsOn).toContain("needs.review-trust.outputs.untrusted != 'true'");
     expect(runsOn).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
     expect(runsOn).toContain('fromJSON(\'["ubuntu-latest"]\')');
     // The hosted toolchain setup must fire on every shape the routing sends
@@ -143,8 +150,119 @@ describe('qwen pr review runner routing', () => {
       (s) => s.name === 'Setup Node.js for hosted review',
     );
     expect(setupNode.if).toContain(
-      "(github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository)",
+      "needs.review-trust.outputs.untrusted == 'true'",
     );
+  });
+
+  it('keeps privileged credentials away from the review agent', () => {
+    const review = parse(workflow).jobs['review-pr'].steps.find(
+      (step) => step.id === 'review',
+    );
+    // The token expression must invert the condition so the fork lane
+    // resolves to the empty string (R1-2): `cond && '' || PAT` falls through
+    // to the PAT because '' is falsy in GitHub expressions.
+    expect(review.env.SECURITY_GITHUB_TOKEN).toContain(
+      "!= 'true' && secrets.CI_BOT_PAT || ''",
+    );
+    expect(review.env.SECURITY_GITHUB_TOKEN).toContain('secrets.CI_BOT_PAT');
+    expect(review.env.SECURITY_GITHUB_TOKEN).toContain(
+      'needs.review-trust.outputs.untrusted',
+    );
+    // The fork lane reads via the read-only job token, not the PAT (R1-12):
+    // the hosts.yml it writes must carry the resolved token, not a sentinel.
+    expect(review.run).not.toContain('review-untrusted-no-token');
+    expect(review.run).toContain('oauth_token: %s');
+    expect(review.env.JOB_GH_TOKEN).toBe('${{ github.token }}');
+    expect(review.run).toContain(
+      '"${QWEN_CI_REAL_RM:-rm}" -f .qwen/tmp/qwen-skill-args-review.txt',
+    );
+    expect(review.env.OPENAI_API_KEY).toBe(
+      "${{ needs.review-trust.outputs.untrusted != 'true' && secrets.REVIEW_OPENAI_API_KEY || '' }}",
+    );
+    expect(review.env.REVIEW_API_KEY_CANARY).toContain(
+      "needs.review-trust.outputs.untrusted != 'true'",
+    );
+    expect(review.env.GITHUB_TOKEN).toContain(
+      "!= 'true' && secrets.CI_BOT_PAT || ''",
+    );
+    expect(String(parse(workflow).jobs['review-pr'].container)).toContain(
+      '--init --user root',
+    );
+    expect(review.run).toContain('UPSTREAM_API_KEY_FILE="$proxy_key"');
+    expect(review.run).toContain('AGENT_LAUNCH=(runuser -u node -- env -i');
+    const agentLaunch = runReviewStep().slice(
+      runReviewStep().indexOf('AGENT_ENV=('),
+      runReviewStep().indexOf(
+        'set +e',
+        runReviewStep().indexOf('AGENT_LAUNCH='),
+      ),
+    );
+    for (const secret of [
+      'OPENAI_PROXY_CONTAINER',
+      'OPENAI_PROXY_PORT',
+      'PROXY_TOKEN',
+      'FORK_OPENAI_API_KEY',
+      'UPSTREAM_API_KEY',
+      'SECURITY_GITHUB_TOKEN',
+      'GITHUB_TOKEN',
+      'GITHUB_EVENT_PATH',
+      'ACTIONS_ID_TOKEN_REQUEST_TOKEN',
+      'ACTIONS_RUNTIME_TOKEN',
+    ]) {
+      expect(agentLaunch).not.toContain(secret);
+    }
+    expect(review.run).toContain('OPENAI_API_KEY="${PROXY_TOKEN}"');
+    expect(review.run).toContain('-u ACTIONS_ID_TOKEN_REQUEST_TOKEN');
+    expect(review.run).not.toContain('UPSTREAM_API_KEY="$');
+    expect(review.run).not.toContain('/usr/bin/docker run --detach');
+    expect(review.run).not.toContain('docker inspect');
+    expect(review.run).toContain('-u SECURITY_GITHUB_TOKEN -u GITHUB_TOKEN');
+    expect(review.run).toContain('if [ "$FORK_LIFECYCLE_REVIEW" = \'true\' ]');
+
+    const guarded = parse(workflow).jobs['review-pr'].steps.filter((step) =>
+      [
+        'Report docs-only medium outcome',
+        'Supersede stale docs-only badge',
+        'Post fallback comment on failure',
+      ].includes(step.name),
+    );
+    expect(guarded).toHaveLength(3);
+    for (const step of guarded) {
+      expect(step.if).toContain(
+        "needs.review-trust.outputs.untrusted != 'true'",
+      );
+    }
+    expect(review.run).toContain(
+      '[ "$CURRENT_HEAD_SHA" != "$TRUSTED_HEAD_SHA" ]',
+    );
+
+    const publisher = parse(workflow).jobs['publish-review'];
+    expect(publisher.uses).toBeUndefined();
+    expect(publisher['runs-on']).toBe('ubuntu-latest');
+    expect(String(publisher.if)).not.toContain('review_result');
+    expect(String(publisher.if)).toContain(
+      "needs.review-pr.outputs.review_mode == 'comment'",
+    );
+    expect(String(publisher.if)).toContain(
+      "needs.review-pr.outputs.review_failed == 'true'",
+    );
+    expect(publisher.permissions).toEqual({
+      contents: 'read',
+      'pull-requests': 'write',
+      issues: 'write',
+    });
+    const publish = publisher.steps.find(
+      (s) => s.name === 'Validate and publish COMMENT only',
+    );
+    expect(publish.env.ALLOW_STALE).toContain(
+      'needs.review-pr.outputs.salvage_post',
+    );
+    expect(publish.env.MOVED_TO).toContain('salvage_moved_to');
+    expect(publish.env.DOCS_ONLY_FAILED).toBe(
+      '${{ needs.review-pr.outputs.docs_only_failed }}',
+    );
+    expect(publish.env.GH_TOKEN).toBe('${{ secrets.CI_BOT_PAT }}');
+    expect(publish.run).toContain('review-publish-comment.mjs');
   });
 
   it('routes the command gate to ECS for payload-less events, keeps the fork guard', () => {
@@ -649,6 +767,7 @@ function runScenario(
           // (R28-1); the pins below re-establish the ones this replay
           // needs to point somewhere specific.
           ...neutralizedRealPins(),
+          UNTRUSTED_PR: 'false',
           // The review lane exports QWEN_CI_REAL_GH; inherited, it would
           // bypass the PATH gh stub every replay decides through. Empty
           // restores the stub — the production :-gh fallback treats it as
@@ -2026,12 +2145,13 @@ describe('docs-only medium gate', () => {
     return run.slice(start, end);
   }
 
-  function buildPrompt({ docsOnlyMedium, reviewMode }) {
+  function buildPrompt({ docsOnlyMedium, reviewMode, untrustedPr = 'false' }) {
     const script = [
       'set -euo pipefail',
       'REVIEW_URL="https://x/pull/1"',
       `DOCS_ONLY_MEDIUM=${docsOnlyMedium}`,
       `REVIEW_MODE=${reviewMode}`,
+      `UNTRUSTED_PR=${untrustedPr}`,
       promptBranchSource(),
       'printf "%s" "$PROMPT"',
     ].join('\n');
@@ -2053,6 +2173,16 @@ describe('docs-only medium gate', () => {
       reviewMode: 'comment',
     });
     expect(prompt).toContain('--comment');
+    expect(prompt).not.toContain('--effort');
+  });
+
+  it('drops --comment on the untrusted fork path (the publisher owns fork writes)', () => {
+    const prompt = buildPrompt({
+      docsOnlyMedium: 'false',
+      reviewMode: 'comment',
+      untrustedPr: 'true',
+    });
+    expect(prompt).not.toContain('--comment');
     expect(prompt).not.toContain('--effort');
   });
 
@@ -2574,6 +2704,7 @@ describe('docs-only gate and relay, executed', () => {
     );
     expect(normalizedIf(relay)).toBe(
       "steps.context.outputs.should_run == 'true' && " +
+        "needs.review-trust.outputs.untrusted != 'true' && " +
         "steps.review.outcome == 'success' && " +
         "steps.review.outputs.review_completed == 'true' && " +
         "steps.review.outputs.docs_only_medium == 'true' && " +
@@ -2588,6 +2719,7 @@ describe('docs-only gate and relay, executed', () => {
     );
     expect(normalizedIf(supersede)).toBe(
       '!cancelled() && ' +
+        "needs.review-trust.outputs.untrusted != 'true' && " +
         "steps.context.outputs.should_run == 'true' && " +
         "steps.context.outputs.pr_number != '' && " +
         "( steps.review.outputs.docs_only_medium == 'false' || " +
@@ -4944,10 +5076,11 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
 
   it('carries no cross-job head wiring to drift', () => {
     // An earlier revision published review-pr's reviewed head as a job output
-    // and read it here. The guard no longer keys on the head at all, so the
-    // wiring is gone rather than left as an untested chain whose silent
-    // breakage would restore the fresh-head comparison.
-    expect(doc.jobs['review-pr'].outputs).toBeUndefined();
+    // and read it here. The fallback guard no longer keys on the head at all,
+    // so none of the review-pr outputs the trusted publish-review relay
+    // consumes may reintroduce a head comparison into THIS job.
+    expect(doc.jobs['review-pr'].outputs).not.toBeUndefined();
+    expect(Object.keys(step.env ?? {})).not.toContain('EXPECTED_HEAD_SHA');
     expect(step.env.REVIEWED_HEAD_SHA).toBeUndefined();
     expect(step.run).not.toContain('REVIEWED_HEAD_SHA');
     expect(inJobStep.run).not.toContain('commit_id ==');
@@ -7705,11 +7838,13 @@ describe('review model canary routing', () => {
     expect(step.env.REVIEW_MODEL_DEFAULT).toBe(
       '${{ vars.QWEN_PR_REVIEW_MODEL }}',
     );
+    // Fork lanes must not route to the canary: hosted runners cannot reach
+    // the internal canary endpoint, so the split is trusted-lane only.
     expect(step.env.REVIEW_MODEL_CANARY).toBe(
-      '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY }}',
+      "${{ needs.review-trust.outputs.untrusted == 'true' && '' || vars.QWEN_PR_REVIEW_MODEL_CANARY }}",
     );
     expect(step.env.REVIEW_MODEL_CANARY_PERCENT).toBe(
-      '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}',
+      "${{ needs.review-trust.outputs.untrusted == 'true' && '0' || vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}",
     );
     // The canary cohort's optional endpoint pair: the URL is a variable,
     // the key is a secret, and neither is pinned into the script.
@@ -7717,7 +7852,7 @@ describe('review model canary routing', () => {
       '${{ vars.QWEN_PR_REVIEW_BASE_URL_CANARY }}',
     );
     expect(step.env.REVIEW_API_KEY_CANARY).toBe(
-      '${{ secrets.REVIEW_OPENAI_API_KEY_CANARY }}',
+      "${{ needs.review-trust.outputs.untrusted != 'true' && secrets.REVIEW_OPENAI_API_KEY_CANARY || '' }}",
     );
     // The runner class is wired from the runner context (not pinned), so the
     // endpoint override can gate itself to the self-hosted pool.
@@ -7817,17 +7952,29 @@ describe('review model canary routing', () => {
   // arguments inverts the rollout, and swapping PR_NUMBER for a per-run value
   // loses the bucket entirely — both with every row above still green. Slice
   // the real block (helper, router, trim, call site, endpoint override,
-  // notice, MODEL_ARGS) and execute it with the values the step's `env:`
-  // supplies.
+  // endpoint-host capture) and execute it with the values the step's `env:`
+  // supplies. The slice ends before the fork-lane model proxy (it needs a
+  // Docker daemon); the notice and MODEL_ARGS are replayed verbatim from the
+  // workflow below, pinned by string containment so an edit on either side
+  // turns red here.
   it('routes and reports at the real call site, not a paraphrase of it', () => {
+    // The slice ends at the endpoint-host capture: the fork-lane model proxy
+    // between it and the notice needs a Docker daemon, which this suite must
+    // not require. The notice and MODEL_ARGS below consume only
+    // OPENAI_MODEL/OPENAI_BASE_URL/OPENAI_API_KEY, whose routing (incl. the
+    // canary endpoint swap) the slice executes for real.
     const start = run.indexOf('canary_percent_effective() {');
     const notice = run.indexOf('echo "::notice title=Review model::');
-    const args = run.indexOf('MODEL_ARGS=()', notice);
-    const end = run.indexOf('\nfi', args) + '\nfi'.length;
+    const hostCapture = run.indexOf(
+      'REVIEW_ENDPOINT_HOST="$(openai_base_host)"',
+    );
+    expect(hostCapture).toBeGreaterThan(-1);
+    expect(hostCapture).toBeLessThan(notice);
+    const end =
+      run.indexOf('\n', hostCapture + 'REVIEW_ENDPOINT_HOST='.length) + 1;
     expect(start).toBeGreaterThan(-1);
     expect(notice).toBeGreaterThan(start);
-    expect(args).toBeGreaterThan(notice);
-    expect(end).toBeGreaterThan(args);
+    expect(end).toBeGreaterThan(hostCapture);
     // The step logs the pre-override host under its own label; reverting that
     // rename would report a same-named value the notice no longer means.
     expect(run).toContain('echo "initial_openai_host=${openai_host}"');
@@ -7838,7 +7985,16 @@ describe('review model canary routing', () => {
     const helperStart = run.indexOf('openai_base_host() {');
     expect(helperStart).toBeGreaterThan(-1);
     const helperEnd = run.indexOf('\n}', helperStart) + '\n}'.length;
-    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}`;
+    // The notice line and the MODEL_ARGS block are quoted verbatim from the
+    // workflow (the slice stops at the proxy); asserting their exact text
+    // keeps this a replay of the real call site, not a paraphrase.
+    const noticeLine =
+      'echo "::notice title=Review model::${OPENAI_MODEL:-<CLI default>} (PR #${PR_NUMBER:-?}, canary ${CANARY_PERCENT_EFFECTIVE}%, bucket ${REVIEW_BUCKET}/${REVIEW_BUCKET_COUNT}, cohort ${REVIEW_COHORT}, endpoint ${REVIEW_ENDPOINT_HOST})"';
+    const modelArgsBlock =
+      'MODEL_ARGS=()\nif [ -n "${OPENAI_MODEL:-}" ]; then\n  MODEL_ARGS=(--model "$OPENAI_MODEL")\nfi';
+    expect(run).toContain(noticeLine);
+    expect(run).toContain(modelArgsBlock);
+    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}\n${noticeLine}\n${modelArgsBlock}`;
 
     // GITHUB_RUN_ID is pinned so the fourth argument cannot be swapped for a
     // per-run value unnoticed: 9999999 % 10 = 9 is outside every percent a
@@ -7923,12 +8079,20 @@ describe('review model canary routing', () => {
   it('moves the endpoint only for the canary cohort, and only with its own key', () => {
     const start = run.indexOf('canary_percent_effective() {');
     const notice = run.indexOf('echo "::notice title=Review model::');
-    const args = run.indexOf('MODEL_ARGS=()', notice);
-    const end = run.indexOf('\nfi', args) + '\nfi'.length;
+    const hostCapture = run.indexOf(
+      'REVIEW_ENDPOINT_HOST="$(openai_base_host)"',
+    );
+    expect(hostCapture).toBeGreaterThan(-1);
+    expect(hostCapture).toBeLessThan(notice);
+    const end =
+      run.indexOf('\n', hostCapture + 'REVIEW_ENDPOINT_HOST='.length) + 1;
     const helperStart = run.indexOf('openai_base_host() {');
     expect(helperStart).toBeGreaterThan(-1);
     const helperEnd = run.indexOf('\n}', helperStart) + '\n}'.length;
-    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}`;
+    const noticeLine =
+      'echo "::notice title=Review model::${OPENAI_MODEL:-<CLI default>} (PR #${PR_NUMBER:-?}, canary ${CANARY_PERCENT_EFFECTIVE}%, bucket ${REVIEW_BUCKET}/${REVIEW_BUCKET_COUNT}, cohort ${REVIEW_COHORT}, endpoint ${REVIEW_ENDPOINT_HOST})"';
+    expect(run).toContain(noticeLine);
+    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}\n${noticeLine}`;
 
     const serve = (
       canary,
