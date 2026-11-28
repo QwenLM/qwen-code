@@ -102,8 +102,10 @@ jobs:
           APPROVE_MARKER="<!-- qwen-triage approve-on-green sha=${HEAD_SHA} -->"
           # The approve marker is only honored in the triage skill's Stage 3
           # reflection comment, whose first line the triage publisher enforces
-          # (`triage-publish.mjs` rejects a body that does not start with its
-          # marker). Bot-authored is not enough: other bot lanes (serve-ab,
+          # (`triage-publish.mjs` guarantees the exact first-line marker —
+          # prepending it when omitted, normalizing harmless whitespace on a
+          # match, and rejecting mismatched leading triage markers). Bot-authored
+          # is not enough: other bot lanes (serve-ab,
           # visuals) publish bodies a fork PR's own scripts generated, so a
           # forged approve marker inside one of those comments must not read
           # as an approval instruction.

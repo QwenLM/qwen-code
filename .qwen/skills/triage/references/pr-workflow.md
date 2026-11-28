@@ -800,6 +800,14 @@ so the maintainer can trust and reproduce it.
 
 Draft a single Stage 2 comment (body → `$DRAFT_DIR/bodies/stage-2.md`, then append the `upsert-comment` action with marker `stage=2`; the body must include `<!-- qwen-triage stage=2 -->` at the top), in this order: code review findings → optional sequence diagram (2a-bis) → optional changed-files overview (2a-bis) → CI test evidence (2b) → the sandboxed-lane line when the central claim is behavioural and 2b cannot settle it (2b-bis) → real-scenario testing result when one was driven locally (2c) → the bilingual `<details>` Chinese summary → signature + footer last (the same tail order as the Stage 1 template). Include the two enrichments only when 2a-bis says they earn their place; a small, focused PR is just findings + testing. The 2b-bis line is not an enrichment — on the CI path it is the only thing in the comment that can close a behavioural gap, so omit it only under the two conditions 2b-bis names.
 
+Open `$DRAFT_DIR/bodies/stage-2.md` with the exact stage marker on line 1:
+
+```markdown
+<!-- qwen-triage stage=2 -->
+
+## Code review
+```
+
 **⛔ BEFORE POSTING: verify the testing section carries real evidence.** Read back through your draft. In CI: does it quote actual check names and conclusions (and the failing job's log excerpt when red), and is the CI table wrapped in the `qwen-triage-ci` region markers so the finalize workflow can update it? On a local run: does it have a fenced code block with the actual terminal capture (or the `N/A` substitution for docs/types/refactor PRs with nothing user-visible)? Does the evidence depth match the PR type per “Scale the evidence” above — screenshots for UI changes, measurements for performance claims, clean-state numbers for build/test claims? If not, fix that now — and never paper over a gap with the author's self-reported results. The maintainer cannot approve without seeing what actually happened.
 
 ````markdown
@@ -841,7 +849,13 @@ If your independent proposal was materially simpler — say so. Not as a blocker
 
 **Step 1: Draft the reflection comment** (body → `$DRAFT_DIR/bodies/stage-3.md`, then append the `upsert-comment` action with marker `stage=3`; the body must include `<!-- qwen-triage stage=3 -->` at the top).
 
-Open it with a one-line confidence score — `**Confidence: N/5** — <one honest line>` — as the human-readable summary of everything above. It is your read, not a rubric dump, and it must stay consistent with the verdict you're about to act on in Step 2:
+Open `$DRAFT_DIR/bodies/stage-3.md` with the exact stage marker on line 1, followed by a one-line confidence score — `**Confidence: N/5** — <one honest line>` — as the human-readable summary of everything above. It is your read, not a rubric dump, and it must stay consistent with the verdict you're about to act on in Step 2:
+
+```markdown
+<!-- qwen-triage stage=3 -->
+
+**Confidence: N/5** — <one honest line>
+```
 
 | Score | Meaning                                                         | Verdict         |
 | ----- | --------------------------------------------------------------- | --------------- |

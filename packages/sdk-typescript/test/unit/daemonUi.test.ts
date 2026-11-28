@@ -2731,7 +2731,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
-  it('keeps a loop type without numbers and drops malformed ones', () => {
+  it('keeps a legacy loop type and drops a malformed call count', () => {
     const [event] = normalizeDaemonEvent({
       id: 49,
       v: 1,

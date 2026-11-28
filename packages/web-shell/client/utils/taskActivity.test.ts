@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { ACPToolCall, Message } from '../adapters/types';
-import { getTaskActivityKey, hasActiveTaskActivity } from './taskActivity';
+import {
+  getScheduledTaskActivityKey,
+  getTaskActivityKey,
+  hasActiveTaskActivity,
+} from './taskActivity';
 
 function monitorCall(
   callId: string,
@@ -73,5 +77,46 @@ describe('hasActiveTaskActivity', () => {
     expect(getTaskActivityKey([group(parent)])).toBe(
       'parent:completed|child:in_progress',
     );
+  });
+});
+
+describe('getScheduledTaskActivityKey', () => {
+  it('tracks cron create, nested wakeups, and automatic turn sources', () => {
+    const nested = group({
+      callId: 'parent',
+      toolName: 'agent',
+      status: 'completed',
+      subTools: [
+        { callId: 'wake-1', toolName: 'loop_wakeup', status: 'completed' },
+      ],
+    });
+    expect(
+      getScheduledTaskActivityKey([
+        group({
+          callId: 'cron-1',
+          toolName: 'cron_create',
+          status: 'completed',
+        }),
+        nested,
+        { id: 'turn-cron', role: 'user', source: 'cron' },
+        { id: 'turn-loop', role: 'user', source: 'loop' },
+      ]),
+    ).toBe(
+      'cron-1:completed|wake-1:completed|turn:turn-cron:cron|turn:turn-loop:loop',
+    );
+    expect(getScheduledTaskActivityKey([nested])).toBe('wake-1:completed');
+  });
+
+  it('does not count human turns or unrelated calls as scheduled activity', () => {
+    expect(
+      getScheduledTaskActivityKey([
+        group({
+          callId: 'run-1',
+          toolName: 'run_shell_command',
+          status: 'completed',
+        }),
+        { id: 'turn-human', role: 'user' },
+      ]),
+    ).toBe('');
   });
 });

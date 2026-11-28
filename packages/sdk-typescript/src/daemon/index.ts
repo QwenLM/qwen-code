@@ -772,6 +772,8 @@ export type {
   DaemonSessionShellTaskRuntime,
   DaemonSessionShellTaskStatus,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionCancelableTaskKind,
+  DaemonSessionScheduledTaskStatus,
   DaemonSessionTaskLifecycleStatus,
   DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskStatus,

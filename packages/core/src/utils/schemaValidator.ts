@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import AjvPkg, { type AnySchema, type Ajv, type ValidateFunction } from 'ajv';
+import AjvPkg, {
+  type AnySchema,
+  type Ajv,
+  type ErrorObject,
+  type ValidateFunction,
+} from 'ajv';
 // Ajv2020 is the documented way to use draft-2020-12: https://ajv.js.org/json-schema.html#draft-2020-12
 // eslint-disable-next-line import/no-internal-modules
 import Ajv2020Pkg from 'ajv/dist/2020.js';
@@ -466,10 +471,88 @@ function validateWithCoercion(
 
     valid = validate(data);
     if (!valid && validate.errors) {
-      return validator.errorsText(validate.errors, { dataVar: 'params' });
+      return (
+        validator.errorsText(validate.errors, { dataVar: 'params' }) +
+        describeBrokenJsonStrings(validate.errors, data)
+      );
     }
   }
   return null;
+}
+
+const BROKEN_JSON_HINT_PREFIX = '\nMalformed JSON argument guidance:\n';
+
+export function getSchemaValidationRetryMessage(message: string): string {
+  const hintStart = message.indexOf(BROKEN_JSON_HINT_PREFIX);
+  return hintStart === -1 ? message : message.slice(0, hintStart);
+}
+
+/**
+ * Explains `type` errors on strings that hold broken JSON. Such a string is
+ * usually an array or object the model wrote with a syntax error, which a
+ * provider passed on as text (DashScope does so for buffered tool
+ * arguments). "must be array" alone does not show that the text is the
+ * problem, and the model resends the same text.
+ */
+function describeBrokenJsonStrings(
+  errors: ErrorObject[],
+  data: Record<string, unknown>,
+): string {
+  const expectedByPath = new Map<string, Set<string>>();
+  for (const error of errors) {
+    if (error.keyword !== 'type') continue;
+    const expected: unknown = error.params['type'];
+    for (const type of Array.isArray(expected) ? expected : [expected]) {
+      if (type !== 'array' && type !== 'object') continue;
+      const types = expectedByPath.get(error.instancePath) ?? new Set<string>();
+      types.add(type);
+      expectedByPath.set(error.instancePath, types);
+    }
+  }
+
+  const notes: string[] = [];
+  for (const [instancePath, types] of expectedByPath) {
+    let value: unknown = data;
+    for (const part of instancePath.split('/').slice(1)) {
+      if (typeof value !== 'object' || value === null) break;
+      value = (value as Record<string, unknown>)[
+        part.replace(/~1/g, '/').replace(/~0/g, '~')
+      ];
+    }
+    if (typeof value !== 'string') continue;
+    const text = value.trim();
+    if (!text.startsWith('[') && !text.startsWith('{')) continue;
+    try {
+      JSON.parse(text);
+    } catch (parseError) {
+      const reason =
+        parseError instanceof Error ? parseError.message : String(parseError);
+      // V8 can quote input containing "position N" in errors with no offset.
+      const position = Number(
+        / at position (\d+) \(line \d+ column \d+\)$/.exec(reason)?.[1],
+      );
+      // Parser messages may contain the argument itself. Keep only the offset.
+      const location =
+        Number.isInteger(position) && position <= text.length
+          ? ` at position ${position} in the trimmed text (zero-based UTF-16 offset)`
+          : '';
+      const expected = types.size === 2 ? 'array or object' : [...types][0];
+      const failedAlternative = errors.some(
+        (error) =>
+          (error.keyword === 'anyOf' || error.keyword === 'oneOf') &&
+          (instancePath === error.instancePath ||
+            instancePath.startsWith(`${error.instancePath}/`)),
+      );
+      const condition = failedAlternative
+        ? 'If the schema alternative requiring a structured value applies, fix'
+        : 'Fix';
+      notes.push(
+        `params${instancePath} arrived as a string whose text is not valid JSON${location}. ` +
+          `${condition} the JSON syntax and send it as a JSON ${expected}, not as a string.`,
+      );
+    }
+  }
+  return notes.length > 0 ? BROKEN_JSON_HINT_PREFIX + notes.join('\n') : '';
 }
 
 /**

@@ -113,6 +113,7 @@ import {
   isRetryableWorkspaceAcquisition,
 } from '../hosted-workspace-tool-turn.js';
 import { extensionAgentsOf } from './configuration-routes.js';
+import { startHostedEventIngest } from './event-ingest.js';
 import { childAgentsOf, stopPublicChildSource } from './interaction-routes.js';
 import { compressionBusy, noteSessionActivity } from './lifecycle-routes.js';
 import {
@@ -1351,6 +1352,36 @@ export function registerHostedPromptRoute({
     ) {
       return error(res, 400, 'invalid_hosted_prompt');
     }
+    // The dispatcher asks for ingest on a fresh submission it hands to this
+    // Harness; the pusher then delivers the Turn's events in its place.
+    const eventDelivery =
+      body?.['eventDelivery'] === undefined
+        ? undefined
+        : object(body['eventDelivery']);
+    const ingestTurnId = eventDelivery?.['turnId'];
+    if (
+      body?.['eventDelivery'] !== undefined &&
+      (eventDelivery?.['mode'] !== 'ingest' ||
+        typeof ingestTurnId !== 'string' ||
+        ingestTurnId.length === 0 ||
+        ingestTurnId.length > 64)
+    )
+      return error(res, 400, 'invalid_hosted_event_delivery');
+    if (eventDelivery && !session.stores)
+      return error(res, 409, 'hosted_event_ingest_unavailable');
+    // A replayed admission asks again: the dispatcher hands the Turn off on
+    // any 202, so the replay must push from the watermark it answers.
+    const pushEvents = (afterSequence: number): void => {
+      if (typeof ingestTurnId === 'string')
+        startHostedEventIngest({
+          session,
+          sessionId: req.params['id'],
+          epoch,
+          promptId,
+          turnId: ingestTurnId,
+          afterSequence,
+        });
+    };
     // #13803: a workflow child Session's first Turn carries one
     // `workflow_launch` block instead of text; the journal's user record
     // keeps the one-line summary while the full payload rides the input.
@@ -1396,6 +1427,7 @@ export function registerHostedPromptRoute({
         lastEventId: existing.lastEventId,
         eventEpoch: epoch,
       });
+      pushEvents(existing.lastEventId);
       return;
     }
     if (
@@ -1525,6 +1557,7 @@ export function registerHostedPromptRoute({
             lastEventId: acceptedSequence,
             eventEpoch: epoch,
           });
+          pushEvents(acceptedSequence);
           return;
         }
         if (admissionRef !== undefined) {
@@ -1559,12 +1592,14 @@ export function registerHostedPromptRoute({
                 if (!res.headersSent) error(res, 409, 'hosted_prompt_conflict');
                 return;
               }
-              if (!res.headersSent)
+              if (!res.headersSent) {
                 res.status(202).json({
                   promptId,
                   lastEventId: acceptedSequence,
                   eventEpoch: epoch,
                 });
+                pushEvents(acceptedSequence);
+              }
             } catch {
               if (!res.headersSent)
                 error(res, 409, 'hosted_prompt_recovery_required');
@@ -1735,6 +1770,7 @@ export function registerHostedPromptRoute({
         const lastEventId = authority.committedSequence;
         session.admissions.set(promptId, { digest, lastEventId });
         res.status(202).json({ promptId, lastEventId, eventEpoch: epoch });
+        pushEvents(lastEventId);
         turnResult = await executeHostedTurn(
           session,
           req.params['id'],

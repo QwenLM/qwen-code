@@ -961,9 +961,6 @@ public class ManagedAgentProperties
         private boolean enabled;
         private final Retention retention = new Retention();
         private final McpParking mcpParking = new McpParking();
-        private String host = "127.0.0.1";
-        private int port = 4182;
-        private boolean allowNonLoopback;
         private String token = "";
         private Map<String, String> providerOptions = Map.of();
         private String provisioner = RuntimeProviderKinds.LOCAL_PROCESS;
