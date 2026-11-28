@@ -50,6 +50,7 @@ function findExistingWorkspaceDirectory(
  */
 export function getDirPathCompletions(
   partialArg: string,
+  platform: NodeJS.Platform = process.platform,
 ): CommandCompletionItem[] {
   const lastComma = partialArg.lastIndexOf(',');
   const prefix = lastComma >= 0 ? partialArg.substring(0, lastComma + 1) : '';
@@ -58,18 +59,20 @@ export function getDirPathCompletions(
       ? partialArg.substring(lastComma + 1).trimStart()
       : partialArg;
 
-  return getPathCompletions(prefix, partial);
+  return getPathCompletions(prefix, partial, platform);
 }
 
 export function getSingleDirPathCompletions(
   partialArg: string,
+  platform: NodeJS.Platform = process.platform,
 ): CommandCompletionItem[] {
-  return getPathCompletions('', partialArg);
+  return getPathCompletions('', partialArg, platform);
 }
 
 function getPathCompletions(
   prefix: string,
   partial: string,
+  platform: NodeJS.Platform,
 ): CommandCompletionItem[] {
   const trimmed = partial.trim();
   if (!trimmed) return [];
@@ -80,6 +83,8 @@ function getPathCompletions(
     inputEndsWithSep || expanded.endsWith('/') || expanded.endsWith(path.sep);
   const searchDir = endsWithSep ? expanded : path.dirname(expanded);
   const namePrefix = endsWithSep ? '' : path.basename(expanded);
+  const caseInsensitive = platform === 'win32';
+  const matchPrefix = caseInsensitive ? namePrefix.toLowerCase() : namePrefix;
 
   try {
     const children = fs
@@ -87,7 +92,9 @@ function getPathCompletions(
       .filter(
         (e) =>
           e.isDirectory() &&
-          e.name.startsWith(namePrefix) &&
+          (caseInsensitive
+            ? e.name.toLowerCase().startsWith(matchPrefix)
+            : e.name.startsWith(matchPrefix)) &&
           !e.name.startsWith('.'),
       )
       .map((e) => ({
