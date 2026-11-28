@@ -5,7 +5,11 @@
  */
 
 import type { Config, ToolCallRequestInfo } from '@qwen-code/qwen-code-core';
-import type { CLIAssistantMessage, CLIMessage } from '../types.js';
+import type {
+  CLIAssistantMessage,
+  CLIMessage,
+  CLIResultMessage,
+} from '../types.js';
 import {
   BaseJsonOutputAdapter,
   type JsonOutputAdapterInterface,
@@ -113,7 +117,7 @@ export class JsonOutputAdapter
     );
   }
 
-  emitResult(options: ResultOptions): void {
+  emitResult(options: ResultOptions): CLIResultMessage {
     const resultMessage = this.buildResultMessage(
       options,
       this.lastAssistantMessage,
@@ -133,6 +137,7 @@ export class JsonOutputAdapter
       observeHeadlessJsonToolResultWire(this.messages, frame);
       process.stdout.write(frame);
     }
+    return resultMessage;
   }
 
   emitMessage(message: CLIMessage): void {

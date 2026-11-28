@@ -17,6 +17,7 @@ import type {
   CLIAssistantMessage,
   CLIMessage,
   CLIPartialAssistantMessage,
+  CLIResultMessage,
   ControlMessage,
   StreamEvent,
   TextBlock,
@@ -99,7 +100,27 @@ export class StreamJsonOutputAdapter
     preserveText: boolean,
     discardedToolCalls: ToolCallRequestInfo[],
   ): void {
-    if (preserveText && discardedToolCalls.length === 0) {
+    if (preserveText) {
+      // A preserving retry keeps the already-delivered text, so it must not run
+      // the retraction branch: those frames are on the wire and still count as
+      // the turn's answer. A buffered tool call still needs its synthetic
+      // not-started result so transcript replay stays valid.
+      if (discardedToolCalls.length === 0) {
+        return;
+      }
+      if (
+        this.mainAgentMessageState.messageStarted &&
+        !this.mainAgentMessageState.finalized
+      ) {
+        this.finalizeAssistantMessage();
+      }
+      this.emitDiscardedAttemptToolResults(discardedToolCalls);
+      // The base only trims the discarded tool blocks; closing the frame above
+      // leaves `finalized` set, so the replacement attempt's first text would
+      // be dropped. Start the successor's frame here, keeping the text that was
+      // already delivered counted as this turn's answer.
+      this.startAssistantMessageInternal(this.mainAgentMessageState);
+      super.restartAttempt(true, discardedToolCalls);
       return;
     }
     // Stream frames cannot be retracted. Close the abandoned assistant first,
@@ -134,12 +155,13 @@ export class StreamJsonOutputAdapter
     return message;
   }
 
-  emitResult(options: ResultOptions): void {
+  emitResult(options: ResultOptions): CLIResultMessage {
     const resultMessage = this.buildResultMessage(
       options,
       this.lastAssistantMessage,
     );
     this.emitMessageImpl(resultMessage);
+    return resultMessage;
   }
 
   emitMessage(message: CLIMessage | ControlMessage): void {
