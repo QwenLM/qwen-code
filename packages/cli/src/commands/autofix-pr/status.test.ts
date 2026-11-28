@@ -135,7 +135,7 @@ describe('runStatus', () => {
         pushTarget: 'origin',
         headSha: HEAD,
         pushes: 3,
-        maxPushes: 10,
+        maxPushes: 20,
         session: 'session-a',
         preparedAt: '2026-10-01T00:00:00.000Z',
         thisSession: true,

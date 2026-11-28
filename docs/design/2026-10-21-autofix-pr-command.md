@@ -14,7 +14,12 @@ bundled `/autofix-pr` skill, with `--once` and watch mode. Step 4 has begun
 `/autofix-pr resume`, and the `autofix_pr` tool that runs the helpers. The reviewer watch, the rest of step 4 and the
 follow-ups of step 5 are still proposals. The four product decisions in
 [Resolved decisions](#11-resolved-decisions) were made on 2026-10-21; the
-fourth is revised there.
+fourth is revised there. Later extensions (2026-11-28,
+[`2026-11-28-autofix-pr-audit-and-resolve.md`](2026-11-28-autofix-pr-audit-and-resolve.md))
+add built-in undirected/adversarial audit and local real-environment
+verification, proactive `--audit`, fail-closed review thread resolution in
+`reply` (`--no-resolve`), and raised budgets (20 pushes, 240/250/255 min fix
+attempt bounds).
 
 ## 1. Problem
 

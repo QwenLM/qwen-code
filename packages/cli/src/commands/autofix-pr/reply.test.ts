@@ -18,11 +18,13 @@ import { dirname, join } from 'node:path';
 import type { PrData } from './snapshot.js';
 
 const mocks = vi.hoisted(() => ({
+  gh: vi.fn((..._args: string[]) => ''),
   ghWithInput: vi.fn((_input: string, ..._args: string[]) => ''),
   fetchPrData: vi.fn(),
 }));
 vi.mock('../review/lib/gh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../review/lib/gh.js')>()),
+  gh: mocks.gh,
   ghWithInput: mocks.ghWithInput,
   setGhHost: () => {},
   ensureAuthenticated: () => {},
@@ -69,6 +71,38 @@ function thread(id: string, comments: Array<ReturnType<typeof comment>>) {
     root: { nodes: [{ databaseId: comments[0].databaseId ?? 0 }] },
     comments: { pageInfo: { hasPreviousPage: false }, nodes: comments },
   };
+}
+
+function liveThreadResponse(
+  t: ReturnType<typeof thread> | null,
+  prOverrides: Partial<{
+    number: number;
+    state: string;
+    headRefOid: string;
+    author: { login: string } | null;
+    repository: { nameWithOwner: string };
+  }> = {},
+): string {
+  return JSON.stringify({
+    data: {
+      node: t
+        ? {
+            id: t.id,
+            isResolved: t.isResolved,
+            pullRequest: {
+              number: 7,
+              state: 'OPEN',
+              headRefOid: HEAD,
+              author: { login: 'me' },
+              repository: { nameWithOwner: 'o/r' },
+              ...prOverrides,
+            },
+            root: t.root,
+            comments: t.comments,
+          }
+        : null,
+    },
+  });
 }
 
 function prData(overrides: Partial<PrData> = {}): PrData {
@@ -168,6 +202,7 @@ describe('runReply', () => {
     writeState(paths.statePath, initial);
     planPath = join(repo, '.qwen', 'tmp', 'autofix-pr-7-plan.json');
     nextId = 1;
+    mocks.gh.mockReset();
     mocks.ghWithInput.mockReset();
     mocks.ghWithInput.mockImplementation(() => {
       const id = nextId++;
@@ -1280,6 +1315,758 @@ describe('runReply', () => {
     ).toThrow(refused('plan_invalid', /the reply plan cannot be read: ENOENT/));
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
+
+  it('resolves a fixed review thread fail-closed after posting and atomic single-response live recheck on a round-bound pushed head', () => {
+    const PREV_HEAD = '0'.repeat(40);
+    const ROUND_ID = 'round-1';
+    const liveComments = [comment('PRRC_101', 'alice', 'COLLABORATOR')];
+    writeState(paths.statePath, {
+      ...state(),
+      pushedShas: [HEAD],
+      lastPush: { sha: HEAD, snapshotRoundId: ROUND_ID },
+    });
+    writeFileSync(
+      paths.snapshotPath,
+      JSON.stringify({ headSha: PREV_HEAD, roundId: ROUND_ID, events: [] }),
+    );
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        reviewThreads: {
+          pageInfo: { hasNextPage: false },
+          nodes: [thread('T1', [...liveComments])],
+        },
+      }),
+      viewer: 'me',
+    }));
+    mocks.gh.mockImplementation((...args) => {
+      expect(args[0]).toBe('api');
+      expect(args[1]).toBe('graphql');
+      expect(args[3]).toContain('PullRequestReviewThread');
+      expect(args[5]).toBe('id=T1');
+      return liveThreadResponse(thread('T1', [...liveComments]));
+    });
+    mocks.ghWithInput.mockImplementation((input, ...args) => {
+      if (args[3] === 'graphql') {
+        const payload = JSON.parse(input) as {
+          query: string;
+          variables: { threadId: string };
+        };
+        expect(payload.query).toContain('resolveReviewThread');
+        return JSON.stringify({
+          data: {
+            resolveReviewThread: {
+              thread: { id: payload.variables.threadId, isResolved: true },
+            },
+          },
+        });
+      }
+      const id = nextId++;
+      const parsed = JSON.parse(input) as { body: string };
+      liveComments.push({
+        ...comment(`POSTED_${id}`, 'me', 'OWNER'),
+        body: parsed.body,
+      });
+      return JSON.stringify({
+        node_id: `POSTED_${id}`,
+        html_url: `https://github.com/o/r/pull/7#posted-${id}`,
+      });
+    });
+    const outcome = reply({
+      replies: [
+        {
+          replyTo: 101,
+          body: 'Fixed in aaaaaaa: handled.',
+          handled: ['PRRC_101'],
+          resolve: true,
+        },
+      ],
+    });
+    expect(outcome.resolvedThreads).toEqual(['T1']);
+    expect(outcome.resolveSkipped).toEqual([]);
+    // Initial PR read ran once; post-POST recheck used one single-response node(id) GraphQL read.
+    expect(mocks.fetchPrData).toHaveBeenCalledTimes(1);
+    expect(mocks.gh).toHaveBeenCalledTimes(1);
+    const graphqlCalls = mocks.ghWithInput.mock.calls.filter(
+      ([, ...args]) => args[3] === 'graphql',
+    );
+    expect(graphqlCalls).toHaveLength(1);
+    expect(
+      (JSON.parse(graphqlCalls[0]![0]) as { variables: { threadId: string } })
+        .variables,
+    ).toEqual({ threadId: 'T1' });
+
+    // Background-fix claimed snapshot (autofix-pr-7-fix-snapshot.json) also
+    // proves the round pushed past the snapshot head when snapshot.json moved.
+    rmSync(paths.snapshotPath);
+    const BG_ROUND = 'round-bg';
+    liveComments.splice(1);
+    writeFileSync(
+      join(repo, '.qwen', 'tmp', 'autofix-pr-7-fix-snapshot.json'),
+      JSON.stringify({ headSha: PREV_HEAD, roundId: BG_ROUND, events: [] }),
+    );
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: [],
+      postedCommentIds: [],
+      pushedShas: [HEAD],
+      lastPush: { sha: HEAD, snapshotRoundId: BG_ROUND },
+    });
+    const bgOutcome = reply({
+      replies: [
+        {
+          replyTo: 101,
+          body: 'Fixed in aaaaaaa: handled.',
+          handled: ['PRRC_101'],
+          resolve: true,
+        },
+      ],
+    });
+    expect(bgOutcome.resolvedThreads).toEqual(['T1']);
+  });
+
+  it('rechecks candidate thread and PR head atomically in one GraphQL response and leaves the thread open on mid-POST follow-up, head drift (including 101st thread), PR close, missing/mismatched thread, or recheck error', () => {
+    const PREV_HEAD = '0'.repeat(40);
+    const ROUND_ID = 'round-race';
+    const resetRound = () => {
+      mocks.gh.mockReset();
+      mocks.fetchPrData.mockReset();
+      mocks.fetchPrData.mockImplementation(() => ({
+        pr: prData(),
+        viewer: 'me',
+      }));
+      writeState(paths.statePath, {
+        ...state(),
+        handledCommentIds: [],
+        postedCommentIds: [],
+        pushedShas: [HEAD],
+        lastPush: { sha: HEAD, snapshotRoundId: ROUND_ID },
+      });
+      writeFileSync(
+        paths.snapshotPath,
+        JSON.stringify({ headSha: PREV_HEAD, roundId: ROUND_ID, events: [] }),
+      );
+    };
+
+    // 1. Collaborator adds PRRC_102 while our reply POST is in flight.
+    resetRound();
+    mocks.gh.mockImplementation(() =>
+      liveThreadResponse(
+        thread('T1', [
+          comment('PRRC_101', 'alice', 'COLLABORATOR'),
+          {
+            ...comment('POSTED_1', 'me', 'OWNER'),
+            body: `Fixed.\n\n${REPLY_MARKER}`,
+          },
+          comment('PRRC_102', 'alice', 'COLLABORATOR'),
+        ]),
+      ),
+    );
+    const midFollowUp = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(midFollowUp.resolvedThreads).toEqual([]);
+    expect(midFollowUp.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'new_comment_in_thread' },
+    ]);
+    expect(mocks.fetchPrData).toHaveBeenCalledTimes(1);
+    expect(
+      mocks.ghWithInput.mock.calls.filter(([, ...a]) => a[3] === 'graphql'),
+    ).toHaveLength(0);
+
+    // 2. PR head moves from HEAD to B on a 101-thread PR: single node(id) response
+    // reports headRefOid B atomically with thread T101 -> head_mismatch.
+    resetRound();
+    const threads101 = Array.from({ length: 101 }, (_, idx) =>
+      thread(`T${idx + 1}`, [
+        comment(`PRRC_${idx + 101}`, 'alice', 'COLLABORATOR'),
+      ]),
+    );
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        reviewThreads: {
+          pageInfo: { hasNextPage: false },
+          nodes: threads101,
+        },
+      }),
+      viewer: 'me',
+    }));
+    mocks.gh.mockImplementation((...args) => {
+      expect(args[5]).toBe('id=T101');
+      return liveThreadResponse(
+        thread('T101', [
+          comment('PRRC_201', 'alice', 'COLLABORATOR'),
+          {
+            ...comment('POSTED_2', 'me', 'OWNER'),
+            body: `Fixed.\n\n${REPLY_MARKER}`,
+          },
+        ]),
+        { headRefOid: 'b'.repeat(40) },
+      );
+    });
+    const headMoved = reply({
+      replies: [
+        { replyTo: 201, body: 'Fixed.', handled: ['PRRC_201'], resolve: true },
+      ],
+    });
+    expect(mocks.fetchPrData).toHaveBeenCalledTimes(1);
+    expect(headMoved.resolvedThreads).toEqual([]);
+    expect(headMoved.resolveSkipped).toEqual([
+      { replyTo: 201, reason: 'head_mismatch' },
+    ]);
+
+    // 3. PR closes/merges before resolve recheck.
+    resetRound();
+    mocks.gh.mockImplementation(() =>
+      liveThreadResponse(
+        thread('T1', [
+          comment('PRRC_101', 'alice', 'COLLABORATOR'),
+          {
+            ...comment('POSTED_3', 'me', 'OWNER'),
+            body: `Fixed.\n\n${REPLY_MARKER}`,
+          },
+        ]),
+        { state: 'MERGED' },
+      ),
+    );
+    const closedMidway = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(closedMidway.resolvedThreads).toEqual([]);
+    expect(closedMidway.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'pr_not_open' },
+    ]);
+
+    // 4. Candidate thread vanishes or belongs to another PR on live recheck -> thread_not_found.
+    resetRound();
+    mocks.gh.mockImplementation(() => liveThreadResponse(null));
+    const gone = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(gone.resolvedThreads).toEqual([]);
+    expect(gone.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'thread_not_found' },
+    ]);
+
+    resetRound();
+    mocks.gh.mockImplementation(() =>
+      liveThreadResponse(
+        thread('T1', [
+          comment('PRRC_101', 'alice', 'COLLABORATOR'),
+          {
+            ...comment('POSTED_4', 'me', 'OWNER'),
+            body: `Fixed.\n\n${REPLY_MARKER}`,
+          },
+        ]),
+        { number: 999 },
+      ),
+    );
+    const wrongPr = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(wrongPr.resolvedThreads).toEqual([]);
+    expect(wrongPr.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'thread_not_found' },
+    ]);
+
+    // 5. Live recheck read fails or returns GraphQL errors: fail-closed skip without losing posted reply.
+    resetRound();
+    mocks.gh.mockImplementation(() => {
+      throw new Error('HTTP 502 Bad Gateway');
+    });
+    const recheckErr = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(recheckErr.posted).toHaveLength(1);
+    expect(state().handledCommentIds).toEqual(['PRRC_101']);
+    expect(recheckErr.resolvedThreads).toEqual([]);
+    expect(recheckErr.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'recheck_failed' },
+    ]);
+
+    resetRound();
+    mocks.gh.mockImplementation(() =>
+      JSON.stringify({ data: { node: null }, errors: [{ message: 'denied' }] }),
+    );
+    const recheckGqlErr = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(recheckGqlErr.resolvedThreads).toEqual([]);
+    expect(recheckGqlErr.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'recheck_failed' },
+    ]);
+  });
+
+  it('never resolves threads not marked resolve: true, or under --no-resolve / --no-post / unpushed head / stale-round or rolled-back head / missing snapshot / head mismatch', () => {
+    const PREV_HEAD = '0'.repeat(40);
+    const ROUND_ID = 'round-guard';
+    const writePriorSnapshot = (headSha = PREV_HEAD, roundId = ROUND_ID) =>
+      writeFileSync(
+        paths.snapshotPath,
+        JSON.stringify({ headSha, roundId, events: [] }),
+      );
+
+    // 1. Not marked resolve: true (e.g. declined / needs_human): no GraphQL call.
+    writeState(paths.statePath, {
+      ...state(),
+      pushedShas: [HEAD],
+      lastPush: { sha: HEAD, snapshotRoundId: ROUND_ID },
+    });
+    writePriorSnapshot();
+    const plain = reply({
+      replies: [
+        {
+          replyTo: 101,
+          body: 'Not changed: by design.',
+          handled: ['PRRC_101'],
+        },
+      ],
+    });
+    expect(plain.resolvedThreads).toEqual([]);
+    expect(plain.resolveSkipped).toEqual([]);
+    expect(
+      mocks.ghWithInput.mock.calls.filter(([, ...a]) => a[3] === 'graphql'),
+    ).toHaveLength(0);
+
+    // 2. --no-resolve (resolve: false) skips resolution and enforces watch.resolve === false.
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: [],
+      postedCommentIds: [],
+      pushedShas: [HEAD],
+      lastPush: { sha: HEAD, snapshotRoundId: ROUND_ID },
+      watch: {
+        every: 2,
+        reply: true,
+        resolve: false,
+        instructions: '',
+        task: 'feedc0ffee12',
+      },
+    });
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        replies: [
+          {
+            replyTo: 101,
+            body: 'Fixed.',
+            handled: ['PRRC_101'],
+            resolve: true,
+          },
+        ],
+      }),
+    );
+    expect(() =>
+      runReply({
+        pr: 7,
+        planPath,
+        post: true,
+        resolve: true,
+        task: 'feedc0ffee12',
+      }),
+    ).toThrow(refused('plan_invalid', /started with --no-resolve/));
+    const disabled = runReply({
+      pr: 7,
+      planPath,
+      post: true,
+      resolve: false,
+      task: 'feedc0ffee12',
+    });
+    expect(disabled.resolvedThreads).toEqual([]);
+    expect(disabled.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'disabled' },
+    ]);
+
+    // 3. --no-post never resolves threads.
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: [],
+      postedCommentIds: [],
+      pushedShas: [HEAD],
+      watch: undefined,
+    });
+    const noPost = reply(
+      {
+        replies: [
+          {
+            replyTo: 101,
+            body: 'Fixed.',
+            handled: ['PRRC_101'],
+            resolve: true,
+          },
+        ],
+      },
+      false,
+    );
+    expect(noPost.resolvedThreads).toEqual([]);
+    expect(noPost.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'no_post' },
+    ]);
+
+    // 4. Unpushed head (watch did not push current head): fail-closed skip.
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: [],
+      postedCommentIds: [],
+      pushedShas: [],
+    });
+    const unpushed = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(unpushed.resolvedThreads).toEqual([]);
+    expect(unpushed.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'not_pushed' },
+    ]);
+
+    // 5. Same head as an earlier round's push (snapshot.headSha === head):
+    // this round did not push a new fix after reading the comment -> fail-closed.
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: [],
+      postedCommentIds: [],
+      pushedShas: [HEAD],
+    });
+    writePriorSnapshot(HEAD);
+    const sameRoundHead = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(sameRoundHead.resolvedThreads).toEqual([]);
+    expect(sameRoundHead.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'not_pushed' },
+    ]);
+
+    // 6. Missing round snapshot cannot prove head advanced after reading the thread.
+    rmSync(paths.snapshotPath);
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: [],
+      postedCommentIds: [],
+      pushedShas: [HEAD],
+      lastPush: { sha: HEAD, snapshotRoundId: ROUND_ID },
+    });
+    const missingSnapshot = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(missingSnapshot.resolvedThreads).toEqual([]);
+    expect(missingSnapshot.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'not_pushed' },
+    ]);
+
+    // 7. Rolled-back branch: HEAD was pushed in an earlier round (`round-old`),
+    // current round started from PREV_HEAD (`round-new`), and `sync` adopted
+    // the rollback without this round pushing -> fail-closed not_pushed.
+    writePriorSnapshot(PREV_HEAD, 'round-new');
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: [],
+      postedCommentIds: [],
+      pushedShas: [HEAD],
+      lastPush: { sha: HEAD, snapshotRoundId: 'round-old' },
+    });
+    const rolledBackStaleRound = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(rolledBackStaleRound.resolvedThreads).toEqual([]);
+    expect(rolledBackStaleRound.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'not_pushed' },
+    ]);
+
+    // Same rollback scenario when `withKnownHead` already cleared `lastPush`.
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: [],
+      postedCommentIds: [],
+      pushedShas: [HEAD],
+    });
+    const rolledBackCleared = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(rolledBackCleared.resolvedThreads).toEqual([]);
+    expect(rolledBackCleared.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'not_pushed' },
+    ]);
+
+    // 8. Live headRefOid lags or moved past lastKnownHeadSha: fail-closed skip.
+    writePriorSnapshot();
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: [],
+      postedCommentIds: [],
+      pushedShas: [HEAD],
+      lastPush: { sha: HEAD, snapshotRoundId: ROUND_ID },
+    });
+    mocks.gh.mockImplementation(() =>
+      liveThreadResponse(
+        thread('T1', [
+          comment('PRRC_101', 'alice', 'COLLABORATOR'),
+          {
+            ...comment('POSTED_X', 'me', 'OWNER'),
+            body: `Fixed.\n\n${REPLY_MARKER}`,
+          },
+        ]),
+        { headRefOid: 'b'.repeat(40) },
+      ),
+    );
+    const mismatch = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(mismatch.resolvedThreads).toEqual([]);
+    expect(mismatch.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'head_mismatch' },
+    ]);
+  });
+
+  it('skips resolution fail-closed when comment history is truncated, a new unanswered trusted comment exists, the thread is already resolved, or previously got a different reply', () => {
+    const ROUND_ID = 'round-thread-guards';
+    const setupPushed = (handled: string[] = []) => {
+      mocks.gh.mockReset();
+      mocks.fetchPrData.mockReset();
+      mocks.fetchPrData.mockImplementation(() => ({
+        pr: prData(),
+        viewer: 'me',
+      }));
+      writeState(paths.statePath, {
+        ...state(),
+        handledCommentIds: handled,
+        postedCommentIds: [],
+        pushedShas: [HEAD],
+        lastPush: { sha: HEAD, snapshotRoundId: ROUND_ID },
+      });
+      writeFileSync(
+        paths.snapshotPath,
+        JSON.stringify({
+          headSha: '0'.repeat(40),
+          roundId: ROUND_ID,
+          events: [],
+        }),
+      );
+    };
+
+    // 1. Truncated thread comment history (`hasPreviousPage: true`): hidden
+    // earlier comments may be unanswered -> leave open fail-closed.
+    setupPushed();
+    mocks.gh.mockImplementation(() => {
+      const t = thread('T1', [
+        comment('PRRC_101', 'alice', 'COLLABORATOR'),
+        {
+          ...comment('POSTED_1', 'me', 'OWNER'),
+          body: `Fixed.\n\n${REPLY_MARKER}`,
+        },
+      ]);
+      t.comments.pageInfo.hasPreviousPage = true;
+      return liveThreadResponse(t);
+    });
+    const truncated = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(truncated.resolvedThreads).toEqual([]);
+    expect(truncated.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'incomplete_history' },
+    ]);
+
+    // 2. New trusted follow-up PRRC_102 arrived in thread T1 while plan only handled PRRC_101.
+    setupPushed();
+    mocks.gh.mockImplementation(() =>
+      liveThreadResponse(
+        thread('T1', [
+          comment('PRRC_101', 'alice', 'COLLABORATOR'),
+          comment('PRRC_102', 'alice', 'COLLABORATOR'),
+          {
+            ...comment('POSTED_2', 'me', 'OWNER'),
+            body: `Fixed.\n\n${REPLY_MARKER}`,
+          },
+        ]),
+      ),
+    );
+    const withFollowUp = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(withFollowUp.resolvedThreads).toEqual([]);
+    expect(withFollowUp.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'new_comment_in_thread' },
+    ]);
+
+    // 3. Already resolved on GitHub: skipped without calling resolve mutation.
+    setupPushed(['PRRC_101']);
+    mocks.gh.mockImplementation(() =>
+      liveThreadResponse({
+        ...thread('T1', [
+          comment('PRRC_101', 'alice', 'COLLABORATOR'),
+          {
+            ...comment('PRRC_199', 'me', 'OWNER'),
+            body: `Fixed.\n\n${REPLY_MARKER}`,
+          },
+        ]),
+        isResolved: true,
+      }),
+    );
+    const already = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(already.resolvedThreads).toEqual([]);
+    expect(already.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'already_resolved' },
+    ]);
+
+    // 4. Old thread previously answered "Needs a human decision" cannot be resolved
+    // on a later pushed head by re-submitting its already-handled comment id
+    // with a different "Fixed." body.
+    setupPushed(['PRRC_101']);
+    mocks.gh.mockImplementation(() =>
+      liveThreadResponse(
+        thread('T1', [
+          comment('PRRC_101', 'alice', 'COLLABORATOR'),
+          {
+            ...comment('PRRC_198', 'me', 'OWNER'),
+            body: `Needs a human decision: clarify?\n\n${REPLY_MARKER}`,
+          },
+        ]),
+      ),
+    );
+    const mismatchedBody = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(mismatchedBody.resolvedThreads).toEqual([]);
+    expect(mismatchedBody.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'not_replied' },
+    ]);
+  });
+
+  it('isolates GraphQL resolve failures without losing posted replies, and resolves idempotently on retry', () => {
+    const ROUND_ID = 'round-retry';
+    const liveComments = [comment('PRRC_101', 'alice', 'COLLABORATOR')];
+    writeState(paths.statePath, {
+      ...state(),
+      pushedShas: [HEAD],
+      lastPush: { sha: HEAD, snapshotRoundId: ROUND_ID },
+    });
+    writeFileSync(
+      paths.snapshotPath,
+      JSON.stringify({
+        headSha: '0'.repeat(40),
+        roundId: ROUND_ID,
+        events: [],
+      }),
+    );
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        reviewThreads: {
+          pageInfo: { hasNextPage: false },
+          nodes: [thread('T1', [...liveComments])],
+        },
+      }),
+      viewer: 'me',
+    }));
+    mocks.gh.mockImplementation(() =>
+      liveThreadResponse(thread('T1', [...liveComments])),
+    );
+    // First attempt: thread reply POST succeeds, GraphQL resolve fails with error.
+    let graphqlCalls = 0;
+    mocks.ghWithInput.mockImplementation((input, ...args) => {
+      if (args[3] === 'graphql') {
+        graphqlCalls += 1;
+        if (graphqlCalls === 1) {
+          return JSON.stringify({
+            data: { resolveReviewThread: null },
+            errors: [{ message: 'Resource not accessible by integration' }],
+          });
+        }
+        if (graphqlCalls === 2) {
+          return JSON.stringify({
+            data: {
+              resolveReviewThread: { thread: { id: 'T1', isResolved: false } },
+            },
+          });
+        }
+        if (graphqlCalls === 3) {
+          throw new Error('HTTP 502 Bad Gateway');
+        }
+        return JSON.stringify({
+          data: {
+            resolveReviewThread: { thread: { id: 'T1', isResolved: true } },
+          },
+        });
+      }
+      const id = nextId++;
+      const parsed = JSON.parse(input) as { body: string };
+      liveComments.push({
+        ...comment(`POSTED_${id}`, 'me', 'OWNER'),
+        body: parsed.body,
+      });
+      return JSON.stringify({
+        node_id: `POSTED_${id}`,
+        html_url: `https://github.com/o/r/pull/7#posted-${id}`,
+      });
+    });
+
+    const plan: ReplyPlan = {
+      replies: [
+        {
+          replyTo: 101,
+          body: 'Fixed in aaaaaaa: done.',
+          handled: ['PRRC_101'],
+          resolve: true,
+        },
+      ],
+    };
+    const r1 = reply(plan);
+    expect(r1.posted).toHaveLength(1);
+    expect(state().handledCommentIds).toEqual(['PRRC_101']);
+    expect(r1.resolvedThreads).toEqual([]);
+    expect(r1.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'graphql_error' },
+    ]);
+
+    const r2 = reply(plan);
+    expect(r2.posted).toEqual([]);
+    expect(r2.skipped).toBe(1);
+    expect(r2.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'not_resolved' },
+    ]);
+
+    const r3 = reply(plan);
+    expect(r3.posted).toEqual([]);
+    expect(r3.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'request_failed' },
+    ]);
+
+    const r4 = reply(plan);
+    expect(r4.posted).toEqual([]);
+    expect(r4.skipped).toBe(1);
+    expect(r4.resolvedThreads).toEqual(['T1']);
+    expect(r4.resolveSkipped).toEqual([]);
+  });
 });
 
 describe('parsePlan', () => {
@@ -1288,6 +2075,18 @@ describe('parsePlan', () => {
     expect(() => parsePlan({ resolve: true })).toThrow(
       /unknown reply plan field/,
     );
+    expect(() =>
+      parsePlan({
+        replies: [{ replyTo: 1, body: 'x', handled: ['a'], resolve: 'yes' }],
+      }),
+    ).toThrow(/resolve must be a boolean/);
+    expect(
+      parsePlan({
+        replies: [
+          { replyTo: 1, body: 'Fixed.', handled: ['a'], resolve: true },
+        ],
+      }).replies[0],
+    ).toMatchObject({ replyTo: 1, resolve: true });
     expect(() =>
       parsePlan({ replies: [{ replyTo: 0, body: 'x', handled: ['a'] }] }),
     ).toThrow(/replyTo must be a positive integer/);

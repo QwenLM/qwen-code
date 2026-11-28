@@ -89,6 +89,7 @@ export function scheduledTask(
       (watch.task ? ` --task ${watch.task}` : '') +
       (state.inPlace ? ' --in-place' : '') +
       (watch.reply ? '' : ' --no-reply') +
+      (watch.resolve === false ? ' --no-resolve' : '') +
       (watch.instructions ? ` -- ${watch.instructions}` : ''),
     ...(daemon
       ? { durable: true as const, sessionMode: 'current' as const }
@@ -123,6 +124,7 @@ export interface ScheduleArgs {
   pr: number;
   every?: number;
   noReply?: boolean;
+  noResolve?: boolean;
   /** Read the instructions from the watch's instructions file. */
   instructions?: boolean;
   /** Schedule the task recorded already again, for a session that took the
@@ -136,7 +138,10 @@ export function runSchedule(
   const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   if (
     args.again &&
-    (args.every !== undefined || args.noReply || args.instructions)
+    (args.every !== undefined ||
+      args.noReply ||
+      args.noResolve ||
+      args.instructions)
   ) {
     throw new TypeError(
       '--again schedules the task recorded already; it takes no other option.',
@@ -190,12 +195,14 @@ export function runSchedule(
       options = {
         every: state.watch.every,
         reply: state.watch.reply,
+        resolve: state.watch.resolve ?? true,
         instructions: state.watch.instructions,
       };
     } else {
       options = {
         every,
         reply: !args.noReply,
+        resolve: !args.noResolve,
         instructions,
       };
     }
@@ -235,6 +242,12 @@ export const scheduleCommand: CommandModule = {
         describe:
           'Rounds post their replies; --no-reply records what they handled without posting',
       })
+      .option('resolve', {
+        type: 'boolean',
+        default: true,
+        describe:
+          'Rounds resolve review threads they fixed; --no-resolve leaves them open',
+      })
       .option('instructions', {
         type: 'boolean',
         default: false,
@@ -255,6 +268,7 @@ export const scheduleCommand: CommandModule = {
           every:
             argv['every'] === undefined ? undefined : Number(argv['every']),
           noReply: argv['reply'] === false,
+          noResolve: argv['resolve'] === false,
           instructions: Boolean(argv['instructions']),
           again: Boolean(argv['again']),
         }),

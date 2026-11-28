@@ -158,7 +158,11 @@ describe('runPush (real git, bare remote)', () => {
     rmSync(base, { recursive: true, force: true });
   });
 
-  it('pushes a fast-forward of the known head and records it', () => {
+  it('pushes a fast-forward of the known head and records it tied to the round snapshot', () => {
+    writeFileSync(
+      paths.snapshotPath,
+      JSON.stringify({ headSha: featSha, roundId: 'round-push-1', events: [] }),
+    );
     const fix = commitIn(paths.worktreePath, 'fix.txt');
     expect(runPush(7)).toEqual({
       pushed: true,
@@ -171,11 +175,40 @@ describe('runPush (real git, bare remote)', () => {
       lastKnownHeadSha: fix,
       pushedShas: [fix],
       pushCount: 1,
+      lastPush: { sha: fix, snapshotRoundId: 'round-push-1' },
     });
-    // The second push builds on the first.
+    // The second push builds on the first and clears lastPush when no snapshot roundId exists.
+    rmSync(paths.snapshotPath);
     const again = commitIn(paths.worktreePath, 'fix2.txt');
     expect(runPush(7)).toMatchObject({ pushed: true, sha: again, pushes: 2 });
     expect(state().pushedShas).toEqual([fix, again]);
+    expect(state().lastPush).toBeUndefined();
+  });
+
+  it('binds lastPush to the snapshot roundId captured before git push even if snapshot.json is replaced during a pre-push hook', () => {
+    writeFileSync(
+      paths.snapshotPath,
+      JSON.stringify({ headSha: featSha, roundId: 'round-1', events: [] }),
+    );
+    const hooksDir = join(base, 'hooks');
+    mkdirSync(hooksDir, { recursive: true });
+    const hook = join(hooksDir, 'pre-push');
+    // Simulate a second `snapshot` replacing snapshot.json with `round-2`
+    // while round 1's real `git push` is paused inside the pre-push hook.
+    writeFileSync(
+      hook,
+      `#!/bin/sh\nprintf '%s' '{"headSha":"${featSha}","roundId":"round-2","events":[]}' > ${JSON.stringify(paths.snapshotPath)}\n`,
+    );
+    chmodSync(hook, 0o755);
+    run(repo, 'config', 'core.hooksPath', hooksDir);
+
+    const fix = commitIn(paths.worktreePath, 'hook-race.txt');
+    expect(runPush(7)).toMatchObject({ pushed: true, sha: fix });
+    // Push receipt stays bound to round-1 so round-2 (now in snapshot.json) cannot resolve threads.
+    expect(state().lastPush).toEqual({
+      sha: fix,
+      snapshotRoundId: 'round-1',
+    });
   });
 
   it('has nothing to push while HEAD is the PR head, and asks GitHub nothing', () => {

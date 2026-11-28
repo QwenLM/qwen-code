@@ -227,7 +227,7 @@ function reviewNode(review) {
 function threadNode(thread) {
   return {
     id: thread.id,
-    isResolved: false,
+    isResolved: Boolean(thread.isResolved),
     isOutdated: false,
     path: thread.path,
     line: thread.line,
@@ -353,6 +353,27 @@ function project(value, fields, path) {
 // `Int!` variable.
 function graphql(fields, typed) {
   const query = fields.query ?? '';
+  if (
+    query.includes('PullRequestReviewThread') &&
+    typeof fields.id === 'string'
+  ) {
+    const thread = world.threads.find((t) => t.id === fields.id);
+    if (!thread) return { data: { node: null } };
+    return {
+      data: {
+        node: {
+          ...threadNode(thread),
+          pullRequest: {
+            number: pr.number,
+            state: pr.state,
+            headRefOid: headSha(),
+            author: { login: pr.author },
+            repository: { nameWithOwner: `${world.owner}/${world.repo}` },
+          },
+        },
+      },
+    };
+  }
   if (query.includes('$number: Int!') && !typed.has('number')) {
     fail('GraphQL: Variable $number of type Int! was provided invalid value');
   }
@@ -531,7 +552,33 @@ function api() {
       unsupported('a second path');
     }
   }
-  if (path === 'graphql') return print(graphql(fields, typed));
+  if (path === 'graphql') {
+    if (method === 'POST' && stdin) {
+      const payload = JSON.parse(stdin);
+      const query = String(payload.query ?? '');
+      if (query.includes('resolveReviewThread')) {
+        const threadId = payload.variables?.threadId;
+        const thread = world.threads.find((t) => t.id === threadId);
+        if (!thread) {
+          return print({
+            data: { resolveReviewThread: null },
+            errors: [{ message: `thread ${threadId} not found` }],
+          });
+        }
+        thread.isResolved = true;
+        saveWrite('gh: HTTP 502: Bad Gateway');
+        return print({
+          data: {
+            resolveReviewThread: {
+              thread: { id: thread.id, isResolved: true },
+            },
+          },
+        });
+      }
+      unsupported('GraphQL mutation');
+    }
+    return print(graphql(fields, typed));
+  }
   if (path === 'user') return answer({ login: world.viewer }, jq);
 
   const base = `repos/${slug}/`;

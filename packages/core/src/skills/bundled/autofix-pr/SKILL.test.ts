@@ -220,7 +220,7 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain(
       "the user's own copy of the head branch could not be squared with the PR",
     );
-    expect(body).toContain('do not start, `--once` included');
+    expect(body).toContain('do not start, `--once` and `--audit` included');
     expect(body).toContain('`localWorkUnknown` is true');
     expect(body).toContain('have them fetch the branch or fix the checkout');
     // A --once round of a watch this session already runs spends its budget.
@@ -474,7 +474,7 @@ describe('bundled autofix-pr skill', () => {
     const { body } = loadSkill();
     const step5 = /\n5\. \*\*Fix\*\*([\s\S]*?)\n6\. /.exec(body)?.[1] ?? '';
     for (const condition of [
-      'not a `--once` one',
+      'not a `--once` or `--audit` one',
       'its `status` said `unattended: true`',
       'step 1 reported no `abandonedFix`',
       'did not restart in this turn',
@@ -483,7 +483,7 @@ describe('bundled autofix-pr skill', () => {
       expect(step5).toContain(condition);
     }
     expect(body).toContain(
-      '- `after-fix <owner>/<repo>#<n> --task <id> --attempt <id>` followed by optional `--no-reply` and `-- <instructions>`',
+      '- `after-fix <owner>/<repo>#<n> --task <id> --attempt <id>` followed by optional `--no-reply`, `--no-resolve` and `-- <instructions>`',
     );
     const after =
       /\n## After a background fix\n([\s\S]*?)(?:\n## |$)/.exec(body)?.[1] ??
@@ -539,13 +539,13 @@ describe('bundled autofix-pr skill', () => {
     const { config, body } = loadSkill();
     expect(config.description).toContain('[--watch]');
     expect(body).toContain(
-      'If the start gives `--once` with `--watch` or `--every`, stop and say so before running `prepare`',
+      'If the start gives `--once` or `--audit` with `--watch` or `--every`, stop and say so before running `prepare`',
     );
     expect(body).toContain(
       '`--in-place --watch` (or `--in-place --every <n>`, which implies `--watch`)',
     );
     expect(body).toContain(
-      '- `tick <owner>/<repo>#<n>` followed by optional `--task <id>`, `--in-place`, `--no-reply` and `-- <instructions>`',
+      '- `tick <owner>/<repo>#<n>` followed by optional `--task <id>`, `--in-place`, `--no-reply`, `--no-resolve` and `-- <instructions>`',
     );
     const inPlace =
       /\n## In-place \(`--in-place`\)\n([\s\S]*?)\n## After a background fix/.exec(
@@ -599,5 +599,37 @@ describe('bundled autofix-pr skill', () => {
     expect(inPlace).toContain(
       'and when `sync` reported `unpushed` commits, that count (noting that approving "Fix it" pushes those local commits on top of the PR head too)',
     );
+  });
+
+  it('documents built-in audit, real-environment verification, --audit, fail-closed thread resolution, and updated budgets', () => {
+    const { config, body } = loadSkill();
+    expect(config.description).toContain('[--audit]');
+    expect(config.description).toContain('[--no-resolve]');
+    const brief = body.split('```markdown')[1]?.split('```')[0] ?? '';
+    expect(brief).toContain('## Audit until clean');
+    expect(brief).toContain('git fetch --no-tags <remote> <baseRefName>');
+    expect(brief).toContain('git merge-base "$BASE_SHA" HEAD');
+    expect(brief).toContain('git diff "$MERGE_BASE"');
+    expect(brief).not.toContain('git diff "$MERGE_BASE"..HEAD');
+    expect(brief).toContain('git ls-files --others --exclude-standard');
+    expect(brief).toContain('Undirected audit');
+    expect(brief).toContain('Adversarial audit');
+    expect(brief).toContain('2 consecutive clean passes');
+    expect(brief).toContain('## Verify in a real environment, then commit');
+    expect(brief).toContain('Local real-environment verification');
+    expect(brief).toMatch(/local `\/review` skill or\s+`qwen review run`/);
+    expect(brief).toContain('Verdict: findings');
+    expect(brief).toContain('deferredOnly: true');
+    expect(brief).toContain('preserve their deferred status');
+    expect(brief).toMatch(/`review` body/);
+    expect(body).toContain('--audit');
+    expect(body).toContain('--no-resolve');
+    expect(body).toContain('"resolve": true');
+    expect(body).toContain('resolveReviewThread');
+    expect(body).toContain('!hasPreviousPage');
+    expect(body).toContain('after 20 pushes');
+    expect(body).toContain('within 255 minutes');
+    expect(body).not.toContain('after 10 pushes');
+    expect(body).not.toContain('within 45 minutes');
   });
 });

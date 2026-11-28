@@ -19,6 +19,7 @@
 //   so the session is woken only for them.
 
 import type { CommandModule } from 'yargs';
+import { randomUUID } from 'node:crypto';
 import {
   lstatSync,
   mkdirSync,
@@ -368,7 +369,14 @@ export type SnapshotEvent =
       outdated: boolean;
       comments: CommentRef[];
     }
-  | ({ type: 'review'; state: string } & CommentRef)
+  | ({
+      type: 'review';
+      state: string;
+      /** Set when an `APPROVED` review carries a deferred checklist (such as
+       * `<!-- qwen-review-deferred -->`): surfaced for accounting while
+       * preserving the items' non-blocking deferred status. */
+      deferredOnly?: true;
+    } & CommentRef)
   | ({ type: 'issue_comment' } & CommentRef)
   | {
       type: 'untrusted_comment';
@@ -1160,6 +1168,69 @@ function startupFailures(suites: CheckSuite[]): FailedCheck[] {
   return failed;
 }
 
+function stripInlineCodeSpans(text: string): string {
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === '`') {
+      let ticks = 0;
+      while (i + ticks < text.length && text[i + ticks] === '`') ticks += 1;
+      const delim = '`'.repeat(ticks);
+      let close = text.indexOf(delim, i + ticks);
+      while (
+        close !== -1 &&
+        ((close > 0 && text[close - 1] === '`') || text[close + ticks] === '`')
+      ) {
+        close = text.indexOf(delim, close + 1);
+      }
+      if (close !== -1) {
+        i = close + ticks;
+        continue;
+      }
+      out += delim;
+      i += ticks;
+      continue;
+    }
+    out += text[i];
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * Whether an `APPROVED` review body carries a deferred checklist that should
+ * be surfaced for accounting, while plain approvals ("LGTM", prose-only
+ * acceptance, or quoted code examples) remain quiet.
+ */
+export function approvalHasDeferredChecklist(body: string): boolean {
+  if (!body.trim()) return false;
+  // Strip fenced code blocks so checklist or marker examples inside fences stay quiet.
+  const withoutFences = body.replace(
+    /(^|\n)[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n[ \t]*\2[ \t]*(?=\n|$)|$)/g,
+    '$1',
+  );
+  if (!withoutFences.trim()) return false;
+  // Strip inline code only for the HTML marker check so prose quoting
+  // `<!-- qwen-review-deferred -->` stays quiet, while task items whose entire
+  // label is inline code (e.g. `- [ ] `updateFoo()``) still count as content.
+  const withoutInlineCode = stripInlineCodeSpans(withoutFences);
+  if (/<!--\s*qwen-review-deferred\s*-->/i.test(withoutInlineCode)) return true;
+  // Unchecked Markdown task list item (`- [ ] ...`, `* [ ] ...`, `1. [ ] ...`,
+  // `1) [ ] ...`), requiring at least one non-whitespace, non-backtick char.
+  for (const match of withoutFences.matchAll(
+    /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+\[\s\][ \t]+([^\n]+)/gm,
+  )) {
+    if (/[^\s`]/.test(match[1]!)) return true;
+  }
+  // Explicit "Deferred ..." heading or lead-in line followed by list items.
+  for (const match of withoutFences.matchAll(
+    /(?:^|\n)[ \t]*(?:#{1,6}[ \t]+|[*_]{1,2})?deferred\b[^\n]*:?(?:[*_]{1,2})?[ \t]*\n+(?:[ \t]*\n)*[ \t]*(?:[-*+]|\d+[.)])[ \t]+([^\n]+)/gi,
+  )) {
+    if (/[^\s`]/.test(match[1]!)) return true;
+  }
+  return false;
+}
+
 /**
  * Review threads, reviews and conversation comments that `isNew` admits,
  * classified by trust. `ids` lists every admitted comment, trusted or not,
@@ -1241,14 +1312,14 @@ function commentEvents(
 
   // A review's inline comments arrive through its threads; only a review
   // with a body of its own says something the threads do not. A dismissed
-  // review was withdrawn, and an approval's body ("LGTM") accepts the PR:
-  // neither asks for anything.
+  // review was withdrawn, and a plain approval ("LGTM") accepts the PR
+  // without asking for anything — except an approval carrying a deferred
+  // checklist, which is surfaced for accounting with `deferredOnly: true`.
   for (const node of pr.reviews.nodes) {
-    if (
-      node.state === 'PENDING' ||
-      node.state === 'DISMISSED' ||
-      node.state === 'APPROVED'
-    ) {
+    if (node.state === 'PENDING' || node.state === 'DISMISSED') {
+      continue;
+    }
+    if (node.state === 'APPROVED' && !approvalHasDeferredChecklist(node.body)) {
       continue;
     }
     if (!node.body.trim() || !isNew(node)) continue;
@@ -1257,7 +1328,12 @@ function commentEvents(
     ids.push(node.id);
     if (trust === 'untrusted') events.push(untrusted(node));
     else
-      events.push({ type: 'review', state: node.state!, ...ref(node, trust) });
+      events.push({
+        type: 'review',
+        state: node.state!,
+        ...(node.state === 'APPROVED' ? { deferredOnly: true as const } : {}),
+        ...ref(node, trust),
+      });
   }
 
   for (const node of pr.comments.nodes) {
@@ -2510,6 +2586,7 @@ export function runSnapshot(args: SnapshotArgs): void {
     `${JSON.stringify(
       {
         ...snapshot,
+        roundId: randomUUID(),
         readAt,
         ...(args.task === undefined ? {} : { task: args.task }),
       },

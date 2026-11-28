@@ -46,13 +46,13 @@ export interface AutofixPrFixAttempt {
  * once a refresh is a minute late (`FIX_HEARTBEAT_MS` and
  * `FIX_HEARTBEAT_LATE_MS` in core): fresh while the attempt may be live. */
 export const FIX_FRESH_MS = 90_000;
-/** The session stops the agent at 30 minutes, and the round may claim the
- * attempt until 40 (`FIX_TIME_LIMIT_MS` and `FIX_CLAIM_DEADLINE_MS` in
+/** The session stops the agent at 240 minutes, and the round may claim the
+ * attempt until 250 (`FIX_TIME_LIMIT_MS` and `FIX_CLAIM_DEADLINE_MS` in
  * core). This bound must stay above that deadline: a claimable attempt read
  * as left behind would be removed by the next `sync`. The five minutes over
  * it leave room for the clocks. A marker kept fresh for longer is no
  * attempt of the session's. */
-export const FIX_MAX_AGE_MS = 45 * 60_000;
+export const FIX_MAX_AGE_MS = 255 * 60_000;
 /** How far ahead of this clock another's may run. */
 const CLOCK_SKEW_MS = 60_000;
 /** How old a round's snapshot may be when its fix starts. */
@@ -147,7 +147,7 @@ export function assertNoFixInFlight(
     `a fix agent is working in PR #${prNumber}'s worktree (attempt ` +
       `${attempt.attempt}, started ${attempt.startedAt}); its round goes on ` +
       `when it ends. In the session that runs it, /autofix-pr stop ` +
-      `${prNumber} stops it; it ends by itself within 45 minutes, and one ` +
+      `${prNumber} stops it; it ends by itself within 255 minutes, and one ` +
       `its session gave up on within 90 seconds.`,
   );
 }
@@ -183,6 +183,37 @@ export function fixSnapshotPath(
     dirname(paths.statePath),
     `autofix-pr-${prNumber}-fix-snapshot.json`,
   );
+}
+
+/** The active round's prepared snapshot path: `snapshot.json`, or the
+ * background-fix claimed copy when `fix-end` moved it. */
+export function roundSnapshotPath(
+  paths: AutofixPrPaths,
+  prNumber: number,
+): string {
+  return isRegularFile(paths.snapshotPath)
+    ? paths.snapshotPath
+    : fixSnapshotPath(paths, prNumber);
+}
+
+/** The `roundId` recorded on the current round's prepared snapshot, or null
+ * when missing or unreadable. */
+export function readSnapshotRoundId(
+  paths: AutofixPrPaths,
+  prNumber: number,
+): string | null {
+  const path = roundSnapshotPath(paths, prNumber);
+  if (!isRegularFile(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as {
+      roundId?: unknown;
+    } | null;
+    return typeof parsed?.roundId === 'string' && parsed.roundId.length > 0
+      ? parsed.roundId
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

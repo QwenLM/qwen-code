@@ -110,12 +110,14 @@ describe('runSchedule', () => {
       sessionMode: 'current',
       every: 5,
       reply: false,
+      resolve: true,
       instructions: 'keep exports stable',
       task: expect.stringMatching(TASK),
     });
     expect(state().watch).toEqual({
       every: 5,
       reply: false,
+      resolve: true,
       instructions: 'keep exports stable',
       task: task.task,
     });
@@ -187,12 +189,14 @@ describe('runSchedule', () => {
       prompt: `Run /autofix-pr tick o/r#7 --task ${task.task}`,
       every: 2,
       reply: true,
+      resolve: true,
       instructions: '',
       task: expect.stringMatching(TASK),
     });
     expect(state().watch).toEqual({
       every: 2,
       reply: true,
+      resolve: true,
       instructions: '',
       task: task.task,
     });
@@ -210,6 +214,7 @@ describe('runSchedule', () => {
       sessionMode: 'current',
       every: 2,
       reply: true,
+      resolve: true,
       instructions: '',
       task: expect.stringMatching(TASK),
     });
@@ -219,7 +224,7 @@ describe('runSchedule', () => {
     expect(again).toMatchObject({ durable: true, sessionMode: 'current' });
   });
 
-  it("puts --no-reply and the user's instructions, on one line, into the prompt", () => {
+  it("puts --no-reply, --no-resolve and the user's instructions, on one line, into the prompt", () => {
     writeFileSync(
       paths.instructionsPath,
       'do not touch\n  the public\u0085API\u2028\u202e\n',
@@ -229,34 +234,42 @@ describe('runSchedule', () => {
       pr: 7,
       every: 60,
       noReply: true,
+      noResolve: true,
       instructions: true,
     });
     expect(task).toMatchObject({
       cron: '0 * * * *',
-      prompt: `Run /autofix-pr tick o/r#7 --task ${task.task} --no-reply -- do not touch the public API`,
+      prompt: `Run /autofix-pr tick o/r#7 --task ${task.task} --no-reply --no-resolve -- do not touch the public API`,
     });
     expect(state().watch).toMatchObject({
       every: 60,
       reply: false,
+      resolve: false,
       instructions: 'do not touch the public API',
     });
   });
 
   it('schedules the recorded task again, under a new id, for the session that took the watch over', () => {
-    const first = runSchedule({ pr: 7, every: 5, noReply: true });
+    const first = runSchedule({
+      pr: 7,
+      every: 5,
+      noReply: true,
+      noResolve: true,
+    });
     write({ sessionId: 'session-b', watch: state().watch });
     process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
     const again = runSchedule({ pr: 7, again: true });
     expect(again).toMatchObject({
       cron: '*/5 * * * *',
       gate: `${GATE.replace('session-a', 'session-b')}${again.task}`,
-      prompt: `Run /autofix-pr tick o/r#7 --task ${again.task} --no-reply`,
+      prompt: `Run /autofix-pr tick o/r#7 --task ${again.task} --no-reply --no-resolve`,
     });
     // The task made from the first output answers stop from now on.
     expect(again.task).not.toBe(first.task);
     expect(state().watch).toEqual({
       every: 5,
       reply: false,
+      resolve: false,
       instructions: '',
       task: again.task,
     });
@@ -270,6 +283,9 @@ describe('runSchedule', () => {
       /no scheduled task recorded/,
     );
     expect(() => runSchedule({ pr: 7, again: true, every: 5 })).toThrow(
+      /--again schedules the task recorded already/,
+    );
+    expect(() => runSchedule({ pr: 7, again: true, noResolve: true })).toThrow(
       /--again schedules the task recorded already/,
     );
     expect(() => runSchedule({ pr: 7, instructions: true })).toThrow(
@@ -323,12 +339,14 @@ describe('runSchedule', () => {
       prompt: `Run /autofix-pr tick o/r#7 --task ${again.task}`,
       every: 2,
       reply: true,
+      resolve: true,
       instructions: '',
       task: expect.stringMatching(TASK),
     });
     expect(state().watch).toEqual({
       every: 2,
       reply: true,
+      resolve: true,
       instructions: '',
       task: again.task,
     });

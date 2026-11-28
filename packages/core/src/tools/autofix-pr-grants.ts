@@ -66,6 +66,8 @@ export interface UnattendedFixGrant {
 export interface WatchTask {
   task: string;
   reply: boolean;
+  /** False when started with `--no-resolve`; absent in legacy records (true). */
+  resolve?: boolean;
   instructions: string;
 }
 
@@ -237,10 +239,10 @@ export const FIX_HEARTBEAT_MS = 30_000;
 /** A refresh later than this past its time: the process was suspended. */
 export const FIX_HEARTBEAT_LATE_MS = 60_000;
 /** The attempt time limit: the agent is stopped then. */
-export const FIX_TIME_LIMIT_MS = 30 * 60_000;
+export const FIX_TIME_LIMIT_MS = 240 * 60_000;
 /** How long an attempt waits for its round's claim, from when it opened:
  * a notification waits for the session to be idle. */
-export const FIX_CLAIM_DEADLINE_MS = 40 * 60_000;
+export const FIX_CLAIM_DEADLINE_MS = 250 * 60_000;
 /** How long, after an attempt ended, whoever acts on its worktree next
  * waits for its stopped agent to settle. */
 export const FIX_SETTLE_WAIT_MS = 15_000;
@@ -444,10 +446,11 @@ export class BackgroundFix {
    */
   followUp(): string | undefined {
     if (this.done) return undefined;
-    const { task, reply, instructions } = this.task;
+    const { task, reply, resolve, instructions } = this.task;
     const args =
       `after-fix ${this.repo}#${this.pr} --task ${task} --attempt ${this.attempt}` +
       (reply ? '' : ' --no-reply') +
+      (resolve === false ? ' --no-resolve' : '') +
       (instructions ? ` -- ${instructions}` : '');
     // The arguments last, on a line of their own: the instructions are the
     // user's, as the scheduled task's prompt carries them.

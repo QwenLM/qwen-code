@@ -32,7 +32,7 @@ import {
   type AutofixPrPaths,
   type AutofixPrState,
 } from './state.js';
-import { assertNoFixInFlight } from './fix.js';
+import { assertNoFixInFlight, readSnapshotRoundId } from './fix.js';
 import {
   checkoutHoldsWork,
   hasUncommittedChanges,
@@ -236,6 +236,11 @@ function pushLocked(
   // An in-place watch works in the checkout the state names, not the
   // worktree path the PR number alone derives.
   paths = statePaths(root, state);
+  // Capture the initiating round's snapshot ID before any network call or
+  // `git push` (which may pause in a pre-push hook while another `snapshot`
+  // replaces the file): only the round that started this push may use it to
+  // authorize thread resolution.
+  const initiatingSnapshotRoundId = readSnapshotRoundId(paths, prNumber);
   const worktree = paths.worktreePath;
   requireWorktree(
     paths,
@@ -350,11 +355,15 @@ function pushLocked(
     );
   }
 
+  const { lastPush: _prevPush, ...baseState } = current;
   writeState(paths.statePath, {
-    ...current,
+    ...baseState,
     lastKnownHeadSha: head,
     pushedShas: [...state.pushedShas, head],
     pushCount: pushes + 1,
+    ...(initiatingSnapshotRoundId
+      ? { lastPush: { sha: head, snapshotRoundId: initiatingSnapshotRoundId } }
+      : {}),
   });
   return {
     pushed: true,

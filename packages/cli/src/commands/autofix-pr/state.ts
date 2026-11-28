@@ -87,6 +87,11 @@ export interface AutofixPrState {
   handledConflictSha?: string | null;
   /** Pushes made by this watch. */
   pushCount?: number;
+  /** The current round's successful push (`push` sets it tied to the round's
+   * prepared snapshot `roundId`; `withKnownHead` clears it whenever a head
+   * is adopted from elsewhere). `reply` requires `lastPush` to match both
+   * `head` and the round's snapshot before resolving review threads. */
+  lastPush?: { sha: string; snapshotRoundId: string };
   /** Head SHA the last round summary was posted for. */
   summarizedSha?: string;
   /** Whether the PR author could push to the base repository (`prepare`). */
@@ -155,6 +160,9 @@ export interface AutofixPrWatchOptions {
   every: number;
   /** False with `--no-reply`: rounds record what they handled, posting nothing. */
   reply: boolean;
+  /** False with `--no-resolve`: rounds reply without resolving review threads;
+   * absent in states written before thread resolution (treated as true). */
+  resolve?: boolean;
   /** The user's instructions for every round, on one line; '' for none. */
   instructions: string;
   /** The task that drives the watch, minted by every `schedule`: the gate of
@@ -230,7 +238,7 @@ export function rerunFloors(state: {
 }
 
 /** Pushes one watch may make before it stops (Section 10 of the design). */
-export const MAX_PUSHES = 10;
+export const MAX_PUSHES = 20;
 
 /** Pushes of a watch a check may go on failing across before a round
  * leaves it for a person instead of fixing it again (Section 10). */
@@ -249,14 +257,22 @@ export function withKnownHead(
   state: AutofixPrState,
   head: string,
 ): AutofixPrState {
-  if (state.pushedShas.includes(head) || !state.failingChecks?.length) {
-    return { ...state, lastKnownHeadSha: head };
+  // Adopting a head from outside `push` invalidates any earlier round's push
+  // evidence so a branch rollback to a previously pushed SHA cannot pass for
+  // a push made by the current round.
+  let base = state;
+  if (head !== state.lastKnownHeadSha && state.lastPush !== undefined) {
+    const { lastPush: _dropped, ...rest } = state;
+    base = rest;
   }
-  const lastPush = state.pushedShas.at(-1);
+  if (base.pushedShas.includes(head) || !base.failingChecks?.length) {
+    return { ...base, lastKnownHeadSha: head };
+  }
+  const lastPush = base.pushedShas.at(-1);
   return {
-    ...state,
+    ...base,
     lastKnownHeadSha: head,
-    failingChecks: state.failingChecks.map((record) => ({
+    failingChecks: base.failingChecks.map((record) => ({
       identity: record.identity,
       check: record.check,
       head: record.head,
@@ -940,6 +956,19 @@ export function stateDefect(state: AutofixPrState): string | null {
   ) {
     return 'pushCount';
   }
+  if (
+    state.lastPush !== undefined &&
+    !(
+      typeof state.lastPush === 'object' &&
+      state.lastPush !== null &&
+      typeof state.lastPush.sha === 'string' &&
+      SHA_RE.test(state.lastPush.sha) &&
+      typeof state.lastPush.snapshotRoundId === 'string' &&
+      state.lastPush.snapshotRoundId.length > 0
+    )
+  ) {
+    return 'lastPush';
+  }
   // `schedule` puts these into the scheduled task's prompt.
   if (state.watch !== undefined && !isWatchOptions(state.watch)) {
     return 'watch';
@@ -1030,6 +1059,7 @@ function isWatchOptions(value: unknown): value is AutofixPrWatchOptions {
     watch !== null &&
     WATCH_INTERVALS.includes(watch.every) &&
     typeof watch.reply === 'boolean' &&
+    (watch.resolve === undefined || typeof watch.resolve === 'boolean') &&
     typeof watch.instructions === 'string' &&
     watch.instructions.length <= MAX_INSTRUCTIONS_CHARS &&
     // A prompt is one line, and says what it shows.
@@ -1084,15 +1114,30 @@ export function readState(statePath: string): AutofixPrState | null {
   }
   // The fields these hold, and nothing else: what reaches `status`, a
   // rebuilt state and the next write is what the helpers wrote.
-  const { watch, ended, needsHuman, reportedNeedsHuman, failingChecks } =
-    parsed;
+  const {
+    watch,
+    ended,
+    needsHuman,
+    reportedNeedsHuman,
+    failingChecks,
+    lastPush,
+  } = parsed;
   return {
     ...parsed,
+    ...(lastPush
+      ? {
+          lastPush: {
+            sha: lastPush.sha,
+            snapshotRoundId: lastPush.snapshotRoundId,
+          },
+        }
+      : {}),
     ...(watch
       ? {
           watch: {
             every: watch.every,
             reply: watch.reply,
+            ...(watch.resolve !== undefined ? { resolve: watch.resolve } : {}),
             instructions: watch.instructions,
             ...(watch.task !== undefined ? { task: watch.task } : {}),
           },

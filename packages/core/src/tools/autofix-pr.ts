@@ -91,6 +91,7 @@ export interface AutofixPrParams {
   lines?: number;
   plan?: string;
   no_post?: boolean;
+  no_resolve?: boolean;
   discard?: boolean;
   every?: number;
   no_reply?: boolean;
@@ -108,9 +109,9 @@ const OPTIONS: Readonly<Record<AutofixPrCommand, readonly OptionName[]>> = {
   'ci-log': ['run_id', 'lines', 'task'],
   push: ['task'],
   sync: ['discard', 'task'],
-  reply: ['plan', 'no_post', 'task'],
+  reply: ['plan', 'no_post', 'no_resolve', 'task'],
   rerun: ['run_id', 'task'],
-  schedule: ['every', 'no_reply', 'instructions', 'again'],
+  schedule: ['every', 'no_reply', 'no_resolve', 'instructions', 'again'],
   'fix-end': ['attempt', 'task'],
   status: [],
   cleanup: ['take_over'],
@@ -131,6 +132,7 @@ const BOOLEAN_OPTIONS = new Set<OptionName>([
   'in_place',
   'watch',
   'no_post',
+  'no_resolve',
   'discard',
   'no_reply',
   'instructions',
@@ -272,6 +274,7 @@ export function autofixPrArgs(params: AutofixPrParams): string[] {
   flag('no-post', params.no_post);
   flag('discard', params.discard);
   flag('no-reply', params.no_reply);
+  flag('no-resolve', params.no_resolve);
   flag('instructions', params.instructions);
   flag('again', params.again);
   return args;
@@ -1077,12 +1080,12 @@ class AutofixPrInvocation extends BaseToolInvocation<
     if (this.params.command === 'prepare') {
       if (this.params.in_place) {
         return this.params.take_over
-          ? `Takes the in-place watch of PR #${pr} over from any other session that holds it: the fix agent works in your own checkout of the PR branch, in the foreground; rounds push what the branch holds — your commits included — and reply on the PR.`
-          : `Starts an in-place watch of PR #${pr}: the fix agent works in your own checkout of the PR branch, in the foreground; rounds push what the branch holds — your commits included — and reply on the PR.`;
+          ? `Takes the in-place watch of PR #${pr} over from any other session that holds it: the fix agent works in your own checkout of the PR branch, in the foreground; rounds push what the branch holds — your commits included — and reply on the PR (resolving fixed review threads unless --no-resolve).`
+          : `Starts an in-place watch of PR #${pr}: the fix agent works in your own checkout of the PR branch, in the foreground; rounds push what the branch holds — your commits included — and reply on the PR (resolving fixed review threads unless --no-resolve).`;
       }
       return this.params.take_over
-        ? `Takes the watch of PR #${pr} over from any other session that holds it: from now on its rounds push to the PR branch and reply on the PR without asking.`
-        : `Starts or resumes this session's watch of PR #${pr}: from now on its rounds push to the PR branch and reply on the PR without asking.`;
+        ? `Takes the watch of PR #${pr} over from any other session that holds it: from now on its rounds push to the PR branch and reply on the PR without asking (resolving fixed review threads unless --no-resolve).`
+        : `Starts or resumes this session's watch of PR #${pr}: from now on its rounds push to the PR branch and reply on the PR without asking (resolving fixed review threads unless --no-resolve).`;
     }
     if (this.params.command === 'cleanup' && this.params.take_over) {
       return `Stops the watch of PR #${pr}, taking it from any other session that holds it.`;
@@ -1282,11 +1285,11 @@ class AutofixPrInvocation extends BaseToolInvocation<
     fix.claim();
     // The watch's options as this session's `schedule` printed them: the
     // turn goes on with these, whatever the follow-up it read said.
-    const { task, reply, instructions } = fix.task;
+    const { task, reply, resolve, instructions } = fix.task;
     const out = JSON.stringify({
       ...(printed !== null && typeof printed === 'object' ? printed : {}),
       agent: ended,
-      watch: { task, reply, instructions },
+      watch: { task, reply, resolve: resolve ?? true, instructions },
     });
     return { llmContent: out, returnDisplay: out };
   }
@@ -1345,7 +1348,12 @@ class AutofixPrInvocation extends BaseToolInvocation<
    * goes on with these options, whatever the state file says later. */
   private recordTask(sessionId: string, out: string): void {
     const printed = lastJsonLine(out) as
-      | { task?: unknown; reply?: unknown; instructions?: unknown }
+      | {
+          task?: unknown;
+          reply?: unknown;
+          resolve?: unknown;
+          instructions?: unknown;
+        }
       | undefined;
     if (
       typeof printed?.task === 'string' &&
@@ -1355,6 +1363,9 @@ class AutofixPrInvocation extends BaseToolInvocation<
       recordWatchTask(sessionId, this.params.pr!, {
         task: printed.task,
         reply: printed.reply,
+        ...(typeof printed.resolve === 'boolean'
+          ? { resolve: printed.resolve }
+          : {}),
         instructions: printed.instructions,
       });
     }
@@ -1554,6 +1565,10 @@ export class AutofixPrTool extends BaseDeclarativeTool<
           no_post: {
             type: 'boolean',
             description: 'reply --no-post.',
+          },
+          no_resolve: {
+            type: 'boolean',
+            description: 'reply / schedule --no-resolve.',
           },
           discard: {
             type: 'boolean',
