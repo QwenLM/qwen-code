@@ -828,8 +828,14 @@ test('@smoke keeps large source files readable without tokenizing the entire tex
     .toBeGreaterThan(1);
   await expect(source).toContainText('export const large0');
   await expect(source.locator('[data-line] span[style]')).toHaveCount(0);
-  expect(await source.locator('[data-line]').count()).toBeGreaterThan(0);
-  expect(await source.locator('[data-line]').count()).toBeLessThan(500);
+  // The virtualizer prunes the first render asynchronously. Both bounds must
+  // hold on the same sample, so poll them together rather than in sequence.
+  await expect
+    .poll(async () => {
+      const count = await source.locator('[data-line]').count();
+      return count > 0 && count < 500 ? 'pruned' : `count=${count}`;
+    })
+    .toBe('pruned');
 });
 
 for (const [cwd, absolutePath] of [
