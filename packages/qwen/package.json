@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-next",
-  "version": "0.28.7",
+  "version": "0.29.0-preview.0",
   "description": "Qwen Code CLI on the Harness kernel",
   "repository": {
     "type": "git",
