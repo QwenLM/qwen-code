@@ -1016,4 +1016,56 @@ describe('WorkspaceDetailsTooltip interactive overview facets', () => {
     expect(document.activeElement).toBe(document.body);
     expect(document.activeElement).not.toBe(trigger);
   });
+
+  it('ignores touch pointerenter and touch-initiated focus while keeping keyboard focus working', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkspaceDetailsTooltip
+            label="qwen-code"
+            cwd="/work/qwen-code"
+            branch="main"
+            overview={undefined}
+            items={[]}
+          >
+            <button type="button">qwen-code</button>
+          </WorkspaceDetailsTooltip>
+        </I18nProvider>,
+      );
+    });
+
+    const trigger = container.querySelector('button')!;
+    const touchEnter = new MouseEvent('pointerover', { bubbles: true });
+    Object.defineProperty(touchEnter, 'pointerType', { value: 'touch' });
+    await act(async () => {
+      trigger.dispatchEvent(touchEnter);
+      vi.advanceTimersByTime(400);
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+    const touchDown = new MouseEvent('pointerdown', { bubbles: true });
+    Object.defineProperty(touchDown, 'pointerType', { value: 'touch' });
+    await act(async () => {
+      trigger.dispatchEvent(touchDown);
+      trigger.focus();
+      vi.advanceTimersByTime(400);
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+    // Subsequent keyboard focus opens the details popover normally.
+    await act(async () => {
+      trigger.blur();
+      trigger.focus();
+      vi.advanceTimersByTime(300);
+    });
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+
+    act(() => root.unmount());
+    container.remove();
+  });
 });

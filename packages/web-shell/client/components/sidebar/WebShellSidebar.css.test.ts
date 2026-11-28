@@ -52,9 +52,9 @@ function mediaText(query: RegExp): string {
 
 const hoverMedia = mediaText(/hover: hover/);
 const nonHoverCss = withoutMedia(/hover: hover/);
-// The repo's touch query, matching TOUCH_COMPOSER_QUERY in
-// client/hooks/useIsTouchComposer.ts.
-const touchMedia = mediaText(/hover: none/);
+// Coarse-pointer touch media blocks (covers phones, tablets, and Apple Pencil
+// hover iPads without tripping on headless fine-pointer Linux Chromium).
+const touchMedia = mediaText(/pointer: coarse/);
 
 describe('WebShellSidebar session row actions stylesheet', () => {
   it('keeps the hidden actions overlay inert until revealed', () => {
@@ -218,6 +218,26 @@ describe('WebShellSidebar session row actions stylesheet', () => {
         ),
       );
     }
+  });
+
+  it('covers coarse-pointer touch devices and mobile drawers with enlarged touch targets without tripping on fine-pointer hover:none', () => {
+    expect(touchMedia).toMatch(/@media\s+\(pointer:\s*coarse\)/);
+    expect(mediaText(/hover:\s*none\)\s*,/)).toBe('');
+    expect(touchMedia).toMatch(
+      /\.sidebar:not\(\[data-narrow\]\)\s+\.sessionRow:not\(\.archivedRow\)\s*\{[^}]*min-height:\s*40px;[^}]*-webkit-touch-callout:\s*none;/,
+    );
+    expect(touchMedia).toMatch(
+      /\.sidebar:not\(\[data-narrow\]\)\s+\.sessionRow:not\(\.archivedRow\)\s+\.sessionActionButton\s*\{[^}]*width:\s*36px;[^}]*height:\s*36px;/,
+    );
+    expect(touchMedia).toMatch(
+      /\.workspaceHeaderActions\[data-workspace-actions\]\s*\{[^}]*position:\s*static;[^}]*visibility:\s*visible;/,
+    );
+    expect(touchMedia).toMatch(
+      /\.sessionGroupHeaderActions\s*\{[^}]*opacity:\s*1;/,
+    );
+    expect(sidebarCss).toMatch(
+      /\.sidebar\.mobileOpen\s+\.sessionRow:not\(\.archivedRow\)\s+\.sessionActions\s*\{[^}]*position:\s*static;[^}]*opacity:\s*1;/,
+    );
   });
 });
 

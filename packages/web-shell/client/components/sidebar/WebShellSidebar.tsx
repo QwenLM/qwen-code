@@ -13,6 +13,7 @@ import {
 import { useDaemonAvailability } from '../../daemon/availability-context.js';
 import {
   Fragment,
+  forwardRef,
   useCallback,
   useContext,
   useEffect,
@@ -21,6 +22,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type HTMLAttributes,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactElement,
@@ -162,10 +164,6 @@ import { isLocalDaemon, isPageOriginDaemon } from '../../config/daemon';
 import { sessionMatchesSource as matchesSessionSource } from './sessionSearch';
 import { SessionSearchDialog } from './SessionSearchDialog';
 import { useLivePresence } from '../../live/live-presence';
-import {
-  isCoarsePointerDevice,
-  TOUCH_COMPOSER_QUERY,
-} from '../../hooks/useIsTouchComposer';
 import { SessionPrBadge, openableSessionPrs } from '../SessionPrBadge';
 import { hasVisibleGoal } from '../GoalStatusStrip';
 import { SessionGoalMarker } from '../SessionGoalMarker';
@@ -217,7 +215,19 @@ import { RecentSessions } from './RecentSessions';
 import { ActivityDateSessions } from './ActivityDateSessions';
 import { LocalFilesControl } from '../LocalFilesControl';
 import { DesktopRelayControl } from '../DesktopRelayControl';
-import { workspaceLabelForCwd } from '../../utils/workspace';
+import { sshWorkspaceLabel, workspaceLabelForCwd } from '../../utils/workspace';
+import {
+  SessionActionSheet,
+  type SessionActionSheetItem,
+} from './SessionActionSheet';
+import { SessionRenameDialog } from '../dialogs/SessionRenameDialog';
+import {
+  deriveStatus,
+  gitStatusPhrases,
+  hasComputedTreeSummary,
+} from '../GitBranchIndicator';
+import { useTouchSidebarActions } from './use-touch-sidebar-actions';
+import { useLongPress } from './use-long-press';
 import {
   ActivityView,
   useActivityOperations,
@@ -359,6 +369,78 @@ interface StandaloneSessionRowAdapter {
   onUnarchive?: () => void;
   onDelete: () => void;
 }
+
+interface ActionSheetTarget {
+  session: DaemonSessionSummary;
+  identity: string;
+  standalone?: StandaloneSessionRowAdapter;
+  recent?: {
+    isCurrent: boolean;
+    isStandalone: boolean;
+    onArchive: () => void;
+  };
+  workspaceLabel?: string;
+  returnFocusEl?: HTMLElement | null;
+}
+
+interface SessionRowContainerProps extends HTMLAttributes<HTMLDivElement> {
+  longPressEnabled: boolean;
+  onLongPress?: () => void;
+}
+
+const SessionRowContainer = forwardRef<
+  HTMLDivElement,
+  SessionRowContainerProps
+>(function SessionRowContainer(
+  {
+    longPressEnabled,
+    onLongPress,
+    onPointerDown,
+    onPointerMove,
+    onPointerUp,
+    onPointerCancel,
+    onClickCapture,
+    onContextMenu,
+    ...rest
+  },
+  ref,
+) {
+  const { pressing, handlers } = useLongPress({
+    enabled: longPressEnabled && Boolean(onLongPress),
+    onLongPress: () => onLongPress?.(),
+  });
+  return (
+    <div
+      ref={ref}
+      {...rest}
+      data-pressing={pressing ? 'true' : undefined}
+      onPointerDown={(event) => {
+        onPointerDown?.(event);
+        handlers.onPointerDown(event);
+      }}
+      onPointerMove={(event) => {
+        onPointerMove?.(event);
+        handlers.onPointerMove(event);
+      }}
+      onPointerUp={(event) => {
+        onPointerUp?.(event);
+        handlers.onPointerUp(event);
+      }}
+      onPointerCancel={(event) => {
+        onPointerCancel?.(event);
+        handlers.onPointerCancel(event);
+      }}
+      onClickCapture={(event) => {
+        handlers.onClickCapture(event);
+        if (!event.defaultPrevented) onClickCapture?.(event);
+      }}
+      onContextMenu={(event) => {
+        handlers.onContextMenu(event);
+        if (!event.defaultPrevented) onContextMenu?.(event);
+      }}
+    />
+  );
+});
 
 function isScheduledTaskSession(session: DaemonSessionSummary): boolean {
   return (
@@ -1477,35 +1559,31 @@ export function WebShellSidebar({
     () => new Set(sessionActionsOptions?.items ?? DEFAULT_SESSION_ACTION_ITEMS),
     [sessionActionsOptions?.items],
   );
-  const [coarsePointer, setCoarsePointer] = useState(isCoarsePointerDevice);
+  const { isTouchActions, useActionSheet } = useTouchSidebarActions(
+    Boolean(mobileOpen),
+  );
   const [narrowViewport, setNarrowViewport] = useState(
     () => window.matchMedia('(max-width: 280px)').matches,
   );
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
-    const media = window.matchMedia(TOUCH_COMPOSER_QUERY);
     const viewport = window.matchMedia('(max-width: 280px)');
-    setCoarsePointer(media.matches);
     setNarrowViewport(viewport.matches);
-    const onPointerChange = (event: MediaQueryListEvent) =>
-      setCoarsePointer(event.matches);
     const onViewportChange = (event: MediaQueryListEvent) =>
       setNarrowViewport(event.matches);
-    media.addEventListener('change', onPointerChange);
     viewport.addEventListener('change', onViewportChange);
     return () => {
-      media.removeEventListener('change', onPointerChange);
       viewport.removeEventListener('change', onViewportChange);
     };
   }, []);
   const inlineActionItems = useMemo(
     () =>
       new Set<WebShellSidebarSessionInlineActionItem>(
-        coarsePointer
+        isTouchActions
           ? []
           : (sessionActionsOptions?.inlineItems ?? DEFAULT_INLINE_ACTION_ITEMS),
       ),
-    [coarsePointer, sessionActionsOptions?.inlineItems],
+    [isTouchActions, sessionActionsOptions?.inlineItems],
   );
   const shouldRenderBrand =
     branding !== false && !(mobileOpen && branding?.hideWhenCompact);
@@ -2150,6 +2228,14 @@ export function WebShellSidebar({
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [selectionMode, bulkWorking, exitSelection]);
+  const [actionSheetTarget, setActionSheetTarget] =
+    useState<ActionSheetTarget | null>(null);
+  const [actionSheetGroupsLoading, setActionSheetGroupsLoading] =
+    useState(false);
+  const [renameDialogTarget, setRenameDialogTarget] = useState<{
+    session: DaemonSessionSummary;
+    value: string;
+  } | null>(null);
   const [groupMenu, setGroupMenu] = useState<GroupMenuState | null>(null);
   const groupMenuOpenRef = useRef(groupMenu !== null);
   useEffect(() => {
@@ -2410,8 +2496,16 @@ export function WebShellSidebar({
       searchOpen ||
       sessionMenuOpenRef.current ||
       groupMenu !== null ||
-      deleteCandidate !== null,
-    [deleteCandidate, groupMenu, searchOpen],
+      deleteCandidate !== null ||
+      actionSheetTarget !== null ||
+      renameDialogTarget !== null,
+    [
+      actionSheetTarget,
+      deleteCandidate,
+      groupMenu,
+      renameDialogTarget,
+      searchOpen,
+    ],
   );
   const previousRunningBySourceRef = useRef<
     Record<SidebarSessionSource, Map<string, boolean> | null>
@@ -4384,32 +4478,21 @@ export function WebShellSidebar({
     setGroupMenu(null);
   }, [cancelRename, projectFeaturesEnabled]);
 
-  const saveRename = useCallback(
-    (displayName: string) => {
+  const submitSessionRename = useCallback(
+    (targetSession: DaemonSessionSummary, displayName: string) => {
       const nextName = displayName.trim();
-      if (
-        !nextName ||
-        !editingSession ||
-        editingSessionIdentity !== getIdentityForSession(editingSession) ||
-        !canRenameSession(editingSession)
-      ) {
-        cancelRename();
-        return;
+      if (!nextName || !canRenameSession(targetSession)) {
+        return false;
       }
-      const sessionId = editingSession.sessionId;
-      const workspaceCwd = getSessionWorkspaceCwd(editingSession);
-      const sessionIdentity = getIdentityForSession(editingSession);
+      const sessionId = targetSession.sessionId;
+      const workspaceCwd = getSessionWorkspaceCwd(targetSession);
+      const sessionIdentity = getIdentityForSession(targetSession);
       if (busySessionIdsRef.current.has(sessionIdentity)) {
-        return;
+        return false;
       }
       setSessionBusy(sessionId, true, workspaceCwd);
-      // Close the editor before the round trip: the draft is committed, and
-      // holding the form open until the daemon answers reads as a stall.
-      if (editingSessionIdentityRef.current === sessionIdentity) {
-        cancelRename();
-      }
       let renamed = false;
-      const rename = isCurrentSession(editingSession)
+      const rename = isCurrentSession(targetSession)
         ? actions.renameSession(nextName)
         : workspaceCwd
           ? workspace.client
@@ -4452,14 +4535,12 @@ export function WebShellSidebar({
           }
           setSessionBusy(sessionId, false, workspaceCwd);
         });
+      return true;
     },
     [
       actions,
       bumpWorkspaceReload,
       canRenameSession,
-      cancelRename,
-      editingSession,
-      editingSessionIdentity,
       getIdentityForSession,
       getSessionWorkspaceCwd,
       isCurrentSession,
@@ -4472,6 +4553,91 @@ export function WebShellSidebar({
       workspace.client,
     ],
   );
+
+  const saveRename = useCallback(
+    (displayName: string) => {
+      const nextName = displayName.trim();
+      if (
+        !nextName ||
+        !editingSession ||
+        editingSessionIdentity !== getIdentityForSession(editingSession) ||
+        !canRenameSession(editingSession)
+      ) {
+        cancelRename();
+        return;
+      }
+      const sessionIdentity = getIdentityForSession(editingSession);
+      if (busySessionIdsRef.current.has(sessionIdentity)) {
+        return;
+      }
+      // Close the editor before the round trip: the draft is committed, and
+      // holding the form open until the daemon answers reads as a stall.
+      if (editingSessionIdentityRef.current === sessionIdentity) {
+        cancelRename();
+      }
+      submitSessionRename(editingSession, nextName);
+    },
+    [
+      canRenameSession,
+      cancelRename,
+      editingSession,
+      editingSessionIdentity,
+      getIdentityForSession,
+      submitSessionRename,
+    ],
+  );
+
+  const openRenameDialog = useCallback(
+    (session: DaemonSessionSummary) => {
+      if (!canRenameSession(session)) return;
+      const identity = getIdentityForSession(session);
+      if (busySessionIdsRef.current.has(identity)) return;
+      setRenameDialogTarget({
+        session,
+        value: getSessionLabel(session, t('sidebar.untitledSession')),
+      });
+    },
+    [canRenameSession, getIdentityForSession, t],
+  );
+
+  useEffect(() => {
+    if (renameDialogTarget && !canRenameSession(renameDialogTarget.session)) {
+      setRenameDialogTarget(null);
+    }
+  }, [canRenameSession, renameDialogTarget]);
+
+  useEffect(() => {
+    if (selectionMode) {
+      setActionSheetTarget(null);
+    }
+  }, [selectionMode]);
+
+  useEffect(() => {
+    if (
+      !actionSheetTarget ||
+      actionSheetTarget.standalone ||
+      actionSheetTarget.recent?.isStandalone
+    ) {
+      return;
+    }
+    const targetCwd = actionSheetTarget.session.workspaceCwd;
+    if (
+      targetCwd &&
+      workspaces.length > 0 &&
+      targetCwd !== primaryWorkspaceCwd &&
+      !workspaces.some((entry) => entry.cwd === targetCwd)
+    ) {
+      setActionSheetTarget(null);
+    }
+  }, [actionSheetTarget, primaryWorkspaceCwd, workspaces]);
+
+  const prevMobileOpenRef = useRef(Boolean(mobileOpen));
+  useEffect(() => {
+    if (prevMobileOpenRef.current && !mobileOpen) {
+      setActionSheetTarget(null);
+    }
+    prevMobileOpenRef.current = Boolean(mobileOpen);
+  }, [mobileOpen]);
 
   const handleBindPrFromMenu = useCallback((session: DaemonSessionSummary) => {
     setBindPrError(undefined);
@@ -4680,6 +4846,9 @@ export function WebShellSidebar({
             : deleteSession
           : undefined;
     setDeleteCandidate(null);
+    setActionSheetTarget((current) =>
+      current && current.identity === sessionIdentity ? null : current,
+    );
     if (!removeSession) return;
     if (busySessionIdsRef.current.has(sessionIdentity)) return;
     setSessionBusy(sessionId, true, deleteCandidate.workspaceCwd);
@@ -5319,6 +5488,25 @@ export function WebShellSidebar({
     ],
   );
 
+  const loadGroupCatalogForSession = useCallback(
+    async (session: DaemonSessionSummary): Promise<number | null> => {
+      if (!canOrganizeSession(session, 'group')) return null;
+      try {
+        const sessionActions = getSessionWorkspaceActions(session);
+        if (!sessionActions) return null;
+        const catalog = await sessionActions.listSessionGroups();
+        if (!canOrganizeSession(session, 'group')) return null;
+        setMenuGroups(catalog.groups);
+        setColorOptions(catalog.colorOptions);
+        return catalog.groups.length;
+      } catch (err) {
+        onError(err, t('sidebar.groupsLoadFailed'));
+        return null;
+      }
+    },
+    [canOrganizeSession, getSessionWorkspaceActions, onError, t],
+  );
+
   const openGroupMenuFromAnchor = useCallback(
     async (anchorEl: HTMLElement, session: DaemonSessionSummary) => {
       if (!canOrganizeSession(session, 'group')) return;
@@ -5885,6 +6073,7 @@ export function WebShellSidebar({
           isCurrent: boolean;
           isStandalone: boolean;
           onOpen: () => void;
+          onArchive?: () => void;
           actions: ReactNode;
         };
       } = {},
@@ -6355,12 +6544,45 @@ export function WebShellSidebar({
           showDelete ||
           showGroup);
       const sessionActionCount = recent
-        ? coarsePointer
+        ? isTouchActions
           ? 1
           : 2
         : inlineActionCount + Number(showMoreActions);
+      const touchRecentHasActions =
+        Boolean(recent) &&
+        (sessionActionItems.has('pin') ||
+          sessionActionItems.has('archive') ||
+          sessionActionItems.has('details'));
+      const touchDefaultHasActions =
+        !recent && (showDefaultActions || sessionActionItems.has('details'));
+      const touchActionSheetAvailable =
+        touchRecentHasActions || touchDefaultHasActions;
+      const openRowActionSheet = (triggerEl?: HTMLElement | null) => {
+        setActionSheetTarget({
+          session,
+          identity: sessionIdentity,
+          standalone,
+          recent: recent
+            ? {
+                isCurrent: recent.isCurrent,
+                isStandalone: recent.isStandalone,
+                onArchive: () => recent.onArchive?.(),
+              }
+            : undefined,
+          workspaceLabel:
+            standalone || recent?.isStandalone
+              ? t('sidebar.standaloneWorkspaceLabel')
+              : undefined,
+          returnFocusEl: triggerEl ?? null,
+        });
+      };
       return withDetails(
-        <div
+        <SessionRowContainer
+          // Always allow touch long-press on actionable rows (useLongPress
+          // ignores mouse pointers) so hybrid-pointer iPads with an attached
+          // trackpad still get long-press when tapped by hand.
+          longPressEnabled={!isEditing && touchActionSheetAvailable}
+          onLongPress={() => openRowActionSheet(null)}
           className={cx(
             styles.sessionRow,
             tree &&
@@ -6384,6 +6606,7 @@ export function WebShellSidebar({
             // Interactive descendants own double-click; it must not become a
             // title-rename gesture when a menu is reopened quickly.
             if (
+              isTouchActions ||
               recent ||
               !showRename ||
               (event.target instanceof Element &&
@@ -6516,7 +6739,12 @@ export function WebShellSidebar({
                 // stylesheet's fallback width on hover.
                 style={
                   {
-                    '--session-actions-width': `${sessionActionCount * 26}px`,
+                    '--session-actions-width': `${
+                      useActionSheet
+                        ? Number(touchActionSheetAvailable) *
+                          (narrowViewport ? 26 : 36)
+                        : sessionActionCount * 26
+                    }px`,
                   } as CSSProperties
                 }
               >
@@ -6563,8 +6791,31 @@ export function WebShellSidebar({
                 ) : !attention && !needsContinuation && gitIcon ? (
                   <span className={styles.sessionGitIcon}>{gitIcon}</span>
                 ) : null}
-                {/* Recent keeps its desktop buttons but shares the More path on touch. */}
-                {recent && (
+                {useActionSheet && touchActionSheetAvailable && (
+                  <div
+                    className={styles.sessionActions}
+                    onClick={(event) => event.stopPropagation()}
+                    onDoubleClick={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => event.stopPropagation()}
+                  >
+                    <button
+                      className={styles.sessionActionButton}
+                      type="button"
+                      aria-label={t('sidebar.moreActions')}
+                      title={t('sidebar.moreActions')}
+                      aria-expanded={
+                        actionSheetTarget?.identity === sessionIdentity
+                      }
+                      onClick={(event) =>
+                        openRowActionSheet(event.currentTarget)
+                      }
+                    >
+                      <EllipsisVerticalIcon />
+                    </button>
+                  </div>
+                )}
+                {/* Recent keeps its desktop buttons and uses the Action Sheet on touch. */}
+                {!useActionSheet && recent && (
                   <div
                     className={styles.sessionActions}
                     onClick={(event) => event.stopPropagation()}
@@ -6574,7 +6825,7 @@ export function WebShellSidebar({
                     {recent.actions}
                   </div>
                 )}
-                {showDefaultActions && (
+                {!useActionSheet && showDefaultActions && (
                   <div
                     className={styles.sessionActions}
                     onClick={(event) => event.stopPropagation()}
@@ -6682,6 +6933,15 @@ export function WebShellSidebar({
                             }}
                             onPointerDown={(event) => {
                               groupMenuTriggerRef.current = event.currentTarget;
+                              // Hybrid-pointer iPads with an attached trackpad
+                              // still use the desktop DropdownMenu for pointer
+                              // clicks, but open the Action Sheet when tapped
+                              // by finger.
+                              if (event.pointerType === 'touch') {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                openRowActionSheet(event.currentTarget);
+                              }
                             }}
                             onClick={(event) => {
                               groupMenuTriggerRef.current = event.currentTarget;
@@ -6831,7 +7091,7 @@ export function WebShellSidebar({
               </div>
             </>
           )}
-        </div>,
+        </SessionRowContainer>,
       );
     },
     [
@@ -6881,7 +7141,10 @@ export function WebShellSidebar({
       saveRename,
       sessionActionItems,
       inlineActionItems,
-      coarsePointer,
+      isTouchActions,
+      useActionSheet,
+      narrowViewport,
+      actionSheetTarget?.identity,
       livePresence,
       startRename,
       splitSessionIds,
@@ -7094,6 +7357,8 @@ export function WebShellSidebar({
           renameLabel={t('sidebar.groupRename')}
           deleteLabel={t('sidebar.groupDelete')}
           actionsDisabled={groupBusy}
+          isTouchActions={isTouchActions}
+          onMenuOpenChange={handleSessionMenuOpenChange}
         >
           {tree.rows.map((row) => (
             <Fragment key={row.session.sessionId}>
@@ -7128,6 +7393,8 @@ export function WebShellSidebar({
     groupBusy,
     handleDeleteGroup,
     handleRenameGroup,
+    handleSessionMenuOpenChange,
+    isTouchActions,
     loading,
     organizationEnabled,
     pinnedExpanded,
@@ -8219,6 +8486,281 @@ export function WebShellSidebar({
       </div>
     </div>
   );
+
+  const actionSheetModel = (() => {
+    if (!actionSheetTarget) return null;
+    const latestFromCatalog =
+      sessions.find(
+        (candidate) =>
+          getIdentityForSession(candidate) === actionSheetTarget.identity,
+      ) ??
+      pinnedSessions.find(
+        (candidate) =>
+          getIdentityForSession(candidate) === actionSheetTarget.identity,
+      ) ??
+      actionSheetTarget.session;
+    const session = applyOptimisticPin(latestFromCatalog);
+    const { standalone, recent, workspaceLabel } = actionSheetTarget;
+    const sessionIdentity = actionSheetTarget.identity;
+    const label = getSessionLabel(session, t('sidebar.untitledSession'));
+    const stamp = session.updatedAt || session.createdAt;
+    const time = stamp ? formatDateTime(stamp) : '';
+    const busy = Boolean(
+      standalone?.busy || busySessionIds.has(sessionIdentity),
+    );
+    const exporting = Boolean(
+      standalone?.busy || exportingSessionIds.has(sessionIdentity),
+    );
+    const completedUnread =
+      !isCurrentSession(session) && completedUnreadIds.has(sessionIdentity);
+    const liveStarting =
+      livePresence?.state === 'starting' &&
+      (livePresence.coordinator?.sessionId === session.sessionId ||
+        (livePresence.callId !== undefined &&
+          session.sourceId === `realtime_voice:${livePresence.callId}`));
+    const items: SessionActionSheetItem[] = [];
+    let showGroup = false;
+
+    if (recent) {
+      const running = hasLiveWork(session);
+      if (sessionActionItems.has('pin')) {
+        const pinLabel = session.isPinned
+          ? t('sidebar.unpin')
+          : t('sidebar.pin');
+        items.push({
+          id: 'pin',
+          label: pinLabel,
+          disabled:
+            busy || recent.isStandalone || !canOrganizeSession(session, 'pin'),
+          disabledTitle: recent.isStandalone
+            ? t('sidebar.standalonePinUnavailable')
+            : undefined,
+          onSelect: () => handleTogglePin(session),
+        });
+      }
+      if (sessionActionItems.has('archive')) {
+        const archiveDisabled =
+          busy ||
+          recent.isCurrent ||
+          running ||
+          (!recent.isStandalone && !canArchiveSession(session));
+        items.push({
+          id: 'archive',
+          label: t('sidebar.archive'),
+          disabled: archiveDisabled,
+          disabledTitle: recent.isCurrent
+            ? t('sidebar.archiveCurrentDisabled')
+            : running
+              ? t('sidebar.archiveRunningDisabled')
+              : undefined,
+          onSelect: () => recent.onArchive(),
+        });
+      }
+    } else {
+      const isCurrent = standalone
+        ? standalone.active
+        : isCurrentSession(session);
+      const running = hasLiveWork(session);
+      const showPin = !standalone && canOrganizeSession(session, 'pin');
+      const showArchive = standalone
+        ? sessionActionItems.has('archive') && Boolean(standalone.onArchive)
+        : session.sourceType !== 'qwen-live' &&
+          sessionActionItems.has('archive') &&
+          canMutateSessionArchive(session);
+      const showRename = standalone
+        ? sessionActionItems.has('rename')
+        : canRenameSession(session);
+      const showBindPr =
+        !standalone &&
+        sessionActionItems.has('bindPr') &&
+        canMutateSessionMetadata(session);
+      const showExport = standalone
+        ? sessionActionItems.has('export')
+        : sessionActionItems.has('export') &&
+          Boolean(getActiveExportScope(session));
+      const showDelete = standalone
+        ? sessionActionItems.has('delete')
+        : canShowDeleteSession(session);
+      const currentStandalone = Boolean(standalone?.active);
+      const deleteBlocked = sessionBlocksDelete(session, isCurrent);
+      const deleteDisabled = busy || currentStandalone || deleteBlocked;
+      const deleteDisabledTitle = currentStandalone
+        ? t('sidebar.currentStandaloneDeleteDisabled')
+        : isCurrent && running
+          ? t('sidebar.currentDeleteDisabled')
+          : deleteBlocked
+            ? t('sidebar.deleteRunningDisabled')
+            : undefined;
+      showGroup = !standalone && canOrganizeSession(session, 'group');
+      const showSplit =
+        !standalone &&
+        (session.sourceType === undefined ||
+          session.sourceType === WEB_SHELL_SESSION_SOURCE_TYPE) &&
+        canOpenSplitView &&
+        Boolean(onAddSessionToSplitView) &&
+        sessionActionItems.has('split') &&
+        canUseWorkspaceQualifiedActions(resolveSessionWorkspaceScope(session));
+      const splitAtCapacity =
+        (splitSessionIds?.length ?? 0) >= MAX_SPLIT_PANES &&
+        !splitSessionIds?.includes(session.sessionId);
+      const splitAlreadyOpen = Boolean(
+        splitSessionIds?.includes(session.sessionId),
+      );
+      const splitCurrentDisabled = isCurrent && !splitSessionIds;
+
+      if (showPin) {
+        items.push({
+          id: 'pin',
+          label: session.isPinned ? t('sidebar.unpin') : t('sidebar.pin'),
+          disabled: busy,
+          onSelect: () => handleTogglePin(session),
+        });
+      }
+      if (showRename) {
+        items.push({
+          id: 'rename',
+          label: t('sidebar.rename'),
+          disabled: busy,
+          opensDialog: true,
+          onSelect: () => {
+            if (standalone) standalone.onRename();
+            else openRenameDialog(session);
+          },
+        });
+      }
+      if (showBindPr) {
+        items.push({
+          id: 'bindPr',
+          label: t('sessionsOverview.bindPr'),
+          disabled: busy,
+          opensDialog: true,
+          onSelect: () => handleBindPrFromMenu(session),
+        });
+      }
+      if (showGroup) {
+        const activeColor =
+          session.color && SESSION_GROUP_COLORS.includes(session.color)
+            ? session.color
+            : null;
+        const activeGroup = !activeColor
+          ? (groups.find((entry) => entry.id === session.groupId) ??
+            menuGroups.find((entry) => entry.id === session.groupId))
+          : undefined;
+        items.push({
+          id: 'group',
+          label: t('sidebar.sessionGroup'),
+          disabled: busy,
+          opensGroupSubpage: true,
+          trailingLabel: activeColor
+            ? t(`sidebar.groupColor.${activeColor}`)
+            : activeGroup?.name,
+          onSelect: () => undefined,
+        });
+      }
+      if (showArchive) {
+        items.push({
+          id: 'archive',
+          label: t('sidebar.archive'),
+          disabled: busy || isCurrent || running,
+          disabledTitle: isCurrent
+            ? t('sidebar.archiveCurrentDisabled')
+            : running
+              ? t('sidebar.archiveRunningDisabled')
+              : undefined,
+          onSelect: () => {
+            if (standalone) standalone.onArchive?.();
+            else handleArchive(session);
+          },
+        });
+      }
+      if (showExport) {
+        items.push({
+          id: 'export',
+          label: t('sidebar.export'),
+          disabled: exporting,
+          onSelect: () => {
+            if (standalone) standalone.onExport();
+            else handleExportSession(session);
+          },
+        });
+      }
+      if (showSplit) {
+        items.push({
+          id: 'split',
+          label: t('sidebar.addToSplitView'),
+          disabled:
+            busy || splitAtCapacity || splitAlreadyOpen || splitCurrentDisabled,
+          disabledTitle: splitAtCapacity
+            ? t('sidebar.splitAtCapacity', { max: MAX_SPLIT_PANES })
+            : splitAlreadyOpen
+              ? t('sidebar.splitAlreadyOpen')
+              : splitCurrentDisabled
+                ? t('sidebar.splitCurrentDisabled')
+                : undefined,
+          onSelect: () => onAddSessionToSplitView?.(session.sessionId),
+        });
+      }
+      if (showDelete) {
+        items.push({
+          id: 'delete',
+          label: t('sidebar.delete'),
+          disabled: deleteDisabled,
+          disabledTitle: deleteDisabledTitle,
+          destructive: true,
+          opensDialog: true,
+          onSelect: () => {
+            if (standalone) standalone.onDelete();
+            else handleDeleteSession(session);
+          },
+        });
+      }
+    }
+
+    const selectedColor =
+      session.color && SESSION_GROUP_COLORS.includes(session.color)
+        ? session.color
+        : null;
+    const selectedGroupId =
+      !selectedColor &&
+      session.groupId &&
+      menuGroups.some((entry) => entry.id === session.groupId)
+        ? session.groupId
+        : null;
+
+    return {
+      session,
+      label,
+      time,
+      completedUnread,
+      statusLabel: liveStarting ? t('live.state.starting') : undefined,
+      workspaceLabel,
+      items,
+      groupPicker: showGroup
+        ? {
+            loading: actionSheetGroupsLoading,
+            groups: menuGroups,
+            colorOptions: menuColorOptions,
+            selectedGroupId,
+            selectedColor,
+            onLoad: async () => {
+              setActionSheetGroupsLoading(true);
+              try {
+                const count = await loadGroupCatalogForSession(session);
+                return count !== null;
+              } finally {
+                setActionSheetGroupsLoading(false);
+              }
+            },
+            onAssignGroup: (groupId: string | null) =>
+              assignSessionGroup(session, groupId),
+            onAssignColor: (color: DaemonSessionGroupPresetColor) =>
+              assignSessionColor(session, color),
+            onCreateGroup: () => handleCreateGroupForSession(session),
+          }
+        : undefined,
+    };
+  })();
+
   const sidebarTree = (
     <>
       {searchOpen && searchEnabled && (
@@ -8390,6 +8932,41 @@ export function WebShellSidebar({
               </span>
             </button>
           </div>
+        )}
+        <SessionActionSheet
+          open={actionSheetModel !== null}
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) setActionSheetTarget(null);
+          }}
+          session={actionSheetModel?.session ?? null}
+          label={actionSheetModel?.label ?? ''}
+          time={actionSheetModel?.time ?? ''}
+          completedUnread={actionSheetModel?.completedUnread ?? false}
+          statusLabel={actionSheetModel?.statusLabel}
+          workspaceLabel={actionSheetModel?.workspaceLabel}
+          showDetails={sessionActionItems.has('details')}
+          actions={actionSheetModel?.items ?? []}
+          groupPicker={actionSheetModel?.groupPicker}
+          returnFocusEl={actionSheetTarget?.returnFocusEl ?? null}
+        />
+        {renameDialogTarget && (
+          <SessionRenameDialog
+            value={renameDialogTarget.value}
+            busy={busySessionIds.has(
+              getIdentityForSession(renameDialogTarget.session),
+            )}
+            onChange={(value) =>
+              setRenameDialogTarget((current) =>
+                current ? { ...current, value } : null,
+              )
+            }
+            onSubmit={(displayName) => {
+              const target = renameDialogTarget.session;
+              setRenameDialogTarget(null);
+              submitSessionRename(target, displayName);
+            }}
+            onClose={() => setRenameDialogTarget(null)}
+          />
         )}
         {deleteCandidate && (
           <DialogShell
@@ -9207,6 +9784,8 @@ export function WebShellSidebar({
                       )
                     }
                     showSessionDetails={sessionActionItems.has('details')}
+                    isTouchActions={isTouchActions}
+                    onGroupMenuOpenChange={handleSessionMenuOpenChange}
                   />
                 ))}
               {pinnedSectionVisible && (
@@ -9624,6 +10203,8 @@ export function WebShellSidebar({
                             showSessionDetails={sessionActionItems.has(
                               'details',
                             )}
+                            isTouchActions={isTouchActions}
+                            onGroupMenuOpenChange={handleSessionMenuOpenChange}
                             overviewEnabled={
                               !channelView && workspaceOverviewEnabled
                             }
@@ -9666,9 +10247,9 @@ export function WebShellSidebar({
                             }
                             gitBranchWanted={
                               !sectionView &&
-                              Boolean(onNewWorktreeSession) &&
                               !lockedWorkspaceCwd &&
-                              !overloadPaused
+                              !overloadPaused &&
+                              (Boolean(onNewWorktreeSession) || isTouchActions)
                             }
                             sessionStats={
                               ws.primary
@@ -9683,7 +10264,10 @@ export function WebShellSidebar({
                               (lockedWorkspaceCwd &&
                                 lockedWorkspaceOptions?.render)
                                 ? undefined
-                                : (visible, { overview, gitBranch }) => {
+                                : (
+                                    visible,
+                                    { overview, gitBranch, gitStatus },
+                                  ) => {
                                     const wsCwd = ws.cwd;
                                     const realPath = isAbsolutePath(ws.cwd);
                                     const canRemove =
@@ -9864,20 +10448,54 @@ export function WebShellSidebar({
                                           }
                                         : {}),
                                     };
+                                    const effectiveMenuActions =
+                                      lockedWorkspaceCwd
+                                        ? {
+                                            createGroup:
+                                              menuActions.createGroup,
+                                          }
+                                        : menuActions;
+                                    const showWorkspaceMenu =
+                                      !lockedWorkspaceCwd ||
+                                      Boolean(menuActions.createGroup);
+                                    const showInlineNewTask =
+                                      ws.trusted &&
+                                      (!isTouchActions ||
+                                        !showWorkspaceMenu ||
+                                        !effectiveMenuActions.newSession);
+                                    const touchGitSummary = gitStatus
+                                      ? gitStatusPhrases(
+                                          deriveStatus(gitStatus),
+                                          t,
+                                        ).join(' · ') ||
+                                        (hasComputedTreeSummary(gitStatus)
+                                          ? t('git.clean')
+                                          : undefined)
+                                      : undefined;
                                     return (
                                       <div
                                         className={
                                           styles.workspaceHeaderActions
                                         }
-                                        style={{
-                                          visibility:
-                                            visible ||
-                                            openWorkspaceMenuId === ws.id
-                                              ? 'visible'
-                                              : 'hidden',
-                                        }}
+                                        data-workspace-actions=""
+                                        data-menu-open={
+                                          openWorkspaceMenuId === ws.id
+                                            ? 'true'
+                                            : undefined
+                                        }
+                                        style={
+                                          isTouchActions
+                                            ? undefined
+                                            : {
+                                                visibility:
+                                                  visible ||
+                                                  openWorkspaceMenuId === ws.id
+                                                    ? 'visible'
+                                                    : 'hidden',
+                                              }
+                                        }
                                       >
-                                        {ws.trusted && (
+                                        {showInlineNewTask && (
                                           <button
                                             className={
                                               styles.workspaceHeaderAction
@@ -9898,19 +10516,25 @@ export function WebShellSidebar({
                                             />
                                           </button>
                                         )}
-                                        {(!lockedWorkspaceCwd ||
-                                          menuActions.createGroup) && (
+                                        {showWorkspaceMenu && (
                                           <WorkspaceMenu
                                             workspace={ws}
-                                            actions={
-                                              lockedWorkspaceCwd
-                                                ? {
-                                                    createGroup:
-                                                      menuActions.createGroup,
-                                                  }
-                                                : menuActions
-                                            }
+                                            actions={effectiveMenuActions}
                                             overview={overview}
+                                            summary={
+                                              isTouchActions
+                                                ? {
+                                                    path: ws.ssh
+                                                      ? sshWorkspaceLabel(
+                                                          ws.ssh,
+                                                        )
+                                                      : ws.cwd,
+                                                    branch: gitBranch,
+                                                    gitSummary: touchGitSummary,
+                                                  }
+                                                : undefined
+                                            }
+                                            touchFriendly={isTouchActions}
                                             disabled={
                                               (workspaceRemoval.submitting &&
                                                 workspaceRemoval.candidate
@@ -10074,6 +10698,10 @@ export function WebShellSidebar({
                         recent: {
                           isCurrent,
                           isStandalone,
+                          onArchive: () =>
+                            isStandalone
+                              ? handleArchiveRecentStandalone(session)
+                              : handleArchive(session),
                           onOpen: () => {
                             if (entry.workspaceCwd)
                               handleLoadSession(
@@ -10091,62 +10719,7 @@ export function WebShellSidebar({
                                 onError(error, t('sidebar.switchFailed')),
                               );
                           },
-                          actions: coarsePointer ? (
-                            <SessionMenu
-                              onOpenChange={handleSessionMenuOpenChange}
-                            >
-                              <DropdownMenuTrigger asChild>
-                                <button
-                                  type="button"
-                                  className={styles.sessionActionButton}
-                                  aria-label={t('sidebar.moreActions')}
-                                  title={t('sidebar.moreActions')}
-                                >
-                                  <EllipsisIcon size={16} />
-                                </button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent
-                                align="end"
-                                onPointerDownOutside={
-                                  handleSessionMenuPointerDownOutside
-                                }
-                                onCloseAutoFocus={
-                                  handleSessionMenuCloseAutoFocus
-                                }
-                                style={SESSION_MENU_PORTAL_STYLE}
-                              >
-                                <DropdownMenuItem
-                                  disabled={
-                                    busy ||
-                                    isStandalone ||
-                                    !canOrganizeSession(session, 'pin')
-                                  }
-                                  onSelect={() => handleTogglePin(session)}
-                                >
-                                  <PinIcon size={16} strokeWidth={1.2} />
-                                  {pinLabel}
-                                </DropdownMenuItem>
-                                <DropdownMenuItem
-                                  disabled={archiveDisabled}
-                                  title={
-                                    isCurrent
-                                      ? t('sidebar.archiveCurrentDisabled')
-                                      : running
-                                        ? t('sidebar.archiveRunningDisabled')
-                                        : t('sidebar.archive')
-                                  }
-                                  onSelect={() =>
-                                    isStandalone
-                                      ? handleArchiveRecentStandalone(session)
-                                      : handleArchive(session)
-                                  }
-                                >
-                                  <ArchiveIcon size={16} strokeWidth={1.2} />
-                                  {t('sidebar.archive')}
-                                </DropdownMenuItem>
-                              </DropdownMenuContent>
-                            </SessionMenu>
-                          ) : (
+                          actions: (
                             <>
                               <button
                                 type="button"
@@ -10262,7 +10835,9 @@ export function WebShellSidebar({
   );
   return (
     <SidebarHoverSuppressionContext.Provider
-      value={sessionMenuOpen || groupMenu !== null}
+      value={
+        sessionMenuOpen || groupMenu !== null || actionSheetTarget !== null
+      }
     >
       {sidebarTree}
     </SidebarHoverSuppressionContext.Provider>

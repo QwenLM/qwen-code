@@ -378,4 +378,30 @@ describe('WorkspaceMenu', () => {
       }),
     ).toBe(false);
   });
+
+  it('renders a path and git branch summary header when summary and touchFriendly are provided', async () => {
+    await render(
+      <WorkspaceMenu
+        workspace={workspace}
+        actions={{ newSession: vi.fn(), copyPath: vi.fn() }}
+        summary={{
+          path: '/repo/demo',
+          branch: 'feat/touch',
+          gitSummary: '2 modified',
+        }}
+        touchFriendly
+      />,
+    );
+    const items = await open();
+    const summary = document.body.querySelector(
+      '[data-web-shell-workspace-menu-summary]',
+    );
+    expect(summary).not.toBeNull();
+    expect(summary?.textContent).toContain('/repo/demo');
+    expect(summary?.textContent).toContain('feat/touch');
+    expect(summary?.textContent).toContain('2 modified');
+    expect(items.every((item) => item.className.includes('min-h-11'))).toBe(
+      true,
+    );
+  });
 });

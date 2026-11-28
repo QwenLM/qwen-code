@@ -127,7 +127,7 @@
   );
 }
 
-@media (hover: none) and (pointer: coarse) {
+@media (pointer: coarse) {
   .sidebar.mobileOpen {
     width: clamp(
       min(var(--web-shell-sidebar-min-width, 220px), 100%),
@@ -908,7 +908,8 @@ button.livePendingSession:hover {
 }
 
 .sessionGroupHeaderRow:hover .sessionGroupHeaderActions,
-.sessionGroupHeaderRow:focus-within .sessionGroupHeaderActions {
+.sessionGroupHeaderRow:focus-within .sessionGroupHeaderActions,
+.sessionGroupHeaderActions[data-touch-actions='true'] {
   opacity: 1;
 }
 
@@ -966,6 +967,14 @@ button.livePendingSession:hover {
   border-radius: 8px;
   color: color-mix(in srgb, var(--sidebar-foreground) 78%, transparent);
   cursor: pointer;
+}
+
+.sessionRow[data-pressing='true'] {
+  background: var(--sidebar-accent);
+  transform: scale(0.99);
+  transition:
+    transform 120ms ease,
+    background-color 120ms ease;
 }
 
 /* A parent row keeps its chevron left of the title; a child row aligns its
@@ -1569,7 +1578,7 @@ button.livePendingSession:hover {
   }
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .sessionRow:hover .sessionMetaSlot {
     min-width: var(--session-actions-width, 78px);
   }
@@ -1602,7 +1611,7 @@ button.livePendingSession:hover {
 
 /* Touch devices get no hover reveal, so the actions stay in the flow and
    share the slot with the markers instead of overlaying and hiding them. */
-@media (hover: none) and (pointer: coarse) {
+@media (pointer: coarse) {
   .sessionActions {
     position: static;
     opacity: 1;
@@ -1616,7 +1625,7 @@ button.livePendingSession:hover {
 
 /* Very narrow touch drawers prioritize the title and enabled actions over
    branch/source decoration. PR state and goal markers stay visible. */
-@media (hover: none) and (pointer: coarse) {
+@media (pointer: coarse) {
   .sidebar.mobileOpen[data-narrow] .sessionGitIcon {
     display: none;
   }
@@ -1779,6 +1788,188 @@ button.livePendingSession:hover {
   stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+/* Touch devices (including Apple Pencil hover iPads) and mobile drawers
+   enlarge sidebar row/workspace/group touch targets and keep controls in-flow
+   without interfering with the ultra-narrow (<=280px) drawer layout or
+   Settings archived rows. */
+@media (pointer: coarse) {
+  .sidebar:not([data-narrow]) .sessionRow:not(.archivedRow) {
+    min-height: 40px;
+    -webkit-touch-callout: none;
+    user-select: none;
+  }
+
+  .sidebar:not([data-narrow])
+    .sessionRow:not(.archivedRow):not(.sessionTreeRow) {
+    padding-left: 16px;
+  }
+
+  .sidebar:not([data-narrow])
+    .sessionRow:not(.archivedRow):not(.sessionTreeRow)
+    .sessionStatusSlot {
+    left: 1px;
+    width: 14px;
+  }
+
+  .sidebar:not([data-narrow]) .sessionRow:not(.archivedRow) .sessionMetaSlot {
+    height: auto;
+    min-height: 36px;
+    gap: 2px;
+  }
+
+  .sidebar:not([data-narrow])
+    .sessionRow:not(.archivedRow)
+    .sessionActionButton {
+    width: 36px;
+    height: 36px;
+    flex: 0 0 36px;
+    pointer-events: auto;
+  }
+
+  .sidebar
+    .sessionRow:not(.archivedRow):not(.currentSession)
+    .sessionActions
+    .sessionActionButton {
+    opacity: 0.55;
+  }
+
+  .sidebar
+    .sessionRow:not(.archivedRow).currentSession
+    .sessionActions
+    .sessionActionButton,
+  .sidebar
+    .sessionRow:not(.archivedRow)
+    .sessionActions
+    .sessionActionButton:active,
+  .sidebar
+    .sessionRow:not(.archivedRow)
+    .sessionActions
+    .sessionActionButton:focus,
+  .sidebar
+    .sessionRow:not(.archivedRow)
+    .sessionActions
+    .sessionActionButton:focus-visible {
+    opacity: 1;
+  }
+
+  .workspaceHeaderActions[data-workspace-actions] {
+    position: static;
+    transform: none;
+    visibility: visible;
+    background: transparent;
+  }
+
+  .workspaceHeaderActions[data-workspace-actions] .workspaceHeaderAction {
+    width: 36px;
+    height: 36px;
+    flex: 0 0 36px;
+  }
+
+  .sessionGroupHeaderActions {
+    opacity: 1;
+  }
+
+  .sessionGroupActionButton {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+.sidebar.mobileOpen:not([data-narrow]) .sessionRow:not(.archivedRow) {
+  min-height: 40px;
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+
+.sidebar.mobileOpen:not([data-narrow])
+  .sessionRow:not(.archivedRow):not(.sessionTreeRow) {
+  padding-left: 16px;
+}
+
+.sidebar.mobileOpen:not([data-narrow])
+  .sessionRow:not(.archivedRow):not(.sessionTreeRow)
+  .sessionStatusSlot {
+  left: 1px;
+  width: 14px;
+}
+
+.sidebar.mobileOpen:not([data-narrow])
+  .sessionRow:not(.archivedRow)
+  .sessionMetaSlot,
+.sidebar.mobileOpen:not([data-narrow])
+  .sessionRow:not(.archivedRow):hover
+  .sessionMetaSlot {
+  min-width: 0;
+  height: auto;
+  min-height: 36px;
+  gap: 2px;
+}
+
+.sidebar.mobileOpen .sessionRow:not(.archivedRow) .sessionActions {
+  position: static;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.sidebar.mobileOpen:not([data-narrow])
+  .sessionRow:not(.archivedRow)
+  .sessionActionButton {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  pointer-events: auto;
+}
+
+.sidebar.mobileOpen
+  .sessionRow:not(.archivedRow):not(.currentSession)
+  .sessionActions
+  .sessionActionButton {
+  opacity: 0.55;
+}
+
+.sidebar.mobileOpen
+  .sessionRow:not(.archivedRow).currentSession
+  .sessionActions
+  .sessionActionButton,
+.sidebar.mobileOpen
+  .sessionRow:not(.archivedRow)
+  .sessionActions
+  .sessionActionButton:active,
+.sidebar.mobileOpen
+  .sessionRow:not(.archivedRow)
+  .sessionActions
+  .sessionActionButton:focus,
+.sidebar.mobileOpen
+  .sessionRow:not(.archivedRow)
+  .sessionActions
+  .sessionActionButton:focus-visible {
+  opacity: 1;
+}
+
+.sidebar.mobileOpen .workspaceHeaderActions[data-workspace-actions] {
+  position: static;
+  transform: none;
+  visibility: visible;
+  background: transparent;
+}
+
+.sidebar.mobileOpen
+  .workspaceHeaderActions[data-workspace-actions]
+  .workspaceHeaderAction {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+}
+
+.sidebar.mobileOpen .sessionGroupHeaderActions {
+  opacity: 1;
+}
+
+.sidebar.mobileOpen .sessionGroupActionButton {
+  width: 36px;
+  height: 36px;
 }
 
 .searchInput {
@@ -2616,7 +2807,7 @@ button.livePendingSession:hover {
 
 /* Hover-gated: touch devices get no hover reveal, and a sticky tap-hover on
    the background dot must not hide the always-visible row actions. */
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .sessionRow:has(.sessionBackgroundRunning:hover) .sessionActions {
     opacity: 0;
     pointer-events: none;

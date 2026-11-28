@@ -1318,4 +1318,46 @@ describe('SessionDetailsTooltip', () => {
     expect(document.body.textContent).toContain('Failed to copy session ID');
     act(() => root.unmount());
   });
+
+  it('ignores non-mouse pointerenter so touch taps do not flash the tooltip', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionDetailsTooltip
+            session={{ sessionId: 'touch-session', workspaceCwd: '/work/repo' }}
+            label="Touch Session"
+            time=""
+            completedUnread={false}
+          >
+            <button type="button">Touch Session</button>
+          </SessionDetailsTooltip>
+        </I18nProvider>,
+      );
+    });
+
+    const trigger = container.querySelector('button')!;
+    const touchEnter = new MouseEvent('pointerover', { bubbles: true });
+    Object.defineProperty(touchEnter, 'pointerType', { value: 'touch' });
+    await act(async () => {
+      trigger.dispatchEvent(touchEnter);
+      vi.advanceTimersByTime(400);
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+    const mouseEnter = new MouseEvent('pointerover', { bubbles: true });
+    Object.defineProperty(mouseEnter, 'pointerType', { value: 'mouse' });
+    await act(async () => {
+      trigger.dispatchEvent(mouseEnter);
+      vi.advanceTimersByTime(300);
+    });
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+
+    act(() => root.unmount());
+    container.remove();
+  });
 });

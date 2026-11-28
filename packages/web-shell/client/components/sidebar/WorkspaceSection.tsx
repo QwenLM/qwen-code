@@ -132,6 +132,8 @@ export interface WorkspaceHeaderActionsContext {
   overview: WorkspaceOverviewSnapshot | undefined;
   /** Current branch from the git poll; null/undefined when not a git repo or not polled. */
   gitBranch: string | null | undefined;
+  /** Full polled git status for touch menu summary display. */
+  gitStatus?: DaemonWorkspaceGitStatus | null;
 }
 
 interface WorkspaceSectionProps {
@@ -281,6 +283,10 @@ interface WorkspaceSectionProps {
   ) => void;
   /** Facets that render as interactive rows in the hover details popover. */
   manageableOverviewItems?: ReadonlySet<WorkspaceOverviewItem>;
+  /** Touch/mobile drawer mode: renders touch-friendly group header menus. */
+  isTouchActions?: boolean;
+  /** Propagates open state of touch group header menus to sidebar overlay guards. */
+  onGroupMenuOpenChange?: (open: boolean) => void;
 }
 
 export function WorkspaceSection({
@@ -340,6 +346,8 @@ export function WorkspaceSection({
   onOpenCommit,
   onOpenOverviewItem,
   manageableOverviewItems,
+  isTouchActions = false,
+  onGroupMenuOpenChange,
 }: WorkspaceSectionProps) {
   const available = useDaemonAvailability() === 'available';
   const availability = useDaemonAvailabilityController();
@@ -1099,6 +1107,7 @@ export function WorkspaceSection({
       {headerActions?.(actionsVisible, {
         overview: overview ?? retainedOverview,
         gitBranch: gitStatus?.branch,
+        gitStatus,
       })}
     </div>
   );
@@ -1274,6 +1283,8 @@ export function WorkspaceSection({
                       renameLabel={renameGroupLabel}
                       deleteLabel={deleteGroupLabel}
                       actionsDisabled={groupActionsDisabled}
+                      isTouchActions={isTouchActions}
+                      onMenuOpenChange={onGroupMenuOpenChange}
                     >
                       {tree.nodes}
                     </SessionGroupSection>

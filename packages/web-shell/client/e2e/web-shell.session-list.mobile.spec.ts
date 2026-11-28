@@ -136,10 +136,10 @@ test.describe('Chromium CDP drawer gestures', () => {
       await row
         .getByRole('button', { name: 'More actions', exact: true })
         .tap();
-      const menu = page.getByRole('menu');
-      await expect(menu).toBeVisible();
-      await menu.press('Escape');
-      await expect(menu).toHaveCount(0);
+      const sheet = page.locator('[data-web-shell-session-action-sheet]');
+      await expect(sheet).toBeVisible();
+      await sheet.press('Escape');
+      await expect(sheet).toHaveCount(0);
       const drawerStayedOpen = await drawer.isVisible();
       const more = row.getByRole('button', {
         name: 'More actions',
@@ -150,9 +150,9 @@ test.describe('Chromium CDP drawer gestures', () => {
       await expect(more).toHaveCSS('opacity', '1');
       await expect(more).toHaveAttribute('aria-expanded', 'false');
       await more.tap();
-      await expect(menu).toBeVisible();
-      await menu.getByRole('menuitem', { name: 'Group', exact: true }).tap();
-      const groupMenu = page.getByRole('menu');
+      await expect(sheet).toBeVisible();
+      await sheet.getByRole('button', { name: 'Group' }).tap();
+      const groupMenu = sheet.getByRole('menu');
       const groupItem = groupMenu.getByRole('menuitemradio').first();
       await expect(groupItem).toBeVisible();
       await expect(
@@ -166,17 +166,36 @@ test.describe('Chromium CDP drawer gestures', () => {
       );
       await expect(groupItem).toBeFocused();
       await groupItem.press('Escape');
-      await expect(groupMenu).toHaveCount(0);
+      await expect(sheet).toHaveCount(0);
       await expect(drawer).toBeVisible();
       await expect(more).toBeFocused();
       await more.tap();
-      await expect(menu).toBeVisible();
+      await expect(sheet).toBeVisible();
       await expect(
         sidebar.getByRole('textbox', { name: /^Rename:/ }),
       ).toHaveCount(0);
-      const bounds = await menu.boundingBox();
-      if (!bounds) throw new Error('The drawer menu is not laid out.');
-      const overflow = await menu.evaluate(
+      const scrollContainer = sheet.locator(
+        '[data-web-shell-session-action-sheet-scroll]',
+      );
+      // Wait for the vaul slide-in animation to settle inside the viewport
+      // before dispatching coordinate-based CDP touch events.
+      let lastBoxY = Number.NaN;
+      await expect
+        .poll(async () => {
+          const box = await scrollContainer.boundingBox();
+          if (!box) return false;
+          const settled =
+            box.y >= 0 &&
+            box.y + box.height <= 281 &&
+            Math.abs(box.y - lastBoxY) < 0.5;
+          lastBoxY = box.y;
+          return settled;
+        })
+        .toBe(true);
+      const bounds = await scrollContainer.boundingBox();
+      if (!bounds)
+        throw new Error('The action sheet scroll area is not laid out.');
+      const overflow = await scrollContainer.evaluate(
         (element) => element.scrollHeight - element.clientHeight,
       );
       expect(overflow, 'The fixture must force menu overflow').toBeGreaterThan(
@@ -201,7 +220,7 @@ test.describe('Chromium CDP drawer gestures', () => {
         type: 'touchEnd',
         touchPoints: [],
       });
-      const scrollTopAfterGesture = await menu.evaluate(
+      const scrollTopAfterGesture = await scrollContainer.evaluate(
         (element) => element.scrollTop,
       );
       await testInfo.attach('drawer-menu-interaction', {
@@ -220,17 +239,17 @@ test.describe('Chromium CDP drawer gestures', () => {
         scrollTopAfterGesture,
         'A menu swipe must scroll the menu',
       ).toBeGreaterThan(0);
-      await menu.press('Escape');
-      await expect(menu).toHaveCount(0);
+      await sheet.press('Escape');
+      await expect(sheet).toHaveCount(0);
       await expect(drawer).toBeVisible();
       await more.tap();
-      await expect(menu).toBeVisible();
-      await menu.dblclick({ position: { x: 4, y: 4 } });
+      await expect(sheet).toBeVisible();
+      await sheet.dblclick({ position: { x: 4, y: 4 } });
       await expect(
         sidebar.getByRole('textbox', { name: /^Rename:/ }),
       ).toHaveCount(0);
-      await menu.press('Escape');
-      await expect(menu).toHaveCount(0);
+      await sheet.press('Escape');
+      await expect(sheet).toHaveCount(0);
       await expect(drawer).toBeVisible();
       await expect(more).toBeFocused();
       await more.press('Escape');
@@ -376,12 +395,12 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
       sidebarBox.x + sidebarBox.width + BROWSER_LAYOUT_TOLERANCE_PX,
     );
     await more.tap();
+    const sheet = page.locator('[data-web-shell-session-action-sheet]');
     await expect(
-      page.getByRole('menuitem', { name: 'Pin', exact: true }),
+      sheet.getByRole('button', { name: 'Pin', exact: true }),
     ).toBeVisible();
-    const menu = page.getByRole('menu');
-    await closeMenuWithEscape(menu);
-    await expect(menu).toHaveCount(0);
+    await closeMenuWithEscape(sheet);
+    await expect(sheet).toHaveCount(0);
     const crowdedRow = sidebar
       .getByTestId('recent-sessions')
       .locator('[data-web-shell-session-title]')
@@ -527,10 +546,10 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
     await goal.click({ trial: true });
     await crowdedMore.tap();
     await expect(
-      page.getByRole('menuitem', { name: 'Pin', exact: true }),
+      sheet.getByRole('button', { name: 'Pin', exact: true }),
     ).toBeVisible();
-    await closeMenuWithEscape(menu);
-    await expect(menu).toHaveCount(0);
+    await closeMenuWithEscape(sheet);
+    await expect(sheet).toHaveCount(0);
     const continuationRow = sidebar
       .getByTestId('recent-sessions')
       .locator('[data-web-shell-session-title]')
@@ -605,10 +624,10 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
     await continuationGoal.click({ trial: true });
     await continuationMore.tap();
     await expect(
-      page.getByRole('menuitem', { name: 'Pin', exact: true }),
+      sheet.getByRole('button', { name: 'Pin', exact: true }),
     ).toBeVisible();
-    await closeMenuWithEscape(menu);
-    await expect(menu).toHaveCount(0);
+    await closeMenuWithEscape(sheet);
+    await expect(sheet).toHaveCount(0);
     await expect(continuationMore).toBeFocused();
     const recent = sidebar.getByTestId('recent-sessions');
     await expect(recent.locator('[data-web-shell-session-title]')).toHaveCount(
@@ -1147,12 +1166,12 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
       await goal.click({ trial: true });
       await pr.click({ trial: true });
       await candidateMore.tap();
-      const menu = page.getByRole('menu');
+      const sheet = page.locator('[data-web-shell-session-action-sheet]');
       await expect(
-        menu.getByRole('menuitem', { name: 'Pin', exact: true }),
+        sheet.getByRole('button', { name: 'Pin', exact: true }),
       ).toBeVisible();
-      await closeMenuWithEscape(menu);
-      await expect(menu).toHaveCount(0);
+      await closeMenuWithEscape(sheet);
+      await expect(sheet).toHaveCount(0);
       await expect(candidateMore).toBeFocused();
       const titlePoint = {
         x: titleBox.x + titleBox.width - 2,
@@ -1190,15 +1209,15 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
       if (await showMore.isVisible()) await showMore.tap();
     }
     await more.tap();
-    const menu = page.getByRole('menu');
+    const sheet = page.locator('[data-web-shell-session-action-sheet]');
     await expect(
-      menu.getByRole('menuitem', { name: 'Pin', exact: true }),
+      sheet.getByRole('button', { name: 'Pin', exact: true }),
     ).toBeVisible();
     await expect(
-      menu.getByRole('menuitem', { name: 'Archive', exact: true }),
+      sheet.getByRole('button', { name: 'Archive', exact: true }),
     ).toBeEnabled();
-    await closeMenuWithEscape(menu);
-    await expect(menu).toHaveCount(0);
+    await closeMenuWithEscape(sheet);
+    await expect(sheet).toHaveCount(0);
     await page.setViewportSize({ width: 1280, height: 700 });
     await expect(
       page.getByRole('dialog', { name: 'Workspace sidebar' }),
@@ -1216,7 +1235,7 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
       () => document.body.style.pointerEvents,
     );
     await expandedMore.tap();
-    await expect(menu).toBeVisible();
+    await expect(sheet).toBeVisible();
     const outsideMenu = { x: 1000, y: 400 };
     await testInfo.attach('recent-menu-outside-hit', {
       body: JSON.stringify(
@@ -1232,7 +1251,7 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
       contentType: 'application/json',
     });
     await page.mouse.click(outsideMenu.x, outsideMenu.y);
-    await expect(menu).toHaveCount(0);
+    await expect(sheet).toHaveCount(0);
     await expect(expandedSidebar).toBeVisible();
     await expect(expandedMore).not.toBeFocused();
     await expect

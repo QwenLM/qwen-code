@@ -8,10 +8,12 @@ import {
   useState,
   type ReactElement,
   type ReactNode,
+  type RefObject,
 } from 'react';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
   CheckIcon,
+  Clock3Icon,
   CopyIcon,
   FolderClosedIcon,
   GitBranchIcon,
@@ -38,7 +40,7 @@ import styles from './WebShellSidebar.module.css';
 import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
 import { SidebarHoverSuppressionContext } from './sidebar-hover-suppression';
 
-interface SessionDetailsTooltipProps {
+export interface SessionDetailsContentProps {
   session: DaemonSessionSummary;
   label: string;
   time: string;
@@ -46,15 +48,13 @@ interface SessionDetailsTooltipProps {
   statusLabel?: string;
   workspaceLabel?: string;
   details?: ReactNode;
-  openOnClick?: boolean;
-  ownerToken?: string;
-  open?: boolean;
-  onOpenChange?: (open: boolean) => void;
-  side?: 'right' | 'bottom';
-  children: ReactElement;
+  variant?: 'popover' | 'sheet';
+  copyButtonTabIndex?: number;
+  copyButtonRef?: RefObject<HTMLButtonElement | null>;
+  resetSignal?: boolean;
 }
 
-export function SessionDetailsTooltip({
+export function SessionDetailsContent({
   session,
   label,
   time,
@@ -62,45 +62,32 @@ export function SessionDetailsTooltip({
   statusLabel,
   workspaceLabel,
   details,
-  openOnClick = false,
-  ownerToken,
-  open: controlledOpen,
-  onOpenChange,
-  side = 'right',
-  children,
-}: SessionDetailsTooltipProps) {
+  variant = 'popover',
+  copyButtonTabIndex,
+  copyButtonRef,
+  resetSignal = true,
+}: SessionDetailsContentProps) {
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
-  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
-  const open = controlledOpen ?? uncontrolledOpen;
-  const setOpen = onOpenChange ?? setUncontrolledOpen;
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>(
     'idle',
   );
   const copyAttemptRef = useRef(0);
   const copyResetTimerRef = useRef<number | undefined>(undefined);
-  const openTimerRef = useRef<number | undefined>(undefined);
-  const closeTimerRef = useRef<number | undefined>(undefined);
-  const anchorRef = useRef<HTMLElement | null>(null);
-  const contentRef = useRef<HTMLDivElement | null>(null);
-  const copyButtonRef = useRef<HTMLButtonElement>(null);
-  const restoreFocusRef = useRef(false);
-  const hoverSuppressionActive = useContext(SidebarHoverSuppressionContext);
-  const hoverSuppressedRef = useRef(hoverSuppressionActive);
-  hoverSuppressedRef.current = hoverSuppressionActive;
-  // The overview shares one token so its own entry points replace each
-  // other; every other instance keeps its own, so a hover elsewhere (e.g.
-  // the sidebar) never moves focus out of this popover.
-  const selfOwnerToken = useId();
-  const detailsOwner = ownerToken ?? selfOwnerToken;
-  const collisionBoundary = open
-    ? side === 'bottom'
-      ? [
-          anchorRef.current?.closest<HTMLElement>('[data-pane-session-id]'),
-          anchorRef.current?.closest<HTMLElement>('[data-web-shell-root]'),
-        ].filter((element): element is HTMLElement => Boolean(element))
-      : resolveSessionDetailsCollisionBoundary(anchorRef.current)
-    : null;
+
+  useEffect(() => {
+    return () => {
+      window.clearTimeout(copyResetTimerRef.current);
+      copyAttemptRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    copyAttemptRef.current += 1;
+    window.clearTimeout(copyResetTimerRef.current);
+    setCopyStatus('idle');
+  }, [session.sessionId, resetSignal]);
+
   const folderPath = session.workspaceCwd;
   const branch =
     session.worktree?.branch || session.worktree?.slug || session.branch?.name;
@@ -140,13 +127,239 @@ export function SessionDetailsTooltip({
               : session.activeWorkState === 'unknown'
                 ? t('sidebar.activityUnknown')
                 : `${t('sessionsOverview.status.idle')} · ${t('sidebar.clients', { count: session.clientCount ?? 0 })}`;
+  const isSheet = variant === 'sheet';
+
+  return (
+    <div
+      className={
+        isSheet
+          ? 'flex flex-col gap-2 rounded-lg border border-border/60 bg-muted/40 p-3 text-xs text-muted-foreground'
+          : 'flex min-h-0 flex-col gap-2.5 overflow-y-auto overscroll-contain'
+      }
+    >
+      {!isSheet && (
+        <div className={styles.sessionDetailsHeader}>
+          <span
+            className={`${styles.sessionDetailsTitle} !whitespace-normal break-words`}
+          >
+            {label}
+          </span>
+          {time && <span className={styles.sessionDetailsTime}>{time}</span>}
+        </div>
+      )}
+      {isSheet && time && (
+        <div className={styles.sessionDetailsRow}>
+          <Clock3Icon aria-hidden="true" />
+          <span>{time}</span>
+        </div>
+      )}
+      <div className={styles.sessionDetailsRow}>
+        <FolderClosedIcon aria-hidden="true" />
+        <span
+          className="!whitespace-normal break-all"
+          title={workspaceLabel ?? folderPath}
+        >
+          {workspaceLabel ?? folderPath}
+        </span>
+      </div>
+      {branch && (
+        <div className={styles.sessionDetailsRow}>
+          <GitBranchIcon aria-hidden="true" />
+          <span className="!whitespace-normal break-all" title={branch}>
+            {branch}
+          </span>
+        </div>
+      )}
+      {prs.map((pr, index) => {
+        const stateLabel = sessionPrStateLabel(t, pr.state);
+        return (
+          // Index composite: a hand-edited sidecar can carry duplicate
+          // numbers (the reader validates shape, not uniqueness), and a
+          // duplicate key would reconcile rows against each other. The
+          // list is a stable per-snapshot order, so index keys are safe.
+          <div
+            className={styles.sessionDetailsRow}
+            key={`${index}-${pr.number}`}
+          >
+            <SessionPrStateIcon state={pr.state} />
+            <a
+              href={pr.url}
+              target="_blank"
+              rel="noreferrer"
+              title={pr.url}
+              onClick={(event) => {
+                event.stopPropagation();
+                openExternalLink(event, pr.url);
+              }}
+            >
+              {t('sidebar.sessionPr', { number: pr.number })}
+              {stateLabel ? (
+                <span className="sr-only">{` · ${stateLabel}`}</span>
+              ) : null}
+            </a>
+          </div>
+        );
+      })}
+      {issues.map((issue, index) => {
+        const stateLabel = sessionIssueStateLabel(t, issue.state);
+        return (
+          <div
+            className={styles.sessionDetailsRow}
+            key={`issue-${index}-${issue.number}`}
+          >
+            <SessionIssueStateIcon state={issue.state} />
+            <a
+              href={issue.url}
+              target="_blank"
+              rel="noreferrer"
+              title={issue.url}
+              onClick={(event) => {
+                event.stopPropagation();
+                openExternalLink(event, issue.url);
+              }}
+            >
+              {t('sidebar.sessionIssue', { number: issue.number })}
+              {stateLabel ? (
+                <span className="sr-only">{` · ${stateLabel}`}</span>
+              ) : null}
+            </a>
+          </div>
+        );
+      })}
+      <div className={styles.sessionDetailsRow}>
+        <RadioTowerIcon aria-hidden="true" />
+        {/* An override replaces the line but must keep naming hidden
+            background work: the row hides that dot in these states. */}
+        <span>
+          {statusLabel ? `${statusLabel}${backgroundSuffix}` : status}
+        </span>
+      </div>
+      {details}
+      <div className={styles.sessionDetailsIdRow}>
+        <span
+          className="!whitespace-normal break-all"
+          data-web-shell-session-id
+          title={session.sessionId}
+        >
+          {session.sessionId}
+        </span>
+        <button
+          type="button"
+          ref={copyButtonRef}
+          tabIndex={copyButtonTabIndex}
+          className={
+            isSheet
+              ? `${styles.sessionDetailsCopyButton} !size-9`
+              : styles.sessionDetailsCopyButton
+          }
+          data-web-shell-session-id-copy
+          aria-label={t('sidebar.copySessionId')}
+          title={t('sidebar.copySessionId')}
+          onClick={() => {
+            const copyAttempt = ++copyAttemptRef.current;
+            void writeClipboardText(session.sessionId)
+              .then(() => {
+                if (copyAttemptRef.current === copyAttempt) {
+                  setCopyStatus('copied');
+                  window.clearTimeout(copyResetTimerRef.current);
+                  copyResetTimerRef.current = window.setTimeout(() => {
+                    if (copyAttemptRef.current === copyAttempt) {
+                      setCopyStatus('idle');
+                    }
+                  }, 2000);
+                }
+              })
+              .catch(() => {
+                if (copyAttemptRef.current === copyAttempt) {
+                  setCopyStatus('failed');
+                }
+              });
+          }}
+        >
+          {copyStatus === 'copied' ? (
+            <CheckIcon aria-hidden="true" />
+          ) : (
+            <CopyIcon aria-hidden="true" />
+          )}
+        </button>
+        <span
+          className={
+            copyStatus === 'copied' ? 'sr-only' : styles.sessionDetailsCopied
+          }
+          aria-live="polite"
+        >
+          {copyStatus === 'copied'
+            ? t('sidebar.sessionIdCopied')
+            : copyStatus === 'failed'
+              ? t('sidebar.copySessionIdFailed')
+              : ''}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+interface SessionDetailsTooltipProps {
+  session: DaemonSessionSummary;
+  label: string;
+  time: string;
+  completedUnread: boolean;
+  statusLabel?: string;
+  workspaceLabel?: string;
+  details?: ReactNode;
+  openOnClick?: boolean;
+  ownerToken?: string;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  side?: 'right' | 'bottom';
+  children: ReactElement;
+}
+
+export function SessionDetailsTooltip({
+  session,
+  label,
+  time,
+  completedUnread,
+  statusLabel,
+  workspaceLabel,
+  details,
+  openOnClick = false,
+  ownerToken,
+  open: controlledOpen,
+  onOpenChange,
+  side = 'right',
+  children,
+}: SessionDetailsTooltipProps) {
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const open = controlledOpen ?? uncontrolledOpen;
+  const setOpen = onOpenChange ?? setUncontrolledOpen;
+  const openTimerRef = useRef<number | undefined>(undefined);
+  const closeTimerRef = useRef<number | undefined>(undefined);
+  const anchorRef = useRef<HTMLElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const copyButtonRef = useRef<HTMLButtonElement>(null);
+  const restoreFocusRef = useRef(false);
+  const hoverSuppressionActive = useContext(SidebarHoverSuppressionContext);
+  const hoverSuppressedRef = useRef(hoverSuppressionActive);
+  hoverSuppressedRef.current = hoverSuppressionActive;
+  // The overview shares one token so its own entry points replace each
+  // other; every other instance keeps its own, so a hover elsewhere (e.g.
+  // the sidebar) never moves focus out of this popover.
+  const selfOwnerToken = useId();
+  const detailsOwner = ownerToken ?? selfOwnerToken;
+  const collisionBoundary = open
+    ? side === 'bottom'
+      ? [
+          anchorRef.current?.closest<HTMLElement>('[data-pane-session-id]'),
+          anchorRef.current?.closest<HTMLElement>('[data-web-shell-root]'),
+        ].filter((element): element is HTMLElement => Boolean(element))
+      : resolveSessionDetailsCollisionBoundary(anchorRef.current)
+    : null;
 
   useEffect(() => {
     return () => {
       window.clearTimeout(openTimerRef.current);
       window.clearTimeout(closeTimerRef.current);
-      window.clearTimeout(copyResetTimerRef.current);
-      copyAttemptRef.current += 1;
     };
   }, []);
 
@@ -171,9 +384,6 @@ export function SessionDetailsTooltip({
   }, []);
 
   useEffect(() => {
-    copyAttemptRef.current += 1;
-    window.clearTimeout(copyResetTimerRef.current);
-    setCopyStatus('idle');
     if (!open) {
       window.clearTimeout(openTimerRef.current);
       window.clearTimeout(closeTimerRef.current);
@@ -211,9 +421,6 @@ export function SessionDetailsTooltip({
     cancelClose();
     restoreFocusRef.current = true;
     setOpen(false);
-    copyAttemptRef.current += 1;
-    window.clearTimeout(copyResetTimerRef.current);
-    setCopyStatus('idle');
   }, [cancelClose, setOpen]);
 
   useEffect(() => {
@@ -254,6 +461,7 @@ export function SessionDetailsTooltip({
           }}
           asChild
           onPointerEnter={(event) => {
+            if (event.pointerType && event.pointerType !== 'mouse') return;
             if (event.currentTarget.contains(event.target as Node)) {
               openAfterDelay();
             }
@@ -294,156 +502,18 @@ export function SessionDetailsTooltip({
         onClick={(event) => event.stopPropagation()}
         className={`${styles.sessionDetailsTooltip} max-h-(--radix-popover-content-available-height)`}
       >
-        <div className="flex min-h-0 flex-col gap-2.5 overflow-y-auto overscroll-contain">
-          <div className={styles.sessionDetailsHeader}>
-            <span
-              className={`${styles.sessionDetailsTitle} !whitespace-normal break-words`}
-            >
-              {label}
-            </span>
-            {time && <span className={styles.sessionDetailsTime}>{time}</span>}
-          </div>
-          <div className={styles.sessionDetailsRow}>
-            <FolderClosedIcon aria-hidden="true" />
-            <span
-              className="!whitespace-normal break-all"
-              title={workspaceLabel ?? folderPath}
-            >
-              {workspaceLabel ?? folderPath}
-            </span>
-          </div>
-          {branch && (
-            <div className={styles.sessionDetailsRow}>
-              <GitBranchIcon aria-hidden="true" />
-              <span className="!whitespace-normal break-all" title={branch}>
-                {branch}
-              </span>
-            </div>
-          )}
-          {prs.map((pr, index) => {
-            const stateLabel = sessionPrStateLabel(t, pr.state);
-            return (
-              // Index composite: a hand-edited sidecar can carry duplicate
-              // numbers (the reader validates shape, not uniqueness), and a
-              // duplicate key would reconcile rows against each other. The
-              // list is a stable per-snapshot order, so index keys are safe.
-              <div
-                className={styles.sessionDetailsRow}
-                key={`${index}-${pr.number}`}
-              >
-                <SessionPrStateIcon state={pr.state} />
-                <a
-                  href={pr.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={pr.url}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    openExternalLink(event, pr.url);
-                  }}
-                >
-                  {t('sidebar.sessionPr', { number: pr.number })}
-                  {stateLabel ? (
-                    <span className="sr-only">{` · ${stateLabel}`}</span>
-                  ) : null}
-                </a>
-              </div>
-            );
-          })}
-          {issues.map((issue, index) => {
-            const stateLabel = sessionIssueStateLabel(t, issue.state);
-            return (
-              <div
-                className={styles.sessionDetailsRow}
-                key={`issue-${index}-${issue.number}`}
-              >
-                <SessionIssueStateIcon state={issue.state} />
-                <a
-                  href={issue.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={issue.url}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    openExternalLink(event, issue.url);
-                  }}
-                >
-                  {t('sidebar.sessionIssue', { number: issue.number })}
-                  {stateLabel ? (
-                    <span className="sr-only">{` · ${stateLabel}`}</span>
-                  ) : null}
-                </a>
-              </div>
-            );
-          })}
-          <div className={styles.sessionDetailsRow}>
-            <RadioTowerIcon aria-hidden="true" />
-            {/* An override replaces the line but must keep naming hidden
-                background work: the row hides that dot in these states. */}
-            <span>
-              {statusLabel ? `${statusLabel}${backgroundSuffix}` : status}
-            </span>
-          </div>
-          {details}
-          <div className={styles.sessionDetailsIdRow}>
-            <span
-              className="!whitespace-normal break-all"
-              data-web-shell-session-id
-              title={session.sessionId}
-            >
-              {session.sessionId}
-            </span>
-            <button
-              type="button"
-              ref={copyButtonRef}
-              tabIndex={openOnClick ? undefined : -1}
-              className={styles.sessionDetailsCopyButton}
-              data-web-shell-session-id-copy
-              aria-label={t('sidebar.copySessionId')}
-              title={t('sidebar.copySessionId')}
-              onClick={() => {
-                const copyAttempt = ++copyAttemptRef.current;
-                void writeClipboardText(session.sessionId)
-                  .then(() => {
-                    if (copyAttemptRef.current === copyAttempt) {
-                      setCopyStatus('copied');
-                      window.clearTimeout(copyResetTimerRef.current);
-                      copyResetTimerRef.current = window.setTimeout(() => {
-                        if (copyAttemptRef.current === copyAttempt) {
-                          setCopyStatus('idle');
-                        }
-                      }, 2000);
-                    }
-                  })
-                  .catch(() => {
-                    if (copyAttemptRef.current === copyAttempt) {
-                      setCopyStatus('failed');
-                    }
-                  });
-              }}
-            >
-              {copyStatus === 'copied' ? (
-                <CheckIcon aria-hidden="true" />
-              ) : (
-                <CopyIcon aria-hidden="true" />
-              )}
-            </button>
-            <span
-              className={
-                copyStatus === 'copied'
-                  ? 'sr-only'
-                  : styles.sessionDetailsCopied
-              }
-              aria-live="polite"
-            >
-              {copyStatus === 'copied'
-                ? t('sidebar.sessionIdCopied')
-                : copyStatus === 'failed'
-                  ? t('sidebar.copySessionIdFailed')
-                  : ''}
-            </span>
-          </div>
-        </div>
+        <SessionDetailsContent
+          session={session}
+          label={label}
+          time={time}
+          completedUnread={completedUnread}
+          statusLabel={statusLabel}
+          workspaceLabel={workspaceLabel}
+          details={details}
+          copyButtonTabIndex={openOnClick ? undefined : -1}
+          copyButtonRef={copyButtonRef}
+          resetSignal={open}
+        />
       </PopoverContent>
     </Popover>
   );
