@@ -2301,6 +2301,35 @@ describe('Gemini Client (client.ts)', () => {
       expect(markedTexts()).toEqual(['port the parser']);
     });
 
+    it.each<[string, Part, string[]]>([
+      [
+        'marks a retry of the prompt the failed send marked',
+        markTypedPrompt({ text: 'port the parser' }),
+        ['port the parser'],
+      ],
+      [
+        'leaves a retry unmarked when the failed send did not mark it',
+        { text: 'port the parser' },
+        [],
+      ],
+    ])('%s', async (_label, failedPart, expected) => {
+      // The CLI retries with the prompt as it first sent it; the entry the
+      // failed send left in history carries that send's mark.
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi
+          .fn()
+          .mockReturnValue([{ role: 'user', parts: [failedPart] }]),
+        getUserContentPushCount: vi.fn().mockReturnValue(1),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      await run([{ text: 'port the parser' }], 'typed-prompt-retry', {
+        type: SendMessageType.Retry,
+      });
+      expect(markedTexts()).toEqual(expected);
+    });
+
     it.each<[string, SendMessageOptions]>([
       ['a prompt with no humanInput', { type: SendMessageType.UserQuery }],
       ...[

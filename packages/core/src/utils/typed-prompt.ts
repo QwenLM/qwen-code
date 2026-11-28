@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Part, PartListUnion, PartUnion } from '@google/genai';
+import type { Content, Part, PartListUnion, PartUnion } from '@google/genai';
 
 /**
  * `partMetadata` key on the part that holds what the user typed, set where
@@ -131,4 +131,33 @@ export function isBareTextPart(part: Part): boolean {
     isTypedPrompt(part) &&
     Object.keys(part.partMetadata ?? {}).length === 1
   );
+}
+
+/**
+ * `request`, a retry, with its first text part marked when a user entry the
+ * retry dropped from history held that text marked. A retry re-sends the
+ * prompt of the send that failed, and that send marked it if the person
+ * typed it, so the retried turn keeps the mark the session file already
+ * records for it (#9455). What was put in front of the dropped text after it
+ * was marked is set aside before the two are compared. A request already
+ * marked, or whose first text no dropped entry marked, is returned as it is.
+ */
+export function markRetriedPrompt(
+  request: PartListUnion,
+  dropped: readonly Content[],
+): PartListUnion {
+  const typedTexts = new Set(
+    dropped
+      .filter((entry) => entry.role === 'user')
+      .flatMap((entry) => entry.parts ?? [])
+      .filter(isTypedPrompt)
+      .map((part) => part.text!.slice(typedPromptPrefix(part) ?? 0)),
+  );
+  if (typedTexts.size === 0) return request;
+  const parts = Array.isArray(request) ? request : [request];
+  const first = parts.find(isPlainTextPart);
+  const text = typeof first === 'string' ? first : first?.text;
+  return text !== undefined && typedTexts.has(text)
+    ? markFirstTextPartUnlessMarked(request)
+    : request;
 }

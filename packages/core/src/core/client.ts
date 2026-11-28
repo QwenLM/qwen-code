@@ -220,7 +220,10 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
-import { markFirstTextPartUnlessMarked } from '../utils/typed-prompt.js';
+import {
+  markFirstTextPartUnlessMarked,
+  markRetriedPrompt,
+} from '../utils/typed-prompt.js';
 import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
@@ -4477,6 +4480,10 @@ export class LlmClient {
           recovered: recoveredAsyncParts,
         });
       }
+      // The typed-prompt mark is set on a UserQuery only. A retry re-sends
+      // the prompt the failed send carried, so it takes that send's mark
+      // from the entry it dropped (#9455).
+      request = markRetriedPrompt(request, strippedRetryEntries);
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
       // tool_result the user is supplying (Retry of a ToolResult

@@ -12,12 +12,14 @@ import {
   isTypedPrompt,
   markFirstTextPart,
   markFirstTextPartUnlessMarked,
+  markRetriedPrompt,
   markTypedPrompt,
   TYPED_PROMPT_METADATA,
   TYPED_PROMPT_PREFIX_METADATA,
   typedPromptPrefix,
   withTypedPromptPrefix,
 } from './typed-prompt.js';
+import { prependToFirstTextPart } from './partUtils.js';
 import { OpenAIContentConverter } from '../core/openaiContentGenerator/converter.js';
 import { AnthropicContentConverter } from '../core/anthropicContentGenerator/converter.js';
 import { convertGeminiContentsToResponsesInput } from '../core/openaiResponsesContentGenerator/responses-converter.js';
@@ -153,6 +155,66 @@ describe('the typed-prompt prefix (#9455 R3-1)', () => {
       expect(typedPromptPrefix(part)).toBeUndefined();
     },
   );
+});
+
+describe('markRetriedPrompt (#9455)', () => {
+  const header: Part = { text: '\n--- Content from referenced files ---' };
+  const failed = (...parts: Part[]): Content => ({ role: 'user', parts });
+  const markedTexts = (request: PartListUnion) =>
+    (Array.isArray(request) ? request : [request])
+      .filter(
+        (part): part is Part => typeof part !== 'string' && isTypedPrompt(part),
+      )
+      .map((part) => part.text);
+
+  it('marks a retry of the text the failed send marked', () => {
+    const dropped = [failed(markTypedPrompt({ text: 'port the parser' }))];
+    expect(markedTexts(markRetriedPrompt('port the parser', dropped))).toEqual([
+      'port the parser',
+    ]);
+  });
+
+  it('sets aside what was put in front of the failed text after it was marked', () => {
+    const [sent] = prependToFirstTextPart(
+      [markTypedPrompt({ text: 'port the parser' })],
+      '<system-reminder>\nide\n</system-reminder>',
+    ) as Part[];
+    expect(
+      markedTexts(
+        markRetriedPrompt(
+          [{ text: 'port the parser' }, header],
+          [failed(sent!)],
+        ),
+      ),
+    ).toEqual(['port the parser']);
+  });
+
+  it.each<[string, Content[]]>([
+    ['nothing was dropped', []],
+    ['the dropped text was not marked', [failed({ text: 'port the parser' })]],
+    [
+      'the dropped entry marked another text',
+      [failed(markTypedPrompt({ text: 'something else' }))],
+    ],
+    [
+      'the marked entry is not a user entry',
+      [
+        {
+          role: 'model',
+          parts: [markTypedPrompt({ text: 'port the parser' })],
+        },
+      ],
+    ],
+  ])('leaves a retry as it is when %s', (_label, dropped) => {
+    const request: Part[] = [{ text: 'port the parser' }, header];
+    expect(markRetriedPrompt(request, dropped)).toBe(request);
+  });
+
+  it('leaves a retry already marked as it is', () => {
+    const request: Part[] = [markTypedPrompt({ text: 'port the parser' })];
+    const dropped = [failed(markTypedPrompt({ text: 'port the parser' }))];
+    expect(markRetriedPrompt(request, dropped)).toBe(request);
+  });
 });
 
 describe('markFirstTextPartUnlessMarked', () => {
