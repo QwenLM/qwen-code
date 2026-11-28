@@ -702,4 +702,271 @@ describe('verify-pr-vm-image offline golden ext4 derivation', () => {
     },
     20_000,
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'pins all seven derivation guards (vault inputs, 0644 workload chmodSync, leaf file symlink unlink, truncateSync imageBytes, mke2fs -t ext4, dynload regular+symlink scan, and mid-derivation injected-source mutation)',
+    () => {
+      const root = makeTempDir('vimg-r3-');
+      const approved = join(root, 'approved');
+      const vault = join(root, 'vault');
+      const outside = join(root, 'outside');
+      mkdirSync(approved, { mode: 0o700 });
+      mkdirSync(vault, { mode: 0o700 });
+      mkdirSync(outside, { mode: 0o700 });
+
+      const golden = join(root, 'golden.ext4');
+      writeFileSync(golden, 'golden-bytes', { mode: 0o444 });
+
+      const fakeDebugfs = join(root, 'fake-debugfs');
+      writeExecutable(
+        fakeDebugfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'TREE=$(printf "%s" "$2" | sed -e "s|^rdump / ||" -e \'s|^"||\' -e \'s|"$||\')',
+          'mkdir -p "$TREE/bin"',
+          'printf "ok\\n" > "$TREE/bin/base-marker"',
+        ].join('\n') + '\n',
+      );
+      const fakeMkfs = join(root, 'fake-mkfs.ext4');
+      writeExecutable(
+        fakeMkfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'OUT=""',
+          'while [ $# -gt 0 ]; do OUT="$1"; shift; done',
+          'printf "img\\n" > "$OUT"',
+        ].join('\n') + '\n',
+      );
+
+      // 1. Vault exclusion on derivation inputs (baseImagePath, extraFiles[].srcPath, pythonLibDir)
+      const vaultBase = join(vault, 'base.ext4');
+      writeFileSync(vaultBase, 'vault-base', { mode: 0o444 });
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: vaultBase,
+          outputImagePath: join(approved, 'from-vault-base.ext4'),
+          approvedRoots: [approved],
+          vaultDir: vault,
+          debugfsBin: fakeDebugfs,
+          mkfsExt4Bin: fakeMkfs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/must not reside inside vaultDir/);
+
+      const vaultExtra = join(vault, 'extra.sh');
+      writeFileSync(vaultExtra, '#!/bin/sh\necho hi\n', { mode: 0o644 });
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'from-vault-extra.ext4'),
+          approvedRoots: [approved],
+          vaultDir: vault,
+          extraFiles: [
+            {
+              srcPath: vaultExtra,
+              target: '/opt/qwen/workload.sh',
+              mode: 0o755,
+            },
+          ],
+          debugfsBin: fakeDebugfs,
+          mkfsExt4Bin: fakeMkfs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/must not reside inside vaultDir/);
+
+      const vaultPyLib = join(vault, 'pylib');
+      mkdirSync(vaultPyLib, { mode: 0o700 });
+      const dummyPy = join(root, 'dummy-py');
+      const dummyLdd = join(root, 'dummy-ldd');
+      writeExecutable(dummyPy, '#!/bin/sh\nexit 0\n');
+      writeExecutable(dummyLdd, '#!/bin/sh\nexit 0\n');
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'from-vault-pylib.ext4'),
+          approvedRoots: [approved],
+          vaultDir: vault,
+          bundleHostPython: true,
+          pythonBin: dummyPy,
+          pythonLibDir: vaultPyLib,
+          lddBin: dummyLdd,
+          debugfsBin: fakeDebugfs,
+          mkfsExt4Bin: fakeMkfs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/must not reside inside vaultDir/);
+
+      // 2. 0644 workload source must be chmodSync'd to 0755 inside extract tree,
+      // AND 4. truncateSync must pre-size tmpOut to imageSizeMib * 1024 * 1024,
+      // AND 5. mke2fs-named binary (via mkfs.ext4 -> mke2fs symlink) must receive `-t ext4`.
+      const workload0644 = join(root, 'workload-0644.sh');
+      writeFileSync(workload0644, '#!/bin/sh\necho run\n', { mode: 0o644 });
+      chmodSync(workload0644, 0o644);
+      const mke2fsStub = join(root, 'mke2fs');
+      writeExecutable(
+        mke2fsStub,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'if [ "$1" != "-t" ] || [ "$2" != "ext4" ]; then',
+          '  echo "missing -t ext4" >&2; exit 1',
+          'fi',
+          'SRC=""',
+          'OUT=""',
+          'while [ $# -gt 0 ]; do',
+          '  if [ "$1" = "-d" ]; then SRC="$2"; shift 2; continue; fi',
+          '  OUT="$1"; shift',
+          'done',
+          'test -x "$SRC/opt/qwen/workload.sh"',
+          'SZ=$(wc -c < "$OUT" | tr -d " ")',
+          'if [ "$SZ" != "33554432" ]; then echo "unexpected size=$SZ" >&2; exit 1; fi',
+        ].join('\n') + '\n',
+      );
+      const mkfsLink = join(root, 'mkfs.ext4');
+      symlinkSync(mke2fsStub, mkfsLink);
+      const sizedOut = join(approved, 'sized-mke2fs.ext4');
+      const sizedRes = deriveExt4GuestImage({
+        baseImagePath: golden,
+        outputImagePath: sizedOut,
+        approvedRoots: [approved],
+        imageSizeMib: 32,
+        extraFiles: [
+          {
+            srcPath: workload0644,
+            target: '/opt/qwen/workload.sh',
+            mode: 0o755,
+          },
+        ],
+        debugfsBin: fakeDebugfs,
+        mkfsExt4Bin: mkfsLink,
+        tempParentDir: root,
+      });
+      expect(sizedRes.imageBytes).toBe(32 * 1024 * 1024);
+      const wlEntry = sizedRes.injectedFiles.find(
+        (f) => f.target === '/opt/qwen/workload.sh',
+      );
+      expect(wlEntry?.mode).toBe('755');
+
+      // 3. Leaf file symlink at an injection target must be unlinked before copyFileSync
+      // so the host file it points to is untouched and derivation succeeds.
+      const leafVictim = join(outside, 'leaf-victim.txt');
+      writeFileSync(leafVictim, 'untouched-host-file', { mode: 0o644 });
+      const leafSymlinkDebugfs = join(root, 'leaf-symlink-debugfs');
+      writeExecutable(
+        leafSymlinkDebugfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'TREE=$(printf "%s" "$2" | sed -e "s|^rdump / ||" -e \'s|^"||\' -e \'s|"$||\')',
+          'mkdir -p "$TREE/opt/qwen"',
+          `ln -s "${leafVictim}" "$TREE/opt/qwen/guest-vsock.py"`,
+        ].join('\n') + '\n',
+      );
+      const leafOut = join(approved, 'leaf-safe.ext4');
+      const leafRes = deriveExt4GuestImage({
+        baseImagePath: golden,
+        outputImagePath: leafOut,
+        approvedRoots: [approved],
+        debugfsBin: leafSymlinkDebugfs,
+        mkfsExt4Bin: fakeMkfs,
+        tempParentDir: root,
+      });
+      expect(existsSync(leafRes.outputImagePath)).toBe(true);
+      expect(readFileSync(leafVictim, 'utf8')).toBe('untouched-host-file');
+
+      // 6. Argument-sensitive fake ldd + regular AND symlinked lib-dynload/*.so entries
+      const pyDir = join(root, 'dyn-py');
+      const pyStdlib = join(pyDir, 'python3.12');
+      const pyDynload = join(pyStdlib, 'lib-dynload');
+      const fakeLibs = join(pyDir, 'syslibs');
+      mkdirSync(pyDynload, { recursive: true, mode: 0o700 });
+      mkdirSync(fakeLibs, { recursive: true, mode: 0o700 });
+      writeFileSync(join(pyStdlib, 'os.py'), '# stdlib\n');
+      const regMod = join(pyDynload, '_socket.so');
+      const realSslTarget = join(pyDir, 'real-ssl.so');
+      const symMod = join(pyDynload, '_ssl.so');
+      writeFileSync(regMod, 'elf-socket');
+      writeFileSync(realSslTarget, 'elf-ssl');
+      symlinkSync(realSslTarget, symMod);
+
+      const libPy = join(fakeLibs, 'libpy.so.1.0');
+      const libSock = join(fakeLibs, 'libsock.so.2.0');
+      const libSsl = join(fakeLibs, 'libssl.so.3.0');
+      writeFileSync(libPy, 'py');
+      writeFileSync(libSock, 'sock');
+      writeFileSync(libSsl, 'ssl');
+      const hostPyBin = join(pyDir, 'python3');
+      writeExecutable(hostPyBin, '#!/bin/sh\nexit 0\n');
+      const argLdd = join(pyDir, 'arg-ldd');
+      writeExecutable(
+        argLdd,
+        [
+          '#!/bin/sh',
+          'case "$1" in',
+          `  *python3) echo "  libpy.so.1 => ${libPy} (0x0)" ;;`,
+          `  *_socket.so) echo "  libsock.so.2 => ${libSock} (0x0)" ;;`,
+          `  *_ssl.so) echo "  libssl.so.3 => ${libSsl} (0x0)" ;;`,
+          'esac',
+        ].join('\n') + '\n',
+      );
+      const dynOut = join(approved, 'dyn-bundled.ext4');
+      const dynRes = deriveExt4GuestImage({
+        baseImagePath: golden,
+        outputImagePath: dynOut,
+        approvedRoots: [approved],
+        bundleHostPython: true,
+        pythonBin: hostPyBin,
+        pythonLibDir: pyStdlib,
+        lddBin: argLdd,
+        debugfsBin: fakeDebugfs,
+        mkfsExt4Bin: fakeMkfs,
+        tempParentDir: root,
+      });
+      expect(dynRes.bundledLibraries).toEqual([
+        'libpy.so.1.0',
+        'libsock.so.2.0',
+        'libssl.so.3.0',
+      ]);
+
+      // 7. Injected source mutated between pre-hash and copy must fail closed
+      const mutableExtra = join(root, 'mutable-wl.sh');
+      writeFileSync(mutableExtra, '#!/bin/sh\necho original\n', {
+        mode: 0o644,
+      });
+      const mutExtraDebugfs = join(root, 'mut-extra-debugfs');
+      writeExecutable(
+        mutExtraDebugfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'TREE=$(printf "%s" "$2" | sed -e "s|^rdump / ||" -e \'s|^"||\' -e \'s|"$||\')',
+          'mkdir -p "$TREE/bin"',
+          'printf "ok\\n" > "$TREE/bin/ok"',
+          `printf "#!/bin/sh\\necho tampered\\n" > "${mutableExtra}"`,
+        ].join('\n') + '\n',
+      );
+      const mutExtraOut = join(approved, 'mut-extra.ext4');
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: mutExtraOut,
+          approvedRoots: [approved],
+          extraFiles: [
+            {
+              srcPath: mutableExtra,
+              target: '/opt/qwen/workload.sh',
+              mode: 0o755,
+            },
+          ],
+          debugfsBin: mutExtraDebugfs,
+          mkfsExt4Bin: fakeMkfs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/changed content between pre-hash and copy/);
+      expect(existsSync(mutExtraOut)).toBe(false);
+    },
+    20_000,
+  );
 });

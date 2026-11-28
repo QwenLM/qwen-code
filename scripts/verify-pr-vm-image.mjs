@@ -530,7 +530,6 @@ export function deriveExt4GuestImage({
     realOutParent,
     `.derive.${process.pid}.${Date.now()}.tmp`,
   );
-  let promoted = false;
   let bundledLibraries = [];
 
   try {
@@ -564,6 +563,20 @@ export function deriveExt4GuestImage({
           '-c',
           'import sysconfig; print(sysconfig.get_path("stdlib"))',
         ]).trim();
+      if (realVault) {
+        const realPyBin = realpathSync(pythonBin);
+        const realPyLib = realpathSync(pyLib);
+        if (withinDir(realVault, realPyBin)) {
+          throw new Error(
+            `pythonBin ${realPyBin} must not reside inside vaultDir`,
+          );
+        }
+        if (withinDir(realVault, realPyLib)) {
+          throw new Error(
+            `pythonLibDir ${realPyLib} must not reside inside vaultDir`,
+          );
+        }
+      }
       bundledLibraries = bundleHostPythonIntoTree(extractTree, {
         pythonBin,
         pythonLibDir: pyLib,
@@ -642,7 +655,8 @@ export function deriveExt4GuestImage({
       throw new Error('golden baseImagePath changed digest during derivation');
     }
 
-    // Publish via hard link + unlink so a concurrently created output is never clobbered.
+    // Publish via hard link + best-effort temp unlink so a concurrently created
+    // output is never clobbered and finally always cleans the temp name.
     try {
       linkSync(tmpOut, safeOut);
     } catch (error) {
@@ -651,8 +665,11 @@ export function deriveExt4GuestImage({
       }
       throw error;
     }
-    unlinkSync(tmpOut);
-    promoted = true;
+    try {
+      unlinkSync(tmpOut);
+    } catch {
+      // Best-effort cleanup; finally also attempts temp-name removal.
+    }
 
     const outInfo = sha256SingleLinkRegularFile(
       safeOut,
@@ -676,12 +693,10 @@ export function deriveExt4GuestImage({
     };
   } finally {
     rmSync(workDir, { recursive: true, force: true });
-    if (!promoted) {
-      try {
-        unlinkSync(tmpOut);
-      } catch {
-        // Ignore temp cleanup error.
-      }
+    try {
+      unlinkSync(tmpOut);
+    } catch {
+      // Ignore temp cleanup error (already unlinked or never created).
     }
   }
 }

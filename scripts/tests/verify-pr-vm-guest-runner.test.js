@@ -20,9 +20,10 @@ import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildFirecrackerLaunchPlan,
+  deriveCollectorAcceptDeadlineMs,
   runHardwareRound,
 } from '../verify-pr-vm-runner.mjs';
 
@@ -124,25 +125,73 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
     const goodCmdline = join(root, 'good-cmdline');
     writeFileSync(
       goodCmdline,
-      'console=ttyS0 qwen.cid=3 qwen.collector_port=5201 qwen.input_port=5301 qwen.model_port=5401 qwen.workload=/opt/qwen/w.sh qwen.workload_timeout=90 qwen.skip_materialize=1\n',
+      'console=ttyS0 qwen.cid=3 qwen.collector_port=5201 qwen.input_port=5301 qwen.model_port=5401 qwen.workload=/opt/qwen/w.sh qwen.workload_timeout=90 qwen.skill=0123456789ab qwen.skip_materialize=1\n',
     );
     const pyCmdOk = spawnSync(
       'python3',
       [
         '-c',
-        `import argparse, importlib.util, json; spec=importlib.util.spec_from_file_location("gr", ${JSON.stringify(GUEST_RUNNER_PY)}); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); ns=argparse.Namespace(from_cmdline=True, cid=2, collector_port=52, input_port=53, model_port=54, workload=None, workload_timeout=600, skip_materialize=False, cmdline_file=${JSON.stringify(goodCmdline)}); mod.apply_cmdline_overrides(ns); print(json.dumps(vars(ns)))`,
+        `import argparse, importlib.util, json; spec=importlib.util.spec_from_file_location("gr", ${JSON.stringify(GUEST_RUNNER_PY)}); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); ns=argparse.Namespace(from_cmdline=True, cid=2, collector_port=52, input_port=53, model_port=54, workload=None, workload_timeout=mod.DEFAULT_WORKLOAD_TIMEOUT, skill_digest=None, skip_materialize=False, cmdline_file=${JSON.stringify(goodCmdline)}); mod.apply_cmdline_overrides(ns); print(json.dumps({"defaultTimeout": mod.DEFAULT_WORKLOAD_TIMEOUT, "args": vars(ns)}))`,
       ],
       { encoding: 'utf8' },
     );
     expect(pyCmdOk.status, pyCmdOk.stderr).toBe(0);
-    const parsedCmd = JSON.parse(pyCmdOk.stdout);
+    const parsedOut = JSON.parse(pyCmdOk.stdout);
+    expect(parsedOut.defaultTimeout).toBeLessThan(45);
+    const parsedCmd = parsedOut.args;
     expect(parsedCmd.cid).toBe(3);
     expect(parsedCmd.collector_port).toBe(5201);
     expect(parsedCmd.input_port).toBe(5301);
     expect(parsedCmd.model_port).toBe(5401);
     expect(parsedCmd.workload).toBe('/opt/qwen/w.sh');
     expect(parsedCmd.workload_timeout).toBe(90);
+    expect(parsedCmd.skill_digest).toBe('0123456789ab');
     expect(parsedCmd.skip_materialize).toBe(true);
+
+    const badSkillCmdline = join(root, 'bad-skill-cmdline');
+    writeFileSync(badSkillCmdline, 'qwen.skill=nothex123456\n');
+    const badSkillRes = spawnSync(
+      'python3',
+      [GUEST_RUNNER_PY, '--from-cmdline', '--cmdline-file', badSkillCmdline],
+      { encoding: 'utf8' },
+    );
+    expect(badSkillRes.status).toBe(1);
+    expect(badSkillRes.stderr).toMatch(/invalid cmdline qwen\.skill/);
+
+    // deriveCollectorAcceptDeadlineMs aligns collector accept window with qwen.workload_timeout
+    expect(
+      deriveCollectorAcceptDeadlineMs(
+        {
+          vmConfig: {
+            'boot-source': {
+              boot_args: 'console=ttyS0 qwen.workload_timeout=120',
+            },
+          },
+        },
+        {},
+      ),
+    ).toBe(150_000);
+    expect(
+      deriveCollectorAcceptDeadlineMs(
+        {
+          argv: [
+            'vfkit',
+            '--bootloader',
+            'linux,cmdline=qwen.workload_timeout=90',
+          ],
+        },
+        {},
+      ),
+    ).toBe(120_000);
+    expect(
+      deriveCollectorAcceptDeadlineMs(
+        { bootArgs: 'qwen.workload_timeout=120' },
+        { acceptDeadlineMs: 5000 },
+      ),
+    ).toBe(5000);
+    expect(
+      deriveCollectorAcceptDeadlineMs({ bootArgs: 'console=ttyS0' }, {}),
+    ).toBeUndefined();
 
     // Malformed non-JSON model-bridge announcement terminates child process instead of leaking it
     const badBridgeScript = join(root, 'bad-bridge.py');
@@ -1221,5 +1270,316 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
       expect(existsSync(childMarker)).toBe(false);
     },
     15_000,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'demotes workload-authored merge-ready verdict to inconclusive on timeout, derives collector acceptDeadlineMs from qwen.workload_timeout, and renders qwen.skill footer only when supplied',
+    async () => {
+      const root = makeTempDir('vgr-r3-');
+      const repoDir = join(root, 'repo');
+      const { baseRefOid, headRefOid } = makeTwoCommitRepo(repoDir);
+      const ctx = makeHostContext(root, baseRefOid, headRefOid);
+
+      const goldenKernel = join(root, 'k');
+      const goldenRootfs = join(root, 'r');
+      writeFileSync(goldenKernel, 'k', { mode: 0o444 });
+      writeFileSync(goldenRootfs, 'r', { mode: 0o444 });
+
+      const cleanNet = join(root, 'clean-net');
+      mkdirSync(join(cleanNet, 'lo'), { recursive: true });
+      const cleanMounts = join(root, 'clean-mounts');
+      writeFileSync(cleanMounts, 'tmpfs /run tmpfs rw 0 0\n');
+
+      const currentUid =
+        typeof process.getuid === 'function' && process.getuid() > 0
+          ? process.getuid()
+          : 65534;
+      const currentGid =
+        typeof process.getgid === 'function' && process.getgid() > 0
+          ? process.getgid()
+          : 65534;
+
+      // 1. R3-1: Workload writes full merge-ready artifacts AND THEN hangs past timeout;
+      // runner MUST overwrite verdict.txt to `inconclusive` + `guest-lifecycle-error`.
+      const sneakyWorkload = join(root, 'sneaky-wl.sh');
+      writeFileSync(
+        sneakyWorkload,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'printf "merge-ready\\n" > "$QWEN_VERIFY_ARTIFACTS_DIR/verdict.txt"',
+          'printf \'{"pass":1,"fail":0,"total":1}\\n\' > "$QWEN_VERIFY_ARTIFACTS_DIR/assertions.json"',
+          'printf "merge-ready · 1 passed · 0 failed · 1 total · %s\\n\\n## Methodology\\n\\n**Boundary.** microvm.\\n" "$QWEN_VERIFY_HEAD_OID" > "$QWEN_VERIFY_ARTIFACTS_DIR/report.md"',
+          'printf "merge-ready\\n" > "$QWEN_VERIFY_ARTIFACTS_DIR/comment.md"',
+          'sleep 10',
+        ].join('\n') + '\n',
+        { mode: 0o755 },
+      );
+      chmodSync(sneakyWorkload, 0o755);
+
+      const plan1 = buildFirecrackerLaunchPlan({
+        runId: 'gr-r3-1',
+        jailBaseDir: join(root, 'j'),
+        firecrackerBin: '/opt/firecracker',
+        jailerBin: '/opt/jailer',
+        vmmUid: currentUid,
+        vmmGid: currentGid,
+        vsockPort: 52,
+        inputVsockPort: 53,
+      });
+      const res1 = await runHardwareRound({
+        contextPath: ctx.path,
+        contextSha256: ctx.sha256,
+        launcherDir: join(root, 'l1'),
+        vaultDir: join(root, 'v1'),
+        approvedRoots: [root],
+        plan: plan1,
+        sourceKernelPath: goldenKernel,
+        sourceRootfsPath: goldenRootfs,
+        stageAssets: true,
+        applyChown: false,
+        runChecker: true,
+        roundInput: { repoDir, baseRefOid, headRefOid },
+        launchBackend: async ({ collectorSocketPath, inputSocketPath }) => {
+          const child = spawn(
+            'python3',
+            [
+              GUEST_RUNNER_PY,
+              '--vsock-script',
+              GUEST_VSOCK_PY,
+              '--work-dir',
+              join(root, 'gw1'),
+              '--unix-collector',
+              collectorSocketPath,
+              '--unix-input',
+              inputSocketPath,
+              '--workload',
+              sneakyWorkload,
+              '--workload-timeout',
+              '1',
+              '--urandom-path',
+              join(root, 'ur1'),
+              '--sys-net-dir',
+              cleanNet,
+              '--proc-mounts',
+              cleanMounts,
+            ],
+            { stdio: 'pipe' },
+          );
+          await new Promise((ok) => child.once('exit', ok));
+          return {
+            workerPid: child.pid,
+            supervisorPid: child.pid,
+            workerExe: 'python3',
+            expectedExeTokens: ['python'],
+            child,
+          };
+        },
+      });
+      expect(res1.errors).toEqual([]);
+      expect(res1.ok).toBe(true);
+      expect(res1.checkExitCode).toBe(0);
+      expect(readFileSync(join(root, 'v1', 'verdict.txt'), 'utf8').trim()).toBe(
+        'inconclusive',
+      );
+      const a1 = JSON.parse(
+        readFileSync(join(root, 'v1', 'assertions.json'), 'utf8'),
+      );
+      expect(a1.failures.map((f) => f.id)).toEqual(['guest-lifecycle-error']);
+
+      // 2. R3-4: Self-test renders footer from qwen.skill=<12-hex> when supplied,
+      // and omits any fabricated footer when absent.
+      const cmdlineWithSkill = join(root, 'cmdline-skill');
+      writeFileSync(cmdlineWithSkill, 'qwen.skill=0123456789ab\n');
+      const planSkill = buildFirecrackerLaunchPlan({
+        runId: 'gr-r3-4a',
+        jailBaseDir: join(root, 'j'),
+        firecrackerBin: '/opt/firecracker',
+        jailerBin: '/opt/jailer',
+        vmmUid: currentUid,
+        vmmGid: currentGid,
+        vsockPort: 52,
+        inputVsockPort: 53,
+      });
+      const resSkill = await runHardwareRound({
+        contextPath: ctx.path,
+        contextSha256: ctx.sha256,
+        launcherDir: join(root, 'l2'),
+        vaultDir: join(root, 'v2'),
+        approvedRoots: [root],
+        plan: planSkill,
+        sourceKernelPath: goldenKernel,
+        sourceRootfsPath: goldenRootfs,
+        stageAssets: true,
+        applyChown: false,
+        runChecker: true,
+        roundInput: { repoDir, baseRefOid, headRefOid },
+        launchBackend: async ({ collectorSocketPath, inputSocketPath }) => {
+          const child = spawn(
+            'python3',
+            [
+              GUEST_RUNNER_PY,
+              '--vsock-script',
+              GUEST_VSOCK_PY,
+              '--from-cmdline',
+              '--cmdline-file',
+              cmdlineWithSkill,
+              '--work-dir',
+              join(root, 'gw2'),
+              '--unix-collector',
+              collectorSocketPath,
+              '--unix-input',
+              inputSocketPath,
+              '--urandom-path',
+              join(root, 'ur2'),
+              '--sys-net-dir',
+              cleanNet,
+              '--proc-mounts',
+              cleanMounts,
+            ],
+            { stdio: 'pipe' },
+          );
+          await new Promise((ok) => child.once('exit', ok));
+          return {
+            workerPid: child.pid,
+            supervisorPid: child.pid,
+            workerExe: 'python3',
+            expectedExeTokens: ['python'],
+            child,
+          };
+        },
+      });
+      expect(resSkill.ok).toBe(true);
+      expect(resSkill.checkExitCode).toBe(0);
+      const commentWithSkill = readFileSync(
+        join(root, 'v2', 'comment.md'),
+        'utf8',
+      ).trim();
+      expect(commentWithSkill.endsWith('skill 0123456789ab)_')).toBe(true);
+      // Without qwen.skill (res1 above), comment.md must NOT fabricate a 000000000000 footer
+      const commentNoSkill = readFileSync(
+        join(root, 'v1', 'comment.md'),
+        'utf8',
+      );
+      expect(commentNoSkill).not.toMatch(/000000000000/);
+
+      // 3. R3-2: With collectorOptions left at defaults and qwen.workload_timeout=90 in bootArgs,
+      // runHardwareRound raises acceptDeadlineMs past the default window so a workload running
+      // longer than the scaled default window still delivers report.md/verdict.txt to the vault.
+      const slowWorkload = join(root, 'slow-wl.sh');
+      writeFileSync(
+        slowWorkload,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'sleep 1',
+          'printf "merge-ready\\n" > "$QWEN_VERIFY_ARTIFACTS_DIR/verdict.txt"',
+          'printf \'{"pass":1,"fail":0,"total":1}\\n\' > "$QWEN_VERIFY_ARTIFACTS_DIR/assertions.json"',
+          'printf "merge-ready · 1 passed · 0 failed · 1 total · %s\\n\\n## Methodology\\n\\n**Boundary.** microvm.\\n" "$QWEN_VERIFY_HEAD_OID" > "$QWEN_VERIFY_ARTIFACTS_DIR/report.md"',
+          'printf "merge-ready\\n" > "$QWEN_VERIFY_ARTIFACTS_DIR/comment.md"',
+        ].join('\n') + '\n',
+        { mode: 0o755 },
+      );
+      chmodSync(slowWorkload, 0o755);
+
+      let observedAcceptDeadlineMs = null;
+      vi.resetModules();
+      vi.doMock('../verify-pr-vm-collector.mjs', async () => {
+        const actual = await vi.importActual('../verify-pr-vm-collector.mjs');
+        return {
+          ...actual,
+          startCollectorServer(opts) {
+            observedAcceptDeadlineMs = opts.acceptDeadlineMs;
+            // Scale an un-raised default acceptDeadlineMs down to 300ms so omitting
+            // the budget derivation immediately fails with an empty vault.
+            const effectiveMs =
+              opts.acceptDeadlineMs === undefined ||
+              opts.acceptDeadlineMs <= 45_000
+                ? 300
+                : opts.acceptDeadlineMs;
+            return actual.startCollectorServer({
+              ...opts,
+              acceptDeadlineMs: effectiveMs,
+            });
+          },
+        };
+      });
+      try {
+        const runnerMod = await import('../verify-pr-vm-runner.mjs');
+        const planLong = runnerMod.buildFirecrackerLaunchPlan({
+          runId: 'gr-r3-2',
+          jailBaseDir: join(root, 'j'),
+          firecrackerBin: '/opt/firecracker',
+          jailerBin: '/opt/jailer',
+          vmmUid: currentUid,
+          vmmGid: currentGid,
+          vsockPort: 52,
+          inputVsockPort: 53,
+          bootArgs:
+            'console=ttyS0 reboot=k panic=1 pci=off init=/opt/poc/init qwen.workload_timeout=90',
+        });
+        const resLong = await runnerMod.runHardwareRound({
+          contextPath: ctx.path,
+          contextSha256: ctx.sha256,
+          launcherDir: join(root, 'l3'),
+          vaultDir: join(root, 'v3'),
+          approvedRoots: [root],
+          plan: planLong,
+          sourceKernelPath: goldenKernel,
+          sourceRootfsPath: goldenRootfs,
+          stageAssets: true,
+          applyChown: false,
+          runChecker: true,
+          roundInput: { repoDir, baseRefOid, headRefOid },
+          launchBackend: async ({ collectorSocketPath, inputSocketPath }) => {
+            const child = spawn(
+              'python3',
+              [
+                GUEST_RUNNER_PY,
+                '--vsock-script',
+                GUEST_VSOCK_PY,
+                '--work-dir',
+                join(root, 'gw3'),
+                '--unix-collector',
+                collectorSocketPath,
+                '--unix-input',
+                inputSocketPath,
+                '--workload',
+                slowWorkload,
+                '--workload-timeout',
+                '90',
+                '--urandom-path',
+                join(root, 'ur3'),
+                '--sys-net-dir',
+                cleanNet,
+                '--proc-mounts',
+                cleanMounts,
+              ],
+              { stdio: 'pipe' },
+            );
+            await new Promise((ok) => child.once('exit', ok));
+            return {
+              workerPid: child.pid,
+              supervisorPid: child.pid,
+              workerExe: 'python3',
+              expectedExeTokens: ['python'],
+              child,
+            };
+          },
+        });
+        expect(observedAcceptDeadlineMs).toBe(120_000);
+        expect(resLong.errors).toEqual([]);
+        expect(resLong.ok).toBe(true);
+        expect(resLong.checkExitCode).toBe(0);
+        expect(existsSync(join(root, 'v3', 'report.md'))).toBe(true);
+        expect(
+          readFileSync(join(root, 'v3', 'verdict.txt'), 'utf8').trim(),
+        ).toBe('merge-ready');
+      } finally {
+        vi.doUnmock('../verify-pr-vm-collector.mjs');
+        vi.resetModules();
+      }
+    },
+    20_000,
   );
 });

@@ -47,10 +47,14 @@ DEFAULT_CID = 2
 DEFAULT_COLLECTOR_PORT = 52
 DEFAULT_INPUT_PORT = 53
 DEFAULT_MODEL_PORT = 54
-DEFAULT_WORKLOAD_TIMEOUT = 600
+# Fits inside verify-pr-vm-collector's 45s default accept window with 15s
+# headroom for boot/fetch/materialize/upload. Callers needing longer workloads
+# set `qwen.workload_timeout=<N>` so runHardwareRound scales acceptDeadlineMs.
+DEFAULT_WORKLOAD_TIMEOUT = 30
 SHARED_FS_TYPES = frozenset({"virtiofs", "9p", "vboxsf", "vmhgfs", "fuse.sshfs"})
 OID_RE = re.compile(r"^[0-9a-f]{40}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+SKILL_DIGEST_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 def resolve_vsock_script(explicit_path=None):
@@ -382,6 +386,7 @@ def write_self_test_artifacts(
     model_probe_status,
     error_message=None,
     include_model_probe=True,
+    skill_digest=None,
 ):
     os.makedirs(artifacts_dir, mode=0o700, exist_ok=True)
 
@@ -470,10 +475,17 @@ def write_self_test_artifacts(
     (Path(artifacts_dir) / "report.md").write_text(
         "\n".join(report_lines), encoding="utf-8"
     )
-    comment_md = (
-        f"{verdict} ({passed_count}/{total_count} guest checks passed for `{manifest['headRefOid']}`)\n\n"
-        "_— verify-pr-guest-runner via Qwen Code /verify-pr (v0.28.7; skill 000000000000)_\n"
-    )
+    comment_lines = [
+        f"{verdict} ({passed_count}/{total_count} guest checks passed for `{manifest['headRefOid']}`)"
+    ]
+    if skill_digest is not None:
+        comment_lines.extend(
+            [
+                "",
+                f"_— verify-pr-guest-runner via Qwen Code /verify-pr (v0.28.7; skill {skill_digest})_",
+            ]
+        )
+    comment_md = "\n".join(comment_lines) + "\n"
     (Path(artifacts_dir) / "comment.md").write_text(comment_md, encoding="utf-8")
 
 
@@ -528,6 +540,11 @@ def run_guest_round(args):
     model_probe_status = None
     workload_rc = 0
     round_error = None
+    harness_wrote_artifacts = False
+
+    skill_digest = getattr(args, "skill_digest", None)
+    if skill_digest is not None and not SKILL_DIGEST_RE.fullmatch(skill_digest):
+        raise RuntimeError(f"invalid skill digest: {skill_digest!r}")
 
     try:
         # Fail-closed gate for workload rounds before materialization or execution
@@ -676,10 +693,14 @@ def run_guest_round(args):
                 model_health=model_health,
                 bridge_url=bridge_url,
                 model_probe_status=model_probe_status,
+                skill_digest=skill_digest,
             )
+            harness_wrote_artifacts = True
     except Exception as exc:
         round_error = exc
-        if not (artifacts_dir / "verdict.txt").is_file():
+        # Always overwrite any workload-authored verdict on harness error (e.g.
+        # a workload that wrote `verdict.txt=merge-ready` before hanging past timeout).
+        if not harness_wrote_artifacts:
             write_self_test_artifacts(
                 artifacts_dir,
                 manifest=manifest,
@@ -691,7 +712,9 @@ def run_guest_round(args):
                 model_probe_status=model_probe_status,
                 error_message=str(exc),
                 include_model_probe=(workload_path is None),
+                skill_digest=skill_digest,
             )
+            harness_wrote_artifacts = True
         raise
     finally:
         stop_process(bridge_proc)
@@ -733,6 +756,7 @@ def build_arg_parser():
     parser.add_argument("--skip-materialize", action="store_true")
     parser.add_argument("--workload", default=None)
     parser.add_argument("--workload-timeout", type=int, default=DEFAULT_WORKLOAD_TIMEOUT)
+    parser.add_argument("--skill-digest", default=None)
     parser.add_argument("--urandom-path", default="/dev/urandom")
     parser.add_argument("--sys-net-dir", default="/sys/class/net")
     parser.add_argument("--proc-mounts", default="/proc/mounts")
@@ -743,6 +767,12 @@ def _parse_positive_int(name, raw):
     if not isinstance(raw, str) or not re.fullmatch(r"[1-9][0-9]*", raw):
         raise RuntimeError(f"invalid cmdline qwen.{name}: expected positive integer")
     return int(raw)
+
+
+def _parse_skill_digest(raw):
+    if not isinstance(raw, str) or not SKILL_DIGEST_RE.fullmatch(raw):
+        raise RuntimeError("invalid cmdline qwen.skill: expected 12-char lowercase hex")
+    return raw
 
 
 def apply_cmdline_overrides(args):
@@ -764,6 +794,8 @@ def apply_cmdline_overrides(args):
         args.workload_timeout = _parse_positive_int(
             "workload_timeout", kv["workload_timeout"]
         )
+    if "skill" in kv:
+        args.skill_digest = _parse_skill_digest(kv["skill"])
     if kv.get("skip_materialize") == "1":
         args.skip_materialize = True
     return args

@@ -1106,6 +1106,57 @@ async function waitForPidFile(pidFile, timeoutMs = 10_000, shouldAbort = null) {
   return null;
 }
 
+const COLLECTOR_DEFAULT_ACCEPT_MS = 45_000;
+const COLLECTOR_WORKLOAD_HEADROOM_MS = 30_000;
+// Clamp derived deadline to 24h so setTimeout never overflows its 32-bit limit.
+const COLLECTOR_MAX_DERIVED_ACCEPT_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Derives a collector `acceptDeadlineMs` from any `qwen.workload_timeout=<N>`
+ * token in the launch plan's kernel cmdline when the caller did not pass an
+ * explicit `collectorOptions.acceptDeadlineMs`, keeping guest and host budgets
+ * aligned without loosening per-read or byte/file collector limits.
+ */
+export function deriveCollectorAcceptDeadlineMs(plan, collectorOptions = {}) {
+  if (collectorOptions?.acceptDeadlineMs !== undefined) {
+    return collectorOptions.acceptDeadlineMs;
+  }
+  const cmdlines = [];
+  if (typeof plan?.vmConfig?.['boot-source']?.boot_args === 'string') {
+    cmdlines.push(plan.vmConfig['boot-source'].boot_args);
+  }
+  if (typeof plan?.bootArgs === 'string') {
+    cmdlines.push(plan.bootArgs);
+  }
+  if (Array.isArray(plan?.argv)) {
+    for (const arg of plan.argv) {
+      if (typeof arg !== 'string') continue;
+      const idx = arg.indexOf('cmdline=');
+      if (idx !== -1) {
+        cmdlines.push(arg.slice(idx + 'cmdline='.length));
+      }
+    }
+  }
+  for (const line of cmdlines) {
+    const match = /(?:^|\s)qwen\.workload_timeout=([1-9]\d*)(?=\s|$)/.exec(
+      line,
+    );
+    if (match) {
+      const timeoutSec = Number(match[1]);
+      if (Number.isSafeInteger(timeoutSec) && timeoutSec > 0) {
+        return Math.min(
+          COLLECTOR_MAX_DERIVED_ACCEPT_MS,
+          Math.max(
+            COLLECTOR_DEFAULT_ACCEPT_MS,
+            timeoutSec * 1000 + COLLECTOR_WORKLOAD_HEADROOM_MS,
+          ),
+        );
+      }
+    }
+  }
+  return undefined;
+}
+
 /**
  * Orchestrates one complete hardware-isolated `/verify-pr` round end to end:
  *   1. Validates host-held `contextPath` + `contextSha256` and cross-checks
@@ -1877,8 +1928,15 @@ export async function runHardwareRound({
 
     // 2. Start bounded content-only collector when plan carries a UDS path
     if (plan.hostVsockPath) {
+      const derivedAcceptDeadlineMs = deriveCollectorAcceptDeadlineMs(
+        plan,
+        collectorOptions,
+      );
       collector = startCollectorServer({
         ...collectorOptions,
+        ...(derivedAcceptDeadlineMs !== undefined
+          ? { acceptDeadlineMs: derivedAcceptDeadlineMs }
+          : {}),
         socketPath: plan.hostVsockPath,
         vaultDir: realVault,
         vmmUid: plan.vmmUid ?? null,
