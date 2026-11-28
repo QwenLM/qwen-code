@@ -776,6 +776,7 @@ export class ExtensionManager {
     ) {
       throw new Error('System and SystemDefaults scopes are not supported.');
     }
+    await this.refreshCache();
     const extension = this.findExtensionForMutation(name, scope);
     if (!extension) {
       throw new Error(`Extension with name ${name} does not exist.`);
@@ -826,6 +827,7 @@ export class ExtensionManager {
     ) {
       throw new Error('System and SystemDefaults scopes are not supported.');
     }
+    await this.refreshCache();
     const extension = this.findExtensionForMutation(name, scope);
     if (!extension) {
       throw new Error(`Extension with name ${name} does not exist.`);
@@ -850,7 +852,7 @@ export class ExtensionManager {
         const extensions = this.getAllLoadedExtensions().filter(
           (candidate) => candidate.name === name,
         );
-        if (extensions.length > 1) {
+        if (extension.versionSlot || extensions.length > 1) {
           snapshot = await this.extensionStore.setWorkspaceActivations(
             extensions.map((candidate) => ({
               id: candidate.id,
@@ -1297,7 +1299,9 @@ export class ExtensionManager {
       (extension) => extension.name === name,
     );
     if (scope !== SettingScope.Workspace) {
-      return candidates.find((extension) => !extension.versionSlot);
+      return (
+        candidates.find((extension) => !extension.versionSlot) ?? candidates[0]
+      );
     }
     if (this.storeSnapshot) {
       const selectedId = this.extensionStore.getWorkspaceExtensionId(

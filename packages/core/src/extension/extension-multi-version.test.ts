@@ -194,6 +194,11 @@ describe('single-store multi-version extensions', () => {
         .filter((e) => e.isActive)
         .map((e) => e.version),
     ).toEqual(['3.0.0']);
+    await mgrA.uninstallExtensionById(v1.id, false);
+    await mgrB.disableExtension('foo', SettingScope.User, wsB);
+    expect(
+      mgrB.getAllLoadedExtensions().filter((e) => e.isActive),
+    ).toHaveLength(0);
   });
 
   it('reuses identical versioned artifacts idempotently across workspaces without duplicating directories', async () => {
