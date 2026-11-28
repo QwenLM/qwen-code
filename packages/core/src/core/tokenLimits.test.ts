@@ -549,7 +549,17 @@ describe('tokenLimit with output type', () => {
 
     it('should return fallback output limits for legacy Claude', () => {
       expect(tokenLimit('claude-sonnet-4', 'output')).toBe(65536);
-      expect(tokenLimit('claude-opus-4', 'output')).toBe(65536);
+      expect(tokenLimit('claude-opus-4-5', 'output')).toBe(65536);
+    });
+
+    it('caps older Claude generations at their declared output limits', () => {
+      expect(tokenLimit('claude-opus-4', 'output')).toBe(32_000);
+      expect(tokenLimit('claude-opus-4-1', 'output')).toBe(32_000);
+      expect(tokenLimit('claude-3-5-sonnet', 'output')).toBe(8_192);
+      expect(tokenLimit('claude-3-5-haiku', 'output')).toBe(8_192);
+      expect(tokenLimit('claude-3-haiku', 'output')).toBe(4_096);
+      expect(tokenLimit('claude-3-opus', 'output')).toBe(4_096);
+      expect(tokenLimit('claude-instant', 'output')).toBe(4_096);
     });
   });
 
@@ -936,6 +946,16 @@ describe('Bedrock model ids', () => {
     expect(tokenLimit('openai.gpt-oss-120b-1:0', 'output')).toBe(32_768);
     expect(tokenLimit('gpt-oss-120b', 'output')).toBe(32_768);
     expect(tokenLimit('gpt-4', 'output')).toBe(16_384);
+  });
+
+  it('caps older Bedrock Claude generations like their plain names', () => {
+    expect(
+      tokenLimit('us.anthropic.claude-opus-4-1-20250805-v1:0', 'output'),
+    ).toBe(32_000);
+    expect(
+      defaultOutputCeiling('anthropic.claude-3-5-sonnet-20241022-v2:0'),
+    ).toBe(8_192);
+    expect(tokenLimit('anthropic.claude-instant-v1', 'output')).toBe(4_096);
   });
 
   it('gives Bedrock Claude the output ceiling of the plain name', () => {

@@ -138,6 +138,9 @@ describe('defaultModalities', () => {
         'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
       ],
     ]);
+    casesFor('returns text-only for', [
+      ['Claude Instant', TEXT_ONLY, 'anthropic.claude-instant-v1'],
+    ]);
   });
 
   describe('Qwen', () => {

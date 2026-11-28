@@ -39,6 +39,7 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // -------------------
   // Anthropic Claude — image + pdf
   // -------------------
+  [/^claude-instant/, {}],
   [/^claude-/, { image: true, pdf: true }],
 
   // -------------------

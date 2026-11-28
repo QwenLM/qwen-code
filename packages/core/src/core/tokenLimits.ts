@@ -382,6 +382,9 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   // Anthropic Claude
   [CLAUDE_OPUS_EXTENDED, 128_000 as TokenCount], // Opus 4.6-4.8, Opus 5.x: 128K
   [/^claude-sonnet-4-6/, LIMITS['64k']], // Sonnet 4.6: 64K
+  [/^claude-opus-4(?:-1)?$/, 32_000 as TokenCount], // Opus 4 / 4.1: 32K
+  [/^claude-3-5-(?:sonnet|haiku)$/, LIMITS['8k']], // Claude 3.5: 8K
+  [/^claude-(?:3-(?:haiku|opus)|instant)/, LIMITS['4k']], // Claude 3, Instant: 4K
   [/^claude-/, LIMITS['64k']], // Claude fallback: 64K
 
   // Alibaba / Qwen
