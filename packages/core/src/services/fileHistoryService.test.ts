@@ -10,12 +10,13 @@ import {
   mkdtemp,
   rm,
   stat,
+  symlink,
   utimes,
   writeFile,
   readFile,
 } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, dirname, join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const mockStorageDir = vi.hoisted(() => vi.fn());
@@ -156,6 +157,157 @@ describe('FileHistoryService', () => {
       expect(await readFile(file)).toEqual(before);
     },
   );
+
+  describe('one file reached through two path spellings', () => {
+    const aliases = (projectDir: string): Array<[string, string]> => {
+      const file = join(projectDir, 'a.ts');
+      const parent = join(projectDir, '..');
+      const list: Array<[string, string]> = [
+        [
+          'a dot segment',
+          `${parent}${sep}.${sep}${basename(projectDir)}${sep}a.ts`,
+        ],
+      ];
+      if (process.platform === 'win32') {
+        list.push(['forward slashes', file.split(sep).join('/')]);
+        list.push([
+          'another drive-letter case',
+          (file[0] === file[0].toUpperCase()
+            ? file[0].toLowerCase()
+            : file[0].toUpperCase()) + file.slice(1),
+        ]);
+      }
+      return list;
+    };
+
+    it('rewinds to the version before the first edit', async () => {
+      const results: string[] = [];
+      for (const [name, alias] of aliases(projectDir)) {
+        const svc = new FileHistoryService(`s-${name}`, true, projectDir);
+        const file = join(projectDir, 'a.ts');
+        await writeFile(file, 'v0');
+        await svc.makeSnapshot('p1');
+        await svc.trackEdit(alias);
+        await writeFile(file, 'v1');
+        await svc.makeSnapshot('p2');
+        await svc.trackEdit(file);
+        await writeFile(file, 'v2');
+        await svc.rewind('p1', false);
+        results.push(`${name}: ${await readFile(file, 'utf8')}`);
+      }
+      expect(results).toEqual(
+        aliases(projectDir).map(([name]) => `${name}: v0`),
+      );
+    });
+
+    it('rewinds an outside-cwd file edited through two spellings', async () => {
+      const outsideDir = await mkdtemp(join(tmpdir(), 'fh-outside-'));
+      try {
+        const file = join(outsideDir, 'a.txt');
+        const alias = `${dirname(outsideDir)}${sep}.${sep}${basename(outsideDir)}${sep}a.txt`;
+        await writeFile(file, 'v0');
+        await service.makeSnapshot('p1');
+        await service.trackEdit(alias);
+        await writeFile(file, 'v1');
+        await service.makeSnapshot('p2');
+        await service.trackEdit(file);
+        await writeFile(file, 'v2');
+        await service.rewind('p1', false);
+        expect(await readFile(file, 'utf8')).toBe('v0');
+      } finally {
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('converges a resumed relative `../` key with a later absolute spelling', async () => {
+      // Older builds stored `<cwd>/../<sibling>/a.txt` under the relative key
+      // `../<sibling>/a.txt`. After resume, an absolute spelling of the same
+      // file must land on that key, not on a second one.
+      const siblingDir = await mkdtemp(join(tmpdir(), 'fh-sibling-'));
+      try {
+        const file = join(siblingDir, 'a.txt');
+        const legacyKey = ['..', basename(siblingDir), 'a.txt'].join(sep);
+        await writeFile(file, 'v0');
+        await service.makeSnapshot('p1');
+        await service.trackEdit(file);
+        await writeFile(file, 'v1');
+        await service.makeSnapshot('p2');
+        const persisted = structuredClone(service.getSnapshots());
+        const absoluteKey = Object.keys(persisted[0].trackedFileBackups).find(
+          (key) => key.endsWith(`${sep}a.txt`),
+        )!;
+        for (const snapshot of persisted) {
+          const backups = snapshot.trackedFileBackups;
+          if (absoluteKey in backups) {
+            backups[legacyKey] = backups[absoluteKey];
+            delete backups[absoluteKey];
+          }
+        }
+
+        const resumed = new FileHistoryService(
+          'test-session',
+          true,
+          projectDir,
+        );
+        resumed.restoreFromSnapshots(persisted);
+        await resumed.trackEdit(file);
+        await writeFile(file, 'v2');
+        await resumed.rewind('p1', false);
+        expect(await readFile(file, 'utf8')).toBe('v0');
+      } finally {
+        await rm(siblingDir, { recursive: true, force: true });
+      }
+    });
+
+    describe.skipIf(process.platform === 'win32')('through a symlink', () => {
+      // cwd `root/proj`, `root/alias -> proj/sub`. On POSIX the OS resolves
+      // `root/alias/../a.ts` to `proj/a.ts`: `..` goes up from the link's
+      // target. A lexical resolve would key `root/a.ts` instead.
+      let root: string;
+      let proj: string;
+      let alias: string;
+      let bystander: string;
+
+      beforeEach(async () => {
+        root = await mkdtemp(join(tmpdir(), 'fh-symlink-'));
+        proj = join(root, 'proj');
+        await mkdir(join(proj, 'sub'), { recursive: true });
+        await symlink(join(proj, 'sub'), join(root, 'alias'));
+        alias = join(root, 'alias') + `${sep}..${sep}a.ts`;
+        bystander = join(root, 'a.ts');
+        await writeFile(bystander, 'bystander');
+      });
+
+      afterEach(async () => {
+        await rm(root, { recursive: true, force: true });
+      });
+
+      it('restores the physical file', async () => {
+        const svc = new FileHistoryService('s-symlink', true, proj);
+        const file = join(proj, 'a.ts');
+        await writeFile(file, 'v0');
+        await svc.makeSnapshot('p1');
+        await svc.trackEdit(alias);
+        await writeFile(alias, 'v1');
+        await svc.makeSnapshot('p2');
+        await svc.trackEdit(file);
+        await writeFile(file, 'v2');
+        await svc.rewind('p1', false);
+        expect(await readFile(file, 'utf8')).toBe('v0');
+        expect(await readFile(bystander, 'utf8')).toBe('bystander');
+      });
+
+      it('does not unlink the lexically cancelled path when rewinding a new file', async () => {
+        const svc = new FileHistoryService('s-symlink-new', true, proj);
+        await svc.makeSnapshot('p1');
+        await svc.trackEdit(alias);
+        await writeFile(alias, 'created');
+        await svc.rewind('p1', false);
+        expect(existsSync(join(proj, 'a.ts'))).toBe(false);
+        expect(await readFile(bystander, 'utf8')).toBe('bystander');
+      });
+    });
+  });
 
   describe('disabled service', () => {
     it('should no-op all operations when disabled', async () => {

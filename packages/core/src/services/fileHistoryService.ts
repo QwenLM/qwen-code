@@ -5,7 +5,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { constants, type Stats } from 'node:fs';
+import { constants, realpathSync, type Stats } from 'node:fs';
 import {
   chmod,
   copyFile,
@@ -15,7 +15,16 @@ import {
   stat,
   unlink,
 } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import {
+  dirname,
+  isAbsolute,
+  join,
+  parse,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
+import { isSubpath } from '../utils/paths.js';
 import {
   diffLines,
   structuredPatch,
@@ -1651,11 +1660,60 @@ export class FileHistoryService {
   }
 
   private maybeShortenFilePath(filePath: string): string {
-    if (!isAbsolute(filePath)) return filePath;
-    if (filePath.startsWith(this.cwd + sep) || filePath === this.cwd) {
-      return relative(this.cwd, filePath);
+    // Tools pass the path as the model spelled it, and a resumed session
+    // passes keys an older build stored (some relative, like `../x/a.txt`).
+    // Resolve both the same way before keying, so separator, `.` / `..`
+    // segment and drive-letter-case spellings of one path get one key. Two
+    // keys for one file made rewind restore whichever was tracked later at
+    // its first version, not the file's state at the chosen checkpoint.
+    // Spellings that differ only in the case of a segment below `cwd`, or
+    // that reach the file through a different symlink, still get their own
+    // key.
+    const resolved = this.resolveTrackingPath(filePath);
+    if (isSubpath(this.trackingCwd(), resolved)) {
+      return relative(this.trackingCwd(), resolved);
     }
-    return filePath;
+    return resolved;
+  }
+
+  private trackingCwdCache: string | undefined;
+
+  private trackingCwd(): string {
+    return (this.trackingCwdCache ??= this.resolveTrackingPath(this.cwd));
+  }
+
+  /**
+   * Absolute form of `filePath` that names the file the tools write. The
+   * tools write the raw spelling, so this follows the OS: Windows collapses
+   * `..` lexically, while POSIX takes `..` from the directory a symlink
+   * points to. On POSIX a `..` therefore goes up from the real path of the
+   * directory before it (`root/alias/../a.ts` with `alias -> proj/sub` is
+   * `proj/a.ts`, not `root/a.ts`); every other segment stays as spelled, so
+   * a clean workspace-relative path keys exactly as before.
+   */
+  private resolveTrackingPath(filePath: string): string {
+    const absolute = isAbsolute(filePath)
+      ? filePath
+      : `${this.cwd}${sep}${filePath}`;
+    if (process.platform === 'win32' || !absolute.includes('..')) {
+      return resolve(absolute);
+    }
+    let current = parse(absolute).root;
+    for (const segment of absolute.slice(current.length).split(sep)) {
+      if (segment === '' || segment === '.') continue;
+      if (segment === '..') {
+        let real = current;
+        try {
+          real = realpathSync(current);
+        } catch {
+          // A missing directory is not a symlink; go up lexically.
+        }
+        current = dirname(real);
+      } else {
+        current = join(current, segment);
+      }
+    }
+    return current;
   }
 
   private maybeExpandFilePath(filePath: string): string {
