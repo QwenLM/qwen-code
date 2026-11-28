@@ -7,6 +7,8 @@ import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionReposito
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -20,6 +22,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
@@ -51,26 +54,51 @@ class TakeoverReconciliationTest {
         }
     }
 
-    @Test
-    void statusSettlesExecutionThatWasStillRunningDuringAdoption() throws Exception {
+    @ParameterizedTest
+    @CsvSource({"EXECUTING, executing, success", "CANCEL_REQUESTED, cancel_requested, cancelled"})
+    void statusSettlesExecutionThatWasStillRunningDuringAdoption(ToolExecutionRecord.State state,
+            String workerState, String executionStatus) throws Exception {
         Fixture fixture = new Fixture();
-        ToolExecutionRecord original = fixture.execution("running", ToolExecutionRecord.State.EXECUTING);
+        ToolExecutionRecord original = fixture.execution("running", state);
+        Map<String, Object> settledResult = Map.of("executionStatus", executionStatus, "output", "original result");
         try (RuntimeBrokerService broker = fixture.broker(reference -> fixture.lookups.size() == 1
-                ? CompletableFuture.completedFuture(Map.of("state", "executing")) : settled())) {
+                ? CompletableFuture.completedFuture(Map.of("state", workerState))
+                : CompletableFuture.completedFuture(Map.of("state", "settled", "result", settledResult)))) {
             fixture.acquire(broker);
-            assertEquals(ToolExecutionRecord.State.EXECUTING, fixture.executions
-                    .findByExecutionCallId(original.getExecutionCallId()).getState());
+            assertEquals(state, fixture.executions.findByExecutionCallId(original.getExecutionCallId()).getState());
             ToolExecutionRecord result = broker.getExecution(original.getHarnessSessionId(),
                     original.getRuntimeSessionId(), original.getExecutionCallId()).toCompletableFuture()
                     .get(10, TimeUnit.SECONDS);
             assertEquals(2, fixture.lookups.size());
             assertEquals(ToolExecutionRecord.State.SETTLED, result.getState());
-            assertEquals(Map.of("executionStatus", "success", "output", "original result"), result.getResult());
+            assertEquals(settledResult, result.getResult());
             assertEquals(original.getVersion() + 1, result.getVersion());
             assertEquals(original.getDispatchOwner(), result.getDispatchOwner());
             assertEquals(original.getDispatchGeneration(), result.getDispatchGeneration());
+            assertEquals(original.isCancelRequested(), result.isCancelRequested());
             assertTrue(fixture.unexpectedTransportCalls.isEmpty(), fixture.unexpectedTransportCalls.toString());
             assertTrue(fixture.unexpectedRepositoryCalls.isEmpty(), fixture.unexpectedRepositoryCalls.toString());
+        }
+    }
+
+    @Test
+    void statusRefusesWhenTheOriginalRuntimeCanNoLongerAnswer() throws Exception {
+        Fixture fixture = new Fixture();
+        ToolExecutionRecord original = fixture.execution("lost-runtime", ToolExecutionRecord.State.EXECUTING);
+        try (RuntimeBrokerService broker = fixture.broker(reference ->
+                CompletableFuture.completedFuture(Map.of("state", "executing")))) {
+            fixture.acquire(broker);
+            fixture.usable = false;
+            ExecutionException failure = assertThrows(ExecutionException.class, () -> broker.getExecution(
+                    original.getHarnessSessionId(), original.getRuntimeSessionId(), original.getExecutionCallId())
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS));
+            RuntimeBrokerException refusal = assertInstanceOf(RuntimeBrokerException.class, failure.getCause());
+            assertEquals(409, refusal.getStatusCode());
+            assertEquals("runtime_execution_evidence_unavailable", refusal.getCode());
+            assertEquals(1, fixture.lookups.size());
+            ToolExecutionRecord stored = fixture.executions.findByExecutionCallId(original.getExecutionCallId());
+            assertEquals(original.getState(), stored.getState());
+            assertEquals(original.getVersion(), stored.getVersion());
         }
     }
 
@@ -321,6 +349,7 @@ class TakeoverReconciliationTest {
         final List<String> unexpectedTransportCalls = new CopyOnWriteArrayList<>();
         final List<String> unexpectedRepositoryCalls = new CopyOnWriteArrayList<>();
         Duration operationLease = Duration.ofSeconds(1);
+        boolean usable = true;
         boolean takeoverOnly = true;
         int settlements;
         int failSettlementNumber;
@@ -377,6 +406,9 @@ class TakeoverReconciliationTest {
             RuntimeProvisioner provisioner = new RuntimeProvisioner() {
                 @Override
                 public String kind() { return "test-supervisor"; }
+
+                @Override
+                public boolean isUsable(RuntimeLease lease) { return usable; }
 
                 @Override
                 public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request) {

@@ -162,7 +162,7 @@ carries_marker() {
 # only when their VALUE is the home or a path inside it, so a process that
 # merely mentions the path in some other variable (PATH, a log prefix) is not
 # this run's daemon.
-HOME_KEYS='HOME USERPROFILE QWEN_HOME COREPACK_HOME NPM_CONFIG_CACHE XDG_CACHE_HOME'
+HOME_KEYS='HOME USERPROFILE QWEN_HOME COREPACK_HOME NPM_CONFIG_CACHE XDG_CACHE_HOME XDG_DATA_HOME'
 
 # A process can exit between the directory listing and this read. The
 # REDIRECTION itself then fails, and `2>/dev/null` on the command does not

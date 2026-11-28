@@ -32,6 +32,7 @@ import {
   ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 import type { ResolvedGeneratorForModel } from '@qwen-code/qwen-code-core/core/baseLlmClient.js';
+import type { ProjectMemoryOwner } from '@qwen-code/qwen-code-core/memory/paths.js';
 import * as path from 'node:path';
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
@@ -560,13 +561,14 @@ function detectMemoryOp(
   toolName: string,
   args: Record<string, unknown>,
   projectRoot: string,
+  owner?: ProjectMemoryOwner,
 ): 'read' | 'write' | undefined {
   const WRITE_TOOLS = new Set(['write_file', 'edit']);
   const READ_TOOLS = new Set(['read_file']);
   const filePath = args?.['file_path'] as string | undefined;
   if (!filePath) return undefined;
   const resolved = path.resolve(filePath);
-  if (!isAnyAutoMemPath(resolved, projectRoot)) return undefined;
+  if (!isAnyAutoMemPath(resolved, projectRoot, owner)) return undefined;
   if (WRITE_TOOLS.has(toolName)) return 'write';
   if (READ_TOOLS.has(toolName)) return 'read';
   return undefined;
@@ -578,6 +580,7 @@ function detectMemoryOp(
 export function mapToDisplay(
   toolOrTools: TrackedToolCall[] | TrackedToolCall,
   projectRoot?: string,
+  owner?: ProjectMemoryOwner,
 ): HistoryItemToolGroup {
   const toolCalls = Array.isArray(toolOrTools) ? toolOrTools : [toolOrTools];
 
@@ -622,6 +625,7 @@ export function mapToDisplay(
                 trackedCall.request.name,
                 trackedCall.request.args as Record<string, unknown>,
                 projectRoot,
+                owner,
               )
             : undefined,
       };

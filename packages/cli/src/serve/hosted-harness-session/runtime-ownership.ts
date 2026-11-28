@@ -25,6 +25,7 @@ import {
   HostedWorkspaceBroker,
   type HostedWorkspaceBrokerOptions,
   HostedWorkspaceBrokerRejection,
+  HostedWorkspaceBrokerTransportError,
 } from '../hosted-workspace-broker.js';
 import {
   hostedRuntimeSessionId,
@@ -71,9 +72,10 @@ export function blockOnTurnRecovery(
   if (
     !session.blocked &&
     cause instanceof HostedToolRecoveryRequiredError &&
-    cause.cause instanceof HostedWorkspaceBrokerRejection &&
-    (cause.cause.code === 'runtime_session_not_found' ||
-      cause.cause.code === 'runtime_reconciliation_required')
+    (cause.cause instanceof HostedWorkspaceBrokerTransportError ||
+      (cause.cause instanceof HostedWorkspaceBrokerRejection &&
+        (cause.cause.code === 'runtime_session_not_found' ||
+          cause.cause.code === 'runtime_reconciliation_required')))
   )
     session.runtimeRecoveryPromptId = promptId;
   session.blocked = true;

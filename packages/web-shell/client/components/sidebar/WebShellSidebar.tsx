@@ -73,7 +73,6 @@ import {
   MessageCircleIcon,
   EllipsisVerticalIcon,
   ArchiveIcon,
-  ArchiveRestoreIcon,
   DownloadIcon,
   FolderClosedIcon,
   FolderInputIcon,
@@ -92,6 +91,7 @@ import {
   SettingsIcon,
   SquarePenIcon,
   SunIcon,
+  TriangleAlertIcon,
 } from 'lucide-react';
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useBrand, useBrandName } from '../../brandContext';
@@ -232,6 +232,25 @@ import {
 import { activityKey, useActivityCatalog } from './use-activity-catalog';
 import { SidebarSectionHeader } from './SidebarSectionHeader';
 import { comparePinnedSectionSessions } from './pinned-session-order';
+import {
+  ArchivedSessionsPanel,
+  type ArchivedEmptyState,
+  type ArchivedSortOption,
+  type ArchivedTypeOption,
+  type ArchivedWorkspaceGroup,
+  type ArchivedWorkspaceOption,
+} from './ArchivedSessionsPanel';
+import {
+  compareArchivedSessions,
+  formatArchivedTimestamp,
+  matchesArchivedSearch,
+  readArchivedSessionSort,
+  resolveArchivedSessionTimestamp,
+  toServerArchivedSortBy,
+  writeArchivedSessionSort,
+  type ArchivedConversationType,
+  type ArchivedSessionSort,
+} from './archived-session-sort';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const SIDEBAR_DEFAULT_WIDTH = 300;
@@ -618,6 +637,11 @@ interface WebShellSidebarProps {
   /** Whether to offer the in-window split view (large screens only). */
   canOpenSplitView?: boolean;
   onNewSession: (workspaceCwd?: string) => Promise<boolean> | boolean;
+  /** Load-admission pause: while true the create entry points are disabled
+   * and a warning strip explains the daemon overload. */
+  overloadPaused?: boolean;
+  overloadDetail?: string;
+  onOverloadRefused?: () => void;
   onNewStandaloneSession?: () => Promise<boolean> | boolean;
   standaloneSessionsReloadToken?: number;
   onLoadSession: (
@@ -1293,6 +1317,9 @@ export function WebShellSidebar({
   splitSessionIds,
   canOpenSplitView,
   onNewSession,
+  overloadPaused = false,
+  overloadDetail,
+  onOverloadRefused,
   onNewStandaloneSession,
   standaloneSessionsReloadToken = 0,
   onLoadSession,
@@ -1383,7 +1410,7 @@ export function WebShellSidebar({
     }
     open?.();
   };
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const brand = useBrand();
   const brandName = useBrandName();
   const connection = useConnection();
@@ -1564,13 +1591,60 @@ export function WebShellSidebar({
       : 'default'
     : undefined;
   const daemonAvailable = useDaemonAvailability() === 'available';
-  const [archiveSessionSource, setArchiveSessionSource] =
-    useState<SidebarSessionSource>('default');
-  const archiveSourceType = sourceMetadataEnabled
-    ? showSessionSourceSwitch
-      ? archiveSessionSource
-      : 'default'
-    : undefined;
+  const [archivedSortPreference, setArchivedSortPreference] = useState(() => ({
+    host: sortHost,
+    value: readArchivedSessionSort(sortHost),
+  }));
+  const rawArchivedSort =
+    archivedSortPreference.host === sortHost
+      ? archivedSortPreference.value
+      : readArchivedSessionSort(sortHost);
+  const effectiveArchivedSort: ArchivedSessionSort =
+    !questionSortSupported && rawArchivedSort === 'lastUserPromptAt'
+      ? 'updatedAt'
+      : rawArchivedSort;
+  const changeArchivedSort = useCallback(
+    (value: ArchivedSessionSort) => {
+      writeArchivedSessionSort(sortHost, value);
+      setArchivedSortPreference({ host: sortHost, value });
+    },
+    [sortHost],
+  );
+  const [archiveType, setArchiveType] =
+    useState<ArchivedConversationType>('all');
+  const [archivedSearchQuery, setArchivedSearchQuery] = useState('');
+  const [archivedWorkspaceFilter, setArchivedWorkspaceFilter] =
+    useState<string>('all');
+  const [knownStandaloneArchivedCount, setKnownStandaloneArchivedCount] =
+    useState(0);
+  const hasArchivedSourceOptions =
+    showSessionSourceSwitch && sourceMetadataEnabled;
+  const hasArchivedOriginOptions = managedArchivedSessions !== undefined;
+  const effectiveArchiveType: ArchivedConversationType =
+    (!hasArchivedSourceOptions &&
+      (archiveType === 'tasks' || archiveType === 'channels')) ||
+    (!hasArchivedOriginOptions &&
+      (archiveType === 'local' || archiveType === 'cloud'))
+      ? 'all'
+      : archiveType;
+  const archiveSourceType: SidebarSessionSource | undefined =
+    sourceMetadataEnabled
+      ? showSessionSourceSwitch
+        ? effectiveArchiveType === 'tasks'
+          ? 'default'
+          : effectiveArchiveType === 'channels'
+            ? 'channel'
+            : undefined
+        : 'default'
+      : undefined;
+  const showLocalArchived = effectiveArchiveType !== 'cloud';
+  const showCloudArchived =
+    hasArchivedOriginOptions &&
+    (effectiveArchiveType === 'all' || effectiveArchiveType === 'cloud');
+  const archivedServerSortBy = toServerArchivedSortBy(
+    effectiveArchivedSort,
+    questionSortSupported,
+  );
   const channelManagementEnabled = Boolean(
     workspace.capabilities?.features.includes('channel_management'),
   );
@@ -1780,6 +1854,25 @@ export function WebShellSidebar({
         .map((entry) => entry.cwd),
     [displayedWorkspaces],
   );
+  const archivedProjectWorkspaces = useMemo(
+    () => sidebarWorkspaces.filter((entry) => entry.kind !== 'live'),
+    [sidebarWorkspaces],
+  );
+  const orderedArchivedProjectWorkspaces = useMemo(
+    () => orderWorkspaces(archivedProjectWorkspaces, workspaceOrder),
+    [archivedProjectWorkspaces, workspaceOrder],
+  );
+  const archivedIncludePrimaryWorkspaceSessions =
+    sessionContent === undefined &&
+    (!lockedWorkspaceCwd || lockedWorkspace?.primary === true);
+  const archivedSecondaryWorkspaceCwds = useMemo(
+    () =>
+      archivedProjectWorkspaces
+        .filter((entry) => !entry.primary && entry.trusted)
+        .map((entry) => entry.cwd),
+    [archivedProjectWorkspaces],
+  );
+  const primaryGroupCwd = primaryWorkspaceCwd || '';
   const secondaryWorkspaceSessionLiveStateEnabled =
     workspaceSessionLiveStateEnabled &&
     secondaryWorkspaceCwds.length > 0 &&
@@ -1870,8 +1963,16 @@ export function WebShellSidebar({
     });
   const archivedExpanded = Boolean(archivedSessionsTarget);
   const [standaloneRefreshKey, setStandaloneRefreshKey] = useState(0);
-  const [standaloneArchivedStatus, setStandaloneArchivedStatus] = useState({
+  const [standaloneArchivedStatus, setStandaloneArchivedStatus] = useState<{
+    count: number;
+    matchedCount?: number;
+    hasMore?: boolean;
+    loading: boolean;
+    error: boolean;
+  }>({
     count: 0,
+    matchedCount: 0,
+    hasMore: false,
     loading: false,
     error: false,
   });
@@ -1887,6 +1988,7 @@ export function WebShellSidebar({
     sessions: archivedSessions,
     loading: archivedLoading,
     error: archivedError,
+    nextCursor: archivedNextCursor,
     reload: reloadArchived,
     deleteSession: deleteArchivedSession,
     unarchiveSession,
@@ -1897,15 +1999,53 @@ export function WebShellSidebar({
     enabled:
       sessionArchiveEnabled &&
       archivedExpanded &&
-      includePrimaryWorkspaceSessions,
+      archivedIncludePrimaryWorkspaceSessions &&
+      showLocalArchived,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'archived',
-    ...(questionSortSupported ? { sortBy: sessionSort } : {}),
+    ...(archivedServerSortBy ? { sortBy: archivedServerSortBy } : {}),
     ...(archiveSourceType ? { sourceType: archiveSourceType } : {}),
-    ...(organizationEnabled
-      ? { view: 'organized' as const, group: 'all' }
-      : {}),
   });
+  type ArchivedExtraPageState = {
+    sessions: DaemonSessionSummary[];
+    nextCursor?: string;
+    loading: boolean;
+    error?: string;
+  };
+  const [archivedExtraPagesByCwd, setArchivedExtraPagesByCwd] = useState<
+    Record<string, ArchivedExtraPageState>
+  >({});
+  const archivedExtraPagesRef = useRef<Record<string, ArchivedExtraPageState>>(
+    archivedExtraPagesByCwd,
+  );
+  archivedExtraPagesRef.current = archivedExtraPagesByCwd;
+  const archivedPaginationGenerationRef = useRef(0);
+  useEffect(() => {
+    archivedPaginationGenerationRef.current += 1;
+    setArchivedSearchQuery('');
+    setArchiveType('all');
+    setArchivedWorkspaceFilter('all');
+    setKnownStandaloneArchivedCount(0);
+    setArchivedExtraPagesByCwd({});
+  }, [sortHost, primaryWorkspaceCwd]);
+  useEffect(() => {
+    if (
+      (effectiveArchiveType === 'channels' &&
+        archivedWorkspaceFilter === '__standalone__') ||
+      (effectiveArchiveType === 'cloud' && archivedWorkspaceFilter !== 'all')
+    ) {
+      setArchivedWorkspaceFilter('all');
+    }
+  }, [effectiveArchiveType, archivedWorkspaceFilter]);
+  useEffect(() => {
+    archivedPaginationGenerationRef.current += 1;
+    setArchivedExtraPagesByCwd({});
+  }, [
+    archivedExpanded,
+    showLocalArchived,
+    archiveSourceType,
+    archivedServerSortBy,
+  ]);
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [menuGroups, setMenuGroups] = useState<DaemonSessionGroup[]>([]);
   const [colorOptions, setColorOptions] = useState<
@@ -2596,29 +2736,21 @@ export function WebShellSidebar({
   const secondaryArchivedEnabled =
     archivedExpanded &&
     sessionArchiveEnabled &&
-    workspaceQualifiedRestCoreEnabled;
+    workspaceQualifiedRestCoreEnabled &&
+    showLocalArchived;
   const secondaryArchivedQueries = useMemo<SessionCatalogQuery[]>(
     () =>
-      secondaryWorkspaceCwds.map((workspaceCwd) => ({
+      archivedSecondaryWorkspaceCwds.map((workspaceCwd) => ({
         routeKind: 'qualified',
         workspaceCwd,
         options: {
           pageSize: SESSION_LIST_PAGE_SIZE,
           archiveState: 'archived',
-          ...(questionSortSupported ? { sortBy: sessionSort } : {}),
+          ...(archivedServerSortBy ? { sortBy: archivedServerSortBy } : {}),
           ...(archiveSourceType ? { sourceType: archiveSourceType } : {}),
-          ...(organizationEnabled
-            ? { view: 'organized' as const, group: 'all' }
-            : {}),
         },
       })),
-    [
-      organizationEnabled,
-      secondaryWorkspaceCwds,
-      archiveSourceType,
-      questionSortSupported,
-      sessionSort,
-    ],
+    [archivedSecondaryWorkspaceCwds, archivedServerSortBy, archiveSourceType],
   );
   const secondaryArchivedSnapshots = useSessionCatalogQueries(
     workspace.client,
@@ -2637,6 +2769,14 @@ export function WebShellSidebar({
       ),
     [secondaryArchivedSnapshots],
   );
+  const secondaryArchivedCursorByCwd = useMemo(() => {
+    const cursors = new Map<string, string>();
+    archivedSecondaryWorkspaceCwds.forEach((cwd, index) => {
+      const nextCursor = secondaryArchivedSnapshots[index]?.page?.nextCursor;
+      if (nextCursor) cursors.set(cwd, nextCursor);
+    });
+    return cursors;
+  }, [archivedSecondaryWorkspaceCwds, secondaryArchivedSnapshots]);
   const secondaryArchivedLoading = secondaryArchivedSnapshots.some(
     (snapshot) => snapshot.loading,
   );
@@ -2645,17 +2785,34 @@ export function WebShellSidebar({
   );
   // Start the fresh read before catalog subscriptions auto-load the same entry.
   useLayoutEffect(() => {
-    if (!archivedExpanded || archiveSourceType === 'channel') {
+    if (
+      !archivedExpanded ||
+      !showLocalArchived ||
+      archiveSourceType === 'channel'
+    ) {
       setStandaloneArchivedStatus((current) =>
-        current.count === 0 && !current.loading && !current.error
+        current.count === 0 &&
+        (current.matchedCount ?? 0) === 0 &&
+        !current.hasMore &&
+        !current.loading &&
+        !current.error
           ? current
-          : { count: 0, loading: false, error: false },
+          : {
+              count: 0,
+              matchedCount: 0,
+              hasMore: false,
+              loading: false,
+              error: false,
+            },
       );
     }
-    if (!archivedExpanded) return;
+    if (!archivedExpanded || archiveSourceType === 'channel') {
+      setKnownStandaloneArchivedCount(0);
+    }
+    if (!archivedExpanded || !showLocalArchived) return;
     if (sessionArchiveEnabled) {
       const queries = [
-        ...(includePrimaryWorkspaceSessions && archivedCatalogQuery
+        ...(archivedIncludePrimaryWorkspaceSessions && archivedCatalogQuery
           ? [archivedCatalogQuery]
           : []),
         ...(workspaceQualifiedRestCoreEnabled ? secondaryArchivedQueries : []),
@@ -2667,11 +2824,12 @@ export function WebShellSidebar({
   }, [
     archivedCatalogQuery,
     archivedExpanded,
+    archivedIncludePrimaryWorkspaceSessions,
     archiveSourceType,
     sessionArchiveEnabled,
-    includePrimaryWorkspaceSessions,
     secondaryArchivedQueries,
     sessionCatalogController,
+    showLocalArchived,
     workspaceQualifiedRestCoreEnabled,
   ]);
   const liveWorkspaces = useMemo(
@@ -3196,29 +3354,84 @@ export function WebShellSidebar({
     [canMutateSessionArchive, sessionActionItems],
   );
 
+  const removeArchivedExtraSession = useCallback(
+    (targetIdentity: string) => {
+      setArchivedExtraPagesByCwd((current) => {
+        let changed = false;
+        const next: Record<string, ArchivedExtraPageState> = {};
+        for (const [cwd, entry] of Object.entries(current)) {
+          const filtered = entry.sessions.filter(
+            (candidate) => getIdentityForSession(candidate) !== targetIdentity,
+          );
+          if (filtered.length !== entry.sessions.length) {
+            changed = true;
+            next[cwd] = { ...entry, sessions: filtered };
+          } else {
+            next[cwd] = entry;
+          }
+        }
+        return changed ? next : current;
+      });
+    },
+    [getIdentityForSession],
+  );
+  const renameArchivedExtraSession = useCallback(
+    (targetIdentity: string, nextDisplayName: string) => {
+      setArchivedExtraPagesByCwd((current) => {
+        let changed = false;
+        const next: Record<string, ArchivedExtraPageState> = {};
+        for (const [cwd, entry] of Object.entries(current)) {
+          const updated = entry.sessions.map((candidate) => {
+            if (getIdentityForSession(candidate) !== targetIdentity) {
+              return candidate;
+            }
+            changed = true;
+            return { ...candidate, displayName: nextDisplayName };
+          });
+          next[cwd] =
+            updated === entry.sessions
+              ? entry
+              : { ...entry, sessions: updated };
+        }
+        return changed ? next : current;
+      });
+    },
+    [getIdentityForSession],
+  );
+
   const allArchivedSessions = useMemo(() => {
+    if (!showLocalArchived) return [];
     const byIdentity = new Map<string, DaemonSessionSummary>();
     for (const session of [
-      ...(includePrimaryWorkspaceSessions ? archivedSessions : []),
+      ...(archivedIncludePrimaryWorkspaceSessions ? archivedSessions : []),
       ...secondaryArchivedSessions,
+      ...Object.values(archivedExtraPagesByCwd).flatMap(
+        (entry) => entry.sessions,
+      ),
     ]) {
       if (!matchesSessionSource(session, archiveSourceType)) continue;
       byIdentity.set(getIdentityForSession(session), session);
     }
     return [...byIdentity.values()];
   }, [
+    archivedExtraPagesByCwd,
+    archivedIncludePrimaryWorkspaceSessions,
     archivedSessions,
-    getIdentityForSession,
-    includePrimaryWorkspaceSessions,
     archiveSourceType,
+    getIdentityForSession,
     secondaryArchivedSessions,
+    showLocalArchived,
   ]);
-  const effectiveArchivedLoading =
-    (includePrimaryWorkspaceSessions && archivedLoading) ||
-    secondaryArchivedLoading;
-  const effectiveArchivedError =
-    (includePrimaryWorkspaceSessions && Boolean(archivedError)) ||
-    secondaryArchivedError;
+  const effectiveArchivedLoading = Boolean(
+    showLocalArchived &&
+      ((archivedIncludePrimaryWorkspaceSessions && archivedLoading) ||
+        secondaryArchivedLoading),
+  );
+  const effectiveArchivedError = Boolean(
+    showLocalArchived &&
+      ((archivedIncludePrimaryWorkspaceSessions && Boolean(archivedError)) ||
+        secondaryArchivedError),
+  );
 
   const qwenCodeVersion = connection.capabilities?.qwenCodeVersion || '';
   // Numeric releases render as "v1.2.3"; a non-semver fallback such as
@@ -3239,7 +3452,25 @@ export function WebShellSidebar({
     '--web-shell-sidebar-min-width': `${sidebarMinWidth}px`,
     '--web-shell-sidebar-max-width': `${getSidebarMaxWidth()}px`,
   } as CSSProperties;
-  const newSessionDisabled = creatingSession;
+  const newSessionDisabled = creatingSession || overloadPaused;
+  const renderOverloadStrip = (compactRail = false) => (
+    <div
+      className={styles.overloadStrip}
+      data-web-shell-overload-strip
+      role="status"
+      title={overloadDetail}
+      aria-label={
+        overloadDetail
+          ? `${t('sidebar.overloadPaused')}: ${overloadDetail}`
+          : t('sidebar.overloadPaused')
+      }
+    >
+      <TriangleAlertIcon size={14} strokeWidth={1.5} />
+      {!compactRail && (!collapsed || homePreviewOpen) && (
+        <span>{t('sidebar.overloadPaused')}</span>
+      )}
+    </div>
+  );
 
   useEffect(() => {
     if (!currentSessionId) return;
@@ -3893,6 +4124,17 @@ export function WebShellSidebar({
   const handleNewSession = useCallback(
     (workspaceCwd?: string, fromRecent = false) => {
       if (creatingSessionRef.current) return;
+      if (overloadPaused) {
+        if (onOverloadRefused) {
+          onOverloadRefused();
+        } else {
+          onError(
+            new Error(t('sidebar.overloadPaused')),
+            t('sidebar.overloadPaused'),
+          );
+        }
+        return;
+      }
 
       creatingSessionRef.current = true;
       setCreatingSession(true);
@@ -3925,7 +4167,9 @@ export function WebShellSidebar({
       bumpWorkspaceReload,
       currentRowIdentity,
       onError,
+      onOverloadRefused,
       onNewSession,
+      overloadPaused,
       primaryWorkspaceCwd,
       sessionCatalogController,
       sessionContent,
@@ -3938,6 +4182,17 @@ export function WebShellSidebar({
   const handleNewWorktreeSession = useCallback(
     (workspaceCwd?: string) => {
       if (!onNewWorktreeSession || creatingSessionRef.current) return;
+      if (overloadPaused) {
+        if (onOverloadRefused) {
+          onOverloadRefused();
+        } else {
+          onError(
+            new Error(t('sidebar.overloadPaused')),
+            t('sidebar.overloadPaused'),
+          );
+        }
+        return;
+      }
 
       creatingSessionRef.current = true;
       setCreatingSession(true);
@@ -3964,7 +4219,9 @@ export function WebShellSidebar({
     [
       bumpWorkspaceReload,
       onError,
+      onOverloadRefused,
       onNewWorktreeSession,
+      overloadPaused,
       primaryWorkspaceCwd,
       sessionCatalogController,
       t,
@@ -4171,6 +4428,7 @@ export function WebShellSidebar({
             typeof result?.displayName === 'string' && result.displayName
               ? result.displayName
               : nextName;
+          renameArchivedExtraSession(sessionIdentity, effectiveName);
           if (workspaceCwd) {
             if (onSessionRenameConfirmed) {
               onSessionRenameConfirmed(workspaceCwd, sessionId, effectiveName);
@@ -4207,6 +4465,7 @@ export function WebShellSidebar({
       isCurrentSession,
       onSessionRenameConfirmed,
       onError,
+      renameArchivedExtraSession,
       sessionCatalogController,
       setSessionBusy,
       t,
@@ -4426,6 +4685,7 @@ export function WebShellSidebar({
     setSessionBusy(sessionId, true, deleteCandidate.workspaceCwd);
     removeSession(sessionId)
       .then(() => {
+        if (isArchived) removeArchivedExtraSession(sessionIdentity);
         onSessionsDeleted?.([sessionId], { attachedSessionId });
         bumpWorkspaceReload();
       })
@@ -4450,6 +4710,7 @@ export function WebShellSidebar({
     onError,
     onSessionsDeleted,
     primaryWorkspaceCwd,
+    removeArchivedExtraSession,
     resolveSessionWorkspaceScope,
     sessionCatalogController,
     setSessionBusy,
@@ -5007,6 +5268,7 @@ export function WebShellSidebar({
       const scope = resolveSessionWorkspaceScope(session);
       setSessionBusy(sessionId, true, session.workspaceCwd);
       void (async () => {
+        let succeeded = false;
         try {
           if (scope.kind === 'locked' || scope.kind === 'restricted') {
             const result = await workspace.client
@@ -5017,11 +5279,17 @@ export function WebShellSidebar({
             );
             if (itemError) {
               onError(new Error(itemError.error), t('sidebar.unarchiveFailed'));
+            } else {
+              succeeded = true;
             }
           } else if (scope.kind === 'primary') {
             await unarchiveSession(sessionId);
+            succeeded = true;
           } else {
             return;
+          }
+          if (succeeded) {
+            removeArchivedExtraSession(sessionIdentity);
           }
         } catch (err) {
           onError(err, t('sidebar.unarchiveFailed'));
@@ -5041,6 +5309,7 @@ export function WebShellSidebar({
       getIdentityForSession,
       onError,
       primaryWorkspaceCwd,
+      removeArchivedExtraSession,
       sessionCatalogController,
       setSessionBusy,
       t,
@@ -5733,11 +6002,19 @@ export function WebShellSidebar({
           Number(showArchivedExport) +
           Number(showArchivedUnarchive) +
           Number(showArchivedMore);
+        const archivedTimestamp = resolveArchivedSessionTimestamp(
+          session,
+          effectiveArchivedSort,
+        );
+        const archivedTime = archivedTimestamp
+          ? formatArchivedTimestamp(archivedTimestamp.iso, language)
+          : '';
         return withDetails(
           <div
             className={cx(
               styles.sessionRow,
               styles.archivedRow,
+              styles.archivedCardRow,
               busy && styles.busySession,
             )}
             onMouseEnter={(event) =>
@@ -5745,129 +6022,131 @@ export function WebShellSidebar({
             }
           >
             {isEditing ? (
-              <SessionRenameEditor
-                label={label}
-                initialName={
-                  renameDraftsRef.current.get(sessionIdentity) ?? label
-                }
-                onDraftChange={(value) => {
-                  renameDraftsRef.current.set(sessionIdentity, value);
-                }}
-                onCommit={saveRename}
-                onCancel={cancelRename}
-              />
+              <div className={styles.archivedCardTitle}>
+                <SessionRenameEditor
+                  label={label}
+                  initialName={
+                    renameDraftsRef.current.get(sessionIdentity) ?? label
+                  }
+                  onDraftChange={(value) => {
+                    renameDraftsRef.current.set(sessionIdentity, value);
+                  }}
+                  onCommit={saveRename}
+                  onCancel={cancelRename}
+                />
+              </div>
             ) : (
-              <span className={styles.sessionText} data-web-shell-session-title>
+              <span
+                className={cx(styles.sessionText, styles.archivedCardTitle)}
+                data-web-shell-session-title
+              >
                 <span className={styles.sessionTextInner}>{label}</span>
               </span>
             )}
-            {prBadge}
-            {goalMarker}
-            <div
-              className={cx(
-                styles.sessionMetaSlot,
-                reserveActionsWidth && styles.sessionMetaSlotReserved,
-              )}
-              style={
-                {
-                  '--session-actions-width': `${archivedActionCount * 26}px`,
-                } as CSSProperties
-              }
-            >
+            <div className={styles.archivedCardMeta}>
+              {prBadge}
+              {goalMarker}
               {scheduledTaskMarker}
               {gitIcon && (
                 <span className={styles.sessionGitIcon}>{gitIcon}</span>
               )}
-              {archivedActionCount > 0 && (
-                <div
-                  className={styles.sessionActions}
-                  onClick={(event) => event.stopPropagation()}
-                  onKeyDown={(event) => event.stopPropagation()}
-                >
-                  {showArchivedExport && (
-                    <button
-                      className={styles.sessionActionButton}
-                      type="button"
-                      disabled={exporting}
-                      aria-label={t('sidebar.export')}
-                      title={t('sidebar.export')}
-                      onClick={() => {
-                        if (standalone) standalone.onExport();
-                        else handleExportSession(session);
-                      }}
-                    >
-                      <DownloadIcon size={16} strokeWidth={1.2} />
-                    </button>
-                  )}
-                  {showArchivedUnarchive && (
-                    <button
-                      className={styles.sessionActionButton}
-                      type="button"
-                      disabled={busy}
-                      aria-label={t('sidebar.unarchive')}
-                      title={t('sidebar.unarchive')}
-                      onClick={() => {
-                        if (standalone) standalone.onUnarchive?.();
-                        else handleUnarchive(session);
-                      }}
-                    >
-                      <ArchiveRestoreIcon size={16} strokeWidth={1.2} />
-                    </button>
-                  )}
-                  {showArchivedMore && (
-                    <SessionMenu onOpenChange={handleSessionMenuOpenChange}>
-                      <DropdownMenuTrigger asChild>
-                        <button
-                          className={styles.sessionActionButton}
-                          type="button"
-                          aria-label={t('sidebar.moreActions')}
-                          title={t('sidebar.moreActions')}
-                        >
-                          <EllipsisVerticalIcon />
-                        </button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent
-                        align="end"
-                        className="w-auto min-w-40"
-                        style={SESSION_MENU_PORTAL_STYLE}
-                        onPointerDownOutside={
-                          handleSessionMenuPointerDownOutside
-                        }
-                        onCloseAutoFocus={handleSessionMenuCloseAutoFocus}
-                      >
-                        <DropdownMenuGroup>
-                          {showArchivedRename && (
-                            <DropdownMenuItem
-                              disabled={busy}
-                              onSelect={() => {
-                                if (standalone) standalone.onRename();
-                                else handleRenameFromMenu(session);
-                              }}
-                            >
-                              <PencilIcon />
-                              {t('sidebar.rename')}
-                            </DropdownMenuItem>
-                          )}
-                          {showArchivedDelete && (
-                            <DropdownMenuItem
-                              variant="destructive"
-                              disabled={busy}
-                              onSelect={() => {
-                                if (standalone) standalone.onDelete();
-                                else handleDeleteSession(session);
-                              }}
-                            >
-                              <Trash2Icon />
-                              {t('sidebar.delete')}
-                            </DropdownMenuItem>
-                          )}
-                        </DropdownMenuGroup>
-                      </DropdownMenuContent>
-                    </SessionMenu>
-                  )}
-                </div>
-              )}
             </div>
+            {archivedTimestamp && archivedTime && (
+              <time
+                className={styles.archivedCardTime}
+                dateTime={archivedTimestamp.iso}
+                title={formatDateTime(archivedTimestamp.iso)}
+              >
+                {archivedTime}
+              </time>
+            )}
+            {archivedActionCount > 0 && (
+              <div
+                className={styles.archivedCardActions}
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => event.stopPropagation()}
+              >
+                {showArchivedExport && (
+                  <button
+                    className={styles.archivedIconAction}
+                    type="button"
+                    disabled={exporting}
+                    aria-label={t('sidebar.export')}
+                    title={t('sidebar.export')}
+                    onClick={() => {
+                      if (standalone) standalone.onExport();
+                      else handleExportSession(session);
+                    }}
+                  >
+                    <DownloadIcon size={15} strokeWidth={1.4} />
+                  </button>
+                )}
+                {showArchivedMore && (
+                  <SessionMenu onOpenChange={handleSessionMenuOpenChange}>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        className={styles.archivedIconAction}
+                        type="button"
+                        aria-label={t('sidebar.moreActions')}
+                        title={t('sidebar.moreActions')}
+                      >
+                        <EllipsisVerticalIcon size={15} strokeWidth={1.4} />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      align="end"
+                      className="w-auto min-w-40"
+                      style={SESSION_MENU_PORTAL_STYLE}
+                      onPointerDownOutside={handleSessionMenuPointerDownOutside}
+                      onCloseAutoFocus={handleSessionMenuCloseAutoFocus}
+                    >
+                      <DropdownMenuGroup>
+                        {showArchivedRename && (
+                          <DropdownMenuItem
+                            disabled={busy}
+                            onSelect={() => {
+                              if (standalone) standalone.onRename();
+                              else handleRenameFromMenu(session);
+                            }}
+                          >
+                            <PencilIcon />
+                            {t('sidebar.rename')}
+                          </DropdownMenuItem>
+                        )}
+                        {showArchivedDelete && (
+                          <DropdownMenuItem
+                            variant="destructive"
+                            disabled={busy}
+                            onSelect={() => {
+                              if (standalone) standalone.onDelete();
+                              else handleDeleteSession(session);
+                            }}
+                          >
+                            <Trash2Icon />
+                            {t('sidebar.delete')}
+                          </DropdownMenuItem>
+                        )}
+                      </DropdownMenuGroup>
+                    </DropdownMenuContent>
+                  </SessionMenu>
+                )}
+                {showArchivedUnarchive && (
+                  <button
+                    className={styles.archivedRestoreButton}
+                    type="button"
+                    disabled={busy}
+                    aria-label={t('sidebar.unarchive')}
+                    title={t('sidebar.unarchive')}
+                    onClick={() => {
+                      if (standalone) standalone.onUnarchive?.();
+                      else handleUnarchive(session);
+                    }}
+                  >
+                    {t('sidebar.unarchive')}
+                  </button>
+                )}
+              </div>
+            )}
           </div>,
         );
       }
@@ -6606,6 +6885,8 @@ export function WebShellSidebar({
       livePresence,
       startRename,
       splitSessionIds,
+      effectiveArchivedSort,
+      language,
       t,
     ],
   );
@@ -6864,18 +7145,23 @@ export function WebShellSidebar({
     toggleSessionSection,
   ]);
 
-  const standaloneSessionsVisible = Boolean(
-    !sectionView &&
-      (workspaceFilter === 'all' || workspaceFilter === 'standalone') &&
-      workspace.capabilities?.features?.includes(
-        STANDALONE_SESSIONS_CAPABILITY,
-      ) === true &&
+  const standaloneSessionsSupported = Boolean(
+    workspace.capabilities?.features?.includes(
+      STANDALONE_SESSIONS_CAPABILITY,
+    ) === true &&
       !lockedWorkspaceCwd &&
       onLoadStandaloneSession &&
       onStandaloneNotice,
   );
+  const standaloneSessionsVisible = Boolean(
+    !sectionView &&
+      (workspaceFilter === 'all' || workspaceFilter === 'standalone') &&
+      standaloneSessionsSupported,
+  );
   const archivedStandaloneSessionsVisible =
-    standaloneSessionsVisible && archiveSourceType !== 'channel';
+    standaloneSessionsSupported &&
+    showLocalArchived &&
+    archiveSourceType !== 'channel';
   const handleStandaloneMutation = useCallback(() => {
     setStandaloneRefreshKey((value) => value + 1);
   }, []);
@@ -6925,12 +7211,109 @@ export function WebShellSidebar({
     ],
   );
   const handleStandaloneArchivedStatus = useCallback(
-    (status: { count: number; loading: boolean; error: boolean }) => {
+    (status: {
+      count: number;
+      matchedCount?: number;
+      hasMore?: boolean;
+      loading: boolean;
+      error: boolean;
+    }) => {
       setStandaloneArchivedStatus(status);
+      if (!status.loading && !status.error) {
+        setKnownStandaloneArchivedCount(status.count);
+      }
     },
     [],
   );
-  const archivedWorkspaceGroups = useMemo(() => {
+  const handleLoadMoreArchivedWorkspace = useCallback(
+    async (cwd: string) => {
+      const existing = archivedExtraPagesRef.current[cwd];
+      if (existing?.loading) return;
+      const baseCursor =
+        cwd === primaryGroupCwd
+          ? archivedNextCursor
+          : secondaryArchivedCursorByCwd.get(cwd);
+      const cursor = existing ? existing.nextCursor : baseCursor;
+      if (!cursor) return;
+      const generation = archivedPaginationGenerationRef.current;
+      setArchivedExtraPagesByCwd((current) => ({
+        ...current,
+        [cwd]: {
+          sessions: current[cwd]?.sessions ?? [],
+          nextCursor: cursor,
+          loading: true,
+        },
+      }));
+      const pageOptions = {
+        pageSize: SESSION_LIST_PAGE_SIZE,
+        cursor,
+        archiveState: 'archived' as const,
+        ...(archivedServerSortBy ? { sortBy: archivedServerSortBy } : {}),
+        ...(archiveSourceType ? { sourceType: archiveSourceType } : {}),
+      };
+      try {
+        const useQualifiedRoute =
+          cwd !== primaryGroupCwd ||
+          archivedCatalogQuery?.routeKind === 'qualified';
+        const page = await (useQualifiedRoute
+          ? workspace.client
+              .workspaceByCwd(cwd)
+              .listWorkspaceSessionsPage(pageOptions)
+          : workspace.client.listWorkspaceSessionsPage(cwd, pageOptions));
+        if (archivedPaginationGenerationRef.current !== generation) return;
+        const normalized = page.sessions.map((session) =>
+          session.workspaceCwd ? session : { ...session, workspaceCwd: cwd },
+        );
+        setArchivedExtraPagesByCwd((current) => {
+          const prev = current[cwd];
+          const merged = new Map<string, DaemonSessionSummary>();
+          for (const session of [...(prev?.sessions ?? []), ...normalized]) {
+            merged.set(getIdentityForSession(session), session);
+          }
+          return {
+            ...current,
+            [cwd]: {
+              sessions: [...merged.values()],
+              nextCursor: page.nextCursor,
+              loading: false,
+            },
+          };
+        });
+      } catch (err) {
+        if (archivedPaginationGenerationRef.current !== generation) return;
+        setArchivedExtraPagesByCwd((current) => ({
+          ...current,
+          [cwd]: {
+            sessions: current[cwd]?.sessions ?? [],
+            nextCursor: cursor,
+            loading: false,
+            error: err instanceof Error ? err.message : t('sidebar.loadFailed'),
+          },
+        }));
+      }
+    },
+    [
+      archiveSourceType,
+      archivedCatalogQuery?.routeKind,
+      archivedNextCursor,
+      archivedServerSortBy,
+      getIdentityForSession,
+      primaryGroupCwd,
+      secondaryArchivedCursorByCwd,
+      t,
+      workspace.client,
+    ],
+  );
+  const formatArchivedGroupCount = useCallback(
+    (count: number, hasMore: boolean) =>
+      hasMore
+        ? t('sidebar.archivedCountMore', { count })
+        : t('sidebar.archivedCount', { count }),
+    [t],
+  );
+  const unfilteredArchivedWorkspaceGroups = useMemo<
+    ArchivedWorkspaceGroup[]
+  >(() => {
     const byCwd = new Map<string, DaemonSessionSummary[]>();
     for (const session of allArchivedSessions) {
       const cwd = getSessionWorkspaceCwd(session);
@@ -6938,175 +7321,369 @@ export function WebShellSidebar({
       current.push(session);
       byCwd.set(cwd, current);
     }
-    return [...byCwd].map(([cwd, sessions]) => {
-      return {
+    const ordered: Array<{
+      cwd: string;
+      label: string;
+      sessions: DaemonSessionSummary[];
+    }> = [];
+    const visited = new Set<string>();
+    for (const entry of orderedArchivedProjectWorkspaces) {
+      const sessionsForWorkspace = byCwd.get(entry.cwd);
+      if (!sessionsForWorkspace) continue;
+      visited.add(entry.cwd);
+      ordered.push({
+        cwd: entry.cwd,
+        label: workspaceLabelForCwd(entry.cwd, archivedProjectWorkspaces),
+        sessions: sessionsForWorkspace,
+      });
+    }
+    const unregistered: Array<{
+      cwd: string;
+      label: string;
+      sessions: DaemonSessionSummary[];
+    }> = [];
+    for (const [cwd, groupSessions] of byCwd) {
+      if (visited.has(cwd)) continue;
+      unregistered.push({
         cwd,
         label: cwd
-          ? workspaceLabelForCwd(cwd, projectWorkspaces)
+          ? workspaceLabelForCwd(cwd, archivedProjectWorkspaces)
           : t('sidebar.projectFallback'),
-        sessions,
+        sessions: groupSessions,
+      });
+    }
+    unregistered.sort((a, b) =>
+      a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }),
+    );
+    return [...ordered, ...unregistered].map((group) => {
+      const extra = archivedExtraPagesByCwd[group.cwd];
+      const baseCursor =
+        group.cwd === primaryGroupCwd
+          ? archivedNextCursor
+          : secondaryArchivedCursorByCwd.get(group.cwd);
+      return {
+        ...group,
+        hasMore: Boolean(extra ? extra.nextCursor : baseCursor),
+        loadingMore: Boolean(extra?.loading),
+        loadMoreError: extra?.error,
       };
     });
-  }, [allArchivedSessions, getSessionWorkspaceCwd, projectWorkspaces, t]);
+  }, [
+    allArchivedSessions,
+    archivedExtraPagesByCwd,
+    archivedNextCursor,
+    archivedProjectWorkspaces,
+    getSessionWorkspaceCwd,
+    orderedArchivedProjectWorkspaces,
+    primaryGroupCwd,
+    secondaryArchivedCursorByCwd,
+    t,
+  ]);
+  const filteredArchivedWorkspaceGroups = useMemo<
+    ArchivedWorkspaceGroup[]
+  >(() => {
+    if (!showLocalArchived || archivedWorkspaceFilter === '__standalone__') {
+      return [];
+    }
+    const needsClientSort =
+      effectiveArchivedSort === 'createdAt' ||
+      effectiveArchivedSort === 'alphabetical';
+    const groups: ArchivedWorkspaceGroup[] = [];
+    for (const group of unfilteredArchivedWorkspaceGroups) {
+      if (
+        archivedWorkspaceFilter !== 'all' &&
+        group.cwd !== archivedWorkspaceFilter
+      ) {
+        continue;
+      }
+      const matched = group.sessions.filter((session) =>
+        matchesArchivedSearch(session, archivedSearchQuery),
+      );
+      if (matched.length === 0 && !group.hasMore) continue;
+      const orderedSessions = needsClientSort
+        ? [...matched].sort((a, b) =>
+            compareArchivedSessions(a, b, effectiveArchivedSort),
+          )
+        : matched;
+      groups.push({ ...group, sessions: orderedSessions });
+    }
+    return groups;
+  }, [
+    archivedSearchQuery,
+    archivedWorkspaceFilter,
+    effectiveArchivedSort,
+    showLocalArchived,
+    unfilteredArchivedWorkspaceGroups,
+  ]);
+  const archivedTypeOptions = useMemo<ArchivedTypeOption[]>(
+    () => [
+      { value: 'all', label: t('sidebar.archiveTypeAll') },
+      ...(hasArchivedSourceOptions
+        ? [
+            {
+              value: 'tasks' as const,
+              label: t('sidebar.sessionSource.tasks'),
+            },
+            {
+              value: 'channels' as const,
+              label: t('sidebar.sessionSource.channels'),
+            },
+          ]
+        : []),
+      ...(hasArchivedOriginOptions
+        ? [
+            { value: 'local' as const, label: t('sidebar.archiveTypeLocal') },
+            { value: 'cloud' as const, label: t('sidebar.archiveTypeCloud') },
+          ]
+        : []),
+    ],
+    [hasArchivedOriginOptions, hasArchivedSourceOptions, t],
+  );
+  const archivedSortOptions = useMemo<ArchivedSortOption[]>(
+    () => [
+      { value: 'updatedAt', label: t('sidebar.sortUpdated') },
+      ...(questionSortSupported
+        ? [
+            {
+              value: 'lastUserPromptAt' as const,
+              label: t('sidebar.sortQuestion'),
+            },
+          ]
+        : []),
+      { value: 'createdAt', label: t('sidebar.sortCreated') },
+      { value: 'alphabetical', label: t('sidebar.sortAlphabetical') },
+    ],
+    [questionSortSupported, t],
+  );
+  const archivedWorkspaceOptions = useMemo<ArchivedWorkspaceOption[]>(() => {
+    const options: ArchivedWorkspaceOption[] = [];
+    if (
+      archivedStandaloneSessionsVisible &&
+      (knownStandaloneArchivedCount > 0 ||
+        archivedWorkspaceFilter === '__standalone__')
+    ) {
+      options.push({
+        value: '__standalone__',
+        label: t('sidebar.noWorkspaceSessions'),
+        count: knownStandaloneArchivedCount,
+      });
+    }
+    const seen = new Set<string>();
+    for (const group of unfilteredArchivedWorkspaceGroups) {
+      seen.add(group.cwd);
+      options.push({
+        value: group.cwd,
+        label: group.label,
+        count: group.sessions.length,
+      });
+    }
+    if (
+      archivedWorkspaceFilter !== 'all' &&
+      archivedWorkspaceFilter !== '__standalone__' &&
+      !seen.has(archivedWorkspaceFilter)
+    ) {
+      options.push({
+        value: archivedWorkspaceFilter,
+        label: archivedWorkspaceFilter
+          ? workspaceLabelForCwd(
+              archivedWorkspaceFilter,
+              archivedProjectWorkspaces,
+            )
+          : t('sidebar.projectFallback'),
+        count: 0,
+      });
+    }
+    return options;
+  }, [
+    archivedProjectWorkspaces,
+    archivedStandaloneSessionsVisible,
+    archivedWorkspaceFilter,
+    knownStandaloneArchivedCount,
+    t,
+    unfilteredArchivedWorkspaceGroups,
+  ]);
+  const showArchivedWorkspaceFilter =
+    !lockedWorkspaceCwd &&
+    showLocalArchived &&
+    (archivedWorkspaceFilter !== 'all' || archivedWorkspaceOptions.length > 1);
 
   const archivedSection = useMemo(() => {
     if (
       (!sessionArchiveEnabled &&
-        !standaloneSessionsVisible &&
+        !standaloneSessionsSupported &&
         managedArchivedSessions === undefined) ||
       !archivedSessionsTarget
     ) {
       return null;
     }
 
+    const showStandaloneInArchived =
+      archivedStandaloneSessionsVisible &&
+      (archivedWorkspaceFilter === 'all' ||
+        archivedWorkspaceFilter === '__standalone__') &&
+      Boolean(onLoadStandaloneSession && onStandaloneNotice);
+    const standaloneMatchedCount = showStandaloneInArchived
+      ? (standaloneArchivedStatus.matchedCount ??
+        standaloneArchivedStatus.count)
+      : 0;
+    const filteredWorkspaceSessionCount =
+      filteredArchivedWorkspaceGroups.reduce(
+        (sum, group) => sum + group.sessions.length,
+        0,
+      );
+    const cloudCount = showCloudArchived
+      ? (managedArchivedSessions?.count ?? 0)
+      : 0;
     const archivedCount =
-      allArchivedSessions.length +
-      (archivedStandaloneSessionsVisible ? standaloneArchivedStatus.count : 0) +
-      (managedArchivedSessions?.count ?? 0);
+      filteredWorkspaceSessionCount + standaloneMatchedCount + cloudCount;
     const archivedLoadingWithStandalone =
       effectiveArchivedLoading ||
-      (archivedStandaloneSessionsVisible && standaloneArchivedStatus.loading) ||
-      managedArchivedSessions?.loading;
+      (showStandaloneInArchived && standaloneArchivedStatus.loading) ||
+      (showCloudArchived && Boolean(managedArchivedSessions?.loading));
     const archivedErrorWithStandalone =
       effectiveArchivedError ||
-      (archivedStandaloneSessionsVisible && standaloneArchivedStatus.error);
+      (showStandaloneInArchived && standaloneArchivedStatus.error);
+    const hasMoreArchivedSessions =
+      filteredArchivedWorkspaceGroups.some((group) => group.hasMore) ||
+      (showStandaloneInArchived && Boolean(standaloneArchivedStatus.hasMore));
+    const showPaginationSortHint =
+      (effectiveArchivedSort === 'createdAt' ||
+        effectiveArchivedSort === 'alphabetical') &&
+      hasMoreArchivedSessions;
 
-    const retry = (
-      <button
-        className={styles.retry}
-        type="button"
-        onClick={() => {
-          void reloadArchived({ interactive: true }).catch(() => undefined);
-          setStandaloneRefreshKey((value) => value + 1);
-          for (const workspaceCwd of secondaryWorkspaceCwds) {
-            sessionCatalogController.refreshWorkspace(workspaceCwd);
-          }
-        }}
-      >
-        {t('sidebar.loadFailed')}
-      </button>
-    );
-    let notice: ReactNode;
+    let emptyState: ArchivedEmptyState = 'none';
     if (
       !archivedLoadingWithStandalone &&
-      archivedErrorWithStandalone &&
-      archivedCount === 0
-    ) {
-      notice = retry;
-    } else if (
-      !archivedLoadingWithStandalone &&
       archivedCount === 0 &&
-      !managedArchivedSessions?.error
+      (archivedErrorWithStandalone || !hasMoreArchivedSessions) &&
+      !(showCloudArchived && managedArchivedSessions?.error)
     ) {
-      notice = (
-        <div className={styles.notice}>{t('sidebar.archivedEmpty')}</div>
-      );
+      if (archivedErrorWithStandalone) {
+        emptyState = 'retry';
+      } else if (archivedSearchQuery.trim().length > 0) {
+        emptyState = 'filtered';
+      } else if (archivedWorkspaceFilter !== 'all') {
+        emptyState = 'workspace';
+      } else {
+        emptyState = 'empty';
+      }
     }
 
-    const content = (
-      <>
-        {showSessionSourceSwitch && sourceMetadataEnabled && (
-          <Tabs
-            className="px-2 pb-2"
-            value={archiveSessionSource}
-            onValueChange={(value) =>
-              setArchiveSessionSource(value as SidebarSessionSource)
-            }
-          >
-            <TabsList
-              className="w-full"
-              aria-label={t('sidebar.archiveSessionSource')}
-            >
-              <TabsTrigger value="default" className="min-w-0">
-                <ListTodoIcon />
-                <span className="min-w-0 truncate">
-                  {t('sidebar.sessionSource.tasks')}
-                </span>
-              </TabsTrigger>
-              <TabsTrigger value="channel" className="min-w-0">
-                <MessageCircleIcon />
-                <span className="min-w-0 truncate">
-                  {t('sidebar.sessionSource.channels')}
-                </span>
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
-        )}
-        {managedArchivedSessions?.content}
-        {archivedStandaloneSessionsVisible &&
-          onLoadStandaloneSession &&
-          onStandaloneNotice && (
-            <StandaloneRecents
-              sortBy={questionSortSupported ? sessionSort : undefined}
-              archiveState="archived"
-              currentSessionId={connection.sessionId}
-              currentSessionReady={
-                connection.status === 'connected' &&
-                !connection.error &&
-                !connection.loadingTranscript &&
-                !connection.catchingUp
-              }
-              refreshKey={standaloneRefreshKey + standaloneSessionsReloadToken}
-              renderSession={(session, standalone) =>
-                renderSessionRow(session, {
-                  isArchived: standalone.isArchived,
-                  standalone,
-                })
-              }
-              onLoadSession={onLoadStandaloneSession}
-              onRenameSession={(sessionId, displayName) =>
-                onSessionRenameConfirmed?.(undefined, sessionId, displayName)
-              }
-              onMutated={handleStandaloneMutation}
-              onStatusChange={handleStandaloneArchivedStatus}
-              onError={onError}
-              onNotice={onStandaloneNotice}
-            />
-          )}
-        {notice}
-        {archivedWorkspaceGroups.map((group) => (
-          <section
-            key={group.cwd}
-            className="mb-3"
-            aria-label={`${t('sidebar.archivedTitle')}: ${group.label}`}
-          >
-            <div className="flex items-center gap-2 px-2 py-1 text-sm text-muted-foreground">
-              <FolderClosedIcon
-                size={16}
-                strokeWidth={1.4}
-                aria-hidden="true"
-              />
-              <span className="min-w-0 flex-1 truncate">{group.label}</span>
-            </div>
-            {group.sessions.map((session) =>
-              renderSessionRow(session, { isArchived: true }),
-            )}
-          </section>
-        ))}
-        {archivedCount > 0 && archivedErrorWithStandalone && retry}
-      </>
-    );
+    const handleArchivedRetry = () => {
+      archivedPaginationGenerationRef.current += 1;
+      setArchivedExtraPagesByCwd({});
+      if (archivedIncludePrimaryWorkspaceSessions && showLocalArchived) {
+        void reloadArchived({ interactive: true }).catch(() => undefined);
+      }
+      if (showLocalArchived) {
+        setStandaloneRefreshKey((value) => value + 1);
+        for (const workspaceCwd of archivedSecondaryWorkspaceCwds) {
+          sessionCatalogController.refreshWorkspace(workspaceCwd);
+        }
+      }
+    };
+
+    const standaloneContent =
+      showStandaloneInArchived &&
+      onLoadStandaloneSession &&
+      onStandaloneNotice ? (
+        <StandaloneRecents
+          sortBy={archivedServerSortBy}
+          clientSort={effectiveArchivedSort}
+          archiveState="archived"
+          currentSessionId={connection.sessionId}
+          currentSessionReady={
+            connection.status === 'connected' &&
+            !connection.error &&
+            !connection.loadingTranscript &&
+            !connection.catchingUp
+          }
+          refreshKey={standaloneRefreshKey + standaloneSessionsReloadToken}
+          searchQuery={archivedSearchQuery}
+          hideWhenSearchEmpty
+          groupCountLabel={formatArchivedGroupCount}
+          renderSession={(session, standalone) =>
+            renderSessionRow(session, {
+              isArchived: standalone.isArchived,
+              standalone,
+            })
+          }
+          onLoadSession={onLoadStandaloneSession}
+          onRenameSession={(sessionId, displayName) =>
+            onSessionRenameConfirmed?.(undefined, sessionId, displayName)
+          }
+          onMutated={handleStandaloneMutation}
+          onStatusChange={handleStandaloneArchivedStatus}
+          onError={onError}
+          onNotice={onStandaloneNotice}
+        />
+      ) : null;
 
     return createPortal(
-      <div className={styles.archivedList}>{content}</div>,
+      <div className={styles.archivedList}>
+        <ArchivedSessionsPanel
+          searchQuery={archivedSearchQuery}
+          onSearchQueryChange={setArchivedSearchQuery}
+          typeFilter={effectiveArchiveType}
+          onTypeFilterChange={setArchiveType}
+          typeOptions={archivedTypeOptions}
+          sortBy={effectiveArchivedSort}
+          onSortByChange={changeArchivedSort}
+          sortOptions={archivedSortOptions}
+          workspaceFilter={archivedWorkspaceFilter}
+          onWorkspaceFilterChange={setArchivedWorkspaceFilter}
+          workspaceOptions={archivedWorkspaceOptions}
+          showWorkspaceFilter={showArchivedWorkspaceFilter}
+          workspaceGroups={filteredArchivedWorkspaceGroups}
+          renderSession={(session) =>
+            renderSessionRow(session, { isArchived: true })
+          }
+          onLoadMoreWorkspace={(cwd) =>
+            void handleLoadMoreArchivedWorkspace(cwd)
+          }
+          managedContent={
+            showCloudArchived ? managedArchivedSessions?.content : undefined
+          }
+          standaloneContent={standaloneContent}
+          showPaginationSortHint={showPaginationSortHint}
+          emptyState={emptyState}
+          showFooterRetry={archivedCount > 0 && archivedErrorWithStandalone}
+          onRetry={handleArchivedRetry}
+          onClearFilters={() => {
+            setArchivedSearchQuery('');
+            setArchiveType('all');
+            setArchivedWorkspaceFilter('all');
+          }}
+          onShowAllWorkspaces={() => setArchivedWorkspaceFilter('all')}
+          formatGroupCount={formatArchivedGroupCount}
+        />
+      </div>,
       archivedSessionsTarget,
     );
   }, [
-    questionSortSupported,
-    sessionSort,
+    archivedIncludePrimaryWorkspaceSessions,
+    archivedSearchQuery,
+    archivedSecondaryWorkspaceCwds,
+    archivedServerSortBy,
     archivedSessionsTarget,
-    archivedWorkspaceGroups,
-    archiveSessionSource,
-    showSessionSourceSwitch,
-    sourceMetadataEnabled,
-    allArchivedSessions,
+    archivedSortOptions,
+    archivedStandaloneSessionsVisible,
+    archivedTypeOptions,
+    archivedWorkspaceFilter,
+    archivedWorkspaceOptions,
+    changeArchivedSort,
     connection.catchingUp,
     connection.error,
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
+    effectiveArchiveType,
     effectiveArchivedError,
     effectiveArchivedLoading,
+    effectiveArchivedSort,
+    filteredArchivedWorkspaceGroups,
+    formatArchivedGroupCount,
+    handleLoadMoreArchivedWorkspace,
     handleStandaloneArchivedStatus,
     handleStandaloneMutation,
     managedArchivedSessions,
@@ -7116,15 +7693,15 @@ export function WebShellSidebar({
     onStandaloneNotice,
     reloadArchived,
     renderSessionRow,
-    secondaryWorkspaceCwds,
-    sessionCatalogController,
     sessionArchiveEnabled,
+    sessionCatalogController,
+    showArchivedWorkspaceFilter,
+    showCloudArchived,
+    showLocalArchived,
     standaloneArchivedStatus,
     standaloneRefreshKey,
     standaloneSessionsReloadToken,
-    archivedStandaloneSessionsVisible,
-    standaloneSessionsVisible,
-    t,
+    standaloneSessionsSupported,
   ]);
   const displayMenuEnabled =
     activityDateGroupingSupported ||
@@ -8089,6 +8666,10 @@ export function WebShellSidebar({
               data-web-shell-navigation-rail
             >
               <div className={styles.railPrimary}>
+                {overloadPaused &&
+                  (homeHidden || sectionView) &&
+                  !homePreviewOpen &&
+                  renderOverloadStrip(true)}
                 {activityEnabled && (collapsed || homeHidden) && (
                   <button
                     type="button"
@@ -8326,6 +8907,11 @@ export function WebShellSidebar({
               </div>
             </>
           )}
+          {!sectionView &&
+            !selectionMode &&
+            overloadPaused &&
+            (!homeHidden || homePreviewOpen) &&
+            renderOverloadStrip()}
           {!sectionView &&
             (selectionMode ||
               primaryNavItems.has('newTask') ||
@@ -9081,7 +9667,8 @@ export function WebShellSidebar({
                             gitBranchWanted={
                               !sectionView &&
                               Boolean(onNewWorktreeSession) &&
-                              !lockedWorkspaceCwd
+                              !lockedWorkspaceCwd &&
+                              !overloadPaused
                             }
                             sessionStats={
                               ws.primary
@@ -9205,7 +9792,7 @@ export function WebShellSidebar({
                                             },
                                           }
                                         : {}),
-                                      ...(ws.trusted
+                                      ...(ws.trusted && !overloadPaused
                                         ? {
                                             newSession: () =>
                                               handleNewSession(wsCwd),
@@ -9216,6 +9803,7 @@ export function WebShellSidebar({
                                       // intent and the daemon rejects the session.
                                       ...(ws.trusted &&
                                       !ws.ssh &&
+                                      !overloadPaused &&
                                       onNewWorktreeSession &&
                                       gitBranch
                                         ? {
@@ -9297,6 +9885,7 @@ export function WebShellSidebar({
                                             type="button"
                                             title={t('sidebar.newTask')}
                                             aria-label={t('sidebar.newTask')}
+                                            disabled={newSessionDisabled}
                                             onClick={(event) => {
                                               event.preventDefault();
                                               event.stopPropagation();
@@ -9413,6 +10002,7 @@ export function WebShellSidebar({
                       })
                     }
                     onNewSession={onNewStandaloneSession}
+                    newSessionDisabled={newSessionDisabled}
                     onLoadSession={onLoadStandaloneSession}
                     onRenameSession={(sessionId, displayName) =>
                       onSessionRenameConfirmed?.(

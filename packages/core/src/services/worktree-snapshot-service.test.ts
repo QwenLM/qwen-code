@@ -53,6 +53,16 @@ vi.mock('../utils/git-branches.js', async (importOriginal) => {
     },
   };
 });
+// Wrapped (not replaced) so every other case keeps the real implementation;
+// the scaling case below swaps in repeated genuine identities for one call.
+vi.mock('./gitWorktreeService.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./gitWorktreeService.js')>();
+  return {
+    ...actual,
+    computeCarriedIdentities: vi.fn(actual.computeCarriedIdentities),
+  };
+});
 vi.mock('tar', async (importOriginal) => {
   const actual = await importOriginal<typeof import('tar')>();
   const { statSync } = await import('node:fs');
@@ -298,6 +308,87 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       ).toBe(capturedMode);
     },
   );
+
+  it('verifies a large capture without an O(N^2) synchronous membership scan', async () => {
+    // The post-capture check used `regularFiles.includes(entry.path)` per
+    // entry: O(N^2) inside one microtask with no yield point, which froze the
+    // daemon event loop for minutes on a 300k-file checkout. A tick counter is
+    // not evidence of the fix — the capture's own async work (git status,
+    // hashing, tar) ticks the timer regardless, so `ticks > 0` held with the
+    // scan reverted too. What the fix changes is the *longest* synchronous gap.
+    const bulk = path.join(worktree, 'bulk');
+    await fs.mkdir(bulk);
+    const FILES = 3000;
+    for (let i = 0; i < FILES; i += 250) {
+      await Promise.all(
+        Array.from({ length: Math.min(250, FILES - i) }, (_, offset) =>
+          fs.writeFile(path.join(bulk, `f${i + offset}`), 'x'),
+        ),
+      );
+    }
+
+    // Hand the membership check far more identities than files by repeating
+    // the genuine ones: the hashes stay real (the capture still completes and
+    // the archive comparison still matches) while the loop runs
+    // FILES * REPEAT times. A 300k-file checkout is large in both factors;
+    // this fixture reproduces the quadratic factor at a size that stays fast.
+    const REPEAT = 100;
+    const gitService = await import('./gitWorktreeService.js');
+    const genuineImpl = (
+      await vi.importActual<typeof import('./gitWorktreeService.js')>(
+        './gitWorktreeService.js',
+      )
+    ).computeCarriedIdentities;
+    let genuine: Awaited<ReturnType<typeof genuineImpl>> | undefined;
+    let ticks = 0;
+    let maxGapMs = 0;
+    let last = Date.now();
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const armMembershipTimer = () => {
+      if (timer) return;
+      last = Date.now();
+      timer = setInterval(() => {
+        ticks += 1;
+        const now = Date.now();
+        maxGapMs = Math.max(maxGapMs, now - last);
+        last = now;
+      }, 20);
+    };
+    vi.mocked(gitService.computeCarriedIdentities).mockImplementation(
+      async (worktreePath, paths) => {
+        genuine ??= await genuineImpl(worktreePath, paths);
+        const repeated = Array.from({ length: REPEAT }, () => genuine!).flat();
+        // Arm only once the genuine hash-object batch and the 300k-element
+        // array are already in memory, so the timer window spans ONLY the
+        // membership check loop + tar verification rather than disk I/O or
+        // child-process scheduling under heavy CI contention (R1-3).
+        armMembershipTimer();
+        return repeated;
+      },
+    );
+
+    try {
+      const result = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      });
+      expect(result.checkoutMatchesCapture).toBe(true);
+    } finally {
+      if (timer) clearInterval(timer);
+      vi.mocked(gitService.computeCarriedIdentities).mockImplementation(
+        genuineImpl,
+      );
+    }
+    expect(ticks).toBeGreaterThan(0);
+    // With `regularFileSet.has` the membership loop is ~15-40ms; mutating it
+    // back to `regularFiles.includes` blocks synchronously for >500ms.
+    expect(maxGapMs).toBeLessThan(200);
+    // The assertion above bounds a STALL, not the test's duration: total time
+    // scales with the fixture and the capture path, so the runner's default
+    // timeout must not become a second, implicit assertion. Explicit headroom
+    // keeps a slow host from reading as a regression to the linear scan.
+  }, 60_000);
 
   it.skipIf(process.platform === 'win32')(
     'verifies force-added ignored bytes without adopting ignored extra files',

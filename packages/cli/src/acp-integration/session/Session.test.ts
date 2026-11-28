@@ -2668,6 +2668,86 @@ describe('Session', () => {
         .map((hold) => hold.id);
     }
 
+    it('does not block conditional close on idle bound durable tasks while holding in-flight scheduled work', () => {
+      createReportingSession();
+      const conditionalClose = { includeScheduledTasks: true };
+      const scheduledHold = {
+        category: 'session',
+        id: 'scheduled-tasks',
+      };
+      const jobs = [
+        { durable: true, boundSessionId: session.sessionId },
+        { durable: true, boundSessionId: 'other-owner' },
+        { durable: true },
+        { durable: false, boundSessionId: session.sessionId },
+      ];
+      let schedulerDisabled = false;
+      const hasGatesInFlight = vi.fn().mockReturnValue(false);
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue({
+        get disabled() {
+          return schedulerDisabled;
+        },
+        list: () => jobs,
+        hasGatesInFlight,
+        stop: vi.fn(),
+      });
+
+      // Registered bound durable tasks are paused by archive/unarchive and must
+      // not block conditional close for an idle session.
+      expect(
+        session.collectActiveWorkHolds(conditionalClose),
+      ).not.toContainEqual(scheduledHold);
+      expect(session.collectActiveWorkHolds()).not.toContainEqual(
+        scheduledHold,
+      );
+      expect(session.isIdle()).toBe(true);
+
+      // Genuine in-flight scheduled work (gates) still holds conditional close.
+      hasGatesInFlight.mockReturnValue(true);
+      expect(session.collectActiveWorkHolds(conditionalClose)).toContainEqual(
+        scheduledHold,
+      );
+      expect(session.collectActiveWorkHolds()).not.toContainEqual(
+        scheduledHold,
+      );
+      expect(hasGatesInFlight).toHaveBeenCalledWith(session.sessionId);
+
+      schedulerDisabled = true;
+      expect(
+        session.collectActiveWorkHolds(conditionalClose),
+      ).not.toContainEqual(scheduledHold);
+
+      schedulerDisabled = false;
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(false);
+      expect(
+        session.collectActiveWorkHolds(conditionalClose),
+      ).not.toContainEqual(scheduledHold);
+
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      hasGatesInFlight.mockReturnValue(true);
+      vi.spyOn(
+        mockConfig.getBackgroundTaskRegistry(),
+        'listUnfinalizedBackgroundAgentIds',
+      ).mockReturnValue(['agent-disposed-history']);
+      const disposedGeneralWork = session.collectActiveWorkHolds();
+      const disposedConditionalWork =
+        session.collectActiveWorkHolds(conditionalClose);
+      expect(disposedGeneralWork.map((hold) => hold.id)).toContain(
+        'agent-disposed-history',
+      );
+      expect(disposedConditionalWork).toContainEqual(scheduledHold);
+      session.dispose();
+      expect(session.collectActiveWorkHolds()).toEqual([]);
+      expect(session.collectActiveWorkHolds(true)).toEqual(disposedGeneralWork);
+      expect(
+        session.collectActiveWorkHolds({
+          ...conditionalClose,
+          includeDisposed: true,
+        }),
+      ).toEqual(disposedConditionalWork);
+    });
+
     it('derives agent holds from the registry, covering the cancel window', async () => {
       createReportingSession();
       expect(session.collectActiveWorkHolds()).toEqual([]);
@@ -10661,6 +10741,7 @@ describe('Session', () => {
         (
           callback: (job: {
             id: string;
+            boundSessionId: string;
             name: string;
             prompt: string;
             cronExpr: string;
@@ -10672,6 +10753,7 @@ describe('Session', () => {
         ) => {
           callback({
             id: 'task-1',
+            boundSessionId: 'session-owner',
             name: 'Review PRs',
             prompt: 'review the next PR',
             cronExpr: '0 * * * *',
@@ -10712,9 +10794,12 @@ describe('Session', () => {
       );
     });
     await vi.waitFor(() => {
-      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
-        sessionId: 'child-session',
-      });
+      expect(annotateRunSession).toHaveBeenCalledWith(
+        'task-1',
+        123,
+        { sessionId: 'child-session' },
+        'session-owner',
+      );
     });
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
   });
@@ -10812,11 +10897,18 @@ describe('Session', () => {
     };
     mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
     mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-    vi.mocked(mockClient.extMethod).mockRejectedValueOnce(
-      new Error('Method not found'),
-    );
+    let rejectSpawn!: (error: Error) => void;
+    const spawn = new Promise<never>((_, reject) => {
+      rejectSpawn = reject;
+    });
+    vi.mocked(mockClient.extMethod).mockImplementationOnce(() => spawn);
 
     session.startCronScheduler();
+    await vi.waitFor(() => {
+      expect(mockClient.extMethod).toHaveBeenCalled();
+    });
+    const cancelClose = session.beginClose();
+    rejectSpawn(new Error('Method not found'));
 
     await vi.waitFor(() => {
       expect(mockClient.extMethod).toHaveBeenCalledWith(
@@ -10832,11 +10924,25 @@ describe('Session', () => {
     });
     // The fire is not lost: it runs here, and the run record says so.
     await vi.waitFor(() => {
-      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
-        sessionId: 'test-session-id',
-        dispatchFailed: true,
-      });
+      expect(annotateRunSession).toHaveBeenCalledWith(
+        'task-1',
+        123,
+        { sessionId: 'test-session-id', dispatchFailed: true },
+        null,
+      );
     });
+    await vi.waitFor(() => {
+      expect(
+        (session as unknown as { pendingCronChildren: number })
+          .pendingCronChildren,
+      ).toBe(0);
+    });
+    expect(
+      session.collectActiveWorkHolds({ includeScheduledTasks: true }),
+    ).toContainEqual({ category: 'session', id: 'scheduled-tasks' });
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    cancelClose();
+
     await vi.waitFor(() => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
     });
@@ -10888,9 +10994,12 @@ describe('Session', () => {
     session.startCronScheduler();
 
     await vi.waitFor(() => {
-      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
-        dispatchFailed: true,
-      });
+      expect(annotateRunSession).toHaveBeenCalledWith(
+        'task-1',
+        123,
+        { dispatchFailed: true },
+        null,
+      );
     });
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
   });
@@ -10905,6 +11014,7 @@ describe('Session', () => {
         (
           callback: (job: {
             id: string;
+            boundSessionId: string;
             prompt: string;
             cronExpr: string;
             recurring: false;
@@ -10915,6 +11025,7 @@ describe('Session', () => {
         ) => {
           callback({
             id: 'task-1',
+            boundSessionId: 'session-owner',
             prompt: 'review the next PR',
             cronExpr: '0 * * * *',
             recurring: false,
@@ -10938,11 +11049,17 @@ describe('Session', () => {
     session.startCronScheduler();
 
     await vi.waitFor(() => {
-      expect(restoreConsumedOneShot).toHaveBeenCalledWith('task-1');
+      expect(restoreConsumedOneShot).toHaveBeenCalledWith(
+        'task-1',
+        'session-owner',
+      );
     });
-    expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
-      dispatchFailed: true,
-    });
+    expect(annotateRunSession).toHaveBeenCalledWith(
+      'task-1',
+      123,
+      { dispatchFailed: true },
+      'session-owner',
+    );
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
   });
 
@@ -10986,10 +11103,13 @@ describe('Session', () => {
     session.startCronScheduler();
 
     await vi.waitFor(() => {
-      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
-        dispatchFailed: true,
-      });
-      expect(restoreConsumedOneShot).toHaveBeenCalledWith('task-1');
+      expect(annotateRunSession).toHaveBeenCalledWith(
+        'task-1',
+        123,
+        { dispatchFailed: true },
+        null,
+      );
+      expect(restoreConsumedOneShot).toHaveBeenCalledWith('task-1', null);
     });
     expect(mockClient.extMethod).not.toHaveBeenCalled();
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
@@ -11074,6 +11194,16 @@ describe('Session', () => {
     };
     mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
     mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    session.dispose();
+    const activeWorkChanged = vi.fn();
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      activeWorkChanged,
+    );
     let releaseSpawn!: () => void;
     const spawned = new Promise<void>((resolve) => {
       releaseSpawn = resolve;
@@ -11090,13 +11220,26 @@ describe('Session', () => {
     await vi.waitFor(() => {
       expect(mockClient.extMethod).toHaveBeenCalled();
     });
+    expect(activeWorkChanged).toHaveBeenCalledTimes(1);
+    expect(session.collectActiveWorkHolds()).toContainEqual({
+      category: 'session',
+      id: 'session:active-turn',
+    });
+    expect(session.isIdle()).toBe(false);
     releaseSpawn();
 
     await vi.waitFor(() => {
-      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
-        sessionId: 'child-session',
-      });
+      expect(annotateRunSession).toHaveBeenCalledWith(
+        'task-1',
+        123,
+        { sessionId: 'child-session' },
+        null,
+      );
     });
+    await vi.waitFor(() => {
+      expect(session.isIdle()).toBe(true);
+    });
+    expect(activeWorkChanged).toHaveBeenCalledTimes(2);
   });
 
   it('does not resume automatic turns until an aborted prompt settles', async () => {
@@ -68754,6 +68897,176 @@ describe('Session', () => {
       };
       expect(internals.cronQueue).toEqual([
         expect.objectContaining({ taskId: 'old-recurring-cron' }),
+      ]);
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+    });
+
+    it('retains bound and unbound same-id cron prompts while a guard waits', async () => {
+      let fireCron!: (job: {
+        id?: string;
+        prompt: string;
+        cronExpr?: string;
+        boundSessionId?: string;
+      }) => void;
+      const scheduler = {
+        hasPendingWork: true,
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(
+          (
+            callback: (job: {
+              id?: string;
+              prompt: string;
+              cronExpr?: string;
+              boundSessionId?: string;
+            }) => void,
+          ) => {
+            fireCron = callback;
+          },
+        ),
+        stop: vi.fn(),
+        list: vi.fn().mockReturnValue([]),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      rebuildSessionWithGuard();
+      const execute = installPendingTodoTool();
+      execute.mockImplementation(async () => {
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([
+          {
+            id: 'guard-agent',
+            isBackgrounded: true,
+            status: 'running',
+            notified: false,
+          },
+        ]);
+        return {
+          llmContent: JSON.stringify(pendingTodos),
+          returnDisplay: {
+            type: 'todo_list',
+            todos: pendingTodos,
+            changes: {},
+          },
+        };
+      });
+      queuePendingTodoThenNaturalStops();
+      await runGuardPrompt();
+      expect(scheduler.start).toHaveBeenCalled();
+
+      fireCron({
+        id: 'shared-cron',
+        prompt: 'bound task prompt',
+        boundSessionId: 'session-a',
+        cronExpr: '* * * * *',
+      });
+      fireCron({
+        id: 'shared-cron',
+        prompt: 'unbound task prompt',
+        cronExpr: '* * * * *',
+      });
+
+      const internals = session as unknown as {
+        cronQueue: Array<{
+          taskId?: string;
+          taskSessionId?: string | null;
+          prompt: string;
+        }>;
+      };
+      expect(internals.cronQueue).toHaveLength(2);
+      expect(internals.cronQueue.map((item) => item.prompt)).toEqual([
+        'bound task prompt',
+        'unbound task prompt',
+      ]);
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+    });
+
+    it('retains a same-owner wakeup while coalescing only same-source cron fires', async () => {
+      let fireCron!: (job: {
+        id?: string;
+        prompt: string;
+        cronExpr?: string;
+        boundSessionId?: string;
+      }) => void;
+      const scheduler = {
+        hasPendingWork: true,
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(
+          (
+            callback: (job: {
+              id?: string;
+              prompt: string;
+              cronExpr?: string;
+              boundSessionId?: string;
+            }) => void,
+          ) => {
+            fireCron = callback;
+          },
+        ),
+        stop: vi.fn(),
+        list: vi.fn().mockReturnValue([]),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      rebuildSessionWithGuard();
+      const execute = installPendingTodoTool();
+      execute.mockImplementation(async () => {
+        mockBackgroundTaskRegistry.getAll.mockReturnValue([
+          {
+            id: 'guard-agent',
+            isBackgrounded: true,
+            status: 'running',
+            notified: false,
+          },
+        ]);
+        return {
+          llmContent: JSON.stringify(pendingTodos),
+          returnDisplay: {
+            type: 'todo_list',
+            todos: pendingTodos,
+            changes: {},
+          },
+        };
+      });
+      queuePendingTodoThenNaturalStops();
+      await runGuardPrompt();
+      expect(scheduler.start).toHaveBeenCalled();
+
+      fireCron({
+        id: 'shared-owner-and-id',
+        prompt: 'session wakeup',
+        cronExpr: '@wakeup',
+      });
+      fireCron({
+        id: 'shared-owner-and-id',
+        prompt: 'first cron prompt',
+        cronExpr: '* * * * *',
+      });
+      fireCron({
+        id: 'shared-owner-and-id',
+        prompt: 'latest cron prompt',
+        cronExpr: '* * * * *',
+      });
+
+      const internals = session as unknown as {
+        cronQueue: Array<{
+          taskId?: string;
+          taskSessionId?: string | null;
+          prompt: string;
+          source: 'cron' | 'loop';
+        }>;
+      };
+      expect(internals.cronQueue).toEqual([
+        expect.objectContaining({
+          prompt: 'session wakeup',
+          source: 'loop',
+          taskSessionId: null,
+        }),
+        expect.objectContaining({
+          prompt: 'latest cron prompt',
+          source: 'cron',
+          taskSessionId: null,
+        }),
       ]);
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
     });

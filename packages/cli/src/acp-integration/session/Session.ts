@@ -481,6 +481,7 @@ import {
 } from '../../nonInteractiveCliCommands.js';
 import {
   getSlashCommandFirstToken,
+  isPrivateBuiltinSlashCommand,
   isSlashCommand,
 } from '../../ui/utils/commandUtils.js';
 import {
@@ -1829,6 +1830,8 @@ function toAdmissibleNotification(
  * imported type, so core stays a type-only dependency of the fire path. */
 interface CronFire {
   id?: string;
+  boundSessionId?: string;
+  runId?: string;
   prompt: string;
   cronExpr?: string;
   recurring?: boolean;
@@ -1851,6 +1854,7 @@ interface CronQueueItem {
   prompt: string;
   source: 'cron' | 'loop';
   taskId?: string;
+  taskSessionId?: string | null;
   firedAt?: number;
   delivery?: CronTaskDelivery;
   todoWorkChainId?: string;
@@ -2413,6 +2417,7 @@ export class Session implements SessionContext {
   // Cron scheduling state
   private cronQueue: CronQueueItem[] = [];
   private cronProcessing = false;
+  private pendingCronChildren = 0;
   private cronAbortController: AbortController | null = null;
   // Resolves the `<<loop.md>>` / `<<loop.md-dynamic>>` sentinels at fire time.
   // Lazily created on the first loop tick; its content cache is reset on
@@ -5101,7 +5106,20 @@ export class Session implements SessionContext {
    * wider than anything reported from here (it covers prompts still waiting in
    * the FIFO, which the child cannot see).
    */
-  collectActiveWorkHolds(includeDisposed = false): ActiveWorkHoldV1[] {
+  collectActiveWorkHolds(
+    options?:
+      | boolean
+      | {
+          includeDisposed?: boolean;
+          includeScheduledTasks?: boolean;
+        },
+  ): ActiveWorkHoldV1[] {
+    const includeDisposed =
+      typeof options === 'boolean'
+        ? options
+        : options?.includeDisposed === true;
+    const includeScheduledTasks =
+      typeof options === 'object' && options.includeScheduledTasks === true;
     if (this.disposed && !includeDisposed) return [];
     const holds: ActiveWorkHoldV1[] = [];
     for (const agentId of this.config
@@ -5160,6 +5178,7 @@ export class Session implements SessionContext {
       this.historyMutationActive ||
       this.goalProcessing ||
       this.cronProcessing ||
+      this.pendingCronChildren > 0 ||
       this.cronAbortController ||
       this.cronCompletion ||
       this.notificationQueue.some(
@@ -5171,6 +5190,22 @@ export class Session implements SessionContext {
         !this.currentShellNotificationActive)
     ) {
       holds.push({ category: 'session', id: 'session:active-turn' });
+    }
+    // Only conditional close needs this retention; idle/reload and active-work
+    // snapshots must keep their existing meaning. Registered durable tasks are
+    // paused/restored by session archive/unarchive and must not block archiving
+    // an idle session; only active/queued scheduled work holds the close.
+    if (includeScheduledTasks && this.config.isCronEnabled?.() !== false) {
+      const scheduler = this.config.getCronScheduler?.();
+      const hasScheduledWork =
+        this.cronQueue.length > 0 ||
+        this.pendingCronChildren > 0 ||
+        (scheduler !== undefined &&
+          scheduler.disabled !== true &&
+          Boolean(scheduler.hasGatesInFlight?.(this.sessionId)));
+      if (hasScheduledWork) {
+        holds.push({ category: 'session', id: 'scheduled-tasks' });
+      }
     }
     return holds;
   }
@@ -5199,6 +5234,7 @@ export class Session implements SessionContext {
         this.pendingPromptCompletion ||
         this.goalProcessing ||
         this.cronProcessing ||
+        this.pendingCronChildren > 0 ||
         this.cronAbortController ||
         this.cronCompletion ||
         this.notificationProcessing ||
@@ -6841,7 +6877,7 @@ export class Session implements SessionContext {
     const recovery = await this.getRecoveryStatusForClient();
     if (!recovery.canContinue && recovery.kind !== 'clean') {
       // Name the veto that fired. `canContinue` collapses `closing` plus the
-      // ten `#hasActiveTurn()` members into one boolean and the only UI
+      // `#hasActiveTurn()` members into one boolean and the only UI
       // consumer renders nothing for it, so without this a leaked flag —
       // recovery disabled for the rest of the session — is indistinguishable
       // from a healthy automatic turn in flight. Logged here rather than in
@@ -6862,6 +6898,7 @@ export class Session implements SessionContext {
         ),
         cron: Boolean(
           this.cronProcessing ||
+            this.pendingCronChildren > 0 ||
             this.cronAbortController ||
             this.cronCompletion,
         ),
@@ -7367,6 +7404,9 @@ export class Session implements SessionContext {
               !isRestoreAskUserQuestion &&
               isSlashCommand(inputText);
             const slashCommandName = getSlashCommandFirstToken(inputText);
+            const deferSlashRecording =
+              isSlashInput &&
+              isPrivateBuiltinSlashCommand(inputText, slashCommandName);
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
@@ -7443,13 +7483,9 @@ export class Session implements SessionContext {
                 this.config
                   .getLlmClient()!
                   .stripOrphanedUserEntriesFromHistory() ?? [];
-            } else if (!isSlashInput || slashCommandName !== 'advisor') {
-              // record user message for session management. Only `/advisor`
-              // defers its record to after command resolution below — a
-              // user-defined command shadowing the name must keep its record
-              // (R18-6) — while every other slash command records here,
-              // BEFORE its action runs: `/clear` swaps in a fresh recorder
-              // inside its action, so its record must land first (R20-9).
+            } else if (!deferSlashRecording) {
+              // /clear rotates the recorder, so record it before its action.
+              // Private command candidates wait until command resolution.
               const attachmentReferences = readDaemonAttachmentReferences(
                 promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
               );
@@ -7524,6 +7560,19 @@ export class Session implements SessionContext {
                     this.mods?.invalidateTools();
                     this.rebindGoalRuntimeForNewSession();
                   },
+                  ...(!isRetry &&
+                  !channelTurn &&
+                  modelPrompt === undefined &&
+                  goalTurn?.origin !== 'runtime'
+                    ? {
+                        confirmAction: (title, content) =>
+                          this.#requestSlashCommandConfirmation(
+                            title,
+                            content,
+                            pendingSend.signal,
+                          ),
+                      }
+                    : {}),
                 },
                 this.slashCommandPolicy,
               );
@@ -7531,7 +7580,7 @@ export class Session implements SessionContext {
               await this.mods?.syncSession();
 
               if (
-                slashCommandName === 'advisor' &&
+                deferSlashRecording &&
                 pendingSend.signal.aborted &&
                 slashCommandResult.type === 'message'
               ) {
@@ -7546,18 +7595,18 @@ export class Session implements SessionContext {
                 return { stopReason: 'cancelled' };
               }
 
-              // Classify by the RESOLVED command, not the raw token: a
-              // custom command named `advisor` shadows the built-in and
-              // must keep its transcript records (R18-6). Only `/advisor`
-              // defers its user-message record to here — every other slash
-              // command was already recorded above, before its action ran.
+              // A custom command shadowing a private built-in keeps its
+              // transcript records.
               const resolvedCommandInfo = slashCommandResult.resolvedCommand;
               const shouldRecordSlashCommand = !(
                 resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
-                resolvedCommandInfo.name === 'advisor'
+                isPrivateBuiltinSlashCommand(
+                  inputText,
+                  resolvedCommandInfo.name,
+                )
               );
               if (
-                slashCommandName === 'advisor' &&
+                deferSlashRecording &&
                 shouldRecordSlashCommand &&
                 goalTurn?.origin !== 'runtime' &&
                 !isRetry
@@ -12781,6 +12830,7 @@ export class Session implements SessionContext {
         prompt: job.prompt,
         source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
         ...(job.id ? { taskId: job.id } : {}),
+        taskSessionId: job.boundSessionId ?? null,
         ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),
         ...(job.delivery ? { delivery: job.delivery } : {}),
         ...(job.todoWorkChainId
@@ -12800,27 +12850,57 @@ export class Session implements SessionContext {
    * marker alongside the session it actually ran in.
    */
   async #dispatchCronToFreshSession(job: CronFire): Promise<void> {
+    // A consumed one-shot no longer has a future-work hold.
+    // Retain its owner until this handoff and any failure cleanup settle.
+    this.pendingCronChildren++;
+    this.#activeWorkChanged();
+    try {
+      await this.#dispatchCronToFreshSessionAndRecord(job);
+    } finally {
+      this.pendingCronChildren--;
+      this.#activeWorkChanged();
+    }
+  }
+
+  async #dispatchCronToFreshSessionAndRecord(job: CronFire): Promise<void> {
     const scheduler = this.config.getCronScheduler();
     const taskId = job.id ?? 'unknown';
     // Captured before the awaited RPC below: processJob re-stamps this very
     // jobs-map entry on the next matching minute, so a spawn that outlasts one
     // interval would otherwise annotate the *next* fire's run record.
     const firedAt = job.lastFiredAt;
+    const runId = job.runId;
     const triggeredAt = firedAt ?? Date.now();
     const record = async (outcome: CronRunSessionOutcome): Promise<void> => {
       if (!job.id || firedAt === undefined) return;
-      await scheduler
-        .annotateRunSession(job.id, firedAt, outcome)
-        .catch((error) => {
-          debugLogger.warn(
-            `Scheduled task ${taskId} could not record its run session: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        });
+      const annotation =
+        runId === undefined
+          ? scheduler.annotateRunSession(
+              job.id,
+              firedAt,
+              outcome,
+              job.boundSessionId ?? null,
+            )
+          : scheduler.annotateRunSession(
+              job.id,
+              firedAt,
+              outcome,
+              job.boundSessionId ?? null,
+              runId,
+            );
+      await annotation.catch((error) => {
+        debugLogger.warn(
+          `Scheduled task ${taskId} could not record its run session: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
     };
     const restoreOneShot = async (): Promise<void> => {
       if (job.recurring !== false || !job.id) return;
       try {
-        const restored = await scheduler.restoreConsumedOneShot(job.id);
+        const restored = await scheduler.restoreConsumedOneShot(
+          job.id,
+          job.boundSessionId ?? null,
+        );
         if (!restored) {
           debugLogger.warn(
             `Scheduled task ${taskId} could not find its consumed one-shot to restore`,
@@ -12913,6 +12993,7 @@ export class Session implements SessionContext {
         prompt: job.prompt,
         source: 'cron',
         ...(job.id ? { taskId: job.id } : {}),
+        taskSessionId: job.boundSessionId ?? null,
         ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),
       });
       void this.#drainCronQueue();
@@ -12949,6 +13030,8 @@ export class Session implements SessionContext {
         const duplicateIndex = this.cronQueue.findIndex(
           (queued) =>
             queued.taskId === item.taskId &&
+            (queued.taskSessionId ?? null) === (item.taskSessionId ?? null) &&
+            queued.source === item.source &&
             !this.#cronContinuesTodoStopGuardWorkChain(queued),
         );
         if (duplicateIndex >= 0) {
@@ -15450,6 +15533,49 @@ export class Session implements SessionContext {
       params,
       signal,
     );
+  }
+
+  async #requestSlashCommandConfirmation(
+    title: string,
+    content: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const response = await this.#requestPermissionQueued(
+      {
+        sessionId: this.sessionId,
+        toolCall: {
+          toolCallId: `slash-command:${randomUUID()}`,
+          title,
+          kind: 'other',
+          status: 'pending',
+          content: [
+            { type: 'content', content: { type: 'text', text: content } },
+          ],
+        },
+        options: [
+          {
+            optionId: ToolConfirmationOutcome.ProceedOnce,
+            name: 'Apply changes',
+            kind: 'allow_once',
+          },
+          {
+            optionId: ToolConfirmationOutcome.Cancel,
+            name: 'Cancel',
+            kind: 'reject_once',
+          },
+        ],
+      },
+      signal,
+    );
+    if (
+      signal.aborted ||
+      response.outcome.outcome !== 'selected' ||
+      response.outcome.optionId !== ToolConfirmationOutcome.ProceedOnce
+    ) {
+      return false;
+    }
+    await this.assertCanStartTurn();
+    return !signal.aborted;
   }
 
   /**

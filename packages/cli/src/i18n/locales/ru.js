@@ -2478,6 +2478,8 @@ export default {
   Retry: 'Повторить',
   'Connecting…': 'Подключение…',
   'Loading models from provider…': 'Загрузка моделей провайдера…',
+  'Could not list models. Enter model IDs manually.':
+    'Не удалось получить список моделей. Введите идентификаторы моделей вручную.',
   'Recommended models · provider list unavailable, showing built-ins':
     'Рекомендуемые модели · список провайдера недоступен, показаны встроенные',
   'Cannot disable an extension-provided MCP server here.':

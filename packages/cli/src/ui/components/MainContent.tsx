@@ -547,7 +547,8 @@ export const MainContent = ({
     const btwPanelOwnsViewport =
       uiState.btwItem !== null && !uiState.btwItem.btw.isPending;
     const viewportInteractive =
-      !uiState.dialogsVisible &&
+      (!uiState.dialogsVisible ||
+        uiState.confirmationRequest?.allowHistoryScroll === true) &&
       contextMenuOpen === null &&
       !btwPanelOwnsViewport;
 

@@ -59,6 +59,50 @@ import static org.awaitility.Awaitility.await;
 class SessionLifecycleCoordinatorTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void signalsGcOnlyAfterDeleteCompletion(boolean completed) {
+        var store = Mockito.mock(AgentStateStore.class);
+        var session = Mockito.mock(StoreModels.SessionRecord.class);
+        Mockito.when(session.workspace()).thenReturn(
+                Mockito.mock(com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding.class));
+        Mockito.when(store.requireSession("tenant", "session")).thenReturn(session);
+        var operation = new StoreModels.OperationRecord("tenant", "session", "operation", OperationKind.DELETE,
+                "digest", "DELIVERING", "ACCEPTED", "DRAINING", "CLOSED", "receipt", "server", 1, 1, null, 0);
+        Mockito.when(store.claimOperation(Mockito.eq("tenant"), Mockito.eq("session"), Mockito.eq("operation"),
+                Mockito.anyString(), Mockito.any())).thenReturn(java.util.Optional.of(operation));
+        Mockito.when(store.completeOperation(Mockito.eq("tenant"), Mockito.eq("session"), Mockito.eq("operation"),
+                Mockito.anyString(), Mockito.eq(1L), Mockito.eq(false))).thenReturn(completed);
+        var executor = Mockito.mock(java.util.concurrent.ExecutorService.class);
+        Mockito.doAnswer(call -> {
+            call.<Runnable>getArgument(0).run();
+            return null;
+        }).when(executor).execute(Mockito.any(Runnable.class));
+        var warmer = Mockito.mock(RuntimeWarmer.class);
+        var coordinator = new SessionLifecycleCoordinator(store, Mockito.mock(JdbcManagedSessionStore.class),
+                Mockito.mock(HarnessConnector.class), warmer, Mockito.mock(JdbcChildResultRelayStore.class),
+                new ObjectMapper(), admissions(store, warmer), noTurnCancels(), brokerProvider(null), executor,
+                Clock.systemUTC(), new ManagedAgentProperties());
+        var wake = Mockito.mock(SessionResourceGcWakeup.class);
+        Mockito.doThrow(new IllegalStateException("broker unavailable")).when(wake).retired("tenant", "session");
+        coordinator.setSessionResourceGcWakeup(wake);
+        try {
+            coordinator.dispatch("tenant", "session", "operation");
+            var order = Mockito.inOrder(store, wake);
+            order.verify(store).completeOperation(Mockito.eq("tenant"), Mockito.eq("session"), Mockito.eq("operation"),
+                    Mockito.anyString(), Mockito.eq(1L), Mockito.eq(false));
+            if (completed) {
+                order.verify(wake).retired("tenant", "session");
+            } else {
+                Mockito.verifyNoInteractions(wake);
+            }
+            Mockito.verify(store, Mockito.never()).retryOperation(Mockito.anyString(), Mockito.anyString(),
+                    Mockito.anyString(), Mockito.anyString(), Mockito.anyLong(), Mockito.anyLong(), Mockito.anyBoolean());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void shellClosePreservesOrdinaryDrainAndKeepsMcpOwnerUntilTransportDrains(boolean mcp) throws Exception {
         var store = Mockito.mock(AgentStateStore.class);
         var session = Mockito.mock(StoreModels.SessionRecord.class);
