@@ -15,6 +15,7 @@ import {
   COMPACTION_BUDGET_SAFETY_MARGIN,
   computeCompactionOutputBudget,
   computeThresholds,
+  DEFAULT_PCT,
   isBelowCompactionWarn,
   MAX_CONSECUTIVE_FAILURES,
   MAX_HOOK_INSTRUCTIONS_CHARS,
@@ -2719,14 +2720,44 @@ describe('computeThresholds', () => {
     expect(t.effectiveWindow).toBe(12_000);
   });
 
-  it('60K window — ceiling governs auto; hard stays above auto (issue #4945)', () => {
-    // ceiling = ew(40K) - 13K = 27K < proportional(51K) → auto = ceiling.
+  it('60K window — crossover floor holds auto; hard stays above auto (issue #4945)', () => {
+    // ceiling = ew(40K) - 13K = 27K is below the crossover floor
+    // 0.85 * 33K = 28,050, so auto = the floor.
     const t = computeThresholds(60_000);
-    expect(t.warn).toBe(7_000); // auto - WARN_BUFFER = 27K - 20K
-    expect(t.auto).toBe(27_000); // min(0.85*60K=51K, ew-13K=27K)
+    expect(t.warn).toBe(8_050); // auto - WARN_BUFFER = 28,050 - 20K
+    expect(t.auto).toBe(28_050); // min(0.85*60K=51K, max(27K, 28,050))
     expect(t.hard).toBe(37_000); // ew - HARD_BUFFER = 40K - 3K
     expect(t.hard).toBeGreaterThan(t.auto);
     expect(t.effectiveWindow).toBe(40_000);
+  });
+
+  it('windows just above 33K keep the crossover floor instead of a near-zero auto', () => {
+    // The ceiling crosses zero at 33K. Without the floor, auto fell from
+    // 28,050 at 33,000 to 1 at 33,001, and a 40,960 window (a common
+    // self-hosted max_model_len) compacted at 7,960.
+    expect(computeThresholds(33_000).auto).toBe(28_050);
+    expect(computeThresholds(33_001).auto).toBe(28_050);
+    expect(computeThresholds(34_000).auto).toBe(28_050);
+    const t = computeThresholds(40_960);
+    expect(t.auto).toBe(28_050);
+    expect(t.warn).toBe(8_050);
+    expect(t.hard).toBe(31_050); // auto + HARD_BUFFER, above ew - 3K = 17,960
+    // From about 61K the ceiling is above the floor and governs again.
+    expect(computeThresholds(61_050).auto).toBe(28_050);
+    expect(computeThresholds(70_000).auto).toBe(37_000);
+  });
+
+  it('auto, warn and hard never drop as the window grows', () => {
+    for (const pct of [0.01, 0.5, DEFAULT_PCT, 1]) {
+      let prev = computeThresholds(1_000, pct);
+      for (let window = 2_000; window <= 300_000; window += 1_000) {
+        const t = computeThresholds(window, pct);
+        expect(t.auto).toBeGreaterThanOrEqual(prev.auto);
+        expect(t.warn).toBeGreaterThanOrEqual(prev.warn);
+        expect(t.hard).toBeGreaterThanOrEqual(prev.hard);
+        prev = t;
+      }
+    }
   });
 
   it('128K window — ceiling governs auto (leaves room to compress)', () => {
@@ -3064,6 +3095,11 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     // computeThresholds(32000).auto = 27200 (degenerate → 0.85 × 32K)
     // 20K < 27.2K → NOOP
     expectGate(false, 32_000, 20_000));
+
+  it('NOOPs at 12K tokens on a 40,960 window (auto is the 28,050 crossover floor, not 7,960)', () =>
+    // 12K is about the size of a default base request (instructions plus
+    // tool declarations), so a 7,960 auto ran a summary on every send.
+    expectGate(false, 40_960, 12_000));
 });
 
 describe('ChatCompressionService.compress cheap-gate runs against the full window', () => {

@@ -260,14 +260,17 @@ export interface CompactionThresholds {
  * The absolute term (effectiveWindow - AUTOCOMPACT_BUFFER) is a *ceiling* —
  * "compact by here, or the summarization side-query has no room to run" — so
  * it is combined with the proportional preference via `min`, not `max`:
- *   auto = absoluteCeiling > 0 ? min(pct * window, absoluteCeiling) : pct * window
+ *   floor = pct * (SUMMARY_RESERVE + AUTOCOMPACT_BUFFER)
+ *   auto = min(pct * window, max(absoluteCeiling, floor))
  *   warn = max(0, auto - WARN_BUFFER)
  *   hard = min(window, max(effectiveWindow - HARD_BUFFER, auto + HARD_BUFFER))
  *
  * So large windows compact at ~pct (never crowding the ceiling), smaller
  * windows compact at the ceiling (leaving room for the summary), and a window
  * too small for even the ceiling (≤ SUMMARY_RESERVE + AUTOCOMPACT_BUFFER) falls
- * back to the proportional value as a floor. This mirrors claude-code
+ * back to the proportional value as a floor. Just above that size the ceiling
+ * is held at the floor's value there, so auto never drops as the window grows.
+ * This mirrors claude-code
  * (autoCompact.ts), which combines its percentage override with the absolute
  * ceiling via Math.min. `pct` defaults to DEFAULT_PCT.
  *
@@ -290,12 +293,19 @@ export function computeThresholds(
   // output). Combine it with the proportional preference via `min`. When the
   // window is so small the ceiling is non-positive, fall back to the
   // proportional value as a floor so the trigger stays usable.
+  //
+  // That floor is also the least the ceiling may pull auto down to. The
+  // ceiling crosses zero at SUMMARY_RESERVE + AUTOCOMPACT_BUFFER (33K), where
+  // the proportional floor is pct × 33K. Without this bound auto fell from
+  // 28,050 at a 33,000 window to 1 at 33,001, and stayed below it until about
+  // 61K: a 40,960 window compacted at 7,960 tokens, below the size of a
+  // fresh session's base request (instructions plus tool declarations).
+  // Windows of 33K and below, and
+  // windows whose ceiling is above the bound, are unchanged.
   const proportional = effectivePct * window;
   const absoluteCeiling = effectiveWindow - AUTOCOMPACT_BUFFER;
-  const auto =
-    absoluteCeiling > 0
-      ? Math.min(proportional, absoluteCeiling)
-      : proportional;
+  const crossoverFloor = effectivePct * (SUMMARY_RESERVE + AUTOCOMPACT_BUFFER);
+  const auto = Math.min(proportional, Math.max(absoluteCeiling, crossoverFloor));
 
   // Warn fires WARN_BUFFER below auto (claude-code positions its warning tier
   // the same way, relative to the auto threshold).
