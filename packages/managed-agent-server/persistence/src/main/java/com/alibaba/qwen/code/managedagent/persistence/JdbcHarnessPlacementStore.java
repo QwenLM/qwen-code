@@ -200,14 +200,18 @@ public class JdbcHarnessPlacementStore
 
     public List<Placement> findClaimCandidates(int limit) {
         requireLimit(limit);
-        // A live owner refuses every claim, so its demand must not hold a place in the batch.
+        // Only Sessions takeover would admit, so demand no claim can satisfy never holds a place in the
+        // batch: no head, a sealed release, or a lapsed writer whose activation is known and settled.
         return jdbc.query("SELECT " + JOIN_COLUMNS + " FROM ma_session m LEFT JOIN ma_session_head h"
                 + " ON h.tenant_id = m.tenant_id AND h.session_id = m.session_id AND h.head_kind = 'MANAGED_SESSION'"
                 + " WHERE m.harness_claim_requested_at IS NOT NULL"
                 + " AND (m.harness_claim_reserved_until IS NULL OR m.harness_claim_reserved_until <= " + ManagedSchemaTime.SQL_NOW + ")"
                 + " AND m.harness_placement_state <> 'UNASSIGNED'"
-                + " AND (m.harness_placement_state = 'RELEASED' OR h.writer_lease_until IS NULL"
-                + " OR h.writer_lease_until <= " + ManagedSchemaTime.SQL_NOW + ")"
+                + " AND (h.session_id IS NULL OR (m.harness_placement_state = 'RELEASED' AND h.state = 'SEALED')"
+                + " OR (h.writer_lease_until <= " + ManagedSchemaTime.SQL_NOW
+                + " AND (h.activation_head_revision = COALESCE(h.journal_revision, 0) OR COALESCE(h.activation_epoch, 0) = 0)"
+                + " AND (COALESCE(h.activation_epoch, 0) = 0 OR h.activation_phase IN ('released', 'revoked')"
+                + " OR (h.activation_phase = 'active' AND h.activation_expires_at <= " + ManagedSchemaTime.SQL_NOW + "))))"
                 + " AND m.status = 'ACTIVE' AND m.deleted_at IS NULL AND m.retired_at IS NULL"
                 + " AND (m.session_kind = 'PUBLIC' OR m.workspace_id IS NOT NULL)"
                 + " ORDER BY m.harness_claim_requested_at, m.tenant_id, m.session_id LIMIT ?",

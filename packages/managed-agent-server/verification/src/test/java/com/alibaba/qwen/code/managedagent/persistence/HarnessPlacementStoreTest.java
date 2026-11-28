@@ -594,6 +594,26 @@ public class HarnessPlacementStoreTest {
                 .isInstanceOf(ManagedAgentException.class).extracting("code").isEqualTo("session_not_found");
     }
 
+    @Test
+    void demandIsACandidateOnlyWhenTakeoverWouldAdmitTheClaim() {
+        var owner = tx.execute(status -> placements.assign(TENANT, SESSION, "pod-a", "boot-a"));
+        tx.executeWithoutResult(status -> store.acquireWriter(TENANT, SESSION, token(owner),
+                new ManagedSessionStoreModels.AcquireWriterRequest(WORKSPACE, "boot-a", 60_000L)));
+        tx.execute(status -> placements.recordDemand(TENANT, SESSION));
+        jdbc.update("UPDATE ma_session_head SET writer_lease_until = 1, activation_epoch = 1,"
+                + " activation_phase = 'active', activation_head_revision = journal_revision, activation_expires_at = ?"
+                + " WHERE tenant_id = ? AND session_id = ?", JdbcHarnessPlacementStore.now(jdbc) + 600_000, TENANT, SESSION);
+        assertThat(placements.findClaimCandidates(10)).isEmpty();
+        assertThatThrownBy(() -> tx.execute(status -> placements.claim(TENANT, SESSION, owner, "pod-b", "boot-b")))
+                .isInstanceOf(ManagedAgentException.class).extracting("code").isEqualTo("harness_owner_still_live");
+
+        jdbc.update("UPDATE ma_session_head SET activation_expires_at = 1 WHERE tenant_id = ? AND session_id = ?",
+                TENANT, SESSION);
+        assertThat(placements.findClaimCandidates(10)).containsExactly(owner);
+        assertThat(tx.execute(status -> placements.claim(TENANT, SESSION, owner, "pod-b", "boot-b"))
+                .placement().epoch()).isEqualTo(owner.epoch() + 1);
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void racingClaimsAndPushTakeoversAdmitOnePlacement(boolean pushRaces) throws Exception {
