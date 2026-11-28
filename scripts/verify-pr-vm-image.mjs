@@ -9,14 +9,21 @@
 /**
  * Offline read-only golden ext4 image derivation tool for `/verify-pr` microVMs.
  *
- * Extracts a read-only golden ext4 rootfs via `debugfs rdump` (without loop
- * mounting or opening the golden image for writing), injects the repository's
- * audited guest scripts (`guest-vsock.py`, `guest-runner.py`, `/opt/poc/init`,
- * plus optional workload/extra files), rebuilds an independent ext4 image via
- * `mkfs.ext4 -d`, and re-verifies that the golden base image SHA-256 is
- * unchanged. Fails closed on symlinks, hardlinks, vault paths, path traversal,
- * overwrite attempts, or SHA mismatches, and cleans up all temporary staging
- * on error.
+ * Copies a read-only golden ext4 rootfs into an isolated temporary file inside
+ * an approved root (never mutating the golden source, zero loop mounts, zero
+ * root required), optionally grows it via `resize2fs -f`, inspects in-image
+ * target ancestors via read-only `debugfs -f` to refuse symlink/non-directory
+ * traversal, injects the repository's audited guest scripts (`guest-vsock.py`,
+ * `guest-runner.py`, `/opt/poc/init`, plus optional workload/extra files and
+ * bundled host Python) directly into the independent copy via `debugfs -w -f`
+ * with explicit `0:0` ownership and POSIX modes, randomizes the filesystem UUID
+ * via `tune2fs -U random` when available, re-verifies the golden base image
+ * SHA-256 and hashes the temporary output before atomic `linkSync` publication.
+ *
+ * Because the base image is never unpacked through the host filesystem, every
+ * existing inode in the golden source — including arbitrary UID/GID ownership
+ * on files and symlinks, FIFOs, sockets, device nodes, hard links, extended
+ * attributes (xattrs), and modes — is preserved bit-for-bit.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -36,6 +43,7 @@ import {
   mkdtempSync,
   openSync,
   readdirSync,
+  readlinkSync,
   readSync,
   realpathSync,
   rmSync,
@@ -57,17 +65,12 @@ import { isPathWithinApprovedRoots } from './verify-pr-vm-lifecycle.mjs';
 
 const HASH_CHUNK_BYTES = 256 * 1024;
 const SHA256_RE = /^[0-9a-f]{64}$/;
-const DEFAULT_IMAGE_SIZE_MIB = 512;
 const MIN_IMAGE_SIZE_MIB = 32;
 const MAX_IMAGE_SIZE_MIB = 16 * 1024;
 const TOOL_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
-// Real non-root `debugfs rdump` prints the version banner plus per-directory
-// `rdump:` and per-file `dump_file:` ownership warnings while exiting 0.
 const DEBUGFS_BANNER_LINE = /^debugfs \d/;
-const DEBUGFS_OWNERSHIP_WARN_LINE =
-  /^(?:rdump|dump_file): Operation not permitted while changing ownership of /;
-const BENIGN_DEBUGFS_STDERR_LINE =
-  /^(?:debugfs \d|(?:rdump|dump_file): Operation not permitted while changing ownership of )/;
+const SPACE_ERR_RE =
+  /No space left|ENOSPC|Could not allocate|EXT2_ET_BLOCK_ALLOC_FAIL|no space/i;
 
 const DEFAULT_GUEST_VSOCK_SRC = fileURLToPath(
   new URL('./verify-pr-vm-guest-vsock.py', import.meta.url),
@@ -169,7 +172,7 @@ export function normalizeImageTargetPath(guestPath) {
   return `/${segments.join('/')}`;
 }
 
-function findExecutable(explicitPath, fallbackNames) {
+function findExecutable(explicitPath, fallbackNames, extraSearchDirs = []) {
   if (explicitPath !== null && explicitPath !== undefined) {
     if (typeof explicitPath !== 'string' || explicitPath.trim() === '') {
       throw new Error('explicit tool path must be a non-empty string');
@@ -184,12 +187,15 @@ function findExecutable(explicitPath, fallbackNames) {
     return real;
   }
   const searchDirs = [
+    ...extraSearchDirs,
     '/usr/local/sbin',
     '/usr/local/bin',
     '/usr/sbin',
     '/usr/bin',
     '/sbin',
     '/bin',
+    '/opt/homebrew/opt/e2fsprogs/sbin',
+    '/usr/local/opt/e2fsprogs/sbin',
     ...(process.env.PATH ?? '').split(':'),
   ];
   for (const name of fallbackNames) {
@@ -227,7 +233,7 @@ function runToolFull(bin, args, { timeoutMs = 180_000 } = {}) {
   }
   if (res.status !== 0) {
     const detail = (res.stderr || res.stdout || '').trim().slice(0, 600);
-    const spaceHint = /No space left|ENOSPC|Could not allocate/i.test(detail)
+    const spaceHint = SPACE_ERR_RE.test(detail)
       ? ' (try a larger --size-mib)'
       : '';
     throw new Error(
@@ -241,194 +247,151 @@ function runTool(bin, args, options) {
   return runToolFull(bin, args, options).stdout;
 }
 
-/**
- * Walks every path component beneath `extractTree` before any `mkdirSync` or
- * `rmSync` so a symlink unpacked from an untrusted base image can never cause
- * host-side directory creation, deletion, or writes outside `extractTree`.
- */
-function ensureSafeExtractPath(
-  extractTree,
-  guestTargetPath,
-  { createParents = false, checkLeafAsDir = false } = {},
-) {
-  const realTree = realpathSync(extractTree);
-  const normalized = normalizeImageTargetPath(guestTargetPath);
-  const segments = normalized.split('/').filter(Boolean);
-  const dirSegments = checkLeafAsDir ? segments : segments.slice(0, -1);
-  let cursor = realTree;
-  for (const seg of dirSegments) {
-    cursor = join(cursor, seg);
-    let st = null;
-    try {
-      st = lstatSync(cursor);
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
-    if (st !== null) {
-      if (st.isSymbolicLink()) {
-        throw new Error(
-          `injected path parent escaped extract tree via symlink: ${guestTargetPath}`,
-        );
-      }
-      if (!st.isDirectory()) {
-        throw new Error(
-          `cannot traverse non-directory inside image: ${guestTargetPath}`,
-        );
-      }
-    } else if (createParents) {
-      mkdirSync(cursor, { mode: 0o755 });
-    }
-  }
-  if (createParents || existsSync(cursor)) {
-    const realParent = realpathSync(cursor);
-    if (!withinDir(realTree, realParent)) {
-      throw new Error(
-        `injected path parent escaped extract tree via symlink: ${guestTargetPath}`,
-      );
-    }
-  }
-  return checkLeafAsDir ? cursor : join(cursor, segments[segments.length - 1]);
-}
-
 function escapeDebugfsArg(value) {
   if (/[\0\r\n]/.test(value)) {
-    throw new Error('extract tree path must not contain newlines or NUL bytes');
+    throw new Error('debugfs argument must not contain newlines or NUL bytes');
   }
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-function collectExtractTreeEntries(extractTree) {
-  const realTree = realpathSync(extractTree);
-  const dirs = ['/'];
-  const entries = ['/'];
-  const queue = [{ hostPath: realTree, guestPath: '/' }];
-  while (queue.length > 0) {
-    const { hostPath, guestPath } = queue.shift();
-    const children = readdirSync(hostPath).sort();
-    for (const name of children) {
-      const childHost = join(hostPath, name);
-      const childGuest =
-        guestPath === '/' ? `/${name}` : `${guestPath}/${name}`;
-      const st = lstatSync(childHost);
-      entries.push(childGuest);
-      if (st.isDirectory() && !st.isSymbolicLink()) {
-        dirs.push(childGuest);
-        queue.push({ hostPath: childHost, guestPath: childGuest });
+function ancestorDirsOf(guestPath) {
+  const parts = guestPath.split('/').filter(Boolean);
+  const dirs = [];
+  for (let i = 1; i < parts.length; i += 1) {
+    dirs.push(`/${parts.slice(0, i).join('/')}`);
+  }
+  return dirs;
+}
+
+/**
+ * Inspects exact inode types for a batch of guest paths inside `imagePath` via
+ * read-only `debugfs -f`. Always checks `/` first to fail closed on corrupt or
+ * non-ext4 inputs.
+ */
+function statImagePaths(debugfsBin, imagePath, guestPaths, workDir) {
+  const unique = Array.from(
+    new Set(['/', ...guestPaths.filter((p) => p !== '/')]),
+  );
+  const cmdLines = unique.map((p) => `stat "${escapeDebugfsArg(p)}"`);
+  const cmdPath = join(workDir, 'stat-paths.debugfs');
+  writeFileSync(cmdPath, `${cmdLines.join('\n')}\n`, { mode: 0o600 });
+
+  const res = runToolFull(debugfsBin, ['-f', cmdPath, imagePath]);
+  const fatalStderr = res.stderr
+    .split(/\r?\n/)
+    .find(
+      (line) =>
+        line.trim() !== '' &&
+        !DEBUGFS_BANNER_LINE.test(line) &&
+        !/: File not found by ext2_lookup\s*$/.test(line) &&
+        !/: Not a directory\s*$/.test(line),
+    );
+  if (fatalStderr !== undefined) {
+    throw new Error(
+      `debugfs image inspection failed: ${fatalStderr.trim().slice(0, 600)}`,
+    );
+  }
+
+  const types = new Map();
+  let currentIdx = -1;
+  for (const line of res.stdout.split(/\r?\n/)) {
+    if (/^debugfs:\s+stat\s+/.test(line)) {
+      currentIdx += 1;
+      if (currentIdx < unique.length) {
+        types.set(unique[currentIdx], 'missing');
+      }
+      continue;
+    }
+    if (currentIdx >= 0 && currentIdx < unique.length) {
+      const m = /^Inode:\s+\d+\s+Type:\s+(\S+)/.exec(line);
+      if (m) {
+        const rawType = m[1].toLowerCase();
+        if (
+          rawType === 'directory' ||
+          rawType === 'regular' ||
+          rawType === 'symlink'
+        ) {
+          types.set(unique[currentIdx], rawType);
+        } else {
+          types.set(unique[currentIdx], 'other');
+        }
       }
     }
   }
-  return { dirs, entries };
-}
-
-function readBaseOwnershipMap(debugfsBin, baseImagePath, dirs, workDir) {
-  const cmdLines = [];
-  for (const dir of dirs) {
-    cmdLines.push(`cd "${escapeDebugfsArg(dir)}"`, 'pwd', 'ls -p');
-  }
-  const cmdPath = join(workDir, 'read-owners.debugfs');
-  writeFileSync(cmdPath, `${cmdLines.join('\n')}\n`, { mode: 0o600 });
-  const res = runToolFull(debugfsBin, ['-f', cmdPath, baseImagePath]);
-  const fatalLine = res.stderr
-    .split(/\r?\n/)
-    .find((line) => line.trim() !== '' && !DEBUGFS_BANNER_LINE.test(line));
-  if (fatalLine !== undefined) {
+  if (types.get('/') !== 'directory') {
     throw new Error(
-      `debugfs ownership inspection failed: ${fatalLine.trim().slice(0, 600)}`,
+      'debugfs image inspection failed: root / is not a valid ext4 directory',
     );
   }
-  const owners = new Map();
-  let currentDir = null;
-  for (const rawLine of res.stdout.split(/\r?\n/)) {
-    const pwdMatch = /^\[pwd\]\s+INODE:\s+\d+\s+PATH:\s+(.+)$/.exec(rawLine);
-    if (pwdMatch) {
-      currentDir = pwdMatch[1];
-      continue;
-    }
-    if (currentDir === null) continue;
-    const lsMatch = /^\/(\d+)\/([0-7]+)\/(\d+)\/(\d+)\/(.+)\/(\d*)\/$/.exec(
-      rawLine,
-    );
-    if (!lsMatch) continue;
-    const uid = Number(lsMatch[3]);
-    const gid = Number(lsMatch[4]);
-    const name = lsMatch[5];
-    if (name === '.') {
-      owners.set(currentDir, { uid, gid });
-    } else if (name !== '..') {
-      const childGuest =
-        currentDir === '/' ? `/${name}` : `${currentDir}/${name}`;
-      owners.set(childGuest, { uid, gid });
-    }
-  }
-  return owners;
+  return types;
 }
 
-function restoreOutputOwnership(
-  debugfsBin,
-  outputImagePath,
-  { finalEntries, baseOwners, injectedTargets, bundleHostPython, workDir },
-) {
-  const builderUid =
-    typeof process.getuid === 'function' ? process.getuid() : null;
-  const builderGid =
-    typeof process.getgid === 'function' ? process.getgid() : null;
-  const paths = new Set(finalEntries);
-  paths.add('/lost+found');
-
-  const cmdLines = [];
-  for (const guestPath of Array.from(paths).sort()) {
-    const isBundledPython =
-      bundleHostPython &&
-      (guestPath === '/opt/python' || guestPath.startsWith('/opt/python/'));
-    let desired;
-    if (injectedTargets.has(guestPath) || isBundledPython) {
-      desired = { uid: 0, gid: 0 };
-    } else if (baseOwners.has(guestPath)) {
-      desired = baseOwners.get(guestPath);
-    } else {
-      desired = { uid: 0, gid: 0 };
+/**
+ * Lists all existing entries beneath an existing directory `rootGuestPath`
+ * inside `imagePath` so `--bundle-host-python` can cleanly replace an existing
+ * `/opt/python` directory inside the image copy.
+ */
+function listImageSubtree(debugfsBin, imagePath, rootGuestPath, workDir) {
+  const dirsToVisit = [rootGuestPath];
+  const files = [];
+  const dirs = [];
+  let batchNo = 0;
+  while (dirsToVisit.length > 0) {
+    const batch = dirsToVisit.splice(0, dirsToVisit.length);
+    const cmdLines = [];
+    for (const d of batch) {
+      cmdLines.push(`cd "${escapeDebugfsArg(d)}"`, 'pwd', 'ls -p');
     }
-    if (
-      builderUid === null ||
-      builderGid === null ||
-      desired.uid !== builderUid ||
-      desired.gid !== builderGid
-    ) {
-      const quoted = `"${escapeDebugfsArg(guestPath)}"`;
-      cmdLines.push(`set_inode_field ${quoted} uid ${desired.uid}`);
-      cmdLines.push(`set_inode_field ${quoted} gid ${desired.gid}`);
+    batchNo += 1;
+    const cmdPath = join(workDir, `list-subtree-${batchNo}.debugfs`);
+    writeFileSync(cmdPath, `${cmdLines.join('\n')}\n`, { mode: 0o600 });
+    const res = runToolFull(debugfsBin, ['-f', cmdPath, imagePath]);
+    const fatal = res.stderr
+      .split(/\r?\n/)
+      .find((line) => line.trim() !== '' && !DEBUGFS_BANNER_LINE.test(line));
+    if (fatal !== undefined) {
+      throw new Error(
+        `debugfs subtree listing failed: ${fatal.trim().slice(0, 600)}`,
+      );
+    }
+    let cur = null;
+    for (const line of res.stdout.split(/\r?\n/)) {
+      const pm = /^\[pwd\]\s+INODE:\s+\d+\s+PATH:\s+(.+)$/.exec(line);
+      if (pm) {
+        cur = pm[1];
+        continue;
+      }
+      if (cur === null) continue;
+      const lm = /^\/(\d+)\/([0-7]+)\/(\d+)\/(\d+)\/(.+)\/(\d*)\/$/.exec(line);
+      if (!lm) continue;
+      const modeOct = parseInt(lm[2], 8);
+      const name = lm[5];
+      if (name === '.' || name === '..') continue;
+      const child = cur === '/' ? `/${name}` : `${cur}/${name}`;
+      if ((modeOct & 0o170000) === 0o040000) {
+        dirs.push(child);
+        dirsToVisit.push(child);
+      } else {
+        files.push(child);
+      }
     }
   }
-  if (cmdLines.length === 0) return;
-
-  const cmdPath = join(workDir, 'restore-owners.debugfs');
-  writeFileSync(cmdPath, `${cmdLines.join('\n')}\n`, { mode: 0o600 });
-  const res = runToolFull(debugfsBin, ['-w', '-f', cmdPath, outputImagePath]);
-  const fatalLine = res.stderr
-    .split(/\r?\n/)
-    .find((line) => line.trim() !== '' && !DEBUGFS_BANNER_LINE.test(line));
-  if (fatalLine !== undefined) {
-    throw new Error(
-      `debugfs ownership restoration failed: ${fatalLine.trim().slice(0, 600)}`,
-    );
-  }
+  return { files, dirs };
 }
 
-function bundleHostPythonIntoTree(
-  treeDir,
-  { pythonBin, pythonLibDir, lddBin },
-) {
+/**
+ * Stages host Python 3, its stdlib, and `ldd`-resolved shared libraries into a
+ * private staging directory and enumerates entries to inject under `/opt/python`.
+ */
+function stageHostPythonBundle(stageRoot, { pythonBin, pythonLibDir, lddBin }) {
   const realPy = realpathSync(pythonBin);
   const pyName = basename(realPy);
-  const pyRoot = ensureSafeExtractPath(treeDir, '/opt/python', {
-    createParents: false,
-    checkLeafAsDir: true,
-  });
-  rmSync(pyRoot, { recursive: true, force: true });
+  const pyRoot = join(stageRoot, 'python');
   const pyBinDir = join(pyRoot, 'bin');
   const pyLibTargetDir = join(pyRoot, 'lib');
   mkdirSync(pyBinDir, { recursive: true, mode: 0o755 });
   mkdirSync(pyLibTargetDir, { recursive: true, mode: 0o755 });
+
   copyFileSync(realPy, join(pyBinDir, pyName));
   chmodSync(join(pyBinDir, pyName), 0o755);
   if (pyName !== 'python3') {
@@ -454,6 +417,7 @@ function bundleHostPythonIntoTree(
       }
     }
   }
+
   const copiedLibs = new Map();
   const aliases = new Set();
   for (const binPath of binariesToScan) {
@@ -473,6 +437,7 @@ function bundleHostPythonIntoTree(
   }
   for (const [srcLib, destName] of copiedLibs) {
     copyFileSync(srcLib, join(pyLibTargetDir, destName));
+    chmodSync(join(pyLibTargetDir, destName), 0o755);
   }
   for (const pair of aliases) {
     const [alias, target] = pair.split('=>');
@@ -480,7 +445,40 @@ function bundleHostPythonIntoTree(
       symlinkSync(target, join(pyLibTargetDir, alias));
     }
   }
-  return [...copiedLibs.values()].sort();
+
+  const dirs = [];
+  const files = [];
+  const symlinks = [];
+  const walk = (hostDir, guestDir) => {
+    for (const name of readdirSync(hostDir).sort()) {
+      const hostChild = join(hostDir, name);
+      const guestChild = `${guestDir}/${name}`;
+      const st = lstatSync(hostChild);
+      if (st.isSymbolicLink()) {
+        symlinks.push({
+          guestPath: guestChild,
+          linkTarget: readlinkSync(hostChild),
+        });
+      } else if (st.isDirectory()) {
+        dirs.push({ guestPath: guestChild, mode: st.mode & 0o777 || 0o755 });
+        walk(hostChild, guestChild);
+      } else if (st.isFile()) {
+        files.push({
+          hostPath: hostChild,
+          guestPath: guestChild,
+          mode: st.mode & 0o777,
+        });
+      }
+    }
+  };
+  walk(pyRoot, '/opt/python');
+
+  return {
+    bundledLibraries: [...copiedLibs.values()].sort(),
+    dirs,
+    files,
+    symlinks,
+  };
 }
 
 /**
@@ -497,8 +495,10 @@ export function deriveExt4GuestImage({
   guestRunnerPath = DEFAULT_GUEST_RUNNER_SRC,
   guestInitPath = DEFAULT_GUEST_INIT_SRC,
   extraFiles = [],
-  imageSizeMib = DEFAULT_IMAGE_SIZE_MIB,
+  imageSizeMib = null,
   debugfsBin = null,
+  resize2fsBin = null,
+  tune2fsBin = null,
   mkfsExt4Bin = null,
   bundleHostPython = false,
   pythonBin = '/usr/bin/python3',
@@ -509,14 +509,16 @@ export function deriveExt4GuestImage({
   if (!Array.isArray(approvedRoots) || approvedRoots.length === 0) {
     throw new Error('deriveExt4GuestImage requires non-empty approvedRoots');
   }
-  if (
-    !Number.isSafeInteger(imageSizeMib) ||
-    imageSizeMib < MIN_IMAGE_SIZE_MIB ||
-    imageSizeMib > MAX_IMAGE_SIZE_MIB
-  ) {
-    throw new Error(
-      `imageSizeMib must be an integer in ${MIN_IMAGE_SIZE_MIB}..${MAX_IMAGE_SIZE_MIB}`,
-    );
+  if (imageSizeMib !== null && imageSizeMib !== undefined) {
+    if (
+      !Number.isSafeInteger(imageSizeMib) ||
+      imageSizeMib < MIN_IMAGE_SIZE_MIB ||
+      imageSizeMib > MAX_IMAGE_SIZE_MIB
+    ) {
+      throw new Error(
+        `imageSizeMib must be an integer in ${MIN_IMAGE_SIZE_MIB}..${MAX_IMAGE_SIZE_MIB}`,
+      );
+    }
   }
   if (expectedBaseSha256 !== null && !SHA256_RE.test(expectedBaseSha256)) {
     throw new Error(
@@ -564,6 +566,16 @@ export function deriveExt4GuestImage({
   }
   if (canonicalOut === baseInfo.path) {
     throw new Error('outputImagePath must differ from baseImagePath');
+  }
+
+  const targetBytes =
+    imageSizeMib !== null && imageSizeMib !== undefined
+      ? imageSizeMib * 1024 * 1024
+      : baseInfo.bytes;
+  if (targetBytes < baseInfo.bytes) {
+    throw new Error(
+      `imageSizeMib (${imageSizeMib} MiB) is smaller than baseImagePath (${baseInfo.bytes} bytes); shrinking is not supported`,
+    );
   }
 
   const injectPlan = [
@@ -614,14 +626,30 @@ export function deriveExt4GuestImage({
     return { ...item, target, srcReal: info.path, sha256: info.sha256 };
   });
 
+  // Preserve compatibility with callers passing explicit --mkfs-ext4-bin.
+  if (mkfsExt4Bin !== null && mkfsExt4Bin !== undefined) {
+    findExecutable(mkfsExt4Bin, ['mkfs.ext4', 'mke2fs']);
+  }
+
   const resolvedDebugfs = findExecutable(debugfsBin, ['debugfs']);
   if (!resolvedDebugfs) {
     throw new Error('debugfs executable not found (e2fsprogs required)');
   }
-  const resolvedMkfs = findExecutable(mkfsExt4Bin, ['mkfs.ext4', 'mke2fs']);
-  if (!resolvedMkfs) {
-    throw new Error('mkfs.ext4 executable not found (e2fsprogs required)');
+  const toolSiblingDir = dirname(resolvedDebugfs);
+  const needsResize = targetBytes > baseInfo.bytes;
+  const resolvedResize2fs = needsResize
+    ? findExecutable(resize2fsBin, ['resize2fs'], [toolSiblingDir])
+    : null;
+  if (needsResize && !resolvedResize2fs) {
+    throw new Error(
+      'resize2fs executable not found for image growth (e2fsprogs required)',
+    );
   }
+  const resolvedTune2fs = findExecutable(
+    tune2fsBin,
+    ['tune2fs'],
+    [toolSiblingDir],
+  );
 
   const outParent = dirname(absOut);
   const outParentCanonical = canonicalizePreservingLeaf(outParent);
@@ -645,8 +673,8 @@ export function deriveExt4GuestImage({
 
   const workDir = realpathSync(mkdtempSync(join(tempParentDir, 'qc-vm-img-')));
   chmodSync(workDir, 0o700);
-  const extractTree = join(workDir, 'rootfs');
-  mkdirSync(extractTree, { mode: 0o755 });
+  const stagedDir = join(workDir, 'staged');
+  mkdirSync(stagedDir, { mode: 0o700 });
   const tmpOut = join(
     realOutParent,
     `.derive.${process.pid}.${Date.now()}.tmp`,
@@ -654,49 +682,46 @@ export function deriveExt4GuestImage({
   let bundledLibraries = [];
 
   try {
-    const extract = runToolFull(resolvedDebugfs, [
-      '-R',
-      `rdump / "${escapeDebugfsArg(extractTree)}"`,
-      baseInfo.path,
-    ]);
-    const fatalLine = extract.stderr
-      .split(/\r?\n/)
-      .find(
-        (line) => line.trim() !== '' && !BENIGN_DEBUGFS_STDERR_LINE.test(line),
-      );
-    if (fatalLine !== undefined) {
-      throw new Error(
-        `debugfs extraction failed: ${fatalLine.trim().slice(0, 600)}`,
-      );
-    }
-    if (readdirSync(extractTree).length === 0) {
-      throw new Error('debugfs extraction produced an empty rootfs tree');
+    // 1. Copy the read-only golden base image into an exclusive private temp file.
+    const tmpFd = openSync(
+      tmpOut,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_EXCL |
+        fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    closeSync(tmpFd);
+    copyFileSync(baseInfo.path, tmpOut);
+    chmodSync(tmpOut, 0o600);
+
+    // 2. Grow offline ext4 filesystem copy when a larger --size-mib was requested.
+    if (needsResize) {
+      truncateSync(tmpOut, targetBytes);
+      runToolFull(resolvedResize2fs, ['-f', tmpOut]);
     }
 
-    // When non-root `debugfs rdump` could not chown extracted files on the host,
-    // capture exact UID/GID ownership from the read-only golden source now so
-    // we can restore every preserved inode after `mkfs.ext4 -d` repacks them.
-    const hasOwnershipWarnings = extract.stderr
-      .split(/\r?\n/)
-      .some((line) => DEBUGFS_OWNERSHIP_WARN_LINE.test(line));
-    let baseOwners = null;
-    if (hasOwnershipWarnings) {
-      const extractedTree = collectExtractTreeEntries(extractTree);
-      baseOwners = readBaseOwnershipMap(
-        resolvedDebugfs,
-        baseInfo.path,
-        extractedTree.dirs,
-        workDir,
+    // 3. Stage verified copies of all injected files and verify post-copy SHA-256
+    // so injectedFiles[].sha256 attests the exact bytes written into the image.
+    const stagedInjects = verifiedInjects.map((item, idx) => {
+      const stagedPath = join(stagedDir, `inject-${idx}`);
+      copyFileSync(item.srcReal, stagedPath);
+      chmodSync(stagedPath, 0o600);
+      const writtenInfo = sha256SingleLinkRegularFile(
+        stagedPath,
+        item.label,
+        realVault,
       );
-      for (const guestPath of extractedTree.entries) {
-        if (!baseOwners.has(guestPath)) {
-          throw new Error(
-            `cannot preserve non-root UID/GID ownership: missing base metadata for ${guestPath}`,
-          );
-        }
+      if (writtenInfo.sha256 !== item.sha256) {
+        throw new Error(
+          `${item.label} changed content between pre-hash and copy`,
+        );
       }
-    }
+      return { ...item, stagedPath };
+    });
 
+    // 4. Optional host Python bundling into private staging directory.
+    let pythonBundle = null;
     if (bundleHostPython) {
       const resolvedLdd = findExecutable(lddBin, ['ldd']);
       if (!resolvedLdd) {
@@ -722,86 +747,200 @@ export function deriveExt4GuestImage({
           );
         }
       }
-      bundledLibraries = bundleHostPythonIntoTree(extractTree, {
+      pythonBundle = stageHostPythonBundle(join(workDir, 'py-stage'), {
         pythonBin,
         pythonLibDir: pyLib,
         lddBin: resolvedLdd,
       });
+      bundledLibraries = pythonBundle.bundledLibraries;
     }
 
-    for (const item of verifiedInjects) {
-      // Verify every ancestor segment BEFORE creating directories so an
-      // unpacked symlink ancestor cannot create host directories outside extractTree.
-      const safeDest = ensureSafeExtractPath(extractTree, item.target, {
-        createParents: true,
-        checkLeafAsDir: false,
-      });
-      try {
-        const existing = lstatSync(safeDest);
-        if (existing.isSymbolicLink() || existing.isFile()) {
-          unlinkSync(safeDest);
-        } else {
-          throw new Error(
-            `cannot overwrite non-file path inside image: ${item.target}`,
-          );
-        }
-      } catch (error) {
-        if (error.code !== 'ENOENT') throw error;
+    // 5. Inspect in-image ancestors & target leaves via read-only debugfs stat
+    // before mutating tmpOut, refusing symlinks or non-directories along ancestors.
+    const ancestorDirs = new Set();
+    const leafTargets = new Set();
+    for (const item of stagedInjects) {
+      for (const dir of ancestorDirsOf(item.target)) {
+        ancestorDirs.add(dir);
       }
-      copyFileSync(item.srcReal, safeDest);
-      chmodSync(safeDest, item.mode);
-      const writtenInfo = sha256SingleLinkRegularFile(
-        safeDest,
-        item.label,
-        realVault,
-      );
-      if (writtenInfo.sha256 !== item.sha256) {
+      leafTargets.add(item.target);
+    }
+    if (bundleHostPython) {
+      ancestorDirs.add('/opt');
+      leafTargets.add('/opt/python');
+    }
+
+    const inspectList = [
+      ...Array.from(ancestorDirs).sort((a, b) => a.length - b.length),
+      ...Array.from(leafTargets).sort(),
+    ];
+    const pathTypes = statImagePaths(
+      resolvedDebugfs,
+      tmpOut,
+      inspectList,
+      workDir,
+    );
+
+    for (const dir of ancestorDirs) {
+      const t = pathTypes.get(dir) ?? 'missing';
+      if (t === 'symlink') {
         throw new Error(
-          `${item.label} changed content between pre-hash and copy`,
+          `injected path parent traverses symlink inside image: ${dir}`,
+        );
+      }
+      if (t !== 'directory' && t !== 'missing') {
+        throw new Error(`cannot traverse non-directory inside image: ${dir}`);
+      }
+    }
+    if (bundleHostPython) {
+      const pyType = pathTypes.get('/opt/python') ?? 'missing';
+      if (pyType === 'symlink') {
+        throw new Error(
+          'injected path parent traverses symlink inside image: /opt/python',
+        );
+      }
+      if (pyType !== 'directory' && pyType !== 'missing') {
+        throw new Error(
+          'cannot traverse non-directory inside image: /opt/python',
+        );
+      }
+    }
+    for (const item of stagedInjects) {
+      const t = pathTypes.get(item.target) ?? 'missing';
+      if (t !== 'missing' && t !== 'regular' && t !== 'symlink') {
+        throw new Error(
+          `cannot overwrite non-file path inside image: ${item.target}`,
         );
       }
     }
 
-    const tmpFd = openSync(
-      tmpOut,
-      fsConstants.O_WRONLY |
-        fsConstants.O_CREAT |
-        fsConstants.O_EXCL |
-        fsConstants.O_NOFOLLOW,
-      0o600,
-    );
-    closeSync(tmpFd);
-    truncateSync(tmpOut, imageSizeMib * 1024 * 1024);
+    // 6. Inject files & optional Python bundle directly into tmpOut in a single
+    // batched `debugfs -w -f` call, setting explicit `0:0` ownership and modes.
+    const writeCmds = [];
+    const createdDirs = new Set();
+    const ensureDirCmd = (dirPath, mode = 0o755) => {
+      if (createdDirs.has(dirPath)) return;
+      if ((pathTypes.get(dirPath) ?? 'missing') === 'directory') {
+        createdDirs.add(dirPath);
+        return;
+      }
+      const q = `"${escapeDebugfsArg(dirPath)}"`;
+      writeCmds.push(`mkdir ${q}`);
+      writeCmds.push(
+        `set_inode_field ${q} mode 040${mode.toString(8).padStart(3, '0')}`,
+      );
+      writeCmds.push(`set_inode_field ${q} uid 0`);
+      writeCmds.push(`set_inode_field ${q} gid 0`);
+      createdDirs.add(dirPath);
+    };
 
-    const mkfsArgs =
-      basename(resolvedMkfs) === 'mke2fs'
-        ? [
-            '-t',
-            'ext4',
-            '-F',
-            '-b',
-            '4096',
-            '-U',
-            'random',
-            '-d',
-            extractTree,
-            tmpOut,
-          ]
-        : ['-F', '-b', '4096', '-U', 'random', '-d', extractTree, tmpOut];
-    runTool(resolvedMkfs, mkfsArgs);
-    if (baseOwners !== null) {
-      const finalTree = collectExtractTreeEntries(extractTree);
-      const injectedTargets = new Set(verifiedInjects.map((i) => i.target));
-      restoreOutputOwnership(resolvedDebugfs, tmpOut, {
-        finalEntries: finalTree.entries,
-        baseOwners,
-        injectedTargets,
-        bundleHostPython,
-        workDir,
-      });
+    for (const dir of Array.from(ancestorDirs).sort(
+      (a, b) => a.split('/').length - b.split('/').length,
+    )) {
+      ensureDirCmd(dir, 0o755);
     }
+
+    if (pythonBundle !== null) {
+      if (pathTypes.get('/opt/python') === 'directory') {
+        const existingPy = listImageSubtree(
+          resolvedDebugfs,
+          tmpOut,
+          '/opt/python',
+          workDir,
+        );
+        for (const f of existingPy.files) {
+          writeCmds.push(`rm "${escapeDebugfsArg(f)}"`);
+        }
+        for (const d of existingPy.dirs.sort((a, b) => b.length - a.length)) {
+          writeCmds.push(`rmdir "${escapeDebugfsArg(d)}"`);
+        }
+        writeCmds.push('rmdir "/opt/python"');
+        pathTypes.set('/opt/python', 'missing');
+      }
+      ensureDirCmd('/opt/python', 0o755);
+      for (const d of pythonBundle.dirs) {
+        const q = `"${escapeDebugfsArg(d.guestPath)}"`;
+        writeCmds.push(`mkdir ${q}`);
+        writeCmds.push(
+          `set_inode_field ${q} mode 040${d.mode.toString(8).padStart(3, '0')}`,
+        );
+        writeCmds.push(`set_inode_field ${q} uid 0`);
+        writeCmds.push(`set_inode_field ${q} gid 0`);
+      }
+      for (const f of pythonBundle.files) {
+        const qSrc = `"${escapeDebugfsArg(f.hostPath)}"`;
+        const qDst = `"${escapeDebugfsArg(f.guestPath)}"`;
+        writeCmds.push(`write ${qSrc} ${qDst}`);
+        writeCmds.push(
+          `set_inode_field ${qDst} mode 0100${f.mode.toString(8).padStart(3, '0')}`,
+        );
+        writeCmds.push(`set_inode_field ${qDst} uid 0`);
+        writeCmds.push(`set_inode_field ${qDst} gid 0`);
+      }
+      for (const s of pythonBundle.symlinks) {
+        const qDst = `"${escapeDebugfsArg(s.guestPath)}"`;
+        const qTarget = `"${escapeDebugfsArg(s.linkTarget)}"`;
+        writeCmds.push(`symlink ${qDst} ${qTarget}`);
+        writeCmds.push(`set_inode_field ${qDst} uid 0`);
+        writeCmds.push(`set_inode_field ${qDst} gid 0`);
+      }
+    }
+
+    const writtenTargets = new Set();
+    for (const item of stagedInjects) {
+      const qSrc = `"${escapeDebugfsArg(item.stagedPath)}"`;
+      const qDst = `"${escapeDebugfsArg(item.target)}"`;
+      const existingType = pathTypes.get(item.target) ?? 'missing';
+      if (
+        existingType === 'regular' ||
+        existingType === 'symlink' ||
+        writtenTargets.has(item.target)
+      ) {
+        writeCmds.push(`rm ${qDst}`);
+      }
+      writeCmds.push(`write ${qSrc} ${qDst}`);
+      writeCmds.push(
+        `set_inode_field ${qDst} mode 0100${item.mode.toString(8).padStart(3, '0')}`,
+      );
+      writeCmds.push(`set_inode_field ${qDst} uid 0`);
+      writeCmds.push(`set_inode_field ${qDst} gid 0`);
+      writtenTargets.add(item.target);
+    }
+
+    const injectCmdPath = join(workDir, 'inject.debugfs');
+    writeFileSync(injectCmdPath, `${writeCmds.join('\n')}\n`, { mode: 0o600 });
+    const injectRes = runToolFull(resolvedDebugfs, [
+      '-w',
+      '-f',
+      injectCmdPath,
+      tmpOut,
+    ]);
+    const injectFatal = injectRes.stderr
+      .split(/\r?\n/)
+      .find((line) => line.trim() !== '' && !DEBUGFS_BANNER_LINE.test(line));
+    if (injectFatal !== undefined) {
+      const detail = injectFatal.trim().slice(0, 600);
+      const spaceHint = SPACE_ERR_RE.test(detail)
+        ? ' (try a larger --size-mib)'
+        : '';
+      throw new Error(`debugfs injection failed: ${detail}${spaceHint}`);
+    }
+
+    // 7. Assign a fresh filesystem UUID when tune2fs is available (updating
+    // ext4 journal & metadata_csum cleanly so e2fsck passes with 0 errors).
+    if (resolvedTune2fs) {
+      try {
+        runToolFull(resolvedTune2fs, ['-U', 'random', tmpOut]);
+      } catch {
+        // Best-effort UUID randomization.
+      }
+    }
+
     chmodSync(tmpOut, 0o644);
 
+    // 8. Re-hash read-only golden base and verify tmpOut BEFORE publishing so
+    // linkSync is the single publication point and transient temp-unlink EBUSY
+    // cannot fail the call.
     const afterBase = sha256SingleLinkRegularFile(
       baseInfo.path,
       'baseImagePath',
@@ -811,8 +950,6 @@ export function deriveExt4GuestImage({
       throw new Error('golden baseImagePath changed digest during derivation');
     }
 
-    // Hash and verify tmpOut BEFORE publishing so linkSync is the single
-    // publication point and a transient EBUSY on temp unlink cannot fail the call.
     const outInfo = sha256SingleLinkRegularFile(
       tmpOut,
       'outputImagePath',
@@ -865,8 +1002,10 @@ function parseCliArgs(argv) {
     approvedRoots: [],
     vaultDir: null,
     workloadPath: null,
-    imageSizeMib: DEFAULT_IMAGE_SIZE_MIB,
+    imageSizeMib: null,
     debugfsBin: null,
+    resize2fsBin: null,
+    tune2fsBin: null,
     mkfsExt4Bin: null,
     bundleHostPython: false,
     error: null,
@@ -925,6 +1064,16 @@ function parseCliArgs(argv) {
       if (v === null) break;
       opts.debugfsBin = v;
       i += 1;
+    } else if (arg === '--resize2fs-bin') {
+      const v = take(arg, i);
+      if (v === null) break;
+      opts.resize2fsBin = v;
+      i += 1;
+    } else if (arg === '--tune2fs-bin') {
+      const v = take(arg, i);
+      if (v === null) break;
+      opts.tune2fsBin = v;
+      i += 1;
     } else if (arg === '--mkfs-ext4-bin') {
       const v = take(arg, i);
       if (v === null) break;
@@ -944,7 +1093,7 @@ function main(argv) {
   if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) {
     process.stdout.write(
       'Usage:\n' +
-        '  node scripts/verify-pr-vm-image.mjs derive --base <golden.ext4> --out <derived.ext4> --approved-root <dir> [--expected-base-sha256 <hex>] [--vault-dir <dir>] [--workload <script>] [--size-mib <n>] [--debugfs-bin <path>] [--mkfs-ext4-bin <path>] [--bundle-host-python]\n',
+        '  node scripts/verify-pr-vm-image.mjs derive --base <golden.ext4> --out <derived.ext4> --approved-root <dir> [--expected-base-sha256 <hex>] [--vault-dir <dir>] [--workload <script>] [--size-mib <n>] [--debugfs-bin <path>] [--resize2fs-bin <path>] [--tune2fs-bin <path>] [--bundle-host-python]\n',
     );
     return 0;
   }
@@ -986,6 +1135,8 @@ function main(argv) {
       extraFiles,
       imageSizeMib: opts.imageSizeMib,
       debugfsBin: opts.debugfsBin,
+      resize2fsBin: opts.resize2fsBin,
+      tune2fsBin: opts.tune2fsBin,
       mkfsExt4Bin: opts.mkfsExt4Bin,
       bundleHostPython: opts.bundleHostPython,
     });

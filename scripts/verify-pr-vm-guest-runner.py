@@ -36,6 +36,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -336,6 +337,17 @@ def materialize_bundle(bundle_path, repo_dir, base_oid, head_oid):
     }
 
 
+def _force_write_text(path, text):
+    """Writes a harness-owned artifact even if a workload replaced the path
+    with a symlink or directory."""
+    p = Path(path)
+    if p.is_symlink() or p.is_file():
+        p.unlink()
+    elif p.is_dir():
+        shutil.rmtree(p)
+    p.write_text(text, encoding="utf-8")
+
+
 def write_runtime_log(
     artifacts_dir,
     *,
@@ -350,6 +362,8 @@ def write_runtime_log(
 ):
     os.makedirs(artifacts_dir, mode=0o700, exist_ok=True)
     logs_dir = Path(artifacts_dir) / "logs"
+    if logs_dir.is_symlink() or (logs_dir.exists() and not logs_dir.is_dir()):
+        logs_dir.unlink()
     logs_dir.mkdir(mode=0o700, exist_ok=True)
     runtime_log = {
         "schemaVersion": "verify-pr-guest-runtime-v1",
@@ -369,8 +383,9 @@ def write_runtime_log(
         "checks": checks,
         "error": error_message,
     }
-    (logs_dir / "guest-runtime.json").write_text(
-        json.dumps(runtime_log, indent=2) + "\n", encoding="utf-8"
+    _force_write_text(
+        logs_dir / "guest-runtime.json",
+        json.dumps(runtime_log, indent=2) + "\n",
     )
 
 
@@ -418,19 +433,11 @@ def write_self_test_artifacts(
     passed_count = len(checks) - len(failed)
     total_count = len(checks)
 
-    write_runtime_log(
-        artifacts_dir,
-        manifest=manifest,
-        isolation=isolation,
-        entropy_status=entropy_status,
-        materialized=materialized,
-        bridge_url=bridge_url,
-        model_probe_status=model_probe_status,
-        checks=checks,
-        error_message=error_message,
-    )
-    (Path(artifacts_dir) / "verdict.txt").write_text(f"{verdict}\n", encoding="utf-8")
-    (Path(artifacts_dir) / "assertions.json").write_text(
+    # Write verdict/report/assertions BEFORE guest-runtime.json so a sabotaged
+    # log path can never leave a workload-authored merge-ready verdict intact.
+    _force_write_text(Path(artifacts_dir) / "verdict.txt", f"{verdict}\n")
+    _force_write_text(
+        Path(artifacts_dir) / "assertions.json",
         json.dumps(
             {
                 "pass": passed_count,
@@ -452,7 +459,6 @@ def write_self_test_artifacts(
             indent=2,
         )
         + "\n",
-        encoding="utf-8",
     )
     changed_count = (
         len(materialized.get("changedFiles", [])) if isinstance(materialized, dict) else 0
@@ -472,9 +478,7 @@ def write_self_test_artifacts(
     if error_message:
         report_lines.append(f"- Guest lifecycle error: `{error_message}`")
     report_lines.append("")
-    (Path(artifacts_dir) / "report.md").write_text(
-        "\n".join(report_lines), encoding="utf-8"
-    )
+    _force_write_text(Path(artifacts_dir) / "report.md", "\n".join(report_lines))
     comment_lines = [
         f"{verdict} ({passed_count}/{total_count} guest checks passed for `{manifest['headRefOid']}`)"
     ]
@@ -486,7 +490,26 @@ def write_self_test_artifacts(
             ]
         )
     comment_md = "\n".join(comment_lines) + "\n"
-    (Path(artifacts_dir) / "comment.md").write_text(comment_md, encoding="utf-8")
+    _force_write_text(Path(artifacts_dir) / "comment.md", comment_md)
+
+    try:
+        write_runtime_log(
+            artifacts_dir,
+            manifest=manifest,
+            isolation=isolation,
+            entropy_status=entropy_status,
+            materialized=materialized,
+            bridge_url=bridge_url,
+            model_probe_status=model_probe_status,
+            checks=checks,
+            error_message=error_message,
+        )
+    except OSError as log_exc:
+        if error_message is None:
+            raise
+        sys.stderr.write(
+            f"guest-runner: writing guest-runtime.json after error failed: {log_exc}\n"
+        )
 
 
 def run_guest_round(args):

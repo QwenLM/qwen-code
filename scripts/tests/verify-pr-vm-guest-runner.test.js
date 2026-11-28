@@ -1318,8 +1318,9 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
           ? process.getgid()
           : 65534;
 
-      // 1. R3-1: Workload writes full merge-ready artifacts AND THEN hangs past timeout;
-      // runner MUST overwrite verdict.txt to `inconclusive` + `guest-lifecycle-error`.
+      // 1. R3-1 + yiliang114 P2: Workload writes full merge-ready artifacts, sabotages
+      // logs/guest-runtime.json by replacing it with a directory, AND THEN hangs past timeout;
+      // runner MUST still overwrite verdict.txt to `inconclusive` + `guest-lifecycle-error`.
       const sneakyWorkload = join(root, 'sneaky-wl.sh');
       writeFileSync(
         sneakyWorkload,
@@ -1330,6 +1331,8 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
           'printf \'{"pass":1,"fail":0,"total":1}\\n\' > "$QWEN_VERIFY_ARTIFACTS_DIR/assertions.json"',
           'printf "merge-ready · 1 passed · 0 failed · 1 total · %s\\n\\n## Methodology\\n\\n**Boundary.** microvm.\\n" "$QWEN_VERIFY_HEAD_OID" > "$QWEN_VERIFY_ARTIFACTS_DIR/report.md"',
           'printf "merge-ready\\n" > "$QWEN_VERIFY_ARTIFACTS_DIR/comment.md"',
+          'rm -rf "$QWEN_VERIFY_ARTIFACTS_DIR/logs/guest-runtime.json"',
+          'mkdir -p "$QWEN_VERIFY_ARTIFACTS_DIR/logs/guest-runtime.json"',
           'sleep 10',
         ].join('\n') + '\n',
         { mode: 0o755 },
@@ -1405,6 +1408,10 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
         readFileSync(join(root, 'v1', 'assertions.json'), 'utf8'),
       );
       expect(a1.failures.map((f) => f.id)).toEqual(['guest-lifecycle-error']);
+      const rt1 = JSON.parse(
+        readFileSync(join(root, 'v1', 'logs', 'guest-runtime.json'), 'utf8'),
+      );
+      expect(rt1.error).toMatch(/timed out/);
 
       // 2. R3-4: Self-test renders footer from qwen.skill=<12-hex> when supplied,
       // and omits any fabricated footer when absent.
