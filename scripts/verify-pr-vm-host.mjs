@@ -160,7 +160,7 @@ export function renderVfkitSeatbeltProfile({ vfkitBin = null } = {}) {
   ].join('\n');
 }
 
-function canonicalizePreservingLeaf(absPath) {
+export function canonicalizePreservingLeaf(absPath) {
   const leaf = basename(absPath);
   let cursor = dirname(absPath);
   const tail = [];
@@ -179,7 +179,7 @@ function canonicalizePreservingLeaf(absPath) {
   }
 }
 
-function canonicalizeVaultDir(vaultDir) {
+export function canonicalizeVaultDir(vaultDir) {
   if (!vaultDir) return null;
   const abs = resolve(vaultDir);
   try {
@@ -189,7 +189,7 @@ function canonicalizeVaultDir(vaultDir) {
   }
 }
 
-function normalizeApprovedRoots(approvedRoots) {
+export function normalizeApprovedRoots(approvedRoots) {
   if (!Array.isArray(approvedRoots)) return [];
   return approvedRoots
     .filter((root) => typeof root === 'string' && root.trim() !== '')
@@ -834,6 +834,14 @@ function assertApprovedDestination(
   return abs;
 }
 
+function isDirWithinOrEqualApprovedRoots(dirPath, normalizedRoots) {
+  const canonical = canonicalizePreservingLeaf(resolve(dirPath));
+  return (
+    normalizedRoots.includes(canonical) ||
+    isPathWithinApprovedRoots(dirPath, normalizedRoots)
+  );
+}
+
 function ensureApprovedDirHierarchy(
   label,
   dirPath,
@@ -841,12 +849,20 @@ function ensureApprovedDirHierarchy(
   { approvedRoots, realVault, createdDirs = null, requirePrivateLeaf = false },
 ) {
   const normalizedRoots = normalizeApprovedRoots(approvedRoots);
-  const abs = assertApprovedDestination(
-    label,
-    dirPath,
-    normalizedRoots,
-    realVault,
-  );
+  if (typeof dirPath !== 'string' || dirPath.trim() === '') {
+    throw new Error(`${label} path is required`);
+  }
+  const abs = resolve(dirPath);
+  const canonicalAbs = canonicalizePreservingLeaf(abs);
+  if (!isDirWithinOrEqualApprovedRoots(abs, normalizedRoots)) {
+    throw new Error(`${label} ${abs} is outside approvedRoots`);
+  }
+  if (
+    realVault &&
+    (withinDir(realVault, abs) || withinDir(realVault, canonicalAbs))
+  ) {
+    throw new Error(`${label} ${canonicalAbs} must not reside inside vaultDir`);
+  }
   const missing = [];
   let cursor = abs;
   while (true) {
@@ -888,11 +904,12 @@ function ensureApprovedDirHierarchy(
   for (let i = missing.length - 1; i >= 0; i -= 1) {
     const nextDir = missing[i];
     mkdirSync(nextDir, { mode });
-    chmodSync(nextDir, mode);
+    // Record immediately after mkdirSync so a failing chmodSync still rolls back.
     if (createdDirs) createdDirs.push(nextDir);
+    chmodSync(nextDir, mode);
   }
   const realDir = realpathSync(abs);
-  if (!isPathWithinApprovedRoots(realDir, normalizedRoots)) {
+  if (!isDirWithinOrEqualApprovedRoots(realDir, normalizedRoots)) {
     throw new Error(`${label} escaped approvedRoots: ${realDir}`);
   }
   if (realVault && withinDir(realVault, realDir)) {

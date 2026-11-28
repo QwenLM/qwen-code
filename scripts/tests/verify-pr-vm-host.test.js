@@ -581,6 +581,20 @@ describe('verify-pr-vm-host asset staging, rollback, and runner integration', ()
       expect(dstStat.nlink).toBe(1);
       expect(dstStat.ino).not.toBe(srcStat.ino);
 
+      // Direct child of approvedRoot (parent === approvedRoot) is accepted,
+      // while targeting approvedRoot itself for a file is still refused.
+      const directChild = copyIsolatedAsset(src, join(approved, 'kernel'), {
+        approvedRoots: [approved],
+        vaultDir: vault,
+        mode: 0o640,
+      });
+      expect(existsSync(directChild.path)).toBe(true);
+      expect(() =>
+        copyIsolatedAsset(src, approved, {
+          approvedRoots: [approved],
+        }),
+      ).toThrow(/outside approvedRoots/);
+
       // Refuses overwrite of existing destination
       expect(() =>
         copyIsolatedAsset(src, dst, { approvedRoots: [approved] }),
