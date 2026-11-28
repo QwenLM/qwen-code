@@ -1,6 +1,7 @@
 export class Stream<T> implements AsyncIterable<T> {
   private returned: (() => void) | undefined;
-  private queue: T[] = [];
+  private queue: Array<T | undefined> = [];
+  private queueHead = 0;
   private readResolve: ((result: IteratorResult<T>) => void) | undefined;
   private readReject: ((error: Error) => void) | undefined;
   private isDone = false;
@@ -20,10 +21,22 @@ export class Stream<T> implements AsyncIterable<T> {
   }
 
   async next(): Promise<IteratorResult<T>> {
-    if (this.queue.length > 0) {
+    if (this.queueHead < this.queue.length) {
+      const value = this.queue[this.queueHead] as T;
+      this.queue[this.queueHead++] = undefined;
+      if (this.queueHead === this.queue.length) {
+        this.queue = [];
+        this.queueHead = 0;
+      } else if (
+        this.queueHead >= 1024 &&
+        this.queueHead * 2 >= this.queue.length
+      ) {
+        this.queue = this.queue.slice(this.queueHead);
+        this.queueHead = 0;
+      }
       return Promise.resolve({
         done: false,
-        value: this.queue.shift()!,
+        value,
       });
     }
     if (this.hasError) {
