@@ -23,12 +23,12 @@ vi.mock('@opentui/core', () => ({
 
 import {
   describePermissionRule,
+  formatScopeRow,
   getPermissionsTabs,
-  getPermissionScopeItems,
   permissionScopeLabel,
   validateWorkspaceDirectory,
 } from './dialogs-permissions.js';
-import { SettingScope } from '../../config/settings.js';
+import { getCachedStringWidth } from '../utils/textUtils.js';
 
 describe('getPermissionsTabs', () => {
   it('keeps the original four tabs, order, and copy', () => {
@@ -77,22 +77,27 @@ describe('permissionScopeLabel', () => {
   });
 });
 
-describe('getPermissionScopeItems', () => {
-  it('lists project first, then user, with the save locations', () => {
-    const items = getPermissionScopeItems();
-    expect(items).toHaveLength(2);
-    expect(items[0]).toEqual({
-      label: 'Project settings',
-      description: 'Checked in at .qwen/settings.json',
-      value: SettingScope.Workspace,
-      key: 'project',
-    });
-    expect(items[1]).toEqual({
-      label: 'User settings',
-      description: 'Saved in at ~/.qwen/settings.json',
-      value: SettingScope.User,
-      key: 'user',
-    });
+describe('formatScopeRow', () => {
+  it('keeps a row that fits untouched', () => {
+    expect(
+      formatScopeRow(
+        {
+          label: 'User settings',
+          description: 'Saved in ~/.qwen/settings.json',
+        },
+        67,
+      ),
+    ).toBe('User settings    Saved in ~/.qwen/settings.json');
+  });
+
+  it('clips an overlong row with an ellipsis, not a silent cut', () => {
+    const row = formatScopeRow(
+      { label: 'User settings', description: 'x'.repeat(120) },
+      40,
+    );
+
+    expect(getCachedStringWidth(row)).toBeLessThanOrEqual(40);
+    expect(row.endsWith('…')).toBe(true);
   });
 });
 
