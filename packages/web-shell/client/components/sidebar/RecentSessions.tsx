@@ -24,24 +24,30 @@ export interface RecentSessionEntry {
   workspaceCwd?: string;
 }
 
+function isRecentSession({ session }: RecentSessionEntry) {
+  return !(
+    session.parentSessionId ||
+    session.isArchived ||
+    session.isPinned ||
+    session.sourceType === 'qwen-live' ||
+    session.sourceId?.startsWith('realtime_voice:') ||
+    (session.sourceType &&
+      !['default', 'standalone'].includes(session.sourceType))
+  );
+}
+
 export function sortRecentSessions(
   entries: RecentSessionEntry[],
   sortBy?: 'updatedAt' | 'lastUserPromptAt',
 ) {
   const unique = new Map<string, RecentSessionEntry>();
   for (const entry of entries) {
-    const { session } = entry;
-    if (
-      session.parentSessionId ||
-      session.isArchived ||
-      session.isPinned ||
-      session.sourceType === 'qwen-live' ||
-      session.sourceId?.startsWith('realtime_voice:') ||
-      (session.sourceType &&
-        !['default', 'standalone'].includes(session.sourceType))
-    )
-      continue;
-    unique.set(JSON.stringify([entry.workspaceCwd, session.sessionId]), entry);
+    if (isRecentSession(entry)) {
+      unique.set(
+        JSON.stringify([entry.workspaceCwd, entry.session.sessionId]),
+        entry,
+      );
+    }
   }
   const activity = (session: DaemonSessionSummary) =>
     sortBy === 'lastUserPromptAt'
@@ -67,17 +73,21 @@ async function readRecentPage(
   load: (cursor?: string) => Promise<DaemonSessionListPage>,
   workspaceCwd?: string,
   sortBy?: 'updatedAt' | 'lastUserPromptAt',
+  isCancelled = () => false,
 ): Promise<RecentSessionEntry[]> {
   let cursor: string | undefined;
-  const entries: RecentSessionEntry[] = [];
+  const entries = new Map<string, RecentSessionEntry>();
   do {
+    if (isCancelled()) return [];
     const page = await load(cursor);
-    entries.push(
-      ...page.sessions.map((session) => ({ session, workspaceCwd })),
-    );
+    if (isCancelled()) return [];
+    for (const session of page.sessions) {
+      const entry = { session, workspaceCwd };
+      if (isRecentSession(entry)) entries.set(session.sessionId, entry);
+    }
     cursor = page.nextCursor;
-  } while (cursor && sortRecentSessions(entries, sortBy).length < LIMIT);
-  return sortRecentSessions(entries, sortBy);
+  } while (cursor && entries.size < LIMIT);
+  return sortRecentSessions([...entries.values()], sortBy);
 }
 
 interface RecentSessionsProps {
@@ -115,6 +125,13 @@ export function RecentSessions({
   const [expanded, setExpanded] = useState(() =>
     readWorkspaceExpanded('recent-sessions'),
   );
+  const [pageVisible, setPageVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    const onVisibilityChange = () => setPageVisible(!document.hidden);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () =>
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, []);
   const [visibleCount, setVisibleCount] = useState(
     SIDEBAR_SESSION_PREVIEW_LIMIT,
   );
@@ -144,10 +161,12 @@ export function RecentSessions({
   }, [expanded]);
 
   useEffect(() => {
-    if (!expanded || refreshPaused) return;
+    if (!expanded || refreshPaused || !pageVisible) return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
+    const isCancelled = () => disposed || document.hidden;
     const load = async () => {
+      if (isCancelled()) return;
       const cwds: string[] = JSON.parse(workspaceKey);
       const requests = cwds.map((cwd) =>
         readRecentPage(
@@ -164,6 +183,7 @@ export function RecentSessions({
             }),
           cwd,
           sortBy,
+          isCancelled,
         ),
       );
       if (includeStandalone)
@@ -178,10 +198,11 @@ export function RecentSessions({
               }),
             undefined,
             sortBy,
+            isCancelled,
           ),
         );
       const results = await Promise.allSettled(requests);
-      if (disposed) return;
+      if (isCancelled()) return;
       setEntries(
         sortRecentSessions(
           results.flatMap((result) =>
@@ -209,6 +230,7 @@ export function RecentSessions({
     organizationEnabled,
     sortBy,
     expanded,
+    pageVisible,
     refreshPaused,
     currentSessionId,
     refreshKey,
