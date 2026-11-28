@@ -22,7 +22,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ManagedSchemaTimeContractTest {
     private static final List<String> TIMESTAMPS = List.of(
-            "ma_session=gmt_create,gmt_modified,deleted_at,retired_at",
+            "ma_session=gmt_create,gmt_modified,deleted_at,retired_at,"
+                    + "harness_claim_requested_at,harness_claim_reserved_until",
             "ma_turn=dispatch_lease_until,gmt_create,gmt_modified,completed_at,retry_after",
             "ma_session_head=writer_lease_until,gmt_create,gmt_modified,"
                     + "activation_expires_at,claim_lease_until,wake_retry_at",
@@ -54,7 +55,8 @@ class ManagedSchemaTimeContractTest {
             "ma_schedule=armed_at,watermark_slot,lease_until,gate_last_at,gmt_create,gmt_modified",
             "ma_schedule_occurrence=slot,next_retry_at,gmt_create,gmt_modified",
             "ma_client_files_binding=expires_at,gmt_create,gmt_modified",
-            "ma_client_files_request=expires_at,gmt_create,gmt_modified");
+            "ma_client_files_request=expires_at,gmt_create,gmt_modified",
+            "ma_terminal_ticket=expires_at,gmt_create");
 
     @Test
     void canonicalSchemaUsesCreationAndModificationNamesWithoutLegacyAliases() {
@@ -80,7 +82,7 @@ class ManagedSchemaTimeContractTest {
                 });
             }
         }
-        assertEquals(88, count);
+        assertEquals(92, count);
         assertAll(checks);
     }
 

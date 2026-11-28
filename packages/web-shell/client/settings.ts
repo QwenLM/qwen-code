@@ -11,6 +11,7 @@ const SETTING_KEYS = {
   'setting:git-pr-co-author': 'general.gitCoAuthor.pr',
   'setting:language': 'general.language',
   'setting:output-language': 'general.outputLanguage',
+  'setting:display-language': 'general.displayLanguage',
   'setting:prevent-system-sleep': 'general.preventSystemSleep',
   'setting:review-attribution': 'review.attribution',
   'setting:review-sandbox': 'review.sandbox',
@@ -57,6 +58,7 @@ const SETTING_KEYS = {
   'setting:max-sessions': 'serve.maxSessions',
   'setting:model-proposed-goals': 'goals.modelProposed',
   'setting:arena-artifacts': 'agents.arena.preserveArtifacts',
+  'setting:worktree-retention': 'worktree.maxRetained',
   'setting:session-workflow': 'experimental.sessionWorkflow',
   'setting:generated-ui': 'experimental.generatedUi',
   'setting:scheduled-tasks': 'experimental.cron',
@@ -77,6 +79,7 @@ const SETTING_KEYS = {
 
 const BUILTIN_IDS = [
   'builtin:chat-width',
+  'builtin:arrow-key-history',
   'builtin:browser-notifications',
   'builtin:live-setup',
   'builtin:local-control',

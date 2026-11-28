@@ -6,6 +6,7 @@
 
 import { constants as fsConstants, promises as fs, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { readdirSync } from 'node:fs';
 import * as path from 'node:path';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 import { DAEMON_ATTACHMENT_CONTEXT_META_KEY } from './bridgeTypes.js';
@@ -1022,6 +1023,30 @@ export class SessionAttachmentStore {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
     }
+  }
+
+  hasRetirementHold(): boolean {
+    if (
+      this.pendingItems ||
+      this.copying ||
+      this.removingNames.size ||
+      this.uploads.hasActiveUploads()
+    )
+      return true;
+    // Native attachment storage is outside the workspace archive contract.
+    for (const directory of new Set([
+      this.activeDirectory,
+      this.persistentDirectory,
+      this.persistentFallbackDirectory,
+    ])) {
+      if (!directory) continue;
+      try {
+        if (readdirSync(directory).length > 0) return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+    return false;
   }
 
   async close(): Promise<void> {

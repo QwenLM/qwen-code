@@ -864,6 +864,13 @@ describe('StreamingToolCallParser', () => {
       expect(parser.hasIncompleteToolCalls()).toBe(false);
     });
 
+    it('names the first named tool call whose JSON is still incomplete', () => {
+      parser.addChunk(0, '{"key": "value"}', 'call_1', 'func_a');
+      expect(parser.getIncompleteToolCallName()).toBeUndefined();
+      parser.addChunk(1, '{"docs": [', 'call_2', 'func_b');
+      expect(parser.getIncompleteToolCallName()).toBe('func_b');
+    });
+
     it('should detect incomplete among multiple tool calls', () => {
       parser.addChunk(0, '{"key": "value"}', 'call_1', 'func_a'); // complete
       parser.addChunk(1, '{"key": "val', 'call_2', 'func_b'); // incomplete

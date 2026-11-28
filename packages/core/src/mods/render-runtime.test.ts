@@ -157,7 +157,7 @@ describe('ui.render through the real QuickJS worker', () => {
     });
   });
 
-  it('hands out a frozen table of the eleven terminal elements, two of them drawn', async () => {
+  it('hands out a frozen table of the twelve terminal elements, three of them drawn', async () => {
     const runtime = await create([
       mod(`on('ui.render', ($, e) => {
         const { Box, Button } = $.ui.resolve(e);
@@ -201,6 +201,7 @@ describe('ui.render through the real QuickJS worker', () => {
         'Link',
         'Code',
         'Markdown',
+        'Progress',
         'Client',
         'Raster',
         'Image',
@@ -515,7 +516,7 @@ describe('ui.render through the real QuickJS worker', () => {
         signal(),
       );
       expect(drawn.props).toEqual({
-        text: 'desktop Box,Text,Button,Input,Select,Svg,Link,Code,Markdown,Client TypeError: $.ui.resolve takes a ui.render event drawn on a surface this host draws',
+        text: 'desktop Box,Text,Button,Input,Select,Svg,Link,Code,Markdown,Progress,Client,Shader TypeError: $.ui.resolve takes a ui.render event drawn on a surface this host draws',
         isFirstOfReply: true,
       });
     });

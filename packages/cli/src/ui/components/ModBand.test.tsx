@@ -114,6 +114,72 @@ describe('ModBand', () => {
     }
   });
 
+  it('draws clip, maxLines and a sideways scroller as the terminal cuts them', () => {
+    const frame = (tree: ModRenderElement) =>
+      render(<ModBand maxRows={6} band={band(tree)} />).lastFrame()!;
+    const long = 'ab '.repeat(70).trim();
+    const text = (props: ModRenderProps, children = [long]) => ({
+      type: 'Text' as const,
+      props,
+      children,
+    });
+    const cut = frame(text({ wrap: 'truncate-end' }));
+    expect(cut.split('\n')).toHaveLength(1);
+    expect(frame(text({ wrap: 'clip' }))).toBe(cut);
+    expect(frame(text({ maxLines: 1 }))).toBe(cut);
+    expect(frame(text({ maxLines: 2 }, ['one\ntwo\nthree']))).toBe('one\ntwo');
+    // A scroller cuts each Text at its edge; maxLines has no effect inside.
+    expect(
+      frame({
+        type: 'Box',
+        props: { overflowX: 'scroll', flexDirection: 'column' },
+        children: [text({ maxLines: 2 }), long],
+      }),
+    ).toBe(`${cut}\n${cut}`);
+    // A Box inside it with a width of its own keeps what it holds as written.
+    expect(
+      frame({
+        type: 'Box',
+        props: { overflowX: 'scroll' },
+        children: [
+          {
+            type: 'Box',
+            props: { width: 5 },
+            children: [text({}, ['ab cd ef'])],
+          },
+        ],
+      }).split('\n'),
+    ).toEqual(['ab cd', expect.stringContaining('ef')]);
+    // The terminal is monospaced.
+    expect(
+      drawn({
+        type: 'Box',
+        props: { overflowX: 'scroll', mono: true, paddingX: 1 },
+      }),
+    ).not.toHaveProperty('mono');
+    expect(
+      drawn({ type: 'Box', props: { overflowX: 'visible' } }),
+    ).not.toHaveProperty('overflowX');
+  });
+
+  it('draws a Progress bar, its figure, and a task with no known end', () => {
+    const frame = (props: ModRenderProps) =>
+      render(
+        <ModBand
+          maxRows={4}
+          band={band({ type: 'Box', children: [{ type: 'Progress', props }] })}
+        />,
+      ).lastFrame();
+    expect(frame({ label: 'Indexing', value: 3, max: 10 })).toBe(
+      'Indexing ███░░░░░░░ 30%',
+    );
+    expect(frame({ label: 'Indexing', value: 9, valueText: '9 of 10' })).toBe(
+      'Indexing ██████████ 9 of 10',
+    );
+    expect(frame({ label: 'Indexing' })).toBe('Indexing …');
+    expect(frame({ label: 'Indexing', value: 1, max: 0 })).toBe('Indexing …');
+  });
+
   it('keeps a tree wider than the terminal within its columns', () => {
     const cases: ModRenderProps[] = [
       { width: 500 },

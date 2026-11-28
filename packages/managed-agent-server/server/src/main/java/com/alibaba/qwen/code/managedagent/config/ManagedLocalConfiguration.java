@@ -36,8 +36,7 @@ public class ManagedLocalConfiguration {
             throw new IllegalStateException("Managed local does not expose an H2 Web console");
         }
         if (server.getAddress() == null || !server.getAddress().isLoopbackAddress()
-                || !BrokerSecurity.isLoopback(properties.getInternalServer().getAddress())
-                || !BrokerSecurity.isLoopback(properties.getRuntimeBroker().getHost())) {
+                || !BrokerSecurity.isLoopback(properties.getInternalServer().getAddress())) {
             throw new IllegalStateException("Managed local listeners must use loopback addresses");
         }
         requireLoopbackUrl(properties.getHarness().getBaseUrl());

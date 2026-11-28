@@ -159,6 +159,58 @@ describe('contextLengthError', () => {
     });
   });
 
+  describe('Kimi / longer-than-context-length wording', () => {
+    const KIMI_OVERFLOW =
+      "The input (1347344 tokens) is longer than the model's context length (1048576 tokens).";
+
+    it.each([
+      KIMI_OVERFLOW,
+      `400 ${KIMI_OVERFLOW}`,
+      `[API Error: 400 ${KIMI_OVERFLOW}]`,
+      'The input (1,347,344 tokens) is longer than the model’s context length (1,048,576 tokens).',
+    ])('detects overflow and parses both token counts: %s', (message) => {
+      const info = getContextLengthExceededInfo(new Error(message));
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(1347344);
+      expect(info.limitTokens).toBe(1048576);
+      expect(info.limitKind).toBe('total');
+    });
+
+    it('detects the wording nested in an SDK-style error object', () => {
+      const info = getContextLengthExceededInfo({
+        status: 400,
+        error: { message: KIMI_OVERFLOW },
+      });
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(1347344);
+      expect(info.limitTokens).toBe(1048576);
+      expect(info.limitKind).toBe('total');
+    });
+
+    it('detects the wording through a wrapping cause chain', () => {
+      const error = new Error('request failed', {
+        cause: new Error(KIMI_OVERFLOW),
+      });
+
+      const info = getContextLengthExceededInfo(error);
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(1347344);
+      expect(info.limitTokens).toBe(1048576);
+      expect(info.limitKind).toBe('total');
+    });
+
+    it('does not match unrelated longer-than errors', () => {
+      const info = getContextLengthExceededInfo(
+        new Error('The input (128 bytes) is longer than the socket path limit'),
+      );
+
+      expect(info.isExceeded).toBe(false);
+    });
+  });
+
   it('parses prompt-too-long actual and limit token counts', () => {
     const info = getContextLengthExceededInfo(
       new Error('prompt is too long: 137500 tokens > 135000 maximum'),
@@ -481,6 +533,11 @@ describe('contextLengthError', () => {
         'TGI, the total',
         'Input validation error: `inputs` tokens + `max_new_tokens` must be <= 32768. Given: 40000 `inputs` tokens and 1000 `max_new_tokens`',
         [32_768],
+      ],
+      [
+        'Kimi',
+        "400 The input (1347344 tokens) is longer than the model's context length (1048576 tokens).",
+        [1_048_576],
       ],
     ])('reads the window %s states', (_label, message, windows) => {
       expect(statedContextWindows(new Error(message))).toEqual(windows);

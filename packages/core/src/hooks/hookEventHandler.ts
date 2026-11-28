@@ -18,6 +18,7 @@ import type {
   HookInput,
   HookExecutionResult,
   UserPromptSubmitInput,
+  UserPromptSource,
   UserPromptExpansionInput,
   StopInput,
   MessageDisplayInput,
@@ -322,6 +323,7 @@ export class HookEventHandler {
     prompt: string,
     signal?: AbortSignal,
     submittedPrompt?: string,
+    source?: UserPromptSource,
   ): Promise<AggregatedHookResult> {
     const input: UserPromptSubmitInput = {
       ...this.createBaseInput(HookEventName.UserPromptSubmit),
@@ -330,6 +332,7 @@ export class HookEventHandler {
       submittedPrompt.trim().length > 0
         ? { submitted_prompt: submittedPrompt }
         : {}),
+      ...(source ? { source } : {}),
     };
 
     return this.executeHooks(

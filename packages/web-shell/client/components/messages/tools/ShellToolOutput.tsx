@@ -1,4 +1,4 @@
-import { isShellResultDisplay } from '@qwen-code/sdk/daemon';
+import { isShellResultDisplay } from '../../../utils/shell-result-display';
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   CheckIcon,

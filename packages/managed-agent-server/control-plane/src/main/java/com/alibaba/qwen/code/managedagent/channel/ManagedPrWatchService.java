@@ -24,8 +24,10 @@ import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.ChannelInstance;
 import com.alibaba.qwen.code.managedagent.repository.PrWatchBindingStore;
 import com.alibaba.qwen.code.managedagent.repository.PrWatchBindingStore.PrWatchBinding;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
@@ -71,6 +73,7 @@ public class ManagedPrWatchService {
     public PrWatchBindingView create(String tenantId, String channelId,
             PrWatchCreateRequest request) {
         ChannelInstance instance = requireInstance(tenantId, channelId);
+        requireRepositoryIdentity(request.owner(), request.repo());
         List<String> events = request.events().stream().distinct().sorted()
                 .toList();
         for (String event : events) {
@@ -91,7 +94,7 @@ public class ManagedPrWatchService {
         } catch (IllegalArgumentException error) {
             throw new ManagedAgentException(400, "invalid_request",
                     error.getMessage());
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new ManagedAgentException(400, "invalid_request",
                     "The PR-watch event set is not serializable.");
         }
@@ -116,6 +119,7 @@ public class ManagedPrWatchService {
     public PrWatchBindingView retire(String tenantId, String channelId,
             PrWatchRetireRequest request) {
         requireInstance(tenantId, channelId);
+        requireRepositoryIdentity(request.owner(), request.repo());
         PrWatchBinding binding = requireBinding(tenantId, channelId,
                 request.owner(), request.repo(), request.prNumber());
         bindings.retire(tenantId, channelId, request.owner(), request.repo(),
@@ -126,6 +130,7 @@ public class ManagedPrWatchService {
     public PrWatchAdmission inject(String tenantId, String channelId,
             PrWatchInjectRequest request) {
         ChannelInstance instance = requireInstance(tenantId, channelId);
+        requireRepositoryIdentity(request.owner(), request.repo());
         if (!"connected".equals(instance.state())) {
             throw new ManagedAgentException(409, "channel_disconnected",
                     "The channel is not connected.");
@@ -345,7 +350,7 @@ public class ManagedPrWatchService {
                     "The PR-watch prompt exceeds the character bound.");
         }
         try {
-            com.fasterxml.jackson.databind.node.ObjectNode envelope =
+            ObjectNode envelope =
                     mapper.createObjectNode();
             envelope.put("owner", request.owner());
             envelope.put("repo", request.repo());
@@ -359,7 +364,7 @@ public class ManagedPrWatchService {
                 throw new ManagedAgentException(400, "invalid_request",
                         "The PR-watch envelope exceeds the byte bound.");
             }
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new ManagedAgentException(400, "invalid_request",
                     "The PR-watch envelope is not serializable.");
         }
@@ -424,6 +429,12 @@ public class ManagedPrWatchService {
                         "The PR-watch binding was not found."));
     }
 
+    /** owner/repo land in VARCHAR(64)/VARCHAR(128) under PAD SPACE. */
+    private static void requireRepositoryIdentity(String owner, String repo) {
+        ManagedChannelService.requireNoTrailingSpace(owner, "The PR owner");
+        ManagedChannelService.requireNoTrailingSpace(repo, "The PR repository");
+    }
+
     private ChannelInstance requireInstance(String tenantId,
             String channelId) {
         if (channelId == null
@@ -440,7 +451,7 @@ public class ManagedPrWatchService {
         JsonNode node;
         try {
             node = mapper.readTree(binding.eventsJson());
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException(
                     "PR-watch binding events are not JSON", error);
         }

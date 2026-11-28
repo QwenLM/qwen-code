@@ -1097,7 +1097,8 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   // is incomplete; a yarn/bun repo that already has a tree is trusted — the build
   // is the authoritative signal, by this command's own argument.
   const installer = lockfileInstaller(root);
-  const installComplete = (): boolean => npmInstallComplete(root);
+  const installComplete =
+    args.installComplete ?? ((): boolean => npmInstallComplete(root));
 
   // A yarn or bun repo (`workspaces` is their syntax too) with no installed tree
   // cannot be installed here: neither installer reads its lockfile, and
@@ -1106,7 +1107,10 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   // prevent. A review worktree is cold by construction, so this is the common case,
   // not an edge. Hand it to the brief, naming the tool to install with. (The warm
   // case — a tree already present — is trusted below and never reaches here.)
-  if (args.install && !installer && !existsSync(join(root, 'node_modules'))) {
+  const hasExistingDeps = args.installComplete
+    ? args.installComplete()
+    : existsSync(join(root, 'node_modules'));
+  if (args.install && !installer && !hasExistingDeps) {
     const altLock = [
       ['yarn.lock', 'yarn install --frozen-lockfile'],
       ['bun.lockb', 'bun install --frozen-lockfile'],

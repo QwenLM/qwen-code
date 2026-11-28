@@ -338,6 +338,7 @@ export class AcpWsTransport implements DaemonTransport {
     genAbort.signal.addEventListener('abort', onAbort, { once: true });
 
     try {
+      opts.onEventStreamReady?.();
       while (!done && !this._disposed) {
         // Check if the generator was aborted (WS close).
         if (genAbort.signal.aborted) {

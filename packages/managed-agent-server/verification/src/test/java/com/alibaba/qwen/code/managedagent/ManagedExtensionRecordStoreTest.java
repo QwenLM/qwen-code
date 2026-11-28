@@ -16,7 +16,6 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.session.ManagedTaskService;
@@ -346,9 +345,8 @@ class ManagedExtensionRecordStoreTest {
         commitDomain(journal, "run-1", "automation_run", run, List.of());
         if (!taskKind) {
             jdbc.update("UPDATE ma_session_record SET task_kind = NULL, task_state = NULL"
-                            + " WHERE tenant_id = ? AND session_id = ? AND record_key = ?",
-                    TENANT, sessionId,
-                    ManagedExtensionProjection.recordKey(sessionId, "automation_run", decision.runId()));
+                            + " WHERE tenant_id = ? AND session_id = ? AND domain = 'automation_run' AND record_id = ?",
+                    TENANT, sessionId, decision.runId());
         }
         run.withObject("/run").put("state", "running");
         commitDomain(journal, "run-2", "automation_run", run, List.of());
@@ -362,9 +360,8 @@ class ManagedExtensionRecordStoreTest {
             status.setRollbackOnly();
         });
         assertThat(jdbc.queryForObject("SELECT task_state FROM ma_session_record"
-                        + " WHERE tenant_id = ? AND session_id = ? AND record_key = ?", String.class,
-                TENANT, sessionId,
-                ManagedExtensionProjection.recordKey(sessionId, "automation_run", decision.runId())))
+                        + " WHERE tenant_id = ? AND session_id = ? AND domain = 'automation_run' AND record_id = ?", String.class,
+                TENANT, sessionId, decision.runId()))
                 .isEqualTo(taskKind ? "running" : null);
         if (occurrenceFirst) {
             assertThat(ledger.countActive(TENANT, scheduleId)).isEqualTo(1);
@@ -808,21 +805,17 @@ class ManagedExtensionRecordStoreTest {
         accepted.withObject("/run").withObject("/delivery").put("state",
                 "accepted");
         commitDomain(journal, "agent-5", "child_run", accepted, List.of());
-        String scope = com.alibaba.qwen.code.managedagent.repository
-                .ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         for (String run : List.of("run-x", "run-other")) {
-            jdbc.update("INSERT INTO ma_delivery (delivery_key,"
-                            + " delivery_kind, tenant_id, source_scope_key,"
+            jdbc.update("INSERT INTO ma_delivery ("
+                            + " delivery_kind, tenant_id, source_scope_id,"
                             + " source_session_id, target_session_id,"
                             + " delivery_id, creation_key, payload_json,"
                             + " transport_state, reception_state,"
                             + " consumption_state, gmt_create, gmt_modified)"
-                            + " VALUES (?, 'CHILD_RESULT', ?, ?, 'session-child',"
+                            + " VALUES ('CHILD_RESULT', ?, ?, 'session-child',"
                             + " ?, ?, 'creation', '{}', 'delivered', 'accepted',"
                             + " 'pending', 1, 1)",
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
-                            .key("delivery", "CHILD_RESULT", scope, run),
-                    TENANT, scope, sessionId, run);
+                    TENANT, sessionId, sessionId, run);
         }
         ObjectNode consumed = accepted.deepCopy();
         consumed.withObject("/run").withObject("/delivery").put("state",
@@ -838,10 +831,9 @@ class ManagedExtensionRecordStoreTest {
         return jdbc.queryForObject("SELECT CONCAT(transport_state, '/',"
                         + " reception_state, '/', consumption_state) FROM"
                         + " ma_delivery WHERE tenant_id = ? AND delivery_kind ="
-                        + " 'CHILD_RESULT' AND source_scope_key = ? AND"
+                        + " 'CHILD_RESULT' AND source_scope_id = ? AND"
                         + " delivery_id = ?", String.class, TENANT,
-                ManagedSessionStore
-                        .sessionScopeKey(TENANT, sessionId), run);
+                sessionId, run);
     }
 
     /** Commits a child agent through its settled result. */
@@ -1287,7 +1279,9 @@ class ManagedExtensionRecordStoreTest {
                 "channel_delivery", delivery.path("deliveryId").asText());
         // The row as a server before the projection wrote it.
         jdbc.update("UPDATE ma_session_record SET task_kind = NULL,"
-                + " task_state = NULL WHERE record_key = ?", recordKey);
+                + " task_state = NULL WHERE tenant_id = ? AND session_id = ?"
+                + " AND domain = 'channel_delivery' AND record_id = ?",
+                TENANT, sessionId, delivery.path("deliveryId").asText());
         jdbc.update("DELETE FROM ma_public_event WHERE tenant_id = ? AND"
                 + " session_id = ? AND stream_kind = 'TASK'", TENANT,
                 sessionId);
@@ -1299,7 +1293,8 @@ class ManagedExtensionRecordStoreTest {
                 List.of());
         Map<String, Object> row = jdbc.queryForMap("SELECT task_kind,"
                 + " task_state, delivery_state FROM ma_session_record WHERE"
-                + " record_key = ?", recordKey);
+                + " tenant_id = ? AND session_id = ? AND domain = 'channel_delivery' AND record_id = ?",
+                TENANT, sessionId, delivery.path("deliveryId").asText());
         assertThat(row.get("delivery_state")).isEqualTo("sending");
         assertThat(row.get("task_kind")).isNull();
         assertThat(row.get("task_state")).isNull();

@@ -52,6 +52,9 @@ const CONTEXT_LENGTH_PATTERNS = [
   // llama.cpp: "request (279935 tokens) exceeds the available context size
   // (262144 tokens), try increasing it" (#13415).
   /\bexceeds the available context size\b/i,
+  // Kimi / OpenAI-compatible servers: "The input (1347344 tokens) is longer
+  // than the model's context length (1048576 tokens)."
+  /\bis\s+longer\s+than\s+(?:the\s+)?(?:model['’]s\s+)?context\s+length\b/i,
 ];
 
 function parseInteger(value: string): number {
@@ -177,6 +180,19 @@ function parseTokenCounts(text: string): {
     return {
       actualTokens: parseInteger(llamaCppMatch[1]!),
       limitTokens: parseInteger(llamaCppMatch[2]!),
+      limitKind: 'total',
+    };
+  }
+
+  // Kimi / OpenAI-compatible servers: "The input (1347344 tokens) is longer
+  // than the model's context length (1048576 tokens)."
+  const longerThanContextMatch = text.match(
+    /\(\s*(\d[\d,]{0,31})\s*tokens?\s*\)\s*is\s+longer\s+than\s+(?:the\s+)?(?:model['’]s\s+)?context\s+length\s*\(\s*(\d[\d,]{0,31})\s*tokens?\s*\)/i,
+  );
+  if (longerThanContextMatch) {
+    return {
+      actualTokens: parseInteger(longerThanContextMatch[1]!),
+      limitTokens: parseInteger(longerThanContextMatch[2]!),
       limitKind: 'total',
     };
   }

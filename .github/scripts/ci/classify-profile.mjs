@@ -39,9 +39,15 @@ export const GITHUB_CI_ONLY_FILES = new Set([
   '.github/actionlint.yaml',
   '.github/scripts/pr-safety-precheck.mjs',
   '.github/scripts/pr-safety-precheck.test.mjs',
+  '.github/scripts/pr-safety-precheck.workflow.test.mjs',
   '.github/scripts/update-ecs-runner-qwen-workflow.test.mjs',
   '.github/workflows/qwen-pr-safety-precheck.yml',
   '.github/workflows/update-ecs-runner-qwen.yml',
+  // Read directly by pr-safety-precheck.test.mjs (runs in the dep-free helper
+  // lane on github_ci_only/full, skipped on docs_only). settings.md is also
+  // read by packages/cli/src/config/settings-docs-sync.test.ts (full-only),
+  // so it lives in TEST_READ_MARKDOWN instead.
+  'docs/users/features/headless.md',
 ]);
 
 function isDocsOnlyFile(file) {
@@ -80,6 +86,7 @@ export const TEST_READ_MARKDOWN = new Set([
   '.qwen/skills/verify-pr/references/web-shell.md',
   'AGENTS.md',
   'CLAUDE.md',
+  'docs/users/configuration/settings.md',
   'integrations/generated-ui/README.md',
   'integrations/generated-ui/skills/generated-ui/SKILL.md',
   'integrations/test-failure-explorer/skills/test-failure-explorer/SKILL.md',
@@ -110,13 +117,14 @@ function isTestFreeMarkdown(file) {
 }
 
 function classifyPath(file) {
-  if (isDocsOnlyFile(file)) return CI_PROFILES.DOCS_ONLY;
-  if (GITHUB_CI_ONLY_FILES.has(file)) return CI_PROFILES.GITHUB_CI_ONLY;
-  if (isTestFreeMarkdown(file)) return CI_PROFILES.GITHUB_CI_ONLY;
-  // A test may read it from a TypeScript suite, so it keeps the full profile.
+  // A test may read it from a TypeScript suite, so it keeps the full profile
+  // even when it lives under docs/.
   if (TEST_READ_MARKDOWN.has(file.replace(/\\/g, '/'))) {
     return CI_PROFILES.FULL;
   }
+  if (GITHUB_CI_ONLY_FILES.has(file)) return CI_PROFILES.GITHUB_CI_ONLY;
+  if (isDocsOnlyFile(file)) return CI_PROFILES.DOCS_ONLY;
+  if (isTestFreeMarkdown(file)) return CI_PROFILES.GITHUB_CI_ONLY;
   if (isJavaOnlyFile(file)) return CI_PROFILES.JAVA_ONLY;
   return CI_PROFILES.FULL;
 }

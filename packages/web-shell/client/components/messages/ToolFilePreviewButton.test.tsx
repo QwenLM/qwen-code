@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
-import { act, createContext, useContext } from 'react';
+import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ACPToolCall } from '../../adapters/types';
+import type { DaemonWorkspaceContextValue } from '../../daemon/workspace/types.js';
 import { I18nProvider } from '../../i18n';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
+import { WorkspaceRuntimeContext } from '../../utils/workspace-context.js';
 import { MessageItem } from '../MessageItem';
 import { ToolLine } from './ToolGroup';
 import {
@@ -12,7 +14,7 @@ import {
   type ToolDetailsLoader,
 } from './tools/ToolDetailsContext';
 
-const state = vi.hoisted(() => {
+const state = (() => {
   const primaryStat = vi.fn();
   const secondaryStat = vi.fn();
   return {
@@ -21,6 +23,7 @@ const state = vi.hoisted(() => {
     primaryActions: { stat: primaryStat },
     workspace: {
       status: 'connected',
+      actions: { stat: primaryStat },
       capabilities: {
         workspaceCwd: '/primary',
         workspaces: [
@@ -31,12 +34,7 @@ const state = vi.hoisted(() => {
       client: { workspaceByCwd: vi.fn(() => ({ fileStat: secondaryStat })) },
     },
   };
-});
-const WorkspaceContext = createContext(state.workspace);
-vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useWorkspace: () => useContext(WorkspaceContext),
-  useWorkspaceActions: () => state.primaryActions,
-}));
+})();
 
 const fileStat = { type: 'file', sizeBytes: 10, modifiedMs: 1 };
 const tool: ACPToolCall = {
@@ -78,7 +76,9 @@ async function render(
   const onOpen = props.onTurnOutputOpen ?? vi.fn();
   await act(async () => {
     root.render(
-      <WorkspaceContext.Provider value={{ ...state.workspace }}>
+      <WorkspaceRuntimeContext.Provider
+        value={{ ...state.workspace } as unknown as DaemonWorkspaceContextValue}
+      >
         <I18nProvider language="en">
           <TranscriptRenderModeProvider value={mode}>
             <ToolDetailsContext.Provider value={loadDetails}>
@@ -92,7 +92,7 @@ async function render(
             </ToolDetailsContext.Provider>
           </TranscriptRenderModeProvider>
         </I18nProvider>
-      </WorkspaceContext.Provider>,
+      </WorkspaceRuntimeContext.Provider>,
     );
   });
   return onOpen;
@@ -289,7 +289,11 @@ describe('tool file preview', () => {
     const renderItem = async (onOpen: typeof first) => {
       await act(async () =>
         root.render(
-          <WorkspaceContext.Provider value={{ ...state.workspace }}>
+          <WorkspaceRuntimeContext.Provider
+            value={
+              { ...state.workspace } as unknown as DaemonWorkspaceContextValue
+            }
+          >
             <I18nProvider language="en">
               <MessageItem
                 message={message}
@@ -297,7 +301,7 @@ describe('tool file preview', () => {
                 onTurnOutputOpen={onOpen}
               />
             </I18nProvider>
-          </WorkspaceContext.Provider>,
+          </WorkspaceRuntimeContext.Provider>,
         ),
       );
     };
@@ -311,5 +315,23 @@ describe('tool file preview', () => {
     await clickView();
     expect(first).not.toHaveBeenCalled();
     expect(second).toHaveBeenCalledTimes(1);
+  });
+
+  it('omits the preview button safely when no WorkspaceRuntimeContext provider is mounted', async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <TranscriptRenderModeProvider value="interactive">
+            <ToolLine
+              tool={tool}
+              forceExpanded
+              workspaceCwd="/secondary"
+              onTurnOutputOpen={vi.fn()}
+            />
+          </TranscriptRenderModeProvider>
+        </I18nProvider>,
+      );
+    });
+    expect(viewButton()).toBeNull();
   });
 });

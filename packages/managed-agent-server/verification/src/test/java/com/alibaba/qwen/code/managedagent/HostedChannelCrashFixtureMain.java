@@ -32,7 +32,6 @@ public final class HostedChannelCrashFixtureMain {
         String cli = args[2];
         String tenant = args[3];
         int internalPort = Integer.parseInt(args[4]);
-        int brokerPort = Integer.parseInt(args[5]);
         // --server.port=0: the sibling convention — nobody reads the public
         // port (the control surface is a second application level), so there
         // is no reason to pre-reserve one through a TOCTOU window.
@@ -57,7 +56,6 @@ public final class HostedChannelCrashFixtureMain {
                         + "a".repeat(64),
                 "--qwen.managed-agent.harness.workspace-files-enabled=true",
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                 "--qwen.managed-agent.runtime-broker.token=fg7-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",

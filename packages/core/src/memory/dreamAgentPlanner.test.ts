@@ -131,9 +131,9 @@ describe('dreamAgentPlanner', () => {
       expect(prompt).toContain(category);
     }
     expect(prompt).toContain(
-      'Do not intentionally remove existing index entries for valid `pinned/` files',
+      'never use a pinned file as a merge target or deletion candidate',
     );
-    expect(prompt).toContain('normal index limits still apply');
+    expect(prompt).toContain('The runtime generates the project index');
   });
 
   it('gives the Dream agent a manifest example the runtime accepts', async () => {

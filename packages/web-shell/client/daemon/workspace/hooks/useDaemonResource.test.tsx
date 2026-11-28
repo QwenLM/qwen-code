@@ -154,6 +154,42 @@ describe('useDaemonResource', () => {
     expect(result?.loading).toBe(false);
   });
 
+  it('keeps a settled failure through a pending retry until recovery', async () => {
+    const retry = createDeferred<string>();
+    const load = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('502 from proxy'))
+      .mockImplementationOnce(() => retry.promise);
+    let result: ReturnType<typeof useDaemonResource<string>> | undefined;
+
+    function TestComponent() {
+      result = useDaemonResource(load, { autoLoad: true });
+      return null;
+    }
+
+    await act(async () => {
+      root.render(<TestComponent />);
+    });
+    expect(result?.error?.message).toBe('502 from proxy');
+
+    let pending: Promise<string | undefined> | undefined;
+    act(() => {
+      pending = result!.reload();
+    });
+    expect(result?.loading).toBe(true);
+    expect(result?.error?.message).toBe('502 from proxy');
+
+    await act(async () => {
+      retry.resolve('healthy');
+      await pending;
+    });
+    expect(result).toMatchObject({
+      data: 'healthy',
+      loading: false,
+      error: undefined,
+    });
+  });
+
   it('keeps errors specific to each reload outcome', async () => {
     const olderRequest = createDeferred<string>();
     const newerRequest = createDeferred<string>();

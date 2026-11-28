@@ -136,6 +136,19 @@ describe('sedEditParser', () => {
     expect(parseSedEditCommand("sed -i 's/foo/bar/1g2' a.ts")).toBeNull();
     expect(parseSedEditCommand("sed -i 's/foo/bar/' $FILE")).toBeNull();
     expect(parseSedEditCommand('sed -i "s/$FOO/bar/" a.ts')).toBeNull();
+    // A byte-valued ANSI-C escape parses to the same-numbered code point
+    // while bash passes the raw byte, so the simulated write would land on
+    // a different file than the one sed edits; the command must fall back
+    // to real shell execution instead.
+    expect(
+      parseSedEditCommand(String.raw`sed -i 's/base/changed/' $'\xc3\xbf'`),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand(String.raw`sed -i 's/base/changed/' $'\377'`),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand(String.raw`sed -i 's/foo/bar/' $'\u00ff'`),
+    ).toBeNull();
     expect(parseSedEditCommand('sed -i "s/$1/bar/" a.ts')).toBeNull();
     expect(parseSedEditCommand('sed -i "s/$(whoami)/root/" a.ts')).toBeNull();
     expect(parseSedEditCommand("sed -i 's/`whoami`/root/' a.ts")).toBeNull();

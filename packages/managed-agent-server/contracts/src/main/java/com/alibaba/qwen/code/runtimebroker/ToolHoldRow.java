@@ -10,6 +10,6 @@ package com.alibaba.qwen.code.runtimebroker;
 public record ToolHoldRow(String executionCallId, String runtimeSessionId) {
     public ToolHoldRow {
         BrokerValues.requireId(executionCallId, "executionCallId");
-        BrokerValues.requireId(runtimeSessionId, "runtimeSessionId");
+        BrokerValues.requireRuntimeSessionId(runtimeSessionId, "runtimeSessionId");
     }
 }

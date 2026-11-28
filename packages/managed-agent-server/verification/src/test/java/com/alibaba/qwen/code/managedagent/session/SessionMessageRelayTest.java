@@ -11,6 +11,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
@@ -596,6 +598,47 @@ class SessionMessageRelayTest {
         relay.scan();
         assertThat(row.get().attempts()).isZero();
         assertThat(row.get().state()).isEqualTo("relaying");
+    }
+
+    // A child the Harness suspended or Action-parked is reloaded by every
+    // step that reaches it: a closing or cold-open-busy answer is a wait on
+    // the receipt, the reconciliation and the sender's own step alike.
+    @ParameterizedTest
+    @CsvSource({
+        "accepting,to_child,receive,hosted_session_closing",
+        "accepting,to_child,receive,hosted_session_open_busy",
+        "accepted,to_child,consume,hosted_session_closing",
+        "accepted,to_child,consume,hosted_session_open_busy",
+        "planned,to_parent,handover,hosted_session_closing",
+        "planned,to_parent,handover,hosted_session_open_busy",
+    })
+    void waitsOnAReloadedSessionWithoutSpendingAnAttempt(String state,
+            String route, String kind, String code) {
+        if ("to_parent".equals(route)) {
+            row.set(new MessageRow(TENANT, CHILD, MESSAGE, null, "relaying",
+                    "owner", 31_000L, 0, 0, null));
+            pending.set(new PendingMessage(TENANT, CHILD, MESSAGE,
+                    "session_message", state, "resource-message"));
+            body(route, CHILD, null);
+            when(store.lineage(TENANT, CHILD))
+                    .thenReturn(new Lineage(PARENT, "run-1"));
+        } else {
+            pending.set(new PendingMessage(TENANT, PARENT, MESSAGE,
+                    "session_message", state, "resource-message"));
+            body(route, PARENT, CHILD);
+            when(store.deliveryState(TENANT, CHILD, "session_message",
+                    MESSAGE)).thenReturn("accepted".equals(state) ? state
+                            : null);
+        }
+        harness.refuseKind = kind;
+        harness.refuseCode = code;
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().attempts()).isZero();
+        verify(store).scheduleRetry(any(MessageRow.class), anyString(),
+                anyLong(), anyLong(), anyLong());
+        verify(store, never()).defer(any(MessageRow.class), anyString(),
+                anyLong(), any(), anyLong(), anyLong());
     }
 
     @Test

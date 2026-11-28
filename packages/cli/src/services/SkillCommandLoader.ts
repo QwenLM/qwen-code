@@ -6,6 +6,8 @@
 
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
+  getTurnSkillSnapshot,
+  getSkillSource,
   createDebugLogger,
   appendToLastTextPart,
   buildSkillLlmContent,
@@ -158,6 +160,23 @@ export class SkillCommandLoader implements ICommandLoader {
               : {}),
           },
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
+            const snapshot = getTurnSkillSnapshot();
+            const selected = snapshot
+              ? snapshot.skills.find(
+                  (candidate) =>
+                    candidate.name === skill.name &&
+                    candidate.level === skill.level &&
+                    candidate.extensionName === skill.extensionName,
+                )
+              : skill;
+            if (!selected || selected.userInvocable === false) {
+              return {
+                type: 'message',
+                messageType: 'error',
+                content: `Skill "${skill.name}" is unavailable in this turn.`,
+              };
+            }
+
             if (this.config?.getShellExecutionSandbox?.()) {
               return {
                 type: 'message',
@@ -166,7 +185,10 @@ export class SkillCommandLoader implements ICommandLoader {
                   'Skill commands are not yet supported with tools.executionSandbox.',
               };
             }
-            if (this.config && !this.config.isSkillEnabled(skill)) {
+            if (
+              this.config &&
+              !this.config.isSkillEnabled(getSkillSource(selected))
+            ) {
               return {
                 type: 'message',
                 messageType: 'error',
@@ -178,11 +200,11 @@ export class SkillCommandLoader implements ICommandLoader {
             // Skill tool does when the model invokes it. Registering only the
             // allowedTools here let a skill's PreToolUse gate silently fail
             // open on this path (#11067).
-            await applySkillSideEffects(this.config, skill);
+            await applySkillSideEffects(this.config, selected);
 
             const body = buildSkillLlmContent(
-              dirname(skill.filePath),
-              skill.body,
+              dirname(selected.filePath),
+              selected.body,
             );
 
             // See BundledSkillLoader: the arguments are written down for the

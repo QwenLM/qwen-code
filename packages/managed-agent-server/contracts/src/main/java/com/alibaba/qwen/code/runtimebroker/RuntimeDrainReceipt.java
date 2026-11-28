@@ -21,7 +21,7 @@ public record RuntimeDrainReceipt(String bindingId, long generation,
                     || "developer-process-group".equals(executionMode) && "process_group".equals(stopScope))) {
             throw new IllegalArgumentException("Invalid extension drain receipt scope");
         }
-        BrokerValues.requireId(bindingId, "bindingId");
+        BrokerValues.requireBindingId(bindingId, "bindingId");
         BrokerValues.requireId(provisionRequestId, "provisionRequestId");
         if (generation <= 0 || resourceHandle == null || stoppedAt == null) {
             throw new IllegalArgumentException("Drain receipt is incomplete");

@@ -31,6 +31,7 @@ import {
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
+import { flushRunUsageOnSessionSwap } from '../../utils/usage-persistence.js';
 
 const BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE =
   "Stop the current session's running background tasks before branching the conversation.";
@@ -295,6 +296,7 @@ export function useBranchCommand(
           computeResumedUserTurnCount(resumed.conversation.messages),
         );
         uiSwapped = true;
+        flushRunUsageOnSessionSwap(config, oldSessionId);
         config.getLlmClient()?.commitTelemetrySwap?.();
         await getInteractiveModSession(config)?.syncSession('resume');
         clearPendingState?.();

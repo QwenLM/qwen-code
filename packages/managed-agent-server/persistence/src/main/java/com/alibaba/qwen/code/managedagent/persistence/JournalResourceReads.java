@@ -4,8 +4,10 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObje
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -51,8 +53,7 @@ final class JournalResourceReads {
         storeRows.requireHeadScope(head, tenantId, workspaceId, sessionId);
         fencing.requireReadGrant(head, writerToken);
         try (var lease = outputRetention.read(tenantId, sessionId)) {
-            String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-            JournalStoreRows.ResourceRow resource = storeRows.findResource(scopeKey, resourceId, updateVerification);
+            JournalStoreRows.ResourceRow resource = storeRows.findResource(tenantId, sessionId, resourceId, updateVerification);
             if (resource == null) {
                 throw new ManagedAgentException(404,
                         ManagedSessionStoreModels.ERROR_RESOURCE_NOT_FOUND,
@@ -81,9 +82,9 @@ final class JournalResourceReads {
 
     private byte[] readSessionObject(JournalStoreRows.ResourceRow resource) {
         byte[] bytes;
-        try (java.io.InputStream stream = publicationObjects.open(resource.objectKey(), () -> {})) {
+        try (InputStream stream = publicationObjects.open(resource.objectKey(), () -> {})) {
             bytes = stream.readAllBytes();
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Session resource read failed", error);
         }
         if (bytes.length != resource.byteLength()
@@ -104,9 +105,9 @@ final class JournalResourceReads {
             fencing.requireCredential(tenantId, workspaceId, sessionId, writerToken);
             throw JournalStoreRows.invalid("Native snapshot resources require the journal-snapshots read API.");
         }
-        if (org.springframework.transaction.support.TransactionSynchronizationManager
+        if (TransactionSynchronizationManager
                         .isActualTransactionActive()
-                || org.springframework.transaction.support.TransactionSynchronizationManager
+                || TransactionSynchronizationManager
                         .hasResource(jdbc.getDataSource())) {
             throw new IllegalStateException(
                     "Owner resource reads require a fresh transaction boundary");
@@ -119,9 +120,10 @@ final class JournalResourceReads {
 
     InputStream guardedPublicationResource(JournalStoreRows.ResourceRow resource, ToolPublicationRetentionStore.ReadLease lease) {
         lease.requireScope(resource.tenantId(), resource.sessionId());
-        var rows = jdbc.queryForList("SELECT scope_key, publication_id FROM ma_resource"
-                + " WHERE scope_key = ? AND resource_id = ? AND object_key = ?",
-                ToolPublicationDataStore.scope(resource.tenantId(), resource.workspaceId(), resource.sessionId()),
+        var rows = jdbc.queryForList("SELECT scope_ref, publication_id FROM ma_resource"
+                + " WHERE scope_ref = ? AND resource_id = ? AND object_key = ?",
+                ManagedSchemaKeys.identity(ManagedIdentityRefs.publicationScopeRef(
+                        resource.tenantId(), resource.workspaceId(), resource.sessionId())),
                 resource.resourceId(), resource.objectKey());
         if (rows.size() != 1) {
             throw JournalStoreRows.resourceCorrupt();
@@ -141,7 +143,8 @@ final class JournalResourceReads {
                 try {
                     if (quarantine) {
                         outputRetention.quarantineResource(
-                                ToolPublicationDataStore.scope(resource.tenantId(), resource.workspaceId(), resource.sessionId()),
+                                ManagedIdentityRefs.publicationScopeRef(
+                                        resource.tenantId(), resource.workspaceId(), resource.sessionId()),
                                 resource.resourceId(), resource.objectKey());
                     }
                 } catch (RuntimeException cleanup) {
