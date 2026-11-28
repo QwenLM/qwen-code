@@ -10548,6 +10548,54 @@ describe('local container recipe pins', () => {
     );
     expect(skill).toContain("never the PR head's copy");
   });
+
+  // PR #18581 showed three root-container rounds certifying 88/88 merge-ready
+  // while missing FIFO/hard-link/xattr loss (P1), non-root symlink-only
+  // ownership-skip (P2) in mid-round delta 2490bb3f, and an unverified
+  // top-level P1 review comment. Pin the fidelity protocol, mid-round delta
+  // bar, proxy-signal rule, container uid disclosure, and --review-threads
+  // mechanical binding in SKILL.md.
+  it('requires extract-repack fidelity axes, mid-round delta probes, proxy-signal counterexamples, and mechanical review-threads binding', () => {
+    const flat = skill.replace(/\s+/g, ' ');
+    expect(flat).toContain(
+      'For **extract-repack and fidelity-preserving transform diffs**',
+    );
+    expect(flat).toContain('Source-anchored full differential oracle');
+    expect(flat).toContain('File-type matrix');
+    expect(flat).toContain('Inode topology');
+    expect(flat).toContain('Metadata, ownership, and xattrs');
+    expect(flat).toContain('Unprivileged execution context');
+    expect(flat).toContain(
+      'New production logic in a follow-up or mid-round delta needs fresh-round adversarial verification.',
+    );
+    expect(flat).toContain(
+      'Attack proxy-signal gates with false-negative counterexamples.',
+    );
+    expect(flat).toContain(
+      'Verify newly fixed external-tool semantics against the real binary, not shell fakes.',
+    );
+    expect(flat).toContain(
+      '`verify-pr-prepare.mjs` (under `--require-isolation`) records the container process `uid` in `boundary-gate.json`',
+    );
+    expect(skill).toContain(
+      "sed -n 's/^  review-sha256  //p' ~/.cache/qwen-verify/pr<n>/prepare.log > ~/.cache/qwen-verify/pr<n>/review-threads.sha256",
+    );
+    expect(skill).toContain(
+      '--review-threads ~/.cache/qwen-verify/pr<n>/review-threads.json \\',
+    );
+    expect(skill).toContain(
+      '--review-threads-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/review-threads.sha256)" \\',
+    );
+    expect(flat).toContain(
+      'which `prepare` also binds via `reviewSha256` inside the host `pr.json` snapshot',
+    );
+    expect(flat).toContain(
+      'optional positive integer `finding` (required per finding whenever one comment lists multiple distinct blockers)',
+    );
+    expect(flat).toContain(
+      'reference in both `report.md` and `comment.md` (when present) when marked `not-reproduced`',
+    );
+  });
 });
 
 describe('per-round token revocation, request budget, and UDS listener (microVM slice)', () => {

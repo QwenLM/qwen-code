@@ -79,36 +79,48 @@
 ### 2. 阻塞评审覆盖机械门禁
 
 - **`scripts/verify-pr-prepare.mjs`**：对 `prepare` 写入的 `review-threads.json`
-  精确字节计算 `reviewSha256`，在 `review` 行之后打印
-  `  review-sha256  <64-hex>`（GraphQL 拉取失败未写文件时省略）。
+  精确字节计算 `reviewSha256`（GraphQL 拉取失败时为 `null`），在计算
+  `contextSha256` 前将 `reviewSha256` 写入宿主侧 `pr.json` 上下文快照，并在
+  `review` 行之后打印 `  review-sha256  <64-hex>`（拉取失败未写文件时省略）。将
+  `reviewSha256` 绑定到宿主 `pr.json` 后，即使两个 PR 的空评审快照逐字节相同，也
+  无法用其他 PR 或旧轮次的快照与摘要冒名顶替。
 - **`scripts/verify-pr-check.mjs`**：
   - 新增 `--review-threads <snapshot>` 与 `--review-threads-sha256 <64-hex>`，施加
     与 `--context` / `--guard` 相同的宿主信任边界校验（拒绝 PR 可写树内路径、文件
     系统根信任根、硬链接、符号链接、非普通文件、摘要不匹配、`--require-guard` 下
-    缺摘要，以及私自植入在 PR 可写产物目录内的 `review-threads.json`）。
-  - 导出 `hasBlockingSeverityTag(body)`、
+    缺摘要，以及私自植入在 PR 可写产物目录内的 `review-threads.json`）。当已绑定
+    的宿主 `--context` 携带 `reviewSha256` 时，对 `--review-threads` 摘要不一致、
+    `reviewSha256` 为 `null` 却传入 `--review-threads`、`--require-guard` 下存在
+    64 位十六进制 `reviewSha256` 却省略 `--review-threads`，以及 `reviewSha256` 为
+    `null` 时尝试发布 `merge-ready` 均 fail-closed 拒绝。
+  - 导出 `extractBlockingFindings(body)`、`hasBlockingSeverityTag(body)`、
     `extractBlockingReviewItems(reviewData, { coordinates })` 与
     `checkReviewThreads(text, { coordinates })`：
     - 对畸形 JSON/结构，以及与可信 `--context` 坐标不匹配的跨 PR URL fail-closed
       拒绝（防止跨 PR 重放）。
-    - 在 Markdown 代码围栏之外识别结构化阻塞标签（`[P0]`、`[P1]`、`【P0】`、
-      `【P1】`、`[Critical]`、`[Blocker]`、行首加粗/标题/列表标签及
-      `Severity: P0|P1|Critical|Blocker`），排除零项/无项标题
-      （`**Blockers**: None`、`### Critical (0)`、`### Blockers\nNone`）与普通
-      叙述语句。
+    - 在 Markdown 代码围栏之外提取每一条独立的阻塞发现（`P0`、`P1`、`Critical`、
+      `Blocker`），涵盖 Markdown 表格严重度列中的独立单元格（区分 `优先级`/
+      `Severity` 逐项表与 `| Critical | 0 |` 计数汇总表）、以标题引导的阻塞列表
+      （`**Blockers**`）以及同一评论内的多个编号/列表阻塞项，同时忽略正文行内反引
+      号提及（如 `` `[P1]` ``）、零项/无项标题（`**Blockers**: None`、
+      `### Critical (0)`、`### Blockers\nNone`）与普通叙述语句。
     - 收集未决阻塞行内线程（`resolved !== true` 或所属评审位于未解除
       `changeRequests` 中）、带阻塞标签的未解除 `changeRequests` 正文，以及带阻塞
-      标签的 `OWNER`/`MEMBER`/`COLLABORATOR` 顶层 `issueComments`，同时排除
-      `/verify-pr` 自身报告（首段含 `Verdict:` 且末行匹配 `/verify-pr` 签名）及开
-      头带机器人生命周期/状态注释头的评论。
+      标签的 `OWNER`/`MEMBER`/`COLLABORATOR` 顶层 `issueComments`（单条评论含多个
+      阻塞发现时输出独立的 `finding: 1..N` 条目），同时排除 `/verify-pr` 自身报告
+      （首段含 `Verdict:` 且末行匹配 `/verify-pr` 签名）及开头带机器人生命周期/状态
+      注释头的评论。
   - 校验 `assertions.json` 中的可选字段 `reviewCoverage`（元素形态
-    `{ url, status, evidence | reason }`，`status` 取值
+    `{ url, finding?, status, evidence | reason }`，`status` 取值
     `reproduced | not-reproduced | not-measured | no-defect-claimed`，禁止重复
-    URL，`reproduced`/`not-reproduced` 须带非空 `evidence`，
+    `(url, finding)` 键或对同一 URL 混用带序号与不带序号条目，
+    `reproduced`/`not-reproduced` 须带非空 `evidence`，
     `not-measured`/`no-defect-claimed` 须带非空 `reason`）：
-    - 若 `verdict` 为 `merge-ready`，任何未决阻塞项被遗漏、标为 `reproduced` 或
-      `not-measured`、或标为 `not-reproduced` 却未在 `report.md` 中引用其
-      URL/片段/评论 ID，均 fail-closed 报错拒绝。
+    - 当一条评论包含多个阻塞发现时，强制要求逐项提供 `{ url, finding: 1..N }` 记
+      录，单条不带 `finding` 的 `{ url }` 无法放行多发现评论。
+    - 若 `verdict` 为 `merge-ready`，任何未决阻塞发现被遗漏、标为 `reproduced` 或
+      `not-measured`、或标为 `not-reproduced` 却未在 **`report.md` 与 `comment.md`
+      （存在时）两处同时**引用其 URL/片段/评论 ID，均 fail-closed 报错拒绝。
     - 若 `verdict` 非 `merge-ready`（`inconclusive`、`findings`、`blocked`），遗漏
       项降级为告警，避免阻塞部分完成或失败轮次的报告发布。
 
@@ -163,10 +175,8 @@
    评论形态的 `extractBlockingReviewItems()`、跨 PR URL 拦截、`reviewCoverage` 校
    验与 `report.md` 引用检查，以及完整 CLI 宿主边界/摘要/植入文件拒绝对照。
 3. `scripts/tests/verify-pr-model-proxy.test.js`：更新后的 `SKILL.md` 通过 shell
-   AST 白名单审计，且对 `review-threads.sha256` 与 `--review-threads` 的对抗变异
-   全部被拒绝。
-4. `scripts/tests/qwen-triage-workflow.test.js`：钉住 `SKILL.md` 新增的保真协议、中
-   途 delta 门槛、代理信号规则、容器 `uid` 披露及 `--review-threads` /
-   `reviewCoverage` 接线。
-5. 所有改动文件通过 ESLint 与 Prettier 检查，并在隔离稀疏目录独立运行
+   AST 白名单审计，对 `review-threads.sha256` 与 `--review-threads` 的对抗变异全
+   部被拒绝，并钉住 `SKILL.md` 新增的保真协议、中途 delta 门槛、代理信号规则、容
+   器 `uid` 披露及 `--review-threads` / `reviewCoverage` 接线。
+4. 所有改动文件通过 ESLint 与 Prettier 检查，并在隔离稀疏目录独立运行
    `scripts/verify-pr-check.mjs` 验证零额外脚本依赖。

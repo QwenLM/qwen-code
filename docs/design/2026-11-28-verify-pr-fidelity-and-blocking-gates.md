@@ -95,40 +95,60 @@ the certified head `2490bb3f` using real `e2fsprogs`:
 ### 2. Mechanical Blocking-Review Coverage Gate
 
 - **`scripts/verify-pr-prepare.mjs`**: Compute `reviewSha256` over the exact
-  serialized `review-threads.json` bytes written by `prepare` and print
+  serialized `review-threads.json` bytes written by `prepare` (or `null` when
+  the GraphQL fetch fails), embed `reviewSha256` inside the host-held `pr.json`
+  context snapshot before computing `contextSha256`, and print
   `  review-sha256  <64-hex>` alongside the `review` line (omitted when the
-  GraphQL fetch fails and no file is written).
+  GraphQL fetch fails and no file is written). Binding `reviewSha256` inside
+  host `pr.json` prevents substituting another PR's byte-identical empty review
+  snapshot and its matching digest.
 - **`scripts/verify-pr-check.mjs`**:
   - Add `--review-threads <snapshot>` and `--review-threads-sha256 <64-hex>`,
     enforcing the same host-trust boundary as `--context` and `--guard` (refuse
     in-tree paths, filesystem-root trust roots, hardlinks, symlinks, non-regular
     files, digest mismatches, missing digest under `--require-guard`, and any
     `review-threads.json` planted inside the PR-writable artifact directory).
-  - Export `hasBlockingSeverityTag(body)`,
+    When the bound host `--context` carries `reviewSha256`, fail closed on
+    digest mismatch against `--review-threads`, on passing `--review-threads`
+    when `reviewSha256` is `null`, on omitting `--review-threads` under
+    `--require-guard` when `reviewSha256` is a 64-hex digest, and on
+    `merge-ready` when `reviewSha256` is `null` (unknown review state).
+  - Export `extractBlockingFindings(body)`, `hasBlockingSeverityTag(body)`,
     `extractBlockingReviewItems(reviewData, { coordinates })`, and
     `checkReviewThreads(text, { coordinates })`:
     - Fail closed on malformed payloads or any review/comment URL targeting a
       different repo/PR than trusted `--context` coordinates (blocking cross-PR
       replay).
-    - Detect structured blocking tags (`[P0]`, `[P1]`, `【P0】`, `【P1】`,
-      `[Critical]`, `[Blocker]`, line-leading bold/heading/list labels, and
-      `Severity: P0|P1|Critical|Blocker`) outside Markdown fenced code blocks,
-      ignoring zero/none headings (`**Blockers**: None`, `### Critical (0)`,
-      `### Blockers\nNone`) and ordinary prose.
+    - Detect every distinct blocking finding (`P0`, `P1`, `Critical`, `Blocker`)
+      outside Markdown fenced code blocks — including standalone severity cells
+      in Markdown tables (distinguishing per-finding severity columns such as
+      `优先级`/`Severity` from zero-count summary tables like `| Critical | 0 |`),
+      heading-led blocker bullet lists (`**Blockers**`), and multiple numbered
+      or bulleted blockers within a single comment — while ignoring inline
+      backtick mentions in prose (such as `` `[P1]` ``), zero/none headings
+      (`**Blockers**: None`, `### Critical (0)`, `### Blockers\nNone`), and
+      ordinary prose.
     - Collect open blocking inline threads (`resolved !== true` or parent review
       in standing `changeRequests`), blocking standing `changeRequests` bodies,
       and blocking top-level `OWNER`/`MEMBER`/`COLLABORATOR` `issueComments`
-      while ignoring `/verify-pr` reports (first-paragraph `Verdict:` paired with
-      the final-line `/verify-pr` footer) and leading bot lifecycle/status comment
-      headers.
+      (emitting distinct `finding: 1..N` items whenever a single comment carries
+      multiple blockers) while ignoring `/verify-pr` reports (first-paragraph
+      `Verdict:` paired with the final-line `/verify-pr` footer) and leading bot
+      lifecycle/status comment headers.
   - Validate optional `assertions.json` `reviewCoverage` entries of shape
-    `{ url, status, evidence | reason }` where `status` is one of
+    `{ url, finding?, status, evidence | reason }` where `status` is one of
     `reproduced | not-reproduced | not-measured | no-defect-claimed` (no
-    duplicate URLs; non-empty `evidence` for `reproduced`/`not-reproduced`;
-    non-empty `reason` for `not-measured`/`no-defect-claimed`):
-    - Refuse `merge-ready` if any open blocking item is omitted, marked
+    duplicate `(url, finding)` keys and no mixing bare and finding-indexed
+    entries for the same URL; non-empty `evidence` for
+    `reproduced`/`not-reproduced`; non-empty `reason` for
+    `not-measured`/`no-defect-claimed`):
+    - Require explicit per-finding `{ url, finding: 1..N }` coverage whenever a
+      comment contains multiple blocking findings (a single bare `{ url }` entry
+      cannot cover a multi-finding comment).
+    - Refuse `merge-ready` if any open blocking finding is omitted, marked
       `reproduced` or `not-measured`, or marked `not-reproduced` without a
-      matching URL/fragment/comment-ID citation in `report.md`.
+      matching URL/fragment/comment-ID citation in **both `report.md` and
+      `comment.md` (when present)**.
     - Downgrade omissions on non-`merge-ready` verdicts (`inconclusive`,
       `findings`, `blocked`) to warnings so partial or failing rounds can still
       publish.
@@ -196,11 +216,10 @@ the certified head `2490bb3f` using real `e2fsprogs`:
    cases, cross-PR URL refusal, `reviewCoverage` validation and `report.md`
    citation enforcement, and full CLI host-trust/digest/planted-file checks.
 3. `scripts/tests/verify-pr-model-proxy.test.js`: shell AST allowlist passes for
-   updated `SKILL.md` and rejects hostile mutations of `review-threads.sha256`
-   and `--review-threads`.
-4. `scripts/tests/qwen-triage-workflow.test.js`: pins the new fidelity protocol,
-   mid-round delta bar, proxy-signal rule, container `uid` disclosure, and
-   `--review-threads` / `reviewCoverage` wiring in `SKILL.md`.
-5. ESLint and Prettier pass cleanly on all modified files, plus an isolated
+   updated `SKILL.md`, rejects hostile mutations of `review-threads.sha256` and
+   `--review-threads`, and pins the new fidelity protocol, mid-round delta bar,
+   proxy-signal rule, container `uid` disclosure, and `--review-threads` /
+   `reviewCoverage` wiring in `SKILL.md`.
+4. ESLint and Prettier pass cleanly on all modified files, plus an isolated
    standalone run of `scripts/verify-pr-check.mjs` confirming zero extra
    dependencies.

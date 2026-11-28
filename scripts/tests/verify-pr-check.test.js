@@ -40,6 +40,7 @@ import {
   checkTrustClassification,
   containerNonceErrors,
   executionApprovalErrors,
+  extractBlockingFindings,
   extractBlockingReviewItems,
   hasBlockingSeverityTag,
   isFilesystemRoot,
@@ -7372,6 +7373,564 @@ describe('container boundary-gate.json uid check and --review-threads blocking-r
       expect(blockedRes.stdout).toMatch(
         /merge-ready omits open blocking issue-comment .*issuecomment-7239998370/,
       );
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  it('extracts per-row table P1 cells and multiple numbered P1 findings using exact PR #18549 review bodies while ignoring count-zero tables and backtick prose mentions', () => {
+    // Exact GitHub body from QwenLM/qwen-code#18549#issuecomment-7233760331 (2 P1s in a Markdown table).
+    const tableReviewBody = [
+      '复审 `bae35ab242c9`，建议暂缓合并。',
+      '',
+      '| 优先级 | 最终刷新期间发生的更新 | 首次发布检查 | 立即重试 |',
+      '| --- | --- | --- | --- |',
+      '| P1 | 共有 101 条正式评审。第二次读取行内评论时，最早一条正式评审的正文更新为 P1。 | 退出 0，报告 `merge-ready` | 退出 1，报告 `reviews: 1 was edited (body changed)` |',
+      '| P1 | 共有 169 条行内评论。最后一次分页已读完前 100 条，读取后 69 条时，前一页的一条评论更新为 P1。 | 退出 0，报告 `merge-ready` | 退出 1，指出该条行内评论已编辑 |',
+      '',
+      '1. **超过 100 条正式评审时，较早的评审失去最终复核。**',
+      '2. **行内评论的最后一次分页仍可能拼出过时内容。**',
+    ].join('\n');
+
+    const tableFindings = extractBlockingFindings(tableReviewBody);
+    expect(tableFindings).toHaveLength(2);
+    expect(tableFindings[0].excerpt).toContain('101 条正式评审');
+    expect(tableFindings[1].excerpt).toContain('169 条行内评论');
+
+    // Exact GitHub body from QwenLM/qwen-code#18549#issuecomment-7231584332 (2 numbered [P1] + 1 [P3]).
+    const multiP1Body = [
+      '复审提交 `933bdde16ca2`。建议暂缓合并。',
+      '',
+      '1. **[P1] 同一 PR 的两轮本地评审会共用起始快照。** 新开的本地信任轮次不持有进行中标记。',
+      '',
+      '2. **[P1] 最终抓取进行期间的推送会被漏掉。** 抓取先读取一次 PR 的 head 和状态。',
+      '',
+      '3. **[P3] 单独调用快照工具时，写入失败仍会留下可用的旧快照。**',
+    ].join('\n');
+
+    const multiFindings = extractBlockingFindings(multiP1Body);
+    expect(multiFindings).toHaveLength(2);
+    expect(multiFindings[0].excerpt).toContain('共用起始快照');
+    expect(multiFindings[1].excerpt).toContain('推送会被漏掉');
+
+    // Heading-led blocker bullet list (triage stage=2 shape).
+    const headingBullets = extractBlockingFindings(
+      '**Blockers**\n\n- `a.mjs` — misses rollback.\n- `b.mjs` — drops upload.\n\n**Non-blocking**\n\n- nit',
+    );
+    expect(headingBullets).toHaveLength(2);
+
+    // Negative controls: zero-count severity summary table, prose mentioning `[P1]` in backticks,
+    // and summary table paired with explicit findings below (no double count).
+    expect(
+      extractBlockingFindings(
+        '| Severity | Count |\n| --- | --- |\n| Critical | 0 |\n| Suggestion | 2 |',
+      ),
+    ).toEqual([]);
+    expect(
+      extractBlockingFindings(
+        'A maintainer who asks for changes without a `[P1]` tag still has a review.',
+      ),
+    ).toEqual([]);
+    expect(
+      extractBlockingFindings(
+        '| Severity | Count |\n| --- | --- |\n| Critical | 2 |\n\n1. **[Critical] Bug A**\n2. **[Critical] Bug B**',
+      ),
+    ).toHaveLength(2);
+    // Standalone count-summary table with non-zero Critical count still falls back to 1 blocker.
+    expect(
+      extractBlockingFindings(
+        '| Severity | Count |\n| --- | --- |\n| Critical | 2 |',
+      ),
+    ).toHaveLength(1);
+    // Bold-wrapped emoji in a severity cell must still normalize cleanly.
+    expect(
+      extractBlockingFindings(
+        '| Severity | Detail |\n| --- | --- |\n| **🔴 Critical** | Drops FIFOs |',
+      ),
+    ).toHaveLength(1);
+    // Markdown link text `[P1](url)` and hidden HTML comments must not trigger blockers.
+    expect(
+      extractBlockingFindings(
+        'See [P1](https://example.com/issue) for context.',
+      ),
+    ).toEqual([]);
+    expect(
+      extractBlockingFindings('<!-- [P1] hidden note -->\nLooks good.'),
+    ).toEqual([]);
+    // Mirrored bilingual <details><summary>中文说明</summary> avoids double-counting
+    // when findings exist outside, while still falling back if findings appear only inside.
+    expect(
+      extractBlockingFindings(
+        '**Blockers**\n\n- Bug A\n- Bug B\n\n<details>\n<summary>中文说明</summary>\n\n**Blockers**\n\n- 翻译 A\n- 翻译 B\n\n</details>',
+      ),
+    ).toHaveLength(2);
+    expect(
+      extractBlockingFindings(
+        'Summary only.\n\n<details>\n<summary>中文说明</summary>\n\n1. **[P1] 仅写在折叠块里的阻塞项**\n\n</details>',
+      ),
+    ).toHaveLength(1);
+    // Counterexamples: inline backtick `<!--` and unclosed `<!--` must never
+    // swallow subsequent [P1] findings, and unclosed <details><summary>中文说明</summary>
+    // must not swallow findings written later in the same comment.
+    expect(
+      extractBlockingFindings(
+        'Verify `<!-- qwen-verify` header cannot be forged.\n\n1. **[P1] Real blocker after backtick HTML comment.**',
+      ),
+    ).toHaveLength(1);
+    expect(
+      extractBlockingFindings(
+        'Note <!-- unclosed marker\n\n1. **[P1] Real blocker after unclosed HTML comment.**',
+      ),
+    ).toHaveLength(1);
+    expect(
+      extractBlockingFindings(
+        '1. **[P1] First blocker**\n\n<details><summary>中文说明</summary>\n\n2. **[P1] Second blocker after unclosed details**',
+      ),
+    ).toHaveLength(2);
+
+    // Verify extractBlockingReviewItems assigns distinct finding 1..2 on both #18549 comments.
+    const extracted = extractBlockingReviewItems(
+      {
+        threads: [],
+        changeRequests: [],
+        issueComments: [
+          {
+            author: 'wenshao',
+            association: 'OWNER',
+            url: 'https://github.com/QwenLM/qwen-code/pull/18549#issuecomment-7233760331',
+            body: tableReviewBody,
+          },
+          {
+            author: 'wenshao',
+            association: 'OWNER',
+            url: 'https://github.com/QwenLM/qwen-code/pull/18549#issuecomment-7231584332',
+            body: multiP1Body,
+          },
+        ],
+      },
+      { coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 18549 } },
+    );
+    expect(extracted.errors).toEqual([]);
+    expect(
+      extracted.items.map((item) => [
+        item.url.split('#')[1],
+        item.finding,
+        item.findingCount,
+      ]),
+    ).toEqual([
+      ['issuecomment-7233760331', 1, 2],
+      ['issuecomment-7233760331', 2, 2],
+      ['issuecomment-7231584332', 1, 2],
+      ['issuecomment-7231584332', 2, 2],
+    ]);
+  });
+
+  it('requires per-finding coverage for multi-P1 comments and enforces citations in both report.md and comment.md', () => {
+    const multiUrl =
+      'https://github.com/QwenLM/qwen-code/pull/18581#issuecomment-7231584332';
+    const reviewText = JSON.stringify({
+      threads: [],
+      changeRequests: [],
+      issueComments: [
+        {
+          author: 'wenshao',
+          association: 'OWNER',
+          url: multiUrl,
+          body: '1. **[P1] Shared start snapshot**\n2. **[P1] Missed mid-fetch push**',
+        },
+      ],
+    });
+    const baseReport = `PR #18581 (${HEAD_OID}) — **Verdict: merge-ready**\n\n## Methodology\n\n**Boundary.** Container.\n\nVerified issuecomment-7231584332 findings 1 and 2.`;
+    const validComment = `${baseReport}\n\n_— claude-opus-4-7 via Qwen Code /verify-pr (v0.29.0; skill 123456789abc)_`;
+
+    // 1. A bare { url } without finding index cannot cover a multi-finding comment.
+    const bareOnly = checkArtifacts({
+      files: makePassingFiles({
+        report: baseReport,
+        comment: validComment,
+        assertions: JSON.stringify({
+          pass: 10,
+          fail: 0,
+          total: 10,
+          reviewCoverage: [
+            {
+              url: multiUrl,
+              status: 'not-reproduced',
+              evidence: 'only checked finding 1',
+            },
+          ],
+        }),
+      }),
+      evidence: ['01-ab.png'],
+      expectedHead: HEAD_OID,
+      coordinates: COORDS,
+      reviewThreadsText: reviewText,
+    });
+    expect(bareOnly.errors).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/finding 1 of 2/),
+        expect.stringMatching(/finding 2 of 2/),
+      ]),
+    );
+
+    // 2. Covering finding 1 and marking finding 2 not-measured fails closed (and does NOT error as duplicate URL).
+    const secondUnmeasured = checkArtifacts({
+      files: makePassingFiles({
+        report: baseReport,
+        comment: validComment,
+        assertions: JSON.stringify({
+          pass: 10,
+          fail: 0,
+          total: 10,
+          reviewCoverage: [
+            {
+              url: multiUrl,
+              finding: 1,
+              status: 'not-reproduced',
+              evidence: 'per-round dirs isolated',
+            },
+            {
+              url: multiUrl,
+              finding: 2,
+              status: 'not-measured',
+              reason: 'pending push race probe',
+            },
+          ],
+        }),
+      }),
+      evidence: ['01-ab.png'],
+      expectedHead: HEAD_OID,
+      coordinates: COORDS,
+      reviewThreadsText: reviewText,
+    });
+    expect(secondUnmeasured.errors.some((e) => e.includes('duplicate'))).toBe(
+      false,
+    );
+    expect(secondUnmeasured.errors).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/finding 2\) marked not-measured/),
+      ]),
+    );
+
+    // 3. Covering both findings passes when BOTH report.md and comment.md cite the comment.
+    const bothCoveredAssertions = JSON.stringify({
+      pass: 10,
+      fail: 0,
+      total: 10,
+      reviewCoverage: [
+        {
+          url: multiUrl,
+          finding: 1,
+          status: 'not-reproduced',
+          evidence: 'per-round dirs isolated',
+        },
+        {
+          url: multiUrl,
+          finding: 2,
+          status: 'not-reproduced',
+          evidence: 'post-pagination head recheck caught push',
+        },
+      ],
+    });
+    const bothPass = checkArtifacts({
+      files: makePassingFiles({
+        report: baseReport,
+        comment: validComment,
+        assertions: bothCoveredAssertions,
+      }),
+      evidence: ['01-ab.png'],
+      expectedHead: HEAD_OID,
+      coordinates: COORDS,
+      reviewThreadsText: reviewText,
+    });
+    expect(bothPass.errors).toEqual([]);
+
+    // 4. Stripping the citation from comment.md while keeping it in report.md fails closed!
+    const strippedComment = `PR #18581 (${HEAD_OID}) — **Verdict: merge-ready**\n\n## Methodology\n\n**Boundary.** Container.\n\nSummary only.\n\n_— claude-opus-4-7 via Qwen Code /verify-pr (v0.29.0; skill 123456789abc)_`;
+    const missingInComment = checkArtifacts({
+      files: makePassingFiles({
+        report: baseReport,
+        comment: strippedComment,
+        assertions: bothCoveredAssertions,
+      }),
+      evidence: ['01-ab.png'],
+      expectedHead: HEAD_OID,
+      coordinates: COORDS,
+      reviewThreadsText: reviewText,
+    });
+    expect(missingInComment.errors).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /comment\.md does not reference verified blocking/,
+        ),
+      ]),
+    );
+
+    // 4b. Hiding the comment citation inside an invisible HTML comment must not satisfy comment.md check.
+    const htmlHiddenComment = `PR #18581 (${HEAD_OID}) — **Verdict: merge-ready**\n\n## Methodology\n\n**Boundary.** Container.\n\n<!-- issuecomment-7231584332 -->\n\n_— claude-opus-4-7 via Qwen Code /verify-pr (v0.29.0; skill 123456789abc)_`;
+    const hiddenInComment = checkArtifacts({
+      files: makePassingFiles({
+        report: baseReport,
+        comment: htmlHiddenComment,
+        assertions: bothCoveredAssertions,
+      }),
+      evidence: ['01-ab.png'],
+      expectedHead: HEAD_OID,
+      coordinates: COORDS,
+      reviewThreadsText: reviewText,
+    });
+    expect(hiddenInComment.errors).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /comment\.md does not reference verified blocking/,
+        ),
+      ]),
+    );
+
+    // 5. Mixing bare and finding-indexed entries for the same URL fails closed.
+    const mixed = checkArtifacts({
+      files: makePassingFiles({
+        report: baseReport,
+        assertions: JSON.stringify({
+          pass: 10,
+          fail: 0,
+          total: 10,
+          reviewCoverage: [
+            { url: multiUrl, status: 'not-reproduced', evidence: 'a' },
+            {
+              url: multiUrl,
+              finding: 1,
+              status: 'not-reproduced',
+              evidence: 'b',
+            },
+          ],
+        }),
+      }),
+      evidence: ['01-ab.png'],
+      expectedHead: HEAD_OID,
+      coordinates: COORDS,
+    });
+    expect(mixed.errors).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/mixes bare and finding-indexed entries/),
+      ]),
+    );
+  });
+
+  it('blocks substituting another PR empty review snapshot via host context reviewSha256 and blocks merge-ready when reviewSha256 is null', () => {
+    const baseDir = mkdtempSync(join(tmpdir(), 'verify-pr-empty-replay-'));
+    try {
+      const cloneDir = join(baseDir, 'pr-clone');
+      const roundDir = join(cloneDir, 'tmp', 'pr18581-verify-20261128-140000');
+      const hostDir = join(baseDir, 'host-cache');
+      const guardDir = join(baseDir, 'host-guard');
+      mkdirSync(join(roundDir, 'evidence'), { recursive: true });
+      mkdirSync(hostDir, { recursive: true });
+      mkdirSync(guardDir, { recursive: true });
+
+      const nonce = 'nonce-empty-replay-test';
+      writeFileSync(join(roundDir, 'run.log'), `container-nonce: ${nonce}\n`);
+      writeFileSync(join(roundDir, 'evidence', '01-ab.png'), 'png');
+      writeFileSync(join(roundDir, 'verdict.txt'), 'merge-ready\n');
+      writeFileSync(
+        join(roundDir, 'report.md'),
+        `PR #18581 (${HEAD_OID}) — **Verdict: merge-ready**\n\n## Methodology\n\n**Boundary.** Container.\n`,
+      );
+      writeFileSync(
+        join(roundDir, 'boundary.json'),
+        JSON.stringify({
+          mode: 'container',
+          detail: 'docker node:22-bookworm',
+        }),
+      );
+      writeFileSync(
+        join(roundDir, 'boundary-gate.json'),
+        JSON.stringify({
+          gate: 'require-isolation',
+          passed: true,
+          at: new Date().toISOString(),
+          signals: ['/.dockerenv'],
+          observed: ['/.dockerenv'],
+          credentialFree: true,
+          uid: 1000,
+          nonceSha256: sha256(nonce),
+        }),
+      );
+      writeFileSync(
+        join(roundDir, 'assertions.json'),
+        JSON.stringify({ pass: 5, fail: 0, total: 5 }),
+      );
+
+      // PR A had an empty review snapshot; PR B actually has a P1 blocker.
+      const emptyReviewText = `${JSON.stringify({ threads: [], changeRequests: [], issueComments: [], issueCommentCount: 0 }, null, 2)}\n`;
+      const realReviewText = `${JSON.stringify(
+        {
+          threads: [],
+          changeRequests: [],
+          issueComments: [
+            {
+              author: 'wenshao',
+              association: 'OWNER',
+              url: 'https://github.com/QwenLM/qwen-code/pull/18581#issuecomment-7239376491',
+              body: '1. **[P1] Real blocker on target PR**',
+            },
+          ],
+          issueCommentCount: 1,
+        },
+        null,
+        2,
+      )}\n`;
+      const emptyReviewPath = join(hostDir, 'other-pr-empty-review.json');
+      writeFileSync(emptyReviewPath, emptyReviewText);
+      const emptyReviewSha = sha256(emptyReviewText);
+      const realReviewSha = sha256(realReviewText);
+
+      // Host context for PR #18581 binds realReviewSha.
+      const ctxText = JSON.stringify({
+        repo: 'QwenLM/qwen-code',
+        pr: 18581,
+        baseRefOid: BASE_OID,
+        headRefOid: HEAD_OID,
+        reviewSha256: realReviewSha,
+      });
+      const ctxPath = join(hostDir, 'pr.json');
+      writeFileSync(ctxPath, ctxText);
+      const ctxSha = sha256(ctxText);
+
+      const nowIso = new Date().toISOString();
+      const guardText = JSON.stringify({
+        schema: GUARD_VERDICT_SCHEMA,
+        clean: true,
+        reasons: [],
+        repo: 'QwenLM/qwen-code',
+        pr: 18581,
+        startHeadRefOid: HEAD_OID,
+        nowHeadRefOid: HEAD_OID,
+        startState: 'OPEN',
+        nowState: 'OPEN',
+        startCapturedAt: nowIso,
+        nowCapturedAt: nowIso,
+        comparedAt: nowIso,
+      });
+      const guardPath = join(guardDir, 'guard-verdict.json');
+      writeFileSync(guardPath, guardText);
+      const guardSha = sha256(guardText);
+
+      // 1. Substituting PR A's empty snapshot + PR A's matching sha fails against PR B's bound context reviewSha256!
+      const crossEmpty = spawnSync(
+        process.execPath,
+        [
+          SCRIPT,
+          '--context',
+          ctxPath,
+          '--context-sha256',
+          ctxSha,
+          '--context-root',
+          cloneDir,
+          '--require-guard',
+          '--guard',
+          guardPath,
+          '--guard-sha256',
+          guardSha,
+          '--review-threads',
+          emptyReviewPath,
+          '--review-threads-sha256',
+          emptyReviewSha,
+          roundDir,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(crossEmpty.status).toBe(1);
+      expect(crossEmpty.stdout).toMatch(
+        /does not match reviewSha256 recorded in the bound host --context snapshot/,
+      );
+
+      // 2. Omitting --review-threads entirely under --require-guard when context binds reviewSha256 fails closed!
+      const droppedFlag = spawnSync(
+        process.execPath,
+        [
+          SCRIPT,
+          '--context',
+          ctxPath,
+          '--context-sha256',
+          ctxSha,
+          '--context-root',
+          cloneDir,
+          '--require-guard',
+          '--guard',
+          guardPath,
+          '--guard-sha256',
+          guardSha,
+          roundDir,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(droppedFlag.status).toBe(1);
+      expect(droppedFlag.stdout).toMatch(
+        /--require-guard requires --review-threads matching reviewSha256 recorded in the bound host --context snapshot/,
+      );
+
+      // 3. When prepare failed to fetch review state (reviewSha256: null), merge-ready is refused (inconclusive passes).
+      const nullCtxText = JSON.stringify({
+        repo: 'QwenLM/qwen-code',
+        pr: 18581,
+        baseRefOid: BASE_OID,
+        headRefOid: HEAD_OID,
+        reviewSha256: null,
+      });
+      const nullCtxPath = join(hostDir, 'pr-null-review.json');
+      writeFileSync(nullCtxPath, nullCtxText);
+      const nullCtxSha = sha256(nullCtxText);
+
+      const nullMergeReady = spawnSync(
+        process.execPath,
+        [
+          SCRIPT,
+          '--context',
+          nullCtxPath,
+          '--context-sha256',
+          nullCtxSha,
+          '--context-root',
+          cloneDir,
+          '--require-guard',
+          '--guard',
+          guardPath,
+          '--guard-sha256',
+          guardSha,
+          roundDir,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(nullMergeReady.status).toBe(1);
+      expect(nullMergeReady.stdout).toMatch(
+        /merge-ready is not allowed when host --context recorded reviewSha256=null/,
+      );
+
+      writeFileSync(join(roundDir, 'verdict.txt'), 'inconclusive\n');
+      writeFileSync(
+        join(roundDir, 'report.md'),
+        `PR #18581 (${HEAD_OID}) — **Verdict: inconclusive**\n\n## Methodology\n\n**Boundary.** Container.\n`,
+      );
+      const nullInconclusive = spawnSync(
+        process.execPath,
+        [
+          SCRIPT,
+          '--context',
+          nullCtxPath,
+          '--context-sha256',
+          nullCtxSha,
+          '--context-root',
+          cloneDir,
+          '--require-guard',
+          '--guard',
+          guardPath,
+          '--guard-sha256',
+          guardSha,
+          roundDir,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(nullInconclusive.status).toBe(0);
     } finally {
       rmSync(baseDir, { recursive: true, force: true });
     }

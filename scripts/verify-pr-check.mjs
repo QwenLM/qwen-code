@@ -84,17 +84,29 @@ const IGNORED_BOT_COMMENT_HEADER =
 const PR_URL_COORDINATES_RE =
   /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)(?:[#/?].*)?$/;
 const BRACKET_BLOCKING_TAG_RE =
-  /(?:\[|【)\s*(?:P0|P1|Critical|Blocker)\s*(?:\]|】)/i;
+  /(?:\[|【)\s*(?:P0|P1|Critical|Blocker)\s*(?:\]|】)(?!\()/i;
+const LEADING_BACKTICK_BRACKET_TAG_RE =
+  /^\s*(?:>\s*)?(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)?(?:\*\*|__)?`(?:\[|【)\s*(?:P0|P1|Critical|Blocker)\s*(?:\]|】)`/i;
+const TRANSLATION_SUMMARY_RE =
+  /^\s*<summary>\s*(?:中文说明|中文|Chinese(?:\s+(?:summary|translation))?)\s*<\/summary>\s*$/i;
 const LINE_LEADING_BLOCKING_TAG_RE =
-  /^\s*(?:>\s*)?(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)?(?:\*\*|__)?(?:P0|P1|Critical|Blocker|Blockers)(?:\*\*|__)?(?:\s*(?:[:：—–-]|$|\())/i;
+  /^\s*(?:>\s*)?(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)?(?:\*\*|__|`)?(?:P0|P1|Critical|Blocker|Blockers)(?:\*\*|__|`)?(?:\s*(?:[:：—–-]|$|\())/i;
 const BARE_BLOCKING_HEADING_RE =
   /^\s*(?:>\s*)?(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)?(?:\*\*|__)?(?:P0|P1|Critical|Blocker|Blockers)(?:\*\*|__)?\s*$/i;
 const SEVERITY_KV_BLOCKING_TAG_RE =
-  /\bseverity\s*[:=]\s*(?:\*\*|__)?(?:P0|P1|Critical|Blocker)\b/i;
+  /\bseverity\s*[:=]\s*(?:\*\*|__|`)?(?:P0|P1|Critical|Blocker)\b/i;
 const ZERO_OR_NONE_BLOCKING_LINE_RE =
   /(?:[:：—–-]\s*(?:none|0|n\/a|无)\s*$|\(\s*0\s*\)\s*$)/i;
 const NONE_ONLY_LINE_RE =
   /^\s*(?:>\s*)?(?:[-*+]\s+)?(?:none|0|n\/a|无)\.?\s*$/i;
+const TABLE_SEVERITY_HEADER_RE =
+  /^(?:severity|priority|level|优先级|严重度|严重程度|严重级别|级别|等级)$/i;
+const TABLE_COUNT_HEADER_RE =
+  /^(?:count|total|found|findings|数量|个数|条数)$/i;
+const STANDALONE_BLOCKING_SEVERITY_RE = /^(?:P0|P1|Critical|Blocker)$/i;
+const ZERO_OR_NONE_CELL_RE = /^(?:0|none|n\/a|无|-|—)?$/i;
+const LIST_ITEM_RE = /^(\s*(?:>\s*)?)(?:[-*+]\s+|\d+[.)]\s+)/;
+const TABLE_SEPARATOR_CELL_RE = /^:?-{1,}:?$/;
 
 /**
  * Who caused a failed assertion. `pr` is the only one that can stamp a defect
@@ -204,14 +216,18 @@ missing --guard-sha256 fails closed. A guard-verdict.json planted inside the
 PR-writable artifact directory is always refused.
 
 With --review-threads <snapshot> (host-held review-threads.json prepared by
-verify-pr-prepare.mjs), the checker extracts open blocking inline threads and
-maintainer top-level blocking comments (Critical, Blocker, P0, P1) and verifies
-that assertions.json reviewCoverage accounts for every item before allowing
-merge-ready (with evidence referenced in report.md for not-reproduced items).
-Pass --review-threads-sha256 <digest> (printed by prepare as review-sha256) to
-bind its bytes; --require-guard fails closed when --review-threads is passed
-without a digest. A review-threads.json planted inside the PR-writable artifact
-directory is always refused.
+verify-pr-prepare.mjs), the checker extracts open blocking inline threads,
+standing change-request bodies, and maintainer top-level blocking comments
+(Critical, Blocker, P0, P1 — including severity-column table rows and multiple
+findings within one comment) and verifies that assertions.json reviewCoverage
+accounts for every finding (with per-finding { url, finding } entries when a
+comment carries more than one blocker) before allowing merge-ready, with
+citations in both report.md and comment.md (when present) for not-reproduced
+items. Pass --review-threads-sha256 <digest> (printed by prepare as
+review-sha256) to bind its bytes; when the bound host --context snapshot
+carries reviewSha256, the checker enforces exact digest agreement to block
+cross-PR empty/stale snapshot substitution. A review-threads.json planted
+inside the PR-writable artifact directory is always refused.
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
@@ -1705,9 +1721,117 @@ function coordinatesMismatch(url, coordinates) {
   return null;
 }
 
-export function hasBlockingSeverityTag(body) {
-  if (typeof body !== 'string' || body.trim() === '') return false;
+function stripInlineCodeSpans(line) {
+  let out = '';
+  let i = 0;
+  while (i < line.length) {
+    if (line[i] === '`') {
+      let tickLen = 0;
+      while (i + tickLen < line.length && line[i + tickLen] === '`') {
+        tickLen++;
+      }
+      const closer = '`'.repeat(tickLen);
+      let searchFrom = i + tickLen;
+      let closeIdx = -1;
+      while (searchFrom < line.length) {
+        const candidate = line.indexOf(closer, searchFrom);
+        if (candidate === -1) break;
+        const beforeOk = candidate === 0 || line[candidate - 1] !== '`';
+        const afterOk =
+          candidate + tickLen === line.length ||
+          line[candidate + tickLen] !== '`';
+        if (beforeOk && afterOk) {
+          closeIdx = candidate;
+          break;
+        }
+        searchFrom = candidate + 1;
+      }
+      if (closeIdx !== -1) {
+        i = closeIdx + tickLen;
+        continue;
+      }
+      out += closer;
+      i += tickLen;
+      continue;
+    }
+    out += line[i];
+    i++;
+  }
+  return out;
+}
+
+function splitMarkdownTableRow(line) {
+  const stripped = line.replace(/^\s*(?:>\s*)+/, '').trim();
+  if (!stripped.includes('|')) return null;
+  const cells = [];
+  let current = '';
+  let inBackticks = 0;
+  for (let i = 0; i < stripped.length; i++) {
+    const ch = stripped[i];
+    if (ch === '\\' && inBackticks === 0 && i + 1 < stripped.length) {
+      if (stripped[i + 1] === '|') {
+        current += '|';
+        i++;
+        continue;
+      }
+    }
+    if (ch === '`') {
+      let tickLen = 0;
+      while (i + tickLen < stripped.length && stripped[i + tickLen] === '`') {
+        tickLen++;
+      }
+      if (inBackticks === 0) {
+        inBackticks = tickLen;
+      } else if (inBackticks === tickLen) {
+        inBackticks = 0;
+      }
+      current += '`'.repeat(tickLen);
+      i += tickLen - 1;
+      continue;
+    }
+    if (ch === '|' && inBackticks === 0) {
+      cells.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  cells.push(current.trim());
+  if (stripped.startsWith('|') && cells[0] === '') cells.shift();
+  if (stripped.endsWith('|') && cells[cells.length - 1] === '') cells.pop();
+  return cells.length > 0 ? cells : null;
+}
+
+function isMarkdownTableSeparator(line, expectedCols) {
+  const cells = splitMarkdownTableRow(line);
+  if (!cells || cells.length !== expectedCols) return false;
+  return cells.every((cell) => TABLE_SEPARATOR_CELL_RE.test(cell));
+}
+
+function normalizeTableCellToken(cell) {
+  let text = cell.trim();
+  for (let pass = 0; pass < 4; pass++) {
+    const prev = text;
+    text = text
+      .replace(/^(?:🔴|🟠|🟡|🚨|⛔|❌|⚠️|❗)\s*/u, '')
+      .replace(/^\*\*(.*)\*\*$/, '$1')
+      .replace(/^__(.*)__$/, '$1')
+      .replace(/^\*(.*)\*$/, '$1')
+      .replace(/^_(.*)_$/, '$1')
+      .replace(/^`(.*)`$/, '$1')
+      .replace(/^\[(.*)\]$/, '$1')
+      .replace(/^【(.*)】$/, '$1')
+      .trim();
+    if (text === prev) break;
+  }
+  return text;
+}
+
+function stripHtmlCommentsOutsideFences(body) {
   const lines = normalizeNewlines(body).split('\n');
+  // Precompute whether a line is inside a fenced code block so we can safely
+  // check for a closing `-->` outside fences before entering an HTML comment.
+  const fenced = new Array(lines.length).fill(false);
   let fenceChar = null;
   let fenceLen = 0;
   let fenceQuoted = false;
@@ -1724,12 +1848,11 @@ export function hasBlockingSeverityTag(body) {
       const marker = fenceMatch[2];
       const rest = line.slice(fenceMatch[0].length);
       if (fenceChar === null) {
-        // CommonMark forbids backticks in a backtick fence info string, so a
-        // line like ```foo``` [P1] is an inline code span, not an open fence.
         if (marker[0] !== '`' || !rest.includes('`')) {
           fenceChar = marker[0];
           fenceLen = marker.length;
           fenceQuoted = prefix.includes('>');
+          fenced[i] = true;
           continue;
         }
       } else if (
@@ -1740,30 +1863,429 @@ export function hasBlockingSeverityTag(body) {
         fenceChar = null;
         fenceLen = 0;
         fenceQuoted = false;
+        fenced[i] = true;
         continue;
       }
     }
-    if (fenceChar !== null) continue;
-    if (BRACKET_BLOCKING_TAG_RE.test(line)) return true;
-    if (SEVERITY_KV_BLOCKING_TAG_RE.test(line)) return true;
-    if (
-      LINE_LEADING_BLOCKING_TAG_RE.test(line) &&
-      !ZERO_OR_NONE_BLOCKING_LINE_RE.test(line)
-    ) {
-      if (BARE_BLOCKING_HEADING_RE.test(line)) {
-        let next = '';
-        for (let j = i + 1; j < lines.length; j++) {
-          if (lines[j].trim() !== '') {
-            next = lines[j];
+    fenced[i] = fenceChar !== null;
+  }
+
+  const hasClosingMarker = (startLine, startCol) => {
+    if (lines[startLine].indexOf('-->', startCol) !== -1) return true;
+    for (let j = startLine + 1; j < lines.length; j++) {
+      if (!fenced[j] && lines[j].includes('-->')) return true;
+    }
+    return false;
+  };
+
+  const out = [];
+  let inHtmlComment = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (fenced[i]) {
+      out.push(line);
+      continue;
+    }
+    let pos = 0;
+    let rebuilt = '';
+    while (pos < line.length) {
+      if (inHtmlComment) {
+        const endIdx = line.indexOf('-->', pos);
+        if (endIdx === -1) {
+          pos = line.length;
+        } else {
+          inHtmlComment = false;
+          pos = endIdx + 3;
+        }
+        continue;
+      }
+      // Preserve balanced inline backtick code spans verbatim so a span like
+      // `` `<!-- qwen-verify` `` never opens an HTML comment.
+      if (line[pos] === '`') {
+        let tickLen = 0;
+        while (pos + tickLen < line.length && line[pos + tickLen] === '`') {
+          tickLen++;
+        }
+        const closer = '`'.repeat(tickLen);
+        let searchFrom = pos + tickLen;
+        let closeIdx = -1;
+        while (searchFrom < line.length) {
+          const candidate = line.indexOf(closer, searchFrom);
+          if (candidate === -1) break;
+          const beforeOk = candidate === 0 || line[candidate - 1] !== '`';
+          const afterOk =
+            candidate + tickLen === line.length ||
+            line[candidate + tickLen] !== '`';
+          if (beforeOk && afterOk) {
+            closeIdx = candidate;
             break;
           }
+          searchFrom = candidate + 1;
         }
-        if (next && NONE_ONLY_LINE_RE.test(next)) continue;
+        if (closeIdx !== -1) {
+          rebuilt += line.slice(pos, closeIdx + tickLen);
+          pos = closeIdx + tickLen;
+          continue;
+        }
+        rebuilt += closer;
+        pos += tickLen;
+        continue;
       }
+      if (line.startsWith('<!--', pos) && hasClosingMarker(i, pos + 4)) {
+        inHtmlComment = true;
+        pos += 4;
+        continue;
+      }
+      rebuilt += line[pos];
+      pos++;
+    }
+    out.push(rebuilt);
+  }
+  return out.join('\n');
+}
+
+function splitTranslationDetailsBlocks(body) {
+  const lines = normalizeNewlines(body).split('\n');
+  const mainLines = [];
+  const translationLines = [];
+  let fenceChar = null;
+  let fenceLen = 0;
+  let fenceQuoted = false;
+  let inTranslationDepth = 0;
+  const hasClosingDetails = (fromIndex) => {
+    let depth = 1;
+    let fChar = null;
+    let fLen = 0;
+    let fQuoted = false;
+    for (let j = fromIndex; j < lines.length; j++) {
+      const l = lines[j];
+      if (fChar !== null && fQuoted && !/^\s*>/.test(l)) {
+        fChar = null;
+        fLen = 0;
+        fQuoted = false;
+      }
+      const fm = /^(\s*(?:>\s*)?)(`{3,}|~{3,})/.exec(l);
+      if (fm) {
+        const rest = l.slice(fm[0].length);
+        if (fChar === null) {
+          if (fm[2][0] !== '`' || !rest.includes('`')) {
+            fChar = fm[2][0];
+            fLen = fm[2].length;
+            fQuoted = fm[1].includes('>');
+          }
+        } else if (
+          fm[2][0] === fChar &&
+          fm[2].length >= fLen &&
+          rest.trim() === ''
+        ) {
+          fChar = null;
+          fLen = 0;
+          fQuoted = false;
+        }
+        continue;
+      }
+      if (fChar !== null) continue;
+      if (/^\s*<details\b[^>]*>/i.test(l)) depth++;
+      if (/<\/details>\s*$/i.test(l)) {
+        depth--;
+        if (depth === 0) return true;
+      }
+    }
+    return false;
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (fenceChar !== null && fenceQuoted && !/^\s*>/.test(line)) {
+      fenceChar = null;
+      fenceLen = 0;
+      fenceQuoted = false;
+    }
+    const fenceMatch = /^(\s*(?:>\s*)?)(`{3,}|~{3,})/.exec(line);
+    if (fenceMatch) {
+      const prefix = fenceMatch[1];
+      const marker = fenceMatch[2];
+      const rest = line.slice(fenceMatch[0].length);
+      if (fenceChar === null) {
+        if (marker[0] !== '`' || !rest.includes('`')) {
+          fenceChar = marker[0];
+          fenceLen = marker.length;
+          fenceQuoted = prefix.includes('>');
+        }
+      } else if (
+        marker[0] === fenceChar &&
+        marker.length >= fenceLen &&
+        rest.trim() === ''
+      ) {
+        fenceChar = null;
+        fenceLen = 0;
+        fenceQuoted = false;
+      }
+      (inTranslationDepth > 0 ? translationLines : mainLines).push(line);
+      continue;
+    }
+    if (fenceChar !== null) {
+      (inTranslationDepth > 0 ? translationLines : mainLines).push(line);
+      continue;
+    }
+    if (inTranslationDepth === 0) {
+      const inlineDetails =
+        /^\s*<details\b[^>]*>\s*(<summary>[\s\S]*<\/summary>)\s*$/i.exec(line);
+      if (
+        inlineDetails &&
+        TRANSLATION_SUMMARY_RE.test(inlineDetails[1]) &&
+        hasClosingDetails(i + 1)
+      ) {
+        inTranslationDepth = 1;
+        continue;
+      }
+      if (/^\s*<details\b[^>]*>\s*$/i.test(line)) {
+        let nextIdx = i + 1;
+        while (nextIdx < lines.length && lines[nextIdx].trim() === '')
+          nextIdx++;
+        if (
+          nextIdx < lines.length &&
+          TRANSLATION_SUMMARY_RE.test(lines[nextIdx]) &&
+          hasClosingDetails(nextIdx + 1)
+        ) {
+          inTranslationDepth = 1;
+          i = nextIdx;
+          continue;
+        }
+      }
+    } else if (inTranslationDepth > 0) {
+      if (/^\s*<details\b[^>]*>/i.test(line)) {
+        inTranslationDepth++;
+      } else if (/<\/details>\s*$/i.test(line)) {
+        inTranslationDepth--;
+        if (inTranslationDepth === 0) continue;
+      }
+      translationLines.push(line);
+      continue;
+    }
+    mainLines.push(line);
+  }
+  return {
+    mainBody: mainLines.join('\n'),
+    translationBody: translationLines.join('\n'),
+  };
+}
+
+function compactFindingExcerpt(line) {
+  const clean = line
+    .replace(/^\s*(?:>\s*)+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return clean.length > 96 ? `${clean.slice(0, 93)}...` : clean;
+}
+
+function lineIndentWidth(prefix) {
+  return prefix.replace(/>/g, ' ').length;
+}
+
+/**
+ * Extracts each distinct blocking finding (P0, P1, Critical, Blocker) from a
+ * Markdown review/comment body outside fenced code blocks, including
+ * severity-column Markdown tables, heading-led blocker bullet lists, and
+ * multiple numbered/bulleted findings inside one comment.
+ */
+function extractBlockingFindingsFromSection(body) {
+  if (typeof body !== 'string' || body.trim() === '') return [];
+  const lines = normalizeNewlines(body).split('\n');
+  const findings = [];
+  const summaryTableFindings = [];
+  let fenceChar = null;
+  let fenceLen = 0;
+  let fenceQuoted = false;
+
+  const updateFence = (line) => {
+    if (fenceChar !== null && fenceQuoted && !/^\s*>/.test(line)) {
+      fenceChar = null;
+      fenceLen = 0;
+      fenceQuoted = false;
+    }
+    const fenceMatch = /^(\s*(?:>\s*)?)(`{3,}|~{3,})/.exec(line);
+    if (!fenceMatch) return false;
+    const prefix = fenceMatch[1];
+    const marker = fenceMatch[2];
+    const rest = line.slice(fenceMatch[0].length);
+    if (fenceChar === null) {
+      // CommonMark forbids backticks in a backtick fence info string, so a
+      // line like ```foo``` [P1] is an inline code span, not an open fence.
+      if (marker[0] !== '`' || !rest.includes('`')) {
+        fenceChar = marker[0];
+        fenceLen = marker.length;
+        fenceQuoted = prefix.includes('>');
+        return true;
+      }
+      return false;
+    }
+    if (
+      marker[0] === fenceChar &&
+      marker.length >= fenceLen &&
+      rest.trim() === ''
+    ) {
+      fenceChar = null;
+      fenceLen = 0;
+      fenceQuoted = false;
       return true;
     }
+    return false;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (updateFence(line) || fenceChar !== null) continue;
+
+    // 1. Markdown table: detect severity-column cells and per-row blocking tags.
+    if (i + 1 < lines.length && line.includes('|')) {
+      const headerCells = splitMarkdownTableRow(line);
+      if (
+        headerCells &&
+        isMarkdownTableSeparator(lines[i + 1], headerCells.length)
+      ) {
+        const severityCols = [];
+        const countCols = [];
+        for (let c = 0; c < headerCells.length; c++) {
+          const normalized = normalizeTableCellToken(headerCells[c]);
+          if (TABLE_SEVERITY_HEADER_RE.test(normalized)) severityCols.push(c);
+          if (TABLE_COUNT_HEADER_RE.test(normalized)) countCols.push(c);
+        }
+        let r = i + 2;
+        while (r < lines.length) {
+          const rowLine = lines[r];
+          if (
+            rowLine.trim() === '' ||
+            /^(\s*(?:>\s*)?)(`{3,}|~{3,})/.test(rowLine)
+          ) {
+            break;
+          }
+          const cells = splitMarkdownTableRow(rowLine);
+          if (!cells) break;
+          const isZeroCountSummary =
+            countCols.length > 0 &&
+            countCols.every((c) =>
+              ZERO_OR_NONE_CELL_RE.test(
+                normalizeTableCellToken(cells[c] ?? ''),
+              ),
+            );
+          const hasSeverityCell = severityCols.some((c) =>
+            STANDALONE_BLOCKING_SEVERITY_RE.test(
+              normalizeTableCellToken(cells[c] ?? ''),
+            ),
+          );
+          const hasInlineTagInRow = cells.some((cell) => {
+            const cleaned = stripInlineCodeSpans(cell);
+            return (
+              BRACKET_BLOCKING_TAG_RE.test(cleaned) ||
+              SEVERITY_KV_BLOCKING_TAG_RE.test(cleaned)
+            );
+          });
+          if (!isZeroCountSummary && (hasSeverityCell || hasInlineTagInRow)) {
+            const entry = { excerpt: compactFindingExcerpt(rowLine) };
+            if (countCols.length > 0 && !hasInlineTagInRow) {
+              summaryTableFindings.push(entry);
+            } else {
+              findings.push(entry);
+            }
+          }
+          r++;
+        }
+        i = r - 1;
+        continue;
+      }
+    }
+
+    const stripped = stripInlineCodeSpans(line);
+
+    // 2. Bare blocking section heading (e.g. "**Blockers**", "### Critical"):
+    // skip if immediately followed by None/0, else extract each top-level list
+    // item under it as a distinct finding.
+    if (BARE_BLOCKING_HEADING_RE.test(stripped)) {
+      let nextIdx = i + 1;
+      while (nextIdx < lines.length && lines[nextIdx].trim() === '') {
+        nextIdx++;
+      }
+      if (nextIdx < lines.length && NONE_ONLY_LINE_RE.test(lines[nextIdx])) {
+        i = nextIdx;
+        continue;
+      }
+      const firstListMatch =
+        nextIdx < lines.length ? LIST_ITEM_RE.exec(lines[nextIdx]) : null;
+      if (firstListMatch) {
+        const baseIndent = lineIndentWidth(firstListMatch[1]);
+        const listFindings = [];
+        let cursor = nextIdx;
+        while (cursor < lines.length) {
+          const curLine = lines[cursor];
+          if (curLine.trim() === '') {
+            let peek = cursor + 1;
+            while (peek < lines.length && lines[peek].trim() === '') peek++;
+            const peekMatch =
+              peek < lines.length ? LIST_ITEM_RE.exec(lines[peek]) : null;
+            if (peekMatch && lineIndentWidth(peekMatch[1]) <= baseIndent + 1) {
+              cursor = peek;
+              continue;
+            }
+            break;
+          }
+          if (/^(\s*(?:>\s*)?)(`{3,}|~{3,})/.test(curLine)) break;
+          const itemMatch = LIST_ITEM_RE.exec(curLine);
+          if (itemMatch) {
+            if (lineIndentWidth(itemMatch[1]) <= baseIndent + 1) {
+              if (!NONE_ONLY_LINE_RE.test(curLine)) {
+                listFindings.push({ excerpt: compactFindingExcerpt(curLine) });
+              }
+            }
+            cursor++;
+            continue;
+          }
+          // Stop at non-indented prose or next section heading.
+          const leading = /^(\s*(?:>\s*)?)/.exec(curLine)?.[1] ?? '';
+          if (lineIndentWidth(leading) <= baseIndent) break;
+          cursor++;
+        }
+        if (listFindings.length > 0) {
+          findings.push(...listFindings);
+          i = cursor - 1;
+          continue;
+        }
+      }
+      findings.push({ excerpt: compactFindingExcerpt(line) });
+      continue;
+    }
+
+    // 3. Inline / bulleted / numbered / heading blocking line.
+    if (
+      LEADING_BACKTICK_BRACKET_TAG_RE.test(line) ||
+      BRACKET_BLOCKING_TAG_RE.test(stripped) ||
+      SEVERITY_KV_BLOCKING_TAG_RE.test(stripped) ||
+      (LINE_LEADING_BLOCKING_TAG_RE.test(line) &&
+        !ZERO_OR_NONE_BLOCKING_LINE_RE.test(line))
+    ) {
+      findings.push({ excerpt: compactFindingExcerpt(line) });
+    }
   }
-  return false;
+
+  return findings.length > 0 ? findings : summaryTableFindings;
+}
+
+/**
+ * Extracts each distinct blocking finding (P0, P1, Critical, Blocker) from a
+ * Markdown review/comment body outside fenced code blocks and HTML comments,
+ * avoiding double-counting mirrored bilingual `<details><summary>中文说明</summary>`
+ * blocks while still falling back to them if findings appear only there.
+ */
+export function extractBlockingFindings(body) {
+  if (typeof body !== 'string' || body.trim() === '') return [];
+  const visible = stripHtmlCommentsOutsideFences(body);
+  const { mainBody, translationBody } = splitTranslationDetailsBlocks(visible);
+  const mainFindings = extractBlockingFindingsFromSection(mainBody);
+  if (mainFindings.length > 0) return mainFindings;
+  return extractBlockingFindingsFromSection(translationBody);
+}
+
+export function hasBlockingSeverityTag(body) {
+  return extractBlockingFindings(body).length > 0;
 }
 
 function isIgnoredTopLevelReviewComment(comment) {
@@ -1818,11 +2340,25 @@ export function extractBlockingReviewItems(
   }
   if (errors.length > 0) return { errors, items };
 
-  const seenUrls = new Set();
-  const pushItem = (item) => {
-    if (seenUrls.has(item.url)) return;
-    seenUrls.add(item.url);
-    items.push(item);
+  const seenKeys = new Set();
+  const pushFindings = (kind, url, author, body) => {
+    const findings = extractBlockingFindings(body);
+    if (findings.length === 0) return false;
+    for (let idx = 0; idx < findings.length; idx++) {
+      const finding = idx + 1;
+      const key = `${url}#finding-${finding}`;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      items.push({
+        kind,
+        url,
+        finding,
+        findingCount: findings.length,
+        author: typeof author === 'string' ? author : null,
+        excerpt: findings[idx].excerpt,
+      });
+    }
+    return true;
   };
 
   const standingChangeRequestUrls = new Set();
@@ -1843,18 +2379,19 @@ export function extractBlockingReviewItems(
     if (
       MAINTAINER_ASSOCIATIONS.has(request.association) &&
       !isIgnoredTopLevelReviewComment(request) &&
-      hasBlockingSeverityTag(request.body)
+      extractBlockingFindings(request.body).length > 0
     ) {
       if (requestUrl === '') {
         errors.push(
           '--review-threads contains a blocking change request with no url',
         );
       } else {
-        pushItem({
-          kind: 'change-request',
-          url: requestUrl,
-          author: typeof request.author === 'string' ? request.author : null,
-        });
+        pushFindings(
+          'change-request',
+          requestUrl,
+          request.author,
+          request.body,
+        );
       }
     }
   }
@@ -1887,7 +2424,7 @@ export function extractBlockingReviewItems(
       thread.resolved !== true ||
       (firstReview !== '' && standingChangeRequestUrls.has(firstReview));
     if (!isOpen) continue;
-    if (!hasBlockingSeverityTag(first.body)) continue;
+    if (extractBlockingFindings(first.body).length === 0) continue;
     const firstUrl = typeof first.url === 'string' ? first.url.trim() : '';
     if (firstUrl === '') {
       errors.push(
@@ -1895,11 +2432,7 @@ export function extractBlockingReviewItems(
       );
       continue;
     }
-    pushItem({
-      kind: 'thread',
-      url: firstUrl,
-      author: typeof first.author === 'string' ? first.author : null,
-    });
+    pushFindings('thread', firstUrl, first.author, first.body);
   }
 
   for (const comment of reviewData.issueComments ?? []) {
@@ -1913,7 +2446,7 @@ export function extractBlockingReviewItems(
     if (mismatch) errors.push(mismatch);
     if (!MAINTAINER_ASSOCIATIONS.has(comment.association)) continue;
     if (isIgnoredTopLevelReviewComment(comment)) continue;
-    if (!hasBlockingSeverityTag(comment.body)) continue;
+    if (extractBlockingFindings(comment.body).length === 0) continue;
     const commentUrl =
       typeof comment.url === 'string' ? comment.url.trim() : '';
     if (commentUrl === '') {
@@ -1922,11 +2455,7 @@ export function extractBlockingReviewItems(
       );
       continue;
     }
-    pushItem({
-      kind: 'issue-comment',
-      url: commentUrl,
-      author: typeof comment.author === 'string' ? comment.author : null,
-    });
+    pushFindings('issue-comment', commentUrl, comment.author, comment.body);
   }
 
   return { errors, items };
@@ -1947,14 +2476,15 @@ export function checkReviewThreads(
 
 function reportMentionsReviewUrl(reportText, url) {
   if (typeof reportText !== 'string' || reportText.trim() === '') return false;
-  if (reportText.includes(url)) return true;
+  const visible = stripHtmlCommentsOutsideFences(reportText);
+  if (visible.includes(url)) return true;
   const hashIndex = url.indexOf('#');
   if (hashIndex === -1) return false;
   const fragment = url.slice(hashIndex + 1);
-  if (fragment && reportText.includes(fragment)) return true;
+  if (fragment && visible.includes(fragment)) return true;
   const digitMatch = /(\d{6,})$/.exec(fragment);
   if (digitMatch) {
-    return new RegExp(`(?<![0-9])${digitMatch[1]}(?![0-9])`).test(reportText);
+    return new RegExp(`(?<![0-9])${digitMatch[1]}(?![0-9])`).test(visible);
   }
   return false;
 }
@@ -1962,16 +2492,18 @@ function reportMentionsReviewUrl(reportText, url) {
 function checkReviewCoverage(
   reviewCoverage,
   blockingItems,
-  { verdict = null, reportText = null } = {},
+  { verdict = null, reportText = null, commentText = null } = {},
 ) {
   const errors = [];
   const warnings = [];
-  const coverageByUrl = new Map();
+  const coverageByKey = new Map();
+  const bareUrls = new Set();
+  const indexedUrls = new Set();
 
   if (reviewCoverage !== undefined) {
     if (!Array.isArray(reviewCoverage)) {
       errors.push(
-        `assertions.json reviewCoverage must be an array of { url, status, evidence | reason } entries (${REVIEW_COVERAGE_STATUSES.join(' | ')})`,
+        `assertions.json reviewCoverage must be an array of { url, finding?, status, evidence | reason } entries (${REVIEW_COVERAGE_STATUSES.join(' | ')})`,
       );
     } else {
       for (const entry of reviewCoverage) {
@@ -1987,11 +2519,46 @@ function checkReviewCoverage(
           continue;
         }
         const url = entry.url.trim();
-        if (coverageByUrl.has(url)) {
+        let finding = undefined;
+        if (entry.finding !== undefined) {
+          if (
+            !Number.isInteger(entry.finding) ||
+            entry.finding < 1 ||
+            entry.finding > Number.MAX_SAFE_INTEGER
+          ) {
+            errors.push(
+              `assertions.json reviewCoverage entry for ${url} has invalid finding index (must be a positive integer)`,
+            );
+            continue;
+          }
+          finding = entry.finding;
+        }
+        const entryKey =
+          finding !== undefined ? `${url}#finding-${finding}` : url;
+        const entryLabel =
+          finding !== undefined ? `${url} (finding ${finding})` : url;
+        if (coverageByKey.has(entryKey)) {
           errors.push(
-            `assertions.json reviewCoverage lists duplicate url ${url}`,
+            `assertions.json reviewCoverage lists duplicate ${finding !== undefined ? `url+finding ${entryLabel}` : `url ${url}`}`,
           );
           continue;
+        }
+        if (finding !== undefined) {
+          if (bareUrls.has(url)) {
+            errors.push(
+              `assertions.json reviewCoverage mixes bare and finding-indexed entries for ${url}`,
+            );
+            continue;
+          }
+          indexedUrls.add(url);
+        } else {
+          if (indexedUrls.has(url)) {
+            errors.push(
+              `assertions.json reviewCoverage mixes bare and finding-indexed entries for ${url}`,
+            );
+            continue;
+          }
+          bareUrls.add(url);
         }
         if (
           (entry.status === 'reproduced' ||
@@ -1999,7 +2566,7 @@ function checkReviewCoverage(
           (typeof entry.evidence !== 'string' || entry.evidence.trim() === '')
         ) {
           errors.push(
-            `assertions.json reviewCoverage entry for ${url} (${entry.status}) needs a non-empty evidence string`,
+            `assertions.json reviewCoverage entry for ${entryLabel} (${entry.status}) needs a non-empty evidence string`,
           );
           continue;
         }
@@ -2009,17 +2576,17 @@ function checkReviewCoverage(
           (typeof entry.reason !== 'string' || entry.reason.trim() === '')
         ) {
           errors.push(
-            `assertions.json reviewCoverage entry for ${url} (${entry.status}) needs a non-empty reason string`,
+            `assertions.json reviewCoverage entry for ${entryLabel} (${entry.status}) needs a non-empty reason string`,
           );
           continue;
         }
-        coverageByUrl.set(url, entry);
+        coverageByKey.set(entryKey, entry);
         if (
           verdict === 'merge-ready' &&
           (entry.status === 'reproduced' || entry.status === 'not-measured')
         ) {
           errors.push(
-            `merge-ready with blocking review item ${url} marked ${entry.status}: open blocking review findings must be verified not-reproduced before merge-ready`,
+            `merge-ready with blocking review item ${entryLabel} marked ${entry.status}: open blocking review findings must be verified not-reproduced before merge-ready`,
           );
         }
       }
@@ -2027,27 +2594,45 @@ function checkReviewCoverage(
   }
 
   if (Array.isArray(blockingItems)) {
+    const hasCommentText =
+      typeof commentText === 'string' && commentText.trim() !== '';
     for (const item of blockingItems) {
-      const entry = coverageByUrl.get(item.url);
+      const findingCount = item.findingCount ?? 1;
+      const finding = item.finding ?? 1;
+      const entry =
+        findingCount > 1
+          ? coverageByKey.get(`${item.url}#finding-${finding}`)
+          : (coverageByKey.get(`${item.url}#finding-1`) ??
+            coverageByKey.get(item.url));
+      const findingSuffix =
+        findingCount > 1
+          ? ` (finding ${finding} of ${findingCount}${item.excerpt ? `: ${JSON.stringify(item.excerpt)}` : ''})`
+          : '';
       if (!entry) {
         const who = item.author ? ` by ${item.author}` : '';
         if (verdict === 'merge-ready') {
           errors.push(
-            `merge-ready omits open blocking ${item.kind} ${item.url}${who}: verify it on the verified head and record it in assertions.json reviewCoverage before merge-ready`,
+            `merge-ready omits open blocking ${item.kind} ${item.url}${findingSuffix}${who}: verify it on the verified head and record ${findingCount > 1 ? `{ url, finding: ${finding}, status, ... }` : 'it'} in assertions.json reviewCoverage before merge-ready`,
           );
         } else {
           warnings.push(
-            `assertions.json reviewCoverage omits open blocking ${item.kind} ${item.url}${who}`,
+            `assertions.json reviewCoverage omits open blocking ${item.kind} ${item.url}${findingSuffix}${who}`,
           );
         }
       } else if (
         entry.status === 'not-reproduced' &&
-        verdict === 'merge-ready' &&
-        !reportMentionsReviewUrl(reportText, item.url)
+        verdict === 'merge-ready'
       ) {
-        errors.push(
-          `report.md does not reference verified blocking ${item.kind} ${item.url} recorded as not-reproduced in assertions.json reviewCoverage`,
-        );
+        if (!reportMentionsReviewUrl(reportText, item.url)) {
+          errors.push(
+            `report.md does not reference verified blocking ${item.kind} ${item.url}${findingSuffix} recorded as not-reproduced in assertions.json reviewCoverage`,
+          );
+        }
+        if (hasCommentText && !reportMentionsReviewUrl(commentText, item.url)) {
+          errors.push(
+            `comment.md does not reference verified blocking ${item.kind} ${item.url}${findingSuffix} recorded as not-reproduced in assertions.json reviewCoverage`,
+          );
+        }
       }
     }
   }
@@ -2079,6 +2664,7 @@ export function checkArtifacts({
   requiredExecutionClass = null,
   trustClassification = undefined,
   reviewThreadsText = null,
+  expectedReviewSha256 = undefined,
 }) {
   const errors = [];
   const warnings = [];
@@ -2248,6 +2834,18 @@ export function checkArtifacts({
     }
   }
 
+  if (expectedReviewSha256 === null && verdict === 'merge-ready') {
+    errors.push(
+      'merge-ready is not allowed when host --context recorded reviewSha256=null (review snapshot fetch failed): re-run prepare to capture review state or degrade verdict to inconclusive',
+    );
+  }
+
+  const readableReportText = unreadableKeys.has('report')
+    ? null
+    : (files.report ?? null);
+  const readableCommentText = unreadableKeys.has('comment')
+    ? null
+    : (files.comment ?? null);
   if (reviewThreadsText !== null && reviewThreadsText !== undefined) {
     const reviewCheck = checkReviewThreads(reviewThreadsText, { coordinates });
     errors.push(...reviewCheck.errors);
@@ -2255,7 +2853,11 @@ export function checkArtifacts({
       const coverageCheck = checkReviewCoverage(
         reviewCoverage,
         reviewCheck.items,
-        { verdict, reportText: files.report ?? null },
+        {
+          verdict,
+          reportText: readableReportText,
+          commentText: readableCommentText,
+        },
       );
       errors.push(...coverageCheck.errors);
       warnings.push(...coverageCheck.warnings);
@@ -2263,7 +2865,8 @@ export function checkArtifacts({
   } else if (reviewCoverage !== undefined) {
     const coverageCheck = checkReviewCoverage(reviewCoverage, null, {
       verdict,
-      reportText: files.report ?? null,
+      reportText: readableReportText,
+      commentText: readableCommentText,
     });
     errors.push(...coverageCheck.errors);
     warnings.push(...coverageCheck.warnings);
@@ -3003,6 +3606,7 @@ function main(argv) {
   let hostContextSha256 = null;
   let requiredExecutionClass = null;
   let trustClassification = undefined;
+  let expectedReviewSha256 = undefined;
   if (contextPath) {
     // A host-held snapshot: the PR clone is mounted read-write, so the round
     // can write ANY path inside it — the artifact dir AND the
@@ -3138,6 +3742,19 @@ function main(argv) {
             return 1;
           }
           requiredExecutionClass = tcCheck.requiredExecutionClass;
+        }
+        if (snapshot?.reviewSha256 !== undefined) {
+          if (
+            snapshot.reviewSha256 !== null &&
+            (typeof snapshot.reviewSha256 !== 'string' ||
+              !/^[0-9a-f]{64}$/.test(snapshot.reviewSha256))
+          ) {
+            process.stderr.write(
+              `verify-pr check: --context ${contextPath} has invalid reviewSha256 (must be a 64-hex digest or null)\n`,
+            );
+            return 1;
+          }
+          expectedReviewSha256 = snapshot.reviewSha256;
         }
       } catch {
         // Reported below; never falls back to the writable artifact copy.
@@ -3425,10 +4042,10 @@ function main(argv) {
       );
       return 1;
     }
+    const actualReviewSha = createHash('sha256')
+      .update(rawReviewThreads, 'utf8')
+      .digest('hex');
     if (reviewThreadsSha) {
-      const actualReviewSha = createHash('sha256')
-        .update(rawReviewThreads, 'utf8')
-        .digest('hex');
       if (actualReviewSha !== reviewThreadsSha) {
         process.stderr.write(
           `verify-pr check: --review-threads ${reviewThreadsPath} does not match --review-threads-sha256\n`,
@@ -3442,7 +4059,23 @@ function main(argv) {
     } else {
       reviewThreadsWarning = `--review-threads ${reviewThreadsPath} has no --review-threads-sha256 binding; pass the host digest prepare printed to bind its bytes`;
     }
+    if (expectedReviewSha256 === null) {
+      reviewThreadsErrors.push(
+        `--review-threads ${reviewThreadsPath} was provided, but the bound host --context snapshot recorded reviewSha256=null (no review snapshot was captured by prepare): re-run prepare to bind a fresh review snapshot for this PR`,
+      );
+    } else if (
+      typeof expectedReviewSha256 === 'string' &&
+      actualReviewSha !== expectedReviewSha256
+    ) {
+      reviewThreadsErrors.push(
+        `--review-threads ${reviewThreadsPath} does not match reviewSha256 recorded in the bound host --context snapshot (cross-PR or stale review snapshot)`,
+      );
+    }
     reviewThreadsText = rawReviewThreads;
+  } else if (requireGuard && typeof expectedReviewSha256 === 'string') {
+    reviewThreadsErrors.push(
+      '--require-guard requires --review-threads matching reviewSha256 recorded in the bound host --context snapshot',
+    );
   }
 
   // The CI entry path is defined by $QWEN_VERIFY_CONTEXT; there the publish
@@ -3465,6 +4098,7 @@ function main(argv) {
     requiredExecutionClass,
     trustClassification,
     reviewThreadsText,
+    expectedReviewSha256,
   });
   let executionMode = null;
   try {

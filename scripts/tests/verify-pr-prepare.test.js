@@ -4000,6 +4000,15 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       `review     ${reviewPath} (2 of 3 threads unresolved, 1 change requests)`,
     );
     expect(result.stdout).toContain(`  review-sha256  ${expectedReviewSha}`);
+    const contextSnapshotPath = join(
+      realpathSync(dir),
+      'tmp',
+      'verify-context',
+      'pr42.json',
+    );
+    expect(
+      JSON.parse(readFileSync(contextSnapshotPath, 'utf8')).reviewSha256,
+    ).toBe(expectedReviewSha);
     const args = ghApiArgs(env)
       .trim()
       .split('\n')
@@ -4049,6 +4058,9 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       const odd = runPrepare(dir, ['42', '--repo', REPO], env);
       expect(odd.status).toBe(0);
       expect(odd.stdout).not.toContain('review-sha256');
+      expect(
+        JSON.parse(readFileSync(contextSnapshotPath, 'utf8')).reviewSha256,
+      ).toBeNull();
       expect(existsSync(reviewPath)).toBe(false);
       expect(odd.stdout).toContain(
         `review     not written — ${reason}; the round lists review findings as not covered`,

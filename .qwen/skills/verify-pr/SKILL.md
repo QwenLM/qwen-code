@@ -3085,17 +3085,24 @@ the report what the count holds.
    When `issueCommentCount > 100`, disclose under _Not covered_ that only the
    latest 100 top-level comments were snapshotted.
    When `verify-pr-check.mjs` is invoked with `--review-threads` (required on
-   local `--publish` rounds whenever `prepare` wrote `review-threads.json`),
-   record every open blocking inline thread, blocking standing change-request
-   body, and blocking maintainer top-level comment in `assertions.json` under
-   `reviewCoverage` as an entry carrying `url`, `status`, and `evidence` or
-   `reason`, where `status` is one of `reproduced`, `not-reproduced`,
-   `not-measured`, or `no-defect-claimed` (`evidence` required for `reproduced`
-   and `not-reproduced`; `reason` required for `not-measured` and
-   `no-defect-claimed`, such as an author's fix-summary reply quoting `[P1]`):
-   `verify-pr-check.mjs` refuses `merge-ready` when any blocking item is
-   omitted, marked `reproduced` or `not-measured`, or lacks a matching
-   URL/comment-ID reference in `report.md` when marked `not-reproduced`.
+   local `--publish` rounds whenever `prepare` wrote `review-threads.json`,
+   which `prepare` also binds via `reviewSha256` inside the host `pr.json`
+   snapshot to reject cross-PR or stale empty snapshots), record every open
+   blocking inline thread, blocking standing change-request body, and blocking
+   maintainer top-level comment (including severity-column table rows and each
+   distinct blocker inside a multi-finding comment) in `assertions.json` under
+   `reviewCoverage` as an entry carrying `url`, optional positive integer
+   `finding` (required per finding whenever one comment lists multiple distinct
+   blockers), `status`, and `evidence` or `reason`, where `status` is one of
+   `reproduced`, `not-reproduced`, `not-measured`, or `no-defect-claimed`
+   (`evidence` required for `reproduced` and `not-reproduced`; `reason`
+   required for `not-measured` and `no-defect-claimed`, such as an author's
+   fix-summary reply quoting `[P1]`): `verify-pr-check.mjs` refuses
+   `merge-ready` when any blocking finding is omitted, marked `reproduced` or
+   `not-measured`, or lacks a matching URL/comment-ID reference in both
+   `report.md` and `comment.md` (when present) when marked `not-reproduced`,
+   and also refuses `merge-ready` when host `pr.json` recorded `reviewSha256`
+   as `null` (review fetch failed).
 5. **Corrections**, when an earlier review round or bot comment described
    the code inaccurately (a wrong ARIA role, a wrong mechanism, a
    misattributed cause). State the correct fact with its evidence and label

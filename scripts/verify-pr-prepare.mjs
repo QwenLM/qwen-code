@@ -2252,21 +2252,6 @@ function main(argv) {
     ...(authorPerm.error ? { permissionError: authorPerm.error } : {}),
   };
 
-  // The host-held snapshot carries the slug too: the checker compares a
-  // waiver's approval permalink against these coordinates, and gh's field
-  // selector has no repo member, so it is added where the snapshot is
-  // written, not to FIELDS.
-  const contextBytes = `${JSON.stringify(
-    {
-      ...snapshot,
-      repo: slug,
-      trustClassification,
-      ...(executionApproval ? { executionApproval } : {}),
-    },
-    null,
-    2,
-  )}\n`;
-
   // Network access never happens under the registration lock. The write
   // stage below rechecks the registration after these calls complete.
   const reviewPath = join(contextDir, `pr${context.pr}-review-threads.json`);
@@ -2274,6 +2259,27 @@ function main(argv) {
   const reviewBytes = review.state
     ? `${JSON.stringify(review.state, null, 2)}\n`
     : null;
+  const reviewSha256 = reviewBytes
+    ? createHash('sha256').update(reviewBytes, 'utf8').digest('hex')
+    : null;
+
+  // The host-held snapshot carries the slug too: the checker compares a
+  // waiver's approval permalink against these coordinates, and gh's field
+  // selector has no repo member, so it is added where the snapshot is
+  // written, not to FIELDS. Binding reviewSha256 here ties the exact
+  // review-threads.json bytes (including an empty snapshot) to this PR and
+  // prepare run so another PR's empty snapshot cannot be substituted.
+  const contextBytes = `${JSON.stringify(
+    {
+      ...snapshot,
+      repo: slug,
+      trustClassification,
+      reviewSha256,
+      ...(executionApproval ? { executionApproval } : {}),
+    },
+    null,
+    2,
+  )}\n`;
 
   const writeRound = () => {
     if (executionApproval?.source === 'comment') {
@@ -2514,10 +2520,7 @@ function main(argv) {
     const contextSha256 = createHash('sha256')
       .update(contextBytes, 'utf8')
       .digest('hex');
-    const reviewSha256 = reviewBytes
-      ? createHash('sha256').update(reviewBytes, 'utf8').digest('hex')
-      : null;
-    return { contextSha256, reviewSha256, reportedContextPath };
+    return { contextSha256, reportedContextPath };
   };
 
   let written;
@@ -2536,7 +2539,7 @@ function main(argv) {
     );
   }
   if (typeof written === 'number') return written;
-  const { contextSha256, reviewSha256, reportedContextPath } = written;
+  const { contextSha256, reportedContextPath } = written;
 
   const isolation = detectIsolation();
   // The title comes from an untrusted fork, and a control character would reach
