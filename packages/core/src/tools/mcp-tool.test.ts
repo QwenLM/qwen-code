@@ -3042,6 +3042,42 @@ describe('DiscoveredMCPTool', () => {
       });
       expect(discoverToolsForServer).not.toHaveBeenCalled();
     });
+
+    it('reconnects on the SDK’s own request timeout when the server is known disconnected', async () => {
+      await expectReconnect(
+        new SdkError(SdkErrorCode.RequestTimeout, 'Request timed out', {
+          timeout: 1,
+        }),
+        MCPServerStatus.DISCONNECTED,
+      );
+    });
+
+    it('reports the SDK’s own request timeout as a timeout when the server is connected', async () => {
+      // `timeout: mcpTimeout` makes the v2 SDK reject with
+      // SdkError(REQUEST_TIMEOUT), never with JSON-RPC -32001.
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const client: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValue(
+          new SdkError(SdkErrorCode.RequestTimeout, 'Request timed out', {
+            timeout: 1,
+          }),
+        ),
+      };
+      const mockConfig = {
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+        }),
+      };
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+
+      await expect(
+        exec(mkTool({ config: mockConfig, client })),
+      ).rejects.toMatchObject({
+        errorType: ToolErrorType.EXECUTION_TIMEOUT,
+      });
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+    });
   });
 
   describe('MCP Tool Idle Timeout', () => {
@@ -3127,6 +3163,26 @@ describe('DiscoveredMCPTool', () => {
       // first must not reclassify the cancellation — the abort side wins
       // regardless of ordering (#8180 review).
       const requestTimeout = coded('raced timeout');
+      const request = pending();
+      const client: McpDirectClient = {
+        callTool: vi.fn().mockReturnValue(request.promise),
+      };
+
+      await expectAbortWins(
+        mkTool({ trust: true, client }),
+        request,
+        requestTimeout,
+      );
+    });
+
+    it('does not classify an SDK-shaped timeout that races with a parent abort as a timeout', async () => {
+      // The v2 SDK rejects an aborted request with
+      // SdkError(REQUEST_TIMEOUT, String(reason)), the shape the timeout gate
+      // now also accepts. The abort side must still win.
+      const requestTimeout = new SdkError(
+        SdkErrorCode.RequestTimeout,
+        'AbortError: Tool call aborted',
+      );
       const request = pending();
       const client: McpDirectClient = {
         callTool: vi.fn().mockReturnValue(request.promise),
