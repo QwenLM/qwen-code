@@ -22,7 +22,7 @@ import { t } from '../../i18n/index.js';
 import { MCPServerStatus } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
 import { ICON } from '../constants.js';
 import { toOriginalKey } from './key-map.js';
-import { useBatchSafeCursor } from './batch-cursor.js';
+import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import {
   DialogFrame,
@@ -422,11 +422,14 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
     cursorRef: serverCursorRef,
     setCursor: setServerCursor,
   } = useBatchSafeCursor();
+  // The detail's action cursor is the action's stable key, not its row: a
+  // rebuild that drops a row (a successful Reconnect, an Approve) must not
+  // leave the cursor — and Enter — on whatever action inherited that slot.
   const {
-    cursor: actionCursor,
-    cursorRef: actionCursorRef,
-    setCursor: setActionCursor,
-  } = useBatchSafeCursor();
+    value: actionKey,
+    ref: actionKeyRef,
+    setValue: setActionKey,
+  } = useBatchSafeState<string | null>(null);
   const {
     cursor: toolCursor,
     cursorRef: toolCursorRef,
@@ -554,6 +557,21 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
         approveSupported: !!onServerAction,
       })
     : [];
+
+  // ink's BaseSelectionList keeps the highlighted item by key and falls back
+  // to the first row when it is gone; deriving the row from the action's key
+  // gives the same rule without a one-frame stale index after a rebuild.
+  // (ink also skips disabled rows when it falls back. No action emitted today
+  // is disabled, so the first row is the complete fallback here; if one gains
+  // a disabled state, mirror computeInitialIndex before landing on it.)
+  const actionIndexFor = (key: string | null): number =>
+    Math.max(
+      0,
+      key === null
+        ? -1
+        : detailActions.findIndex((action) => action.key === key),
+    );
+  const actionCursor = actionIndexFor(actionKey);
 
   // The server list's rows are not 1:1 with the servers: each group paints a
   // header row, and groups after the first pay the group box's marginBottom.
@@ -754,7 +772,7 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
         const server = flatServers[serverCursorRef.current];
         if (server) {
           setSelectedServerName(server.name);
-          setActionCursor(0);
+          setActionKey(null);
           navigateToStep(MCP_MANAGEMENT_STEPS.SERVER_DETAIL);
         }
       }
@@ -769,15 +787,21 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
     if (currentStep === MCP_MANAGEMENT_STEPS.SERVER_DETAIL) {
       if (detailWindowRows < 1) return;
       if (keyMatchers[Command.SELECTION_UP](original)) {
-        setActionCursor(
-          findNextEnabledIndex(detailActions, actionCursorRef.current, 'up'),
+        const next = findNextEnabledIndex(
+          detailActions,
+          actionIndexFor(actionKeyRef.current),
+          'up',
         );
+        setActionKey(detailActions[next]?.key ?? null);
       } else if (keyMatchers[Command.SELECTION_DOWN](original)) {
-        setActionCursor(
-          findNextEnabledIndex(detailActions, actionCursorRef.current, 'down'),
+        const next = findNextEnabledIndex(
+          detailActions,
+          actionIndexFor(actionKeyRef.current),
+          'down',
         );
+        setActionKey(detailActions[next]?.key ?? null);
       } else if (name === 'return') {
-        const action = detailActions[actionCursorRef.current];
+        const action = detailActions[actionIndexFor(actionKeyRef.current)];
         if (!action || !selectedServer) return;
         switch (action.action) {
           case 'view-tools':
@@ -997,7 +1021,7 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
               onMouseUp={() => {
                 setServerCursor(row.flatIndex);
                 setSelectedServerName(server.name);
-                setActionCursor(0);
+                setActionKey(null);
                 navigateToStep(MCP_MANAGEMENT_STEPS.SERVER_DETAIL);
               }}
             >
@@ -1128,9 +1152,9 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
             <box
               key={row.key}
               flexDirection="row"
-              onMouseOver={() => setActionCursor(row.index)}
+              onMouseOver={() => setActionKey(action.key)}
               onMouseUp={() => {
-                setActionCursor(row.index);
+                setActionKey(action.key);
                 if (!selectedServer) return;
                 switch (action.action) {
                   case 'view-tools':
