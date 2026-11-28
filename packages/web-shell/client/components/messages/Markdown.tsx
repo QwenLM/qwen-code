@@ -604,6 +604,10 @@ function CodeBlock({
   const documentMode = useTranscriptRenderMode() === 'document';
   const [html, setHtml] = useState<string | null>(null);
   const [copied, flashCopied] = useCopiedFlash();
+  const [highlightTarget, setHighlightTarget] = useState<HTMLDivElement | null>(
+    null,
+  );
+  const [readyTarget, setReadyTarget] = useState<HTMLDivElement | null>(null);
 
   const { label, lang, resolvedLang } = resolveFenceLanguage(
     extractRawFenceLanguage(className),
@@ -612,15 +616,46 @@ function CodeBlock({
   const shikiTheme =
     appTheme === 'light' ? 'github-light-default' : 'github-dark-default';
 
+  const canHighlight =
+    !documentMode &&
+    !isStreaming &&
+    lang !== 'mermaid' &&
+    resolvedLang !== 'text';
+
   useEffect(() => {
-    // Stream code as plain text. Highlighting a growing fence on every chunk
-    // repeatedly tokenizes its entire contents and can dominate rendering for
-    // long responses; the settled render below highlights the final text once.
+    if (!canHighlight || !highlightTarget || readyTarget === highlightTarget) {
+      return;
+    }
+    const root = highlightTarget.closest('[data-web-shell-message-list]');
+    // Outside the scrollable transcript (e.g. a standalone Markdown surface),
+    // keep eager highlighting. An explicit root expands the chat viewport,
+    // rather than expanding the page viewport around a clipped chat.
+    if (!root || typeof IntersectionObserver !== 'function') {
+      setReadyTarget(highlightTarget);
+      return;
+    }
+    let active = true;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (active && entries.some((entry) => entry.isIntersecting)) {
+          observer.disconnect();
+          setReadyTarget(highlightTarget);
+        }
+      },
+      { root, rootMargin: '200px 0px' },
+    );
+    observer.observe(highlightTarget);
+    return () => {
+      active = false;
+      observer.disconnect();
+    };
+  }, [canHighlight, highlightTarget, readyTarget]);
+
+  useEffect(() => {
     if (
-      documentMode ||
-      isStreaming ||
-      lang === 'mermaid' ||
-      resolvedLang === 'text' ||
+      !canHighlight ||
+      !highlightTarget ||
+      readyTarget !== highlightTarget ||
       isTooLargeToHighlight(code)
     ) {
       setHtml(null);
@@ -668,7 +703,14 @@ function CodeBlock({
     return () => {
       cancelled = true;
     };
-  }, [code, documentMode, lang, resolvedLang, shikiTheme, isStreaming]);
+  }, [
+    canHighlight,
+    code,
+    highlightTarget,
+    readyTarget,
+    resolvedLang,
+    shikiTheme,
+  ]);
 
   const handleCopy = () => {
     void writeClipboardText(code)
@@ -687,7 +729,11 @@ function CodeBlock({
   }
 
   return (
-    <div className={styles.codeBlock} data-selection-code-language={lang}>
+    <div
+      className={styles.codeBlock}
+      data-selection-code-language={lang}
+      ref={canHighlight ? setHighlightTarget : undefined}
+    >
       <div className={styles.codeBlockHeader} data-selection-copy-ignore>
         <span className={styles.codeBlockLang}>{label}</span>
         <button className={styles.codeBlockCopy} onClick={handleCopy}>
