@@ -66,6 +66,8 @@ export interface DaemonChatControllerFromStateOptions {
   readonly pendingQuestions: readonly PendingQuestion[];
   readonly pendingSignature: string;
   readonly transcriptState?: SessionChatController['transcriptState'];
+  readonly responding?: boolean;
+  readonly cancelPrompt?: () => Promise<Admission>;
   readonly submitPermission?: (
     requestId: string,
     optionId: string,
@@ -89,6 +91,7 @@ interface LiveFacts {
   statusFacts: ChatStatusFacts;
   capabilities: ChatCapabilities;
   settledPhase: 'idle' | 'failed';
+  responding: boolean;
 }
 
 function capabilitiesFromFeatures(
@@ -117,6 +120,8 @@ function useDaemonChatControllerCore({
   pendingQuestions,
   pendingSignature,
   transcriptState,
+  responding = false,
+  cancelPrompt: cancelPromptOverride,
   submitPermission: submitPermissionOverride,
 }: DaemonChatControllerFromStateOptions): {
   readonly controller: SessionChatController;
@@ -143,6 +148,7 @@ function useDaemonChatControllerCore({
     statusFacts: DEFAULT_STATUS_FACTS,
     capabilities: regionsToCapabilities([]),
     settledPhase: 'idle',
+    responding: false,
   });
   factsRef.current = {
     messages,
@@ -161,6 +167,7 @@ function useDaemonChatControllerCore({
       connection.capabilities?.features ?? [],
     ),
     settledPhase: 'idle',
+    responding,
   };
 
   const actionsRef = useRef(actions);
@@ -171,6 +178,9 @@ function useDaemonChatControllerCore({
 
   const transcriptHistoryRef = useRef(transcriptHistory);
   transcriptHistoryRef.current = transcriptHistory;
+
+  const cancelPromptOverrideRef = useRef(cancelPromptOverride);
+  cancelPromptOverrideRef.current = cancelPromptOverride;
 
   const submitPermissionOverrideRef = useRef(submitPermissionOverride);
   submitPermissionOverrideRef.current = submitPermissionOverride;
@@ -240,6 +250,9 @@ function useDaemonChatControllerCore({
         get settledPhase() {
           return factsRef.current.settledPhase;
         },
+        get responding() {
+          return factsRef.current.responding;
+        },
         // History pagination is a provider capability, not an intent: read the
         // latest loader per call and forward options (including { force: true }
         // for pagination-error retries) so a session-stable controller never
@@ -290,6 +303,10 @@ function useDaemonChatControllerCore({
           }
         },
         async cancelPrompt() {
+          const override = cancelPromptOverrideRef.current;
+          if (override) {
+            return override();
+          }
           try {
             await actionsRef.current.cancel();
             return 'accepted';
