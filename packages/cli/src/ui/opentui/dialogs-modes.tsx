@@ -603,16 +603,18 @@ export function OpenTuiEffortDialog(props: {
   settings: LoadedSettings;
   onClose: () => void;
   notify?: (text: string, level?: 'info' | 'error') => void;
+  /** Footer entry: preselect the tier the footer currently displays. */
+  initialEffort?: ReasoningEffort;
   /** The popup region's row budget; the tier list windows from it. */
   availableTerminalHeight?: number;
 }) {
-  const { config, settings, onClose, notify } = props;
+  const { config, settings, onClose, notify, initialEffort } = props;
   const tiers = config
     ? [...getReasoningEffortsForConfig(config)]
     : (REASONING_EFFORT_TIERS as ReasoningEffort[]);
   // Pre-select the live tier only when this model exposes it; an unset or
   // out-of-range effort starts at the top (ink EffortDialog parity).
-  const currentEffort = config?.getReasoningEffort?.();
+  const currentEffort = initialEffort ?? config?.getReasoningEffort?.();
   const configuredIndex = currentEffort ? tiers.indexOf(currentEffort) : -1;
   const items: Array<LabeledItem<ReasoningEffort>> = tiers.map((tier) => ({
     key: tier,
@@ -665,7 +667,9 @@ export function OpenTuiEffortDialog(props: {
         applyModelReasoningEffort(config, settings, effort);
         // Read back after the apply: the message names what the provider
         // actually clamped the tier to, not what the row asked for.
-        if (config) notify?.(formatEffortChangeMessage(config, effort));
+        if (config) {
+          notify?.(formatEffortChangeMessage(config, effort), 'info');
+        }
       } catch (error) {
         notify?.(getErrorMessage(error), 'error');
       }

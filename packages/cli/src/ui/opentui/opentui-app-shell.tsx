@@ -2120,6 +2120,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               shellModeActive={shellModeActive}
               exitHint={exitHint}
               vimMode={props.vimMode}
+              onOpenEffort={
+                streaming
+                  ? undefined
+                  : () =>
+                      setDialog({ dialog: 'effort', openedFromFooter: true })
+              }
             />
           ) : null}
         </box>

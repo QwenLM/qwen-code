@@ -6,15 +6,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act, render, screen, waitFor } from '@testing-library/react';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BUILT_IN_OUTPUT_STYLES,
   type Config,
   type OutputStyleDefinition,
 } from '@qwen-code/qwen-code-core';
+import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
-import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import { type LoadedSettings, SettingScope } from '../../config/settings.js';
 import { getCachedStringWidth } from '../utils/textUtils.js';
 
 const mocks = vi.hoisted(() => {
@@ -46,9 +53,18 @@ const mocks = vi.hoisted(() => {
             ),
           ),
         );
+        const source = config as Record<string, unknown> | null;
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          { ...(key === undefined ? {} : { key }), 'data-p': captured },
+          {
+            ...(key === undefined ? {} : { key }),
+            'data-p': captured,
+            // Mouse parity is observable from these tests only if the handler
+            // reaches the DOM node; the real renderer gets it as a prop.
+            ...(typeof source?.['onMouseUp'] === 'function'
+              ? { onMouseUp: source['onMouseUp'] as (event: unknown) => void }
+              : {}),
+          },
           children,
         );
       }
@@ -1633,6 +1649,13 @@ describe('OpenTuiEffortDialog', () => {
   function renderEffortDialog(
     reasoningEffort: string | undefined,
     availableTerminalHeight?: number,
+    nestedStaticEffort = false,
+    initialEffort?: ReasoningEffort,
+    options: {
+      userTier?: string;
+      workspaceOwnsProviders?: boolean;
+      modelGenerationConfig?: Record<string, unknown>;
+    } = {},
   ) {
     const setValue = vi.fn();
     const notify = vi.fn();
@@ -1640,21 +1663,66 @@ describe('OpenTuiEffortDialog', () => {
     const setReasoningEffort = vi.fn((tier: string) => {
       applied = tier;
     });
+    const nestedReasoning = { effort: 'max' };
+    const makeStatic = () => {
+      const base = nestedStaticEffort
+        ? {
+            extra_body: { reasoning: nestedReasoning, temperature: 1 },
+            samplingParams: { reasoning: nestedReasoning },
+          }
+        : {
+            extra_body: { reasoning_effort: 'max', temperature: 1 },
+            samplingParams: { reasoning_effort: 'max' },
+          };
+      return base;
+    };
+    const generation = {
+      ...makeStatic(),
+      authType: 'openai',
+    } as {
+      extra_body?: Record<string, unknown>;
+      samplingParams?: Record<string, unknown>;
+      authType?: string;
+    };
+    const providers = {
+      openai: [
+        {
+          id: 'deepseek-v4-pro',
+          name: 'DeepSeek V4 Pro',
+          baseUrl: 'https://active.example',
+          generationConfig: makeStatic(),
+        },
+      ],
+    };
+    const userModel = {
+      ...(options.modelGenerationConfig
+        ? { generationConfig: options.modelGenerationConfig }
+        : {}),
+      ...(options.userTier ? { reasoningEffort: options.userTier } : {}),
+    };
+    const userSettings = {
+      ...(Object.keys(userModel).length > 0 ? { model: userModel } : {}),
+      ...(options.workspaceOwnsProviders ? {} : { modelProviders: providers }),
+    };
+    const workspaceSettings = {
+      general: {},
+      ...(options.workspaceOwnsProviders ? { modelProviders: providers } : {}),
+    };
     const config = {
       getModel: () => 'deepseek-v4-pro',
       getAuthType: () => 'openai',
       getModelPreferenceKey: () => undefined,
       getReasoningEffort: () => applied,
       setReasoningEffort,
+      getContentGeneratorConfig: () => generation,
       getResolvedModelConfig: () => ({
         capabilities: { reasoning: capability },
       }),
     } as unknown as Config;
     const settings = {
       isTrusted: true,
-      user: { settings: {} },
-      workspace: { settings: { general: {} } },
-      merged: {},
+      user: { settings: userSettings },
+      workspace: { settings: workspaceSettings },
       setValue,
     } as unknown as LoadedSettings;
     render(
@@ -1663,10 +1731,17 @@ describe('OpenTuiEffortDialog', () => {
         settings={settings}
         onClose={vi.fn()}
         notify={notify}
+        initialEffort={initialEffort}
         availableTerminalHeight={availableTerminalHeight}
       />,
     );
-    return { setValue, setReasoningEffort, notify };
+    return {
+      setValue,
+      setReasoningEffort,
+      notify,
+      generation,
+      userSettings,
+    };
   }
 
   it('lists only the tiers the resolved model exposes, with ink labels', () => {
@@ -1715,6 +1790,119 @@ describe('OpenTuiEffortDialog', () => {
     );
   });
 
+  it('persists through the same path as ink and preserves static provider knobs', () => {
+    const harness = renderEffortDialog('max');
+    const before = structuredClone(harness.userSettings);
+    press('down');
+    press('return');
+
+    expect(harness.setReasoningEffort).toHaveBeenCalledWith('high');
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      'high',
+    );
+    expect(harness.setValue.mock.calls.map(([, key]) => key)).toEqual([
+      'model.reasoningEffort',
+    ]);
+    expect(harness.userSettings).toEqual(before);
+    expect(harness.generation.extra_body).toEqual({
+      reasoning_effort: 'max',
+      temperature: 1,
+    });
+    expect(harness.generation.samplingParams).toEqual({
+      reasoning_effort: 'max',
+    });
+    expect(harness.notify).toHaveBeenCalledWith(
+      expect.stringContaining('Reasoning effort: high'),
+      'info',
+    );
+  });
+
+  it('preserves static model.generationConfig and nested reasoning knobs', () => {
+    const harness = renderEffortDialog('max', undefined, true, undefined, {
+      modelGenerationConfig: {
+        extra_body: {
+          reasoning: { budget_tokens: 8192 },
+          temperature: 1,
+        },
+        samplingParams: { reasoning: { effort: 'max' } },
+      },
+    });
+    const before = structuredClone(harness.userSettings);
+    press('down');
+    press('return');
+
+    expect(harness.setValue.mock.calls.map(([, key]) => key)).toEqual([
+      'model.reasoningEffort',
+    ]);
+    expect(harness.userSettings).toEqual(before);
+    expect(harness.generation.extra_body).toEqual({
+      reasoning: { effort: 'max' },
+      temperature: 1,
+    });
+    expect(harness.generation.samplingParams).toEqual({
+      reasoning: { effort: 'max' },
+    });
+    expect(harness.notify).toHaveBeenCalledWith(
+      expect.stringContaining('Reasoning effort: high'),
+      'info',
+    );
+  });
+
+  it('writes a workspace-owned pick to Workspace without clearing User', () => {
+    const harness = renderEffortDialog('max', undefined, false, undefined, {
+      workspaceOwnsProviders: true,
+      userTier: 'max',
+    });
+    press('down');
+    press('return');
+
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'model.reasoningEffort',
+      'high',
+    );
+    expect(harness.setValue).not.toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      undefined,
+    );
+  });
+
+  it('preselects the footer tier when the footer opened the picker', () => {
+    renderEffortDialog(undefined, undefined, false, 'max');
+
+    expect(isSelected('max — ')).toBe(true);
+    expect(screen.queryByText(/No effort configured/)).toBeNull();
+  });
+
+  it('reports a persistence failure instead of pretending it saved', () => {
+    const harness = renderEffortDialog('max');
+    harness.setValue.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+
+    press('down');
+    press('return');
+
+    expect(harness.setValue).toHaveBeenCalledTimes(1);
+    expect(harness.notify).toHaveBeenCalledWith('disk full', 'error');
+  });
+
+  it('selects a tier with a left click, like the keyboard path', () => {
+    const harness = renderEffortDialog('max');
+
+    fireEvent.mouseUp(screen.getByText(/high — /), { button: 0 });
+
+    expect(harness.setReasoningEffort).toHaveBeenCalledWith('high');
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      'high',
+    );
+  });
+
   it('reports the applied tier with ink effort-hook message', () => {
     const harness = renderEffortDialog('max');
     press('down');
@@ -1723,6 +1911,7 @@ describe('OpenTuiEffortDialog', () => {
     expect(harness.notify).toHaveBeenCalledTimes(1);
     expect(harness.notify).toHaveBeenCalledWith(
       'Reasoning effort: high (requested; the effective tier depends on the active provider/model).',
+      'info',
     );
   });
 
