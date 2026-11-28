@@ -184,6 +184,19 @@ export interface ShellTask extends TaskBase {
    */
   sourceTurnId?: string;
   /**
+   * Agent that launched this shell. Absent for shells launched by the
+   * top-level session. The terminal notification goes to this agent first,
+   * so a subagent learns that its own background job finished.
+   */
+  ownerAgentId?: string;
+  /**
+   * The owner's ancestor agents, nearest first, captured at launch. They are
+   * the delivery fallbacks when the owner can no longer take input. The chain
+   * must be captured up front: a finished foreground agent is unregistered,
+   * so its parent link is gone by the time the shell settles.
+   */
+  ownerAncestorAgentIds?: string[];
+  /**
    * @deprecated Read `id` instead; kept as a synonym during the back-compat
    * window. Always equals `id`.
    */
@@ -258,6 +271,17 @@ export type BackgroundShellNotificationCallback = (
 ) => void;
 
 /**
+ * Per-agent delivery. Returns `true` when the agent accepted the
+ * notification, and `false` when it can no longer take input (finished or
+ * finishing), so the registry tries the next fallback.
+ */
+export type BackgroundShellAgentNotificationCallback = (
+  displayText: string,
+  modelText: string,
+  meta: ShellNotificationMeta,
+) => boolean;
+
+/**
  * Fires after registration and every status transition (running →
  * terminal). Symmetric with `BackgroundTaskRegistry.setStatusChangeCallback`
  * so the same UI hook can subscribe to both registries.
@@ -269,6 +293,10 @@ export class BackgroundShellRegistry {
 
   private registerCallback: BackgroundShellRegisterCallback | undefined;
   private notificationCallback: BackgroundShellNotificationCallback | undefined;
+  private readonly agentNotificationCallbacks = new Map<
+    string,
+    BackgroundShellAgentNotificationCallback
+  >();
   private statusChangeCallback: BackgroundShellStatusChangeCallback | undefined;
 
   /**
@@ -303,6 +331,25 @@ export class BackgroundShellRegistry {
         `Redelivering retained terminal notification for shell ${entry.shellId}`,
       );
       this.emitNotification(entry);
+    }
+  }
+
+  /**
+   * Install (or, with `undefined`, remove) the delivery callback for one
+   * agent. A shell whose `ownerAgentId` (or one of its
+   * `ownerAncestorAgentIds`) has a callback is delivered there before the
+   * session-level callback. Unlike `MonitorRegistry`, an undeliverable owned
+   * notification falls back to the session instead of being dropped: a
+   * background shell usually outlives the agent that started it.
+   */
+  setAgentNotificationCallback(
+    agentId: string,
+    cb: BackgroundShellAgentNotificationCallback | undefined,
+  ): void {
+    if (cb) {
+      this.agentNotificationCallbacks.set(agentId, cb);
+    } else {
+      this.agentNotificationCallbacks.delete(agentId);
     }
   }
 
@@ -529,14 +576,13 @@ export class BackgroundShellRegistry {
   private emitNotification(entry: ShellTask): void {
     if (entry.notified) return;
 
-    if (!this.notificationCallback) {
+    const agentTargets = this.getOwnerDeliveryTargets(entry);
+    if (!this.notificationCallback && agentTargets.length === 0) {
       debugLogger.debug(
         `Notification left eligible for shell ${entry.shellId}: no callback registered`,
       );
       return;
     }
-
-    entry.notified = true;
 
     const statusText =
       entry.status === 'completed'
@@ -592,15 +638,59 @@ export class BackgroundShellRegistry {
       todoWorkChainId: entry.todoWorkChainId,
       sourceTurnId: entry.sourceTurnId,
     };
+    const modelText = xmlParts.join('\n');
+
+    // The agent that launched the shell gets the notification first, then
+    // its nearest live ancestor. The top-level session is the last resort.
+    for (const [agentId, callback] of agentTargets) {
+      let delivered = false;
+      try {
+        delivered = callback(displayText, modelText, meta);
+      } catch (error) {
+        debugLogger.error(
+          `Failed to deliver shell ${entry.shellId} notification to agent ${agentId}:`,
+          error,
+        );
+      }
+      if (delivered) {
+        entry.notified = true;
+        return;
+      }
+    }
+
+    if (!this.notificationCallback) {
+      debugLogger.debug(
+        `Notification left eligible for shell ${entry.shellId}: no owner accepted it and no session callback is registered`,
+      );
+      return;
+    }
+
+    entry.notified = true;
 
     try {
-      this.notificationCallback(displayText, xmlParts.join('\n'), meta);
+      this.notificationCallback(displayText, modelText, meta);
     } catch (error) {
       debugLogger.error(
         `Failed to emit shell notification for shell ${entry.shellId}:`,
         error,
       );
     }
+  }
+
+  private getOwnerDeliveryTargets(
+    entry: ShellTask,
+  ): Array<[string, BackgroundShellAgentNotificationCallback]> {
+    if (!entry.ownerAgentId) return [];
+    const targets: Array<[string, BackgroundShellAgentNotificationCallback]> =
+      [];
+    for (const agentId of [
+      entry.ownerAgentId,
+      ...(entry.ownerAncestorAgentIds ?? []),
+    ]) {
+      const callback = this.agentNotificationCallbacks.get(agentId);
+      if (callback) targets.push([agentId, callback]);
+    }
+    return targets;
   }
 
   /**

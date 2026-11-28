@@ -1518,6 +1518,25 @@ export class BackgroundTaskRegistry {
   }
 
   /**
+   * Registered ancestors of `agentId` along `parentAgentId`, nearest first.
+   * The walk stops at the first id that is not registered. A visited set
+   * guards against cycles, as in `findBackgroundedAncestorAgentId`.
+   */
+  getAncestorAgentIds(agentId: string): string[] {
+    const ancestors: string[] = [];
+    const seen = new Set<string>([agentId]);
+    let id = this.agents.get(agentId)?.parentAgentId ?? undefined;
+    while (id !== undefined && !seen.has(id)) {
+      const entry = this.agents.get(id);
+      if (!entry) break;
+      seen.add(id);
+      ancestors.push(id);
+      id = entry.parentAgentId ?? undefined;
+    }
+    return ancestors;
+  }
+
+  /**
    * Snapshot of every entry regardless of status. Used by the TUI
    * footer/dialog to render rows for still-running AND terminal-state
    * tasks; the headless holdback loop keys off `hasUnfinalizedTasks`

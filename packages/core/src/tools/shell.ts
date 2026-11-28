@@ -77,6 +77,7 @@ import {
   statusFilePathFor,
   type ShellTaskRegistration,
 } from '../services/backgroundShellRegistry.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 import stripAnsi from 'strip-ansi';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
@@ -140,6 +141,25 @@ export const SHELL_RECORD_ARTIFACT_REMINDER =
  */
 export const SHELL_PR_BINDING_DIRECTORY_NOTICE =
   'PR auto-binding fell back to the launch directory: this command\'s directory change is not statically resolvable. Set the shell tool\'s "directory" parameter to the repository you create the PR in, or register the PR on the session after creating it.';
+
+/**
+ * Records which agent launched a background shell, so its terminal
+ * notification goes back to that agent instead of the top-level session
+ * (#15748). Top-level launches have no agent frame and record nothing.
+ */
+function captureShellOwner(
+  config: Config,
+): Pick<ShellTaskRegistration, 'ownerAgentId' | 'ownerAncestorAgentIds'> {
+  const ownerAgentId = getCurrentAgentId();
+  if (!ownerAgentId) return {};
+  const ownerAncestorAgentIds = config
+    .getBackgroundTaskRegistry()
+    .getAncestorAgentIds(ownerAgentId);
+  return {
+    ownerAgentId,
+    ...(ownerAncestorAgentIds.length > 0 ? { ownerAncestorAgentIds } : {}),
+  };
+}
 
 function getShellOutputThreshold(config: Config): number {
   return config.isTruncateToolOutputThresholdExplicit()
@@ -5095,6 +5115,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       startTime,
       outputPath,
       abortController: entryAc,
+      ...captureShellOwner(this.config),
     };
 
     // `registry.register` is internally safe today (Map.set + emit),
@@ -5519,6 +5540,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       startTime,
       outputPath,
       abortController: entryAc,
+      ...captureShellOwner(this.config),
     };
 
     let executionHandle;
