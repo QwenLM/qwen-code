@@ -43,7 +43,9 @@ class ManagedSchemaPublicationLoadMySqlIT {
 
         @Override
         public <T> List<T> query(String sql, RowMapper<T> mapper, Object... arguments) {
-            if (sql.startsWith("SELECT scope_id, tenant_id, session_id FROM ma_operation")
+            boolean sessionGcPoll = sql.contains("FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'")
+                    && sql.contains("ORDER BY available_at, operation_ref");
+            if (sessionGcPoll
                     || sql.startsWith("SELECT scope_id, publication_id, tenant_id, session_id FROM ma_operation")
                     || sql.contains("AS needs_operation") || sql.contains("AS needs_ledger")
                     || sql.equals("SELECT MAX(id) FROM ma_output_capture")

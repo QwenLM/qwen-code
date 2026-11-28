@@ -94,7 +94,7 @@ final class WorkspaceMigrationAdmission {
         if (!tenant.equals(alias.get("tenant_id")) || !storage.equals(alias.get("storage_id"))) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        if ("EXTERNAL".equals(alias.get("storage_kind"))) {
+        if (java.util.Set.of("EXTERNAL", "EPHEMERAL").contains(alias.get("storage_kind"))) {
             requireExternalPhysicalOpen(jdbc, tenant, storage, lock);
             return;
         }
@@ -109,8 +109,8 @@ final class WorkspaceMigrationAdmission {
     }
 
     private static void requireExternalPhysicalOpen(JdbcTemplate jdbc, String tenant, String storage, String lock) {
-        var registrations = jdbc.query("SELECT registration_json, registration_revision, physical_id FROM ma_storage"
-                + " WHERE tenant_id = ? AND storage_id = ? AND storage_kind = 'EXTERNAL' AND registration_state = 'REGISTERED'"
+        var registrations = jdbc.query("SELECT registration_json, registration_revision, physical_id, storage_kind FROM ma_storage"
+                + " WHERE tenant_id = ? AND storage_id = ? AND storage_kind IN ('EXTERNAL', 'EPHEMERAL') AND registration_state = 'REGISTERED'"
                 + lock, (row, index) -> {
                     ExternalStorageRegistry.RegisteredExternalStorage registered;
                     try {
@@ -122,7 +122,10 @@ final class WorkspaceMigrationAdmission {
                         // Workspace verdict instead of leaking a mapper 400/500.
                         throw WorkspaceExecutionStore.unavailable();
                     }
-                    if (!storage.equals(registered.tenantWorkspaceId()) || !registered.ownerKey().equals(ManagedSchemaRows.identity(row, "physical_id"))
+                    if (!registered.storageKind().equals(row.getString("storage_kind"))
+                            || registered.ephemeral() && !tenant.equals(registered.ephemeralTenantId())
+                            || !storage.equals(registered.tenantWorkspaceId())
+                            || !registered.ownerKey().equals(ManagedSchemaRows.identity(row, "physical_id"))
                             || registered.registrationRevision() != row.getLong("registration_revision")) {
                         throw WorkspaceExecutionStore.unavailable();
                     }
@@ -134,7 +137,7 @@ final class WorkspaceMigrationAdmission {
         var registered = registrations.getFirst();
         var owners = jdbc.query("SELECT * FROM ma_storage_owner WHERE physical_id = ?" + lock,
                 (row, index) -> registered.ownerKey().equals(ManagedSchemaRows.identity(row, "physical_id"))
-                        && "EXTERNAL".equals(row.getString("storage_kind"))
+                        && registered.storageKind().equals(row.getString("storage_kind"))
                         && tenant.equals(row.getString("tenant_id")) && storage.equals(row.getString("storage_id"))
                         && registered.mountRoot().equals(row.getString("mount_root"))
                         && registered.registrationRevision() == row.getLong("mount_revision")

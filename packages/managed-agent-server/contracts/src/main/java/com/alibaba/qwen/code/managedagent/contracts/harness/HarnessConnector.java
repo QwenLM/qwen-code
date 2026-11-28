@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.IOException;
@@ -62,6 +63,21 @@ public interface HarnessConnector extends AutoCloseable {
 
     /** Whether the Harness can push an admitted Turn's events (event-ingest/1). */
     public default boolean supportsEventIngest() { return false; }
+
+    /** Whether a work-pull poller with this instance and boot may claim; P1.1 admits negotiated pool members only. */
+    public default boolean acceptsWorkPullClaims(String instanceId, String bootId) { return false; }
+
+    /** Whether the same poller may retrieve its existing reservations while it is draining or has no free slot. */
+    public default boolean acceptsWorkPullReoffers(String instanceId, String bootId) { return false; }
+
+    /** The passive load body a claimer runs for wake recovery, built for the claimed placement without sending it. */
+    public default Map<String, Object> claimLoad(String tenantId, String sessionId, HarnessPlacementStore.Placement placement) {
+        throw new UnsupportedOperationException("Work-pull claims are unavailable");
+    }
+
+    /** Runs after a push path records claim demand on this Java instance. */
+    public default void onClaimDemand(Runnable listener) {
+    }
 
     /** Selects an instance without acquiring or changing Session placement. */
     public default SideQueryTarget prepareSideQuery() {

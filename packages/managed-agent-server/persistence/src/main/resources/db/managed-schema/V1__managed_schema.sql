@@ -1099,6 +1099,7 @@ CREATE TABLE ma_tool_execution (
         (binding_id, runtime_generation, execution_state),
     INDEX idx_tool_execution_harness
         (harness_session_id, execution_call_id),
+    shared_dispatch_class VARCHAR(16) COMMENT 'Verified dispatch classification. Only READ is ever stored; NULL fences shared claims and READ permits concurrent readers.',
     CONSTRAINT uk_ma_tool_execution_business_key UNIQUE (execution_call_id),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_tool_execution_id PRIMARY KEY (id),
