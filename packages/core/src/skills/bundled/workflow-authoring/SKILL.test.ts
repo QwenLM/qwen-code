@@ -115,6 +115,13 @@ describe('bundled workflow-authoring skill', () => {
     for (const schema of refused) {
       expect(prepareWorkflowSchema(schema).ok).toBe(false);
     }
+    expect(
+      prepareWorkflowSchema({
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+      }).ok,
+    ).toBe(true);
+
     const contradictory = {
       type: 'object',
       required: ['a'],
@@ -156,6 +163,8 @@ describe('bundled workflow-authoring skill', () => {
       'property-name keywords',
       'newer-dialect spellings need',
       'https://json-schema.org/draft/2020-12/schema',
+      'A schema with no `$schema`, or with the draft-07 URI, is compiled as draft-07',
+      'every other `$schema` URI is refused outright',
     ]) {
       expect(prose).toContain(anchor);
     }

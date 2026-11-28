@@ -127,8 +127,10 @@ say explicitly what each one should read and whether it may edit files.
   node's own property rules and skips a node carrying reference, combinator,
   conditional, dependency, unevaluated-property or property-name keywords;
   newer-dialect spellings need the root `$schema` set to
-  `https://json-schema.org/draft/2020-12/schema`; any other dialect is refused
-  before dispatch. Otherwise the agent is dispatched and
+  `https://json-schema.org/draft/2020-12/schema`. A schema with no `$schema`,
+  or with the draft-07 URI, is compiled as draft-07, so those keywords are
+  refused as unknown; every other `$schema` URI is refused outright.
+  Otherwise the agent is dispatched and
   the failure arrives as failed submissions. Each failed submission hands its
   error back to the agent, and
   the third failed submission stops it. With no valid result agent() resolves
