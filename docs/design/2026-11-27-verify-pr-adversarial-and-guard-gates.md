@@ -122,22 +122,28 @@ exact same commits (`7210889200`, `7214891441`, `7215477398`, `7215982054`,
   preserving the CI publish job's sparse checkout of `verify-pr-check.mjs`
   without adding a runtime dependency on `verify-pr-guard.mjs`.
 - **`verify-pr-guard.mjs`**:
-  - Record `capturedAt` (UTC ISO-8601) in `fetchSnapshot()` (keeping
-    `isSnapshot()` backwards-compatible when `capturedAt` is absent) and enforce
-    strict `owner/repo` slug validation plus rejection of stray positional
-    arguments.
-  - On `--snapshot <file>`, pre-check target safety before fetching and remove
-    any stale regular snapshot already at that path when a refresh fails
-    (without touching symlinks, hardlinks, or non-regular files), so a retry
-    after a failed refresh cannot reuse an older `guard-now.json`.
+  - Record `capturedAt` (UTC ISO-8601, taken before the opening metadata read)
+    in `fetchSnapshot()` (keeping `isSnapshot()` backwards-compatible when
+    `capturedAt` is absent), enforce strict `owner/repo` slug validation, and
+    reject empty flag values or stray positional arguments.
+  - Re-read PR head and state after all paginated comment lists finish and fail
+    closed if either changed while pages were in flight, requiring a fresh
+    snapshot before comparing.
+  - Add `--no-clobber` (`O_EXCL` atomic create) for round-start snapshots in
+    per-round host directories so concurrent rounds cannot overwrite or delete
+    each other's `guard-start.json`.
+  - On refresh `--snapshot <file>` (without `--no-clobber`) and `--compare
+--out <verdict-file>`, pre-check target safety and invalidate any stale
+    regular file at that path on either fetch failure or write failure (such as
+    `EACCES` on a read-only file in a writable directory, without touching
+    symlinks, hardlinks, or non-regular files).
   - Harden same-file detection on `--compare` via `realpathSync`, parent-dir
     canonicalization, and `(dev, ino)` so symlink and hardlink aliases cannot
-    compare a snapshot with itself.
-  - Add `--out <verdict-file>` to `--compare`, refusing writes through symlinks,
-    hardlinks, non-regular files, or paths aliasing `--start`/`--now`. Always
-    write the verdict on both clean and dirty runs (preventing a stale
-    `clean: true` file from surviving a dirty check); on clean runs print
-    `  guard-verdict  <path>` and `  guard-sha256  <64-hex>`.
+    compare a snapshot with itself, and flag inverted timestamps
+    (`now.capturedAt < start.capturedAt`) as dirty.
+  - Always write the structured verdict on both clean and dirty `--compare
+--out` runs; on clean runs print `  guard-verdict  <path>` and
+    `  guard-sha256  <64-hex>`.
 - **`verify-pr-check.mjs`**:
   - Add `--guard <verdict>`, `--guard-sha256 <64-hex>`,
     `--guard-max-age-sec <1..86400>` (default `600`), and `--require-guard`
@@ -154,14 +160,16 @@ exact same commits (`7210889200`, `7214891441`, `7215477398`, `7215982054`,
     both ends, monotonic UTC timestamps
     (`startCapturedAt <= nowCapturedAt <= comparedAt`), freshness against
     `nowCapturedAt` and `comparedAt`, and a 60 s future-skew bound.
-- **`SKILL.md`**: Document the local `--publish` gate sequence that deletes any
-  stale `guard-now.json` / `guard-verdict.json`, refreshes `guard-now.json` in
-  the same step (exiting immediately on failure), compares into
-  `~/.cache/qwen-verify/pr<n>/guard-verdict.json` + `guard.sha256`, and requires
-  `verify-pr-check.mjs` with `--require-guard` to exit 0 before posting —
-  including the runner-backed VM variant (`microvm` / `provider-vm`) that keeps
-  the runner's `--execution-record`, `--execution-record-sha256`, and vault
-  artifact directory in the same final check.
+- **`SKILL.md`**: Document the per-round host directory layout
+  (`~/.cache/qwen-verify/pr<n>/<round-id>/`) isolating start snapshot
+  (`--no-clobber`), final snapshot refresh, verdict, log, and digest from
+  concurrent local rounds on the same PR. The local `--publish` gate clears
+  stale per-round files, refreshes `guard-now.json` in the same step (exiting
+  immediately on failure), compares into `guard-verdict.json` + `guard.sha256`,
+  and requires `verify-pr-check.mjs` with `--require-guard` to exit 0 before
+  posting — including the runner-backed VM variant (`microvm` / `provider-vm`)
+  that keeps the runner's `--execution-record`, `--execution-record-sha256`, and
+  vault artifact directory in the same final check.
 
 ## Design Decisions and Rationale
 

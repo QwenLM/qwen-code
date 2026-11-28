@@ -21,7 +21,7 @@
  * path can produce a clean verdict from an unanswered question.
  *
  * Usage:
- *   node verify-pr-guard.mjs --pr <n> --repo <owner>/<repo> --snapshot <file>
+ *   node verify-pr-guard.mjs --pr <n> --repo <owner>/<repo> --snapshot <file> [--no-clobber]
  *   node verify-pr-guard.mjs --compare --start <file> --now <file> [--out <verdict-file>]
  *
  * Exit codes: 0 clean / snapshot written, 1 dirty or fetch failed, 2 usage.
@@ -67,14 +67,22 @@ const LISTS = [
 ];
 
 const HELP = `Usage:
-  node scripts/verify-pr-guard.mjs --pr <n> --repo <owner>/<repo> --snapshot <file>
+  node scripts/verify-pr-guard.mjs --pr <n> --repo <owner>/<repo> --snapshot <file> [--no-clobber]
   node scripts/verify-pr-guard.mjs --compare --start <file> --now <file> [--out <verdict-file>]
 
---snapshot fetches the head, the PR state and all three comment lists with
---paginate, and writes them only when every call succeeded. A failed call exits
-1 and leaves no file behind (removing any stale regular snapshot already at that
-path, while refusing to touch symlinks, hardlinks, or non-regular files), so a
-retry after a failed refresh cannot be mistaken for a fresh snapshot.
+--snapshot fetches the head and PR state, paginates all three comment lists,
+then re-reads the head and PR state to confirm neither changed while pages were
+in flight. It writes the file only when every call succeeded and the opening
+and closing metadata match. A failed fetch or failed write exits 1 and leaves
+no stale regular snapshot behind (removing any stale regular snapshot already
+at that path while refusing to touch symlinks, hardlinks, or non-regular
+files), so a retry after a failed refresh cannot be mistaken for a fresh
+snapshot.
+
+With --no-clobber (for round-start snapshots in a per-round host directory),
+--snapshot creates the file exclusively (O_EXCL) and exits 1 without touching
+or deleting an existing file, preventing concurrent rounds from overwriting
+each other's start snapshot.
 
 --compare is fail-closed: a malformed snapshot, a moved head, a changed state, a
 new or edited item, a vanished item, or a list shorter than the start snapshot
@@ -85,7 +93,8 @@ alias to it) as both sides is a usage error, not a clean round.
 
 With --out <verdict-file>, --compare writes a structured ${GUARD_VERDICT_SCHEMA}
 record (both on clean and on dirty, so a stale clean record at the same path
-cannot survive a dirty re-check). On a clean round it prints \`guard-sha256\` so
+cannot survive a dirty re-check; a write failure also invalidates any stale
+regular verdict at that path). On a clean round it prints \`guard-sha256\` so
 verify-pr-check.mjs --require-guard --guard <file> --guard-sha256 <digest> can
 bind the verdict before posting.
 
@@ -137,16 +146,24 @@ export function fetchSnapshot({ pr, repo, run, now = () => new Date() }) {
     }
   };
 
+  const isPlainObject = (value) =>
+    value !== null && typeof value === 'object' && !Array.isArray(value);
+
+  const capturedAt = now().toISOString();
   const meta = call(
     ['pr', 'view', String(pr), '--repo', repo, '--json', 'headRefOid,state'],
     'pr view',
   );
+  if (meta !== null && !isPlainObject(meta)) {
+    errors.push(`pr view: expected an object, got ${typeof meta}`);
+  }
+  const metaObj = isPlainObject(meta) ? meta : null;
   const snapshot = {
     pr,
     repo,
-    headRefOid: meta?.headRefOid ?? null,
-    state: meta?.state ?? null,
-    capturedAt: now().toISOString(),
+    headRefOid: metaObj?.headRefOid ?? null,
+    state: metaObj?.state ?? null,
+    capturedAt,
   };
 
   for (const [key, path, carriesState] of LISTS) {
@@ -163,6 +180,32 @@ export function fetchSnapshot({ pr, repo, run, now = () => new Date() }) {
       continue;
     }
     snapshot[key] = normalize(items, carriesState);
+  }
+
+  // Re-read head and state after all paginated comment fetches finish so a
+  // push or state transition landing while pages were in flight cannot hide
+  // behind the opening `pr view`.
+  if (errors.length === 0 && metaObj !== null) {
+    const confirm = call(
+      ['pr', 'view', String(pr), '--repo', repo, '--json', 'headRefOid,state'],
+      'pr view (confirm)',
+    );
+    if (confirm !== null && !isPlainObject(confirm)) {
+      errors.push(
+        `pr view (confirm): expected an object, got ${typeof confirm}`,
+      );
+    } else if (confirm !== null) {
+      if (confirm.headRefOid !== metaObj.headRefOid) {
+        errors.push(
+          `PR head moved during snapshot fetch (${metaObj.headRefOid} -> ${confirm.headRefOid}); re-fetch before comparing`,
+        );
+      }
+      if (confirm.state !== metaObj.state) {
+        errors.push(
+          `PR state changed during snapshot fetch (${metaObj.state} -> ${confirm.state}); re-fetch before comparing`,
+        );
+      }
+    }
   }
 
   if (errors.length > 0) return { ok: false, errors, snapshot: null };
@@ -328,6 +371,7 @@ function parseArgs(argv) {
     pr: null,
     repo: null,
     snapshot: null,
+    noClobber: false,
     compare: false,
     start: null,
     now: null,
@@ -345,6 +389,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--compare') out.compare = true;
+    else if (arg === '--no-clobber') out.noClobber = true;
     else if (arg === '--pr') {
       const val = nextVal(arg, i);
       if (val === null) break;
@@ -418,9 +463,16 @@ function sameFilePath(a, b) {
   return false;
 }
 
-function inspectWritableTarget(filePath) {
+function inspectWritableTarget(filePath, { noClobber = false } = {}) {
   try {
     const st = lstatSync(filePath);
+    if (noClobber) {
+      return {
+        ok: false,
+        existedRegular: false,
+        error: `refusing to overwrite existing snapshot ${filePath} (--no-clobber); use a dedicated per-round host directory`,
+      };
+    }
     if (st.isSymbolicLink()) {
       return {
         ok: false,
@@ -471,16 +523,40 @@ function removeStaleSnapshot(filePath) {
   }
 }
 
-function safeWriteFile(filePath, content) {
-  const checked = inspectWritableTarget(filePath);
+function safeWriteFile(filePath, content, { noClobber = false } = {}) {
+  const checked = inspectWritableTarget(filePath, { noClobber });
   if (!checked.ok) {
     return { ok: false, error: checked.error };
   }
   try {
-    writeFileSync(filePath, content);
+    writeFileSync(filePath, content, noClobber ? { flag: 'wx' } : undefined);
     const sha256 = createHash('sha256').update(content, 'utf8').digest('hex');
     return { ok: true, sha256 };
   } catch (error) {
+    if (noClobber && error?.code === 'EEXIST') {
+      return {
+        ok: false,
+        error: `refusing to overwrite existing snapshot ${filePath} (--no-clobber); use a dedicated per-round host directory`,
+      };
+    }
+    // On refresh/verdict overwrites, invalidate any stale regular file left
+    // behind (for example a chmod-444 snapshot in a writable directory, or a
+    // partial write on ENOSPC) so subsequent compares cannot pass on old data.
+    if (!noClobber) {
+      const cleaned = removeStaleSnapshot(filePath);
+      if (cleaned.removed) {
+        return {
+          ok: false,
+          error: `cannot write ${filePath}: ${error.message} (removed stale ${filePath})`,
+        };
+      }
+      if (cleaned.error) {
+        return {
+          ok: false,
+          error: `cannot write ${filePath}: ${error.message}; ${cleaned.error}`,
+        };
+      }
+    }
     return {
       ok: false,
       error: `cannot write ${filePath}: ${error.message}`,
@@ -516,6 +592,12 @@ function main(argv) {
   }
 
   if (args.compare) {
+    if (args.noClobber) {
+      process.stderr.write(
+        `verify-pr guard: --no-clobber is only valid with --snapshot\n\n${HELP}`,
+      );
+      return 2;
+    }
     if (!args.start || !args.now) {
       process.stderr.write(
         `verify-pr guard: --compare needs --start and --now\n\n${HELP}`,
@@ -593,7 +675,9 @@ function main(argv) {
     );
     return 2;
   }
-  const targetCheck = inspectWritableTarget(args.snapshot);
+  const targetCheck = inspectWritableTarget(args.snapshot, {
+    noClobber: args.noClobber,
+  });
   if (!targetCheck.ok) {
     process.stderr.write(`verify-pr guard: ${targetCheck.error}\n`);
     return 1;
@@ -606,9 +690,9 @@ function main(argv) {
     run,
   });
   if (!ok) {
-    const cleaned = targetCheck.existedRegular
-      ? removeStaleSnapshot(args.snapshot)
-      : { removed: false, error: null };
+    const cleaned = args.noClobber
+      ? { removed: false, error: null }
+      : removeStaleSnapshot(args.snapshot);
     const statusNote = cleaned.removed
       ? `removed stale ${args.snapshot}`
       : 'nothing written';
@@ -621,6 +705,7 @@ function main(argv) {
   const written = safeWriteFile(
     args.snapshot,
     `${JSON.stringify(snapshot, null, 2)}\n`,
+    { noClobber: args.noClobber },
   );
   if (!written.ok) {
     process.stderr.write(`verify-pr guard: ${written.error}\n`);

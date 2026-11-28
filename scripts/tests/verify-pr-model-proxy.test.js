@@ -783,7 +783,7 @@ describe('local container recipe pins', () => {
     const logSuffix =
       '> ~/.cache/qwen-verify/pr<n>/prepare.log 2>&1 || { cat ~/.cache/qwen-verify/pr<n>/prepare.log >&2; exit 1; }';
     const guardLogSuffix =
-      '> ~/.cache/qwen-verify/pr<n>/guard.log 2>&1 || { cat ~/.cache/qwen-verify/pr<n>/guard.log >&2; exit 1; }';
+      '> ~/.cache/qwen-verify/pr<n>/<round-id>/guard.log 2>&1 || { cat ~/.cache/qwen-verify/pr<n>/<round-id>/guard.log >&2; exit 1; }';
     const logged = ` ${basic.trim()} --context-out ~/.cache/qwen-verify/pr<n>/pr.json ${logSuffix}`;
     const script = '<trusted-clone>/scripts/verify-pr-prepare.mjs';
     const valueFlags = new Set([
@@ -981,7 +981,7 @@ describe('local container recipe pins', () => {
           '<digest>',
         )
         .replace(
-          /"\$\(cat ~\/\.cache\/qwen-verify\/pr<n>\/guard\.sha256\)"/g,
+          /"\$\(cat ~\/\.cache\/qwen-verify\/pr<n>\/<round-id>\/guard\.sha256\)"/g,
           '<guard-digest>',
         )
         .replace(/(^|\s)--repo=/g, '$1--repo ')
@@ -992,6 +992,7 @@ describe('local container recipe pins', () => {
         .replaceAll('<host snapshot>', '<host-snapshot>')
         .replaceAll('<artifact dir>', '<artifact-dir>')
         .replaceAll('<absolute qwen>', '<absolute-qwen>')
+        .replaceAll('<round-id>', 'roundId')
         .replaceAll('pr<n>', 'prN')
         .replaceAll('<owner>/<repo>', 'owner/repo');
       if (kind === 'prepare') {
@@ -1013,7 +1014,7 @@ describe('local container recipe pins', () => {
         }
         const snapMatch = text.match(
           exact(
-            String.raw` --pr <n> --repo (${repo}) --snapshot (${pathValue})`,
+            String.raw` --pr <n> --repo (${repo}) --snapshot (${pathValue})(?: --no-clobber)?`,
           ),
         );
         return snapMatch !== null && validDocumentedPath(snapMatch[2]);
@@ -6576,7 +6577,7 @@ describe('local container recipe pins', () => {
         if (hasBashCaseInSyntax(source)) return false;
         const parsed = source
           .replace(
-            /"<[A-Za-z0-9](?:[A-Za-z0-9_.,+ -]*[A-Za-z0-9])?>"|(?<=^|[\s/="'`:-]|\bpr)<(?:n|owner|repo|clone|pr-clone|trusted-clone|ts|assets-repo|default|branch|path|dir|round-dir|trusted-dir)>(?=\/)|(?<=^|[\s/="'`:-]|\bpr)<[A-Za-z0-9](?:[A-Za-z0-9_,+ -]*[A-Za-z0-9])?>(?![A-Za-z0-9_./])/g,
+            /"<[A-Za-z0-9](?:[A-Za-z0-9_.,+ -]*[A-Za-z0-9])?>"|(?<=^|[\s/="'`:-]|\bpr)<(?:n|owner|repo|clone|pr-clone|trusted-clone|ts|assets-repo|default|branch|path|dir|round-dir|round-id|trusted-dir)>(?=\/)|(?<=^|[\s/="'`:-]|\bpr)<[A-Za-z0-9](?:[A-Za-z0-9_,+ -]*[A-Za-z0-9])?>(?![A-Za-z0-9_./])/g,
             (placeholder) =>
               placeholder.startsWith('"')
                 ? `"${'P'.repeat(placeholder.length - 2)}"`
@@ -6795,12 +6796,12 @@ describe('local container recipe pins', () => {
             if (raw === `> ${cacheRoot}/prepare.log`) {
               return helper('prepare');
             }
-            if (raw === `> ${cacheRoot}/guard.log`) {
+            if (raw === `> ${cacheRoot}/<round-id>/guard.log`) {
               return helper('guard');
             }
             if (
               raw === `> ${cacheRoot}/pr.sha256` ||
-              raw === `> ${cacheRoot}/guard.sha256`
+              raw === `> ${cacheRoot}/<round-id>/guard.sha256`
             ) {
               return name === 'sed';
             }
@@ -6935,8 +6936,8 @@ describe('local container recipe pins', () => {
                   [
                     'prepare.log',
                     'pr.sha256',
-                    'guard.log',
-                    'guard.sha256',
+                    '<round-id>/guard.log',
+                    '<round-id>/guard.sha256',
                     'proxy.pid',
                   ].some((suffix) => cachePath(rawValues[0], suffix)))
               );
@@ -6993,7 +6994,7 @@ describe('local container recipe pins', () => {
               ) {
                 return (
                   cachePath(rawValues[2], 'pr.sha256') ||
-                  cachePath(rawValues[2], 'guard.sha256')
+                  cachePath(rawValues[2], '<round-id>/guard.sha256')
                 );
               }
               if (
@@ -7027,6 +7028,7 @@ describe('local container recipe pins', () => {
                 rawValues[0] === '-p' &&
                 (cachePath(rawValues[1]) ||
                   cachePath(rawValues[1], 'qwen-base') ||
+                  cachePath(rawValues[1], '<round-id>') ||
                   (trustedDockerExec && rawValues[1] === '"$HOME/.qwen"'))
               );
             }
@@ -7095,10 +7097,10 @@ describe('local container recipe pins', () => {
                       [
                         'prepare.log',
                         'pr.sha256',
-                        'guard-now.json',
-                        'guard-verdict.json',
-                        'guard.log',
-                        'guard.sha256',
+                        '<round-id>/guard-now.json',
+                        '<round-id>/guard-verdict.json',
+                        '<round-id>/guard.log',
+                        '<round-id>/guard.sha256',
                         'review-threads.json',
                         'previous-report.md',
                         'proxy.json',
@@ -7311,7 +7313,7 @@ describe('local container recipe pins', () => {
                 ((rawValues[1] === "'s/^  context-sha256  //p'" &&
                   cachePath(rawValues[2], 'prepare.log')) ||
                   (rawValues[1] === "'s/^  guard-sha256  //p'" &&
-                    cachePath(rawValues[2], 'guard.log')));
+                    cachePath(rawValues[2], '<round-id>/guard.log')));
               return;
             }
             if (name === 'tar') {
@@ -7603,10 +7605,10 @@ describe('local container recipe pins', () => {
       const families = calls.map((call) => call.family);
       const actions = calls.map((call) => call.action);
       return (
-        calls.length === 28 &&
+        calls.length === 29 &&
         families.filter((family) => family === 'prepare').length === 4 &&
         families.filter((family) => family === 'check').length === 5 &&
-        families.filter((family) => family === 'guard').length === 2 &&
+        families.filter((family) => family === 'guard').length === 3 &&
         families.filter((family) => family === 'watch-state').length === 12 &&
         families.filter((family) => family === 'watch-gate').length === 3 &&
         families.filter((family) => family === 'model-proxy').length === 1 &&
@@ -7618,14 +7620,21 @@ describe('local container recipe pins', () => {
       );
     };
     expect(await onlyDocumentedPrepareCalls(skill)).toBe(true);
-    // Hostile mutations of the new guard-refresh, guard-verdict, VM execution
-    // record, and --require-guard gate must be rejected by the AST auditor.
+    // Hostile mutations of the new guard-start, guard-refresh, guard-verdict,
+    // VM execution record, and --require-guard gate must be rejected by the AST auditor.
     for (const [label, mutated] of [
+      [
+        'guard start from untrusted PR clone',
+        skill.replace(
+          'node <trusted-clone>/scripts/verify-pr-guard.mjs \\\n  --pr <n> --repo <owner>/<repo> \\\n  --snapshot ~/.cache/qwen-verify/pr<n>/<round-id>/guard-start.json',
+          'node <pr-clone>/scripts/verify-pr-guard.mjs \\\n  --pr <n> --repo <owner>/<repo> \\\n  --snapshot ~/.cache/qwen-verify/pr<n>/<round-id>/guard-start.json',
+        ),
+      ],
       [
         'guard refresh from untrusted PR clone',
         skill.replace(
-          'node <trusted-clone>/scripts/verify-pr-guard.mjs \\\n  --pr <n> --repo <owner>/<repo>',
-          'node <pr-clone>/scripts/verify-pr-guard.mjs \\\n  --pr <n> --repo <owner>/<repo>',
+          'node <trusted-clone>/scripts/verify-pr-guard.mjs \\\n  --pr <n> --repo <owner>/<repo> \\\n  --snapshot ~/.cache/qwen-verify/pr<n>/<round-id>/guard-now.json',
+          'node <pr-clone>/scripts/verify-pr-guard.mjs \\\n  --pr <n> --repo <owner>/<repo> \\\n  --snapshot ~/.cache/qwen-verify/pr<n>/<round-id>/guard-now.json',
         ),
       ],
       [
@@ -7636,16 +7645,16 @@ describe('local container recipe pins', () => {
         ),
       ],
       [
-        'guard.log redirected outside host cache',
+        'guard.log redirected outside per-round host cache',
         skill.replace(
-          '> ~/.cache/qwen-verify/pr<n>/guard.log 2>&1',
+          '> ~/.cache/qwen-verify/pr<n>/<round-id>/guard.log 2>&1',
           '> /tmp/guard.log 2>&1',
         ),
       ],
       [
-        'guard.sha256 written outside host cache',
+        'guard.sha256 written outside per-round host cache',
         skill.replace(
-          '> ~/.cache/qwen-verify/pr<n>/guard.sha256',
+          '> ~/.cache/qwen-verify/pr<n>/<round-id>/guard.sha256',
           '> /tmp/guard.sha256',
         ),
       ],

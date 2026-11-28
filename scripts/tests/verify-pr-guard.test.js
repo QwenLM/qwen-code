@@ -239,6 +239,77 @@ describe('fetchSnapshot', () => {
       /an id, body or review state in one of the lists/,
     );
   });
+  it('rejects a snapshot when PR head or state changes during paginated comment fetches, or when the closing pr view fails', () => {
+    const HEAD_B = 'b'.repeat(40);
+    const makeSequencedRun = (closingMeta) => {
+      let prViews = 0;
+      const base = allLists();
+      return (args) => {
+        if (args[0] !== 'api') {
+          prViews += 1;
+          return prViews === 1 ? base['pr view'] : closingMeta;
+        }
+        return base[args[2]];
+      };
+    };
+
+    const moved = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: makeSequencedRun(ok({ headRefOid: HEAD_B, state: 'OPEN' })),
+    });
+    expect(moved.ok).toBe(false);
+    expect(moved.snapshot).toBeNull();
+    expect(moved.errors.join('\n')).toMatch(
+      /PR head moved during snapshot fetch/,
+    );
+
+    const merged = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: makeSequencedRun(ok({ headRefOid: HEAD, state: 'MERGED' })),
+    });
+    expect(merged.ok).toBe(false);
+    expect(merged.snapshot).toBeNull();
+    expect(merged.errors.join('\n')).toMatch(
+      /PR state changed during snapshot fetch/,
+    );
+
+    const confirmFailed = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: makeSequencedRun({
+        status: 1,
+        stdout: '',
+        stderr: 'connection reset',
+      }),
+    });
+    expect(confirmFailed.ok).toBe(false);
+    expect(confirmFailed.snapshot).toBeNull();
+    expect(confirmFailed.errors.join('\n')).toMatch(
+      /pr view \(confirm\): gh exited 1/,
+    );
+
+    // Non-object JSON literals (`null`, `[]`) from `pr view` fail closed
+    // without throwing a TypeError during confirmation.
+    const nullMeta = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: fakeRun({ ...allLists(), 'pr view': ok(null) }),
+    });
+    expect(nullMeta.ok).toBe(false);
+    expect(nullMeta.snapshot).toBeNull();
+
+    const arrayConfirm = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: makeSequencedRun(ok([])),
+    });
+    expect(arrayConfirm.ok).toBe(false);
+    expect(arrayConfirm.errors.join('\n')).toMatch(
+      /pr view \(confirm\): expected an object/,
+    );
+  });
 });
 
 describe('isSnapshot', () => {
@@ -853,4 +924,243 @@ esac`;
     expect(existsSync(hardSnap)).toBe(true);
     expect(readFileSync(protectedTarget, 'utf8')).toBe('do-not-delete');
   });
+
+  it('refuses overwriting an existing start snapshot with --no-clobber and isolates concurrent rounds in per-round directories', () => {
+    const dir = tmpDir();
+    const roundADir = join(dir, 'round-a');
+    const roundBDir = join(dir, 'round-b');
+    mkdirSync(roundADir, { recursive: true });
+    mkdirSync(roundBDir, { recursive: true });
+    const startA = join(roundADir, 'guard-start.json');
+    const nowA = join(roundADir, 'guard-now.json');
+    const verdictA = join(roundADir, 'guard-verdict.json');
+    const startB = join(roundBDir, 'guard-start.json');
+    const nowB = join(roundBDir, 'guard-now.json');
+    const verdictB = join(roundBDir, 'guard-verdict.json');
+
+    // Round A captures its start snapshot exclusively before a new P1 lands.
+    const envBeforeP1 = withGh(dir, GH_OK);
+    expect(
+      run(
+        [
+          '--pr',
+          '7',
+          '--repo',
+          'owner/repo',
+          '--snapshot',
+          startA,
+          '--no-clobber',
+        ],
+        envBeforeP1,
+      ).status,
+    ).toBe(0);
+    const originalA = readFileSync(startA, 'utf8');
+
+    // A second round pointing at Round A's path with --no-clobber is refused
+    // without touching or deleting Round A's start snapshot.
+    const ghAfterP1 = GH_OK.replace(
+      `  *issues/7/comments*) echo '[]' ;;`,
+      `  *issues/7/comments*) echo '[{"id":99,"updated_at":"2026-10-28T00:05:00Z","body":"[P1] new finding"}]' ;;`,
+    );
+    const envAfterP1 = withGh(join(dir, 'gh-p1'), ghAfterP1);
+    const clobberAttempt = run(
+      [
+        '--pr',
+        '7',
+        '--repo',
+        'owner/repo',
+        '--snapshot',
+        startA,
+        '--no-clobber',
+      ],
+      envAfterP1,
+    );
+    expect(clobberAttempt.status).toBe(1);
+    expect(clobberAttempt.stderr).toContain('--no-clobber');
+    expect(readFileSync(startA, 'utf8')).toBe(originalA);
+
+    // Round B captures its own start snapshot in round-b/ (including P1 #99).
+    expect(
+      run(
+        [
+          '--pr',
+          '7',
+          '--repo',
+          'owner/repo',
+          '--snapshot',
+          startB,
+          '--no-clobber',
+        ],
+        envAfterP1,
+      ).status,
+    ).toBe(0);
+
+    // Round A's publish check still detects P1 #99 as new and exits 1, while
+    // Round B (which started after P1 #99) sees a clean round.
+    expect(
+      run(['--pr', '7', '--repo', 'owner/repo', '--snapshot', nowA], envAfterP1)
+        .status,
+    ).toBe(0);
+    const cmpA = run([
+      '--compare',
+      '--start',
+      startA,
+      '--now',
+      nowA,
+      '--out',
+      verdictA,
+    ]);
+    expect(cmpA.status).toBe(1);
+    expect(cmpA.stdout).toContain('issueComments: 99 is new');
+    expect(JSON.parse(readFileSync(verdictA, 'utf8')).clean).toBe(false);
+
+    expect(
+      run(['--pr', '7', '--repo', 'owner/repo', '--snapshot', nowB], envAfterP1)
+        .status,
+    ).toBe(0);
+    const cmpB = run([
+      '--compare',
+      '--start',
+      startB,
+      '--now',
+      nowB,
+      '--out',
+      verdictB,
+    ]);
+    expect(cmpB.status).toBe(0);
+    expect(JSON.parse(readFileSync(verdictB, 'utf8')).clean).toBe(true);
+
+    // --no-clobber is rejected with --compare.
+    expect(
+      run(['--compare', '--start', startB, '--now', nowB, '--no-clobber'])
+        .status,
+    ).toBe(2);
+  });
+
+  it('rejects a mid-fetch push arriving while comment pages are returned and removes any stale now snapshot', () => {
+    const dir = tmpDir();
+    const startPath = join(dir, 'guard-start.json');
+    const nowPath = join(dir, 'guard-now.json');
+    const stateFile = join(dir, 'push-marker');
+    const HEAD_B = 'b'.repeat(40);
+
+    const okEnv = withGh(dir, GH_OK);
+    expect(
+      run(['--pr', '7', '--repo', 'owner/repo', '--snapshot', startPath], okEnv)
+        .status,
+    ).toBe(0);
+    expect(
+      run(['--pr', '7', '--repo', 'owner/repo', '--snapshot', nowPath], okEnv)
+        .status,
+    ).toBe(0);
+
+    // Simulate a push landing right as the first comment list returns: the
+    // opening `pr view` sees HEAD, reviews marks stateFile, and the closing
+    // `pr view` observes HEAD_B.
+    const midPushGh = `#!/bin/sh
+case "$*" in
+  *'pr view'*)
+    if [ -f "${stateFile}" ]; then
+      echo '{"headRefOid":"${HEAD_B}","state":"OPEN"}'
+    else
+      echo '{"headRefOid":"${HEAD}","state":"OPEN"}'
+    fi ;;
+  *pulls/7/reviews*)
+    touch "${stateFile}"
+    echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":"","state":"COMMENTED"}]' ;;
+  *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *issues/7/comments*) echo '[]' ;;
+  *) echo "unexpected gh call: $*" >&2; exit 2 ;;
+esac
+`;
+    const midPushEnv = withGh(join(dir, 'gh-midpush'), midPushGh);
+    const res = run(
+      ['--pr', '7', '--repo', 'owner/repo', '--snapshot', nowPath],
+      midPushEnv,
+    );
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain('PR head moved during snapshot fetch');
+    expect(res.stderr).toContain(`removed stale ${nowPath}`);
+    expect(existsSync(nowPath)).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'invalidates a read-only stale snapshot or verdict when overwriting fails with EACCES',
+    () => {
+      const dir = tmpDir();
+      const startPath = join(dir, 'guard-start.json');
+      const nowPath = join(dir, 'guard-now.json');
+      const verdictPath = join(dir, 'guard-verdict.json');
+      const okEnv = withGh(dir, GH_OK);
+
+      expect(
+        run(
+          ['--pr', '7', '--repo', 'owner/repo', '--snapshot', startPath],
+          okEnv,
+        ).status,
+      ).toBe(0);
+      expect(
+        run(['--pr', '7', '--repo', 'owner/repo', '--snapshot', nowPath], okEnv)
+          .status,
+      ).toBe(0);
+
+      // Make the stale guard-now.json read-only inside the writable directory.
+      // Refresh fetches successfully, write fails with EACCES, and the stale
+      // read-only snapshot is unlinked so a subsequent compare fails closed.
+      chmodSync(nowPath, 0o444);
+      const writeFail = run(
+        ['--pr', '7', '--repo', 'owner/repo', '--snapshot', nowPath],
+        okEnv,
+      );
+      expect(writeFail.status).toBe(1);
+      expect(writeFail.stderr).toContain('cannot write');
+      expect(writeFail.stderr).toContain(`removed stale ${nowPath}`);
+      expect(existsSync(nowPath)).toBe(false);
+
+      const cmpAfterWriteFail = run([
+        '--compare',
+        '--start',
+        startPath,
+        '--now',
+        nowPath,
+        '--out',
+        verdictPath,
+      ]);
+      expect(cmpAfterWriteFail.status).toBe(1);
+      expect(cmpAfterWriteFail.stdout).toContain(
+        'now snapshot is missing or malformed',
+      );
+
+      // Same invariant for a read-only clean guard-verdict.json: a failing
+      // --compare --out write invalidates the old clean verdict.
+      expect(
+        run(['--pr', '7', '--repo', 'owner/repo', '--snapshot', nowPath], okEnv)
+          .status,
+      ).toBe(0);
+      expect(
+        run([
+          '--compare',
+          '--start',
+          startPath,
+          '--now',
+          nowPath,
+          '--out',
+          verdictPath,
+        ]).status,
+      ).toBe(0);
+      chmodSync(verdictPath, 0o444);
+      const verdictWriteFail = run([
+        '--compare',
+        '--start',
+        startPath,
+        '--now',
+        nowPath,
+        '--out',
+        verdictPath,
+      ]);
+      expect(verdictWriteFail.status).toBe(1);
+      expect(verdictWriteFail.stderr).toContain(`removed stale ${verdictPath}`);
+      expect(existsSync(verdictPath)).toBe(false);
+    },
+  );
 });

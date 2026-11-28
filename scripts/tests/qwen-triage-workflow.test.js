@@ -2307,29 +2307,39 @@ describe('qwen-triage verify workflow', () => {
     expect(flat).toContain('adversarially attack your own patch too');
     expect(flat).toContain('**Bind the guard before every local publish.**');
     expect(flat).toContain(
-      'clear stale guard files, refresh `guard-now.json` in the same publish step (failing closed immediately if the refresh errors)',
+      "Keep every round's start snapshot, final snapshot, verdict, log, and digest in a **per-round host directory** under the host verify cache (`pr<n>/<round-id>/`",
+    );
+    expect(verifySkill).toContain(
+      'mkdir -p ~/.cache/qwen-verify/pr<n>/<round-id>',
+    );
+    expect(verifySkill).toContain(
+      '--snapshot ~/.cache/qwen-verify/pr<n>/<round-id>/guard-start.json \\',
+    );
+    expect(verifySkill).toContain('--no-clobber \\');
+    expect(flat).toContain(
+      'clear stale guard files in that same `<round-id>` directory, refresh `guard-now.json` in the same publish step',
     );
     expect(flat).toContain(
       'run `verify-pr-check.mjs` with `--require-guard` before posting the PR comment',
     );
     expect(verifySkill).toContain(
-      'rm -f ~/.cache/qwen-verify/pr<n>/guard-now.json ~/.cache/qwen-verify/pr<n>/guard-verdict.json ~/.cache/qwen-verify/pr<n>/guard.log ~/.cache/qwen-verify/pr<n>/guard.sha256',
+      'rm -f ~/.cache/qwen-verify/pr<n>/<round-id>/guard-now.json ~/.cache/qwen-verify/pr<n>/<round-id>/guard-verdict.json ~/.cache/qwen-verify/pr<n>/<round-id>/guard.log ~/.cache/qwen-verify/pr<n>/<round-id>/guard.sha256',
     );
     expect(verifySkill).toContain(
-      '--snapshot ~/.cache/qwen-verify/pr<n>/guard-now.json \\',
+      '--snapshot ~/.cache/qwen-verify/pr<n>/<round-id>/guard-now.json \\',
     );
     expect(verifySkill).toContain(
-      '--out ~/.cache/qwen-verify/pr<n>/guard-verdict.json',
+      '--out ~/.cache/qwen-verify/pr<n>/<round-id>/guard-verdict.json',
     );
     expect(verifySkill).toContain(
-      "sed -n 's/^  guard-sha256  //p' ~/.cache/qwen-verify/pr<n>/guard.log > ~/.cache/qwen-verify/pr<n>/guard.sha256",
+      "sed -n 's/^  guard-sha256  //p' ~/.cache/qwen-verify/pr<n>/<round-id>/guard.log > ~/.cache/qwen-verify/pr<n>/<round-id>/guard.sha256",
     );
     expect(verifySkill).toContain('--require-guard \\');
     expect(verifySkill).toContain(
-      '--guard ~/.cache/qwen-verify/pr<n>/guard-verdict.json \\',
+      '--guard ~/.cache/qwen-verify/pr<n>/<round-id>/guard-verdict.json \\',
     );
     expect(verifySkill).toContain(
-      '--guard-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/guard.sha256)" \\',
+      '--guard-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/<round-id>/guard.sha256)" \\',
     );
     // Runner-backed VM publish preserves --execution-record and its digest in
     // the same final verify-pr-check.mjs invocation as --require-guard.
