@@ -2625,6 +2625,101 @@ describe('DiscoveredMCPTool', () => {
       expect(ensureTool).toHaveBeenCalledWith(toolA.name);
     });
 
+    it('does not reconnect on the name while its own connection is healthy', async () => {
+      // Inverse of the teardown veto: a sibling's drop writes DISCONNECTED to
+      // the shared name while this invocation's own transport is still
+      // CONNECTED. Reading the name would repair a connection that never
+      // died; the reconnect decision has to read the same identity the veto
+      // does.
+      const toolName = 'literature.search_pubmed';
+      const { config, discoverToolsForServer, ensureTool } = registry({
+        ensured: safeTool({ toolName, client: okClient() }),
+        extra: noTruncation,
+      });
+      let rejectCall: ((error: Error) => void) | undefined;
+      const clientA: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              rejectCall = reject;
+            }),
+        ),
+      };
+      const siblingB = { id: 'sibling-b' };
+      recordMCPConnectionStatus(clientA, MCPServerStatus.CONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const toolA = safeTool({ toolName, config, client: clientA });
+
+      const executePromise = exec(toolA);
+      // B dies; the aggregate name follows it even though A is still up.
+      recordMCPConnectionStatus(siblingB, MCPServerStatus.DISCONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      rejectCall!(new Error('Invalid parameters'));
+
+      await expect(executePromise).rejects.toThrow('Invalid parameters');
+      expect(clientA.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(ensureTool).not.toHaveBeenCalled();
+    });
+
+    it('reconnects a connection that reports DISCONNECTED while the name is healthy', async () => {
+      // The other inverse: A died and reports DISCONNECTED, but a healthy
+      // sibling keeps the shared name at CONNECTED. The error prose is
+      // deliberately unrecognized so only the status can route it.
+      const toolName = 'literature.search_pubmed';
+      const newMockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockResolvedValueOnce(textResult('Repaired')),
+      };
+      const { config, discoverToolsForServer, ensureTool } = registry({
+        ensured: safeTool({ toolName, client: newMockMcpClient }),
+        extra: noTruncation,
+      });
+      let rejectCall: ((error: Error) => void) | undefined;
+      const clientA: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              rejectCall = reject;
+            }),
+        ),
+      };
+      const siblingB = { id: 'sibling-b' };
+      recordMCPConnectionStatus(clientA, MCPServerStatus.CONNECTED);
+      recordMCPConnectionStatus(siblingB, MCPServerStatus.CONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const toolA = safeTool({ toolName, config, client: clientA });
+
+      const executePromise = exec(toolA);
+      recordMCPConnectionStatus(clientA, MCPServerStatus.DISCONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      rejectCall!(new Error('Invalid parameters'));
+
+      const result = await executePromise;
+      expect(result.llmContent).toEqual([{ text: 'Repaired' }]);
+      expect(clientA.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName, false);
+      expect(ensureTool).toHaveBeenCalledWith(toolA.name);
+    });
+
+    it('still reconnects an untracked connection through the name-only fallback', async () => {
+      // Legacy single-connection callers never record a per-connection
+      // status. The name has to keep driving repair for them.
+      const { config, discoverToolsForServer } = registry({
+        ensured: safeTool({ client: okClient() }),
+        extra: noTruncation,
+      });
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      await exec(
+        safeTool({
+          config,
+          client: failing(new Error('Invalid parameters')),
+        }),
+      );
+
+      expect(discoverToolsForServer).toHaveBeenCalledWith(serverName, false);
+    });
+
     it('suppresses a stopped generation while repairing the one that replaced it', async () => {
       // A restart reuses the same SDK `Client`, so the connection marker alone
       // cannot separate the lifetime a call started in from the one now live.

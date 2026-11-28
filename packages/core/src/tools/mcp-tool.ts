@@ -798,7 +798,13 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       return false;
     }
 
-    if (getMCPServerStatus(this.serverName) === MCPServerStatus.DISCONNECTED) {
+    // The positive counterpart of the teardown veto above has to use the same
+    // identity. A pool keeps one entry per `serverName + fingerprint`, so the
+    // shared name reads DISCONNECTED whenever a sibling is down even though
+    // this transport is healthy, and reads CONNECTED whenever a sibling is up
+    // even though this one is dead. Deciding from the name alone reconnects a
+    // live connection or strands a dead one.
+    if (this.connectionStatus() === MCPServerStatus.DISCONNECTED) {
       return true;
     }
 
