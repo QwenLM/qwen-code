@@ -11,6 +11,7 @@ import type { Settings } from '../../config/settings.js';
 import { LiveHostCoordinator } from './live-host-coordinator.js';
 import { LiveHostInstaller } from './live-host-installer.js';
 import { LiveSetupController } from './live-setup-controller.js';
+import type { LiveProviderCredential } from './provider-credentials.js';
 import {
   LIVE_HOST_PROTOCOL_VERSION,
   LIVE_WEB_HOST_BUNDLE_ID,
@@ -24,6 +25,8 @@ function createHarness(
     modelProviders?: Record<string, unknown[]>;
     env?: Record<string, string | undefined>;
     nativeHost?: boolean;
+    model?: string;
+    turnDetection?: unknown;
   } = {},
 ) {
   const initiallyEnabled = options.initiallyEnabled ?? false;
@@ -34,6 +37,10 @@ function createHarness(
         shortcut: 'Command+E',
         ...(options.apiKey ? { apiKey: options.apiKey } : {}),
         ...(options.endpoint ? { endpoint: options.endpoint } : {}),
+        ...(options.model ? { model: options.model } : {}),
+        ...(options.turnDetection !== undefined
+          ? { turnDetection: options.turnDetection }
+          : {}),
       },
     },
     ...(options.modelProviders
@@ -54,7 +61,9 @@ function createHarness(
       experimental: { ...settings.experimental, liveVoice },
     } as Settings;
   });
-  const validateCredential = vi.fn(async () => {});
+  const validateCredential = vi.fn(
+    async (_credential: LiveProviderCredential) => {},
+  );
   const setEnabled = vi.fn(async (next: boolean) => {
     enabled = next;
   });
@@ -674,6 +683,144 @@ describe('LiveSetupController', () => {
         harness.controller.update({ endpoint: intlBase }),
       ).rejects.toMatchObject({ code: 'live_endpoint_unused', status: 400 });
       expect(harness.persistSettings).not.toHaveBeenCalled();
+    });
+  });
+  describe('turnDetection', () => {
+    it('reports an invalid stored value instead of failing the status', async () => {
+      const harness = createHarness({
+        initiallyEnabled: true,
+        apiKey: 'realtime-secret',
+        turnDetection: 'garbage',
+      });
+
+      const status = await harness.controller.getStatus();
+
+      expect(status.turnDetection).toBe('garbage');
+      expect(status.turnDetectionError).toContain(
+        'experimental.liveVoice.turnDetection',
+      );
+      expect(status.turnDetectionError).toContain('"garbage"');
+      // The key itself is fine; only the mode is refused.
+      expect(status.keyConfigured).toBe(true);
+      expect(status.keyError).toBeUndefined();
+    });
+
+    it('reports a route key as configured when only the mode is refused', async () => {
+      const harness = createHarness({
+        initiallyEnabled: true,
+        model: 'qwen-audio-3.0-realtime-plus',
+        turnDetection: 'server-vad',
+        modelProviders: {
+          openai: [
+            {
+              id: 'qwen-audio-3.0-realtime-plus',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+              realtimeOnly: true,
+            },
+          ],
+        },
+        env: { DASHSCOPE_API_KEY: 'route-secret' },
+      });
+
+      const status = await harness.controller.getStatus();
+
+      expect(status.keySource).toBe('route');
+      expect(status.keyConfigured).toBe(true);
+      expect(status.keyError).toBeUndefined();
+      expect(status.turnDetectionError).toContain('"server-vad"');
+    });
+
+    it('still turns Live Voice off while the stored value is invalid', async () => {
+      const harness = createHarness({
+        initiallyEnabled: true,
+        apiKey: 'realtime-secret',
+        turnDetection: 'garbage',
+      });
+
+      const status = await harness.controller.update({ enabled: false });
+
+      expect(status.enabled).toBe(false);
+      expect(harness.setEnabled).toHaveBeenCalledWith(false);
+      expect(harness.settings().experimental?.liveVoice?.enabled).toBe(false);
+    });
+
+    it('refuses to enable with an invalid stored value, as a client error', async () => {
+      const harness = createHarness({
+        apiKey: 'realtime-secret',
+        turnDetection: 'garbage',
+      });
+
+      await expect(
+        harness.controller.update({ enabled: true }),
+      ).rejects.toMatchObject({
+        code: 'invalid_live_turn_detection',
+        status: 400,
+      });
+      expect(harness.validateCredential).not.toHaveBeenCalled();
+      expect(harness.persistSettings).not.toHaveBeenCalled();
+    });
+
+    it('repairs an invalid stored value by clearing it', async () => {
+      const harness = createHarness({
+        initiallyEnabled: true,
+        apiKey: 'realtime-secret',
+        turnDetection: 'garbage',
+      });
+
+      const status = await harness.controller.update({ turnDetection: '' });
+
+      expect(status.turnDetection).toBe('');
+      expect(status.turnDetectionError).toBeUndefined();
+      expect(
+        harness.settings().experimental?.liveVoice?.turnDetection,
+      ).toBeUndefined();
+    });
+
+    it('rejects an unknown mode in an update without persisting', async () => {
+      const harness = createHarness({ apiKey: 'realtime-secret' });
+
+      await expect(
+        harness.controller.update({ turnDetection: 'bogus' }),
+      ).rejects.toMatchObject({
+        code: 'invalid_live_turn_detection',
+        status: 400,
+      });
+      expect(harness.persistSettings).not.toHaveBeenCalled();
+    });
+
+    it('validates a qwen-audio model with the server_vad default', async () => {
+      const harness = createHarness({ apiKey: 'realtime-secret' });
+
+      await harness.controller.update({
+        enabled: true,
+        model: 'qwen-audio-3.0-realtime-plus',
+      });
+
+      expect(harness.validateCredential).toHaveBeenCalledOnce();
+      expect(harness.validateCredential.mock.lastCall?.[0]).toMatchObject({
+        realtimeModel: 'qwen-audio-3.0-realtime-plus',
+        turnDetection: 'server_vad',
+      });
+    });
+
+    it('validates and persists a replaced mode', async () => {
+      const harness = createHarness({
+        initiallyEnabled: true,
+        apiKey: 'realtime-secret',
+      });
+
+      const status = await harness.controller.update({
+        turnDetection: ' smart_turn_v2 ',
+      });
+
+      expect(harness.validateCredential.mock.lastCall?.[0]).toMatchObject({
+        turnDetection: 'smart_turn_v2',
+      });
+      expect(harness.settings().experimental?.liveVoice?.turnDetection).toBe(
+        'smart_turn_v2',
+      );
+      expect(status.turnDetection).toBe('smart_turn_v2');
     });
   });
 });

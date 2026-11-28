@@ -107,6 +107,18 @@ function parseUpdate(body: Record<string, unknown>): LiveSetupUpdate {
     }
     update.endpoint = value;
   }
+  if (body['turnDetection'] !== undefined) {
+    const value = body['turnDetection'];
+    // Empty restores the model-aware default; the controller validates the mode.
+    if (typeof value !== 'string' || value.length > 64) {
+      throw new LiveSetupError(
+        'turnDetection must be a turn detection mode, or empty for the default.',
+        'invalid_live_turn_detection',
+        400,
+      );
+    }
+    update.turnDetection = value;
+  }
   if (Object.keys(update).length === 0) {
     throw new LiveSetupError(
       'At least one Live Voice setting is required.',

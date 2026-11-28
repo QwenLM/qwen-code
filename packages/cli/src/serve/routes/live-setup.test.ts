@@ -88,4 +88,38 @@ describe('POST /live/setup', () => {
       expect(update).not.toHaveBeenCalled();
     },
   );
+
+  it('forwards a turn detection mode to the controller', async () => {
+    const { app, update } = createApp();
+    const response = await request(app)
+      .post('/live/setup')
+      .send({ turnDetection: 'server_vad' });
+
+    expect(response.status).toBe(200);
+    expect(update).toHaveBeenCalledWith({ turnDetection: 'server_vad' });
+  });
+
+  it('forwards an empty turn detection, which restores the default', async () => {
+    const { app, update } = createApp();
+    const response = await request(app)
+      .post('/live/setup')
+      .send({ turnDetection: '' });
+
+    expect(response.status).toBe(200);
+    expect(update).toHaveBeenCalledWith({ turnDetection: '' });
+  });
+
+  it.each([7, null, 'x'.repeat(65)])(
+    'rejects an invalid turn detection %j before reaching the controller',
+    async (value) => {
+      const { app, update } = createApp();
+      const response = await request(app)
+        .post('/live/setup')
+        .send({ turnDetection: value });
+
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe('invalid_live_turn_detection');
+      expect(update).not.toHaveBeenCalled();
+    },
+  );
 });

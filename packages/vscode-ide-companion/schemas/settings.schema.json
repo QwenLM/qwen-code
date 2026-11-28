@@ -4751,6 +4751,16 @@
               "description": "Electron accelerator registered globally by Qwen Live Host.",
               "type": "string",
               "default": "Command+E"
+            },
+            "turnDetection": {
+              "description": "Realtime turn detection type. Unset or empty defaults to server_vad for qwen-audio realtime models and semantic_vad for all others. An invalid value blocks Live Voice calls and is reported as turnDetectionError by GET /live/setup; clear or replace it with turnDetection in POST /live/setup (empty restores the default) or in settings.json. Options: , server_vad, smart_turn, smart_turn_v2, semantic_vad",
+              "enum": [
+                "",
+                "server_vad",
+                "smart_turn",
+                "smart_turn_v2",
+                "semantic_vad"
+              ]
             }
           }
         },
