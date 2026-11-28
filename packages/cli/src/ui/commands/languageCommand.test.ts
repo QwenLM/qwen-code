@@ -518,6 +518,25 @@ describe('languageCommand', () => {
       expect(i18n.setLanguageAsync).toHaveBeenCalledWith('ru');
     });
 
+    it('reports the effective language in the confirmation message', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+      vi.mocked(i18n.getCurrentLanguage).mockReturnValue('zh');
+      (mockContext.services.settings as { merged?: unknown }).merged = {
+        general: { language: 'zh' },
+      };
+
+      const result = await languageCommand.action(
+        mockContext,
+        'ui de --global',
+      );
+      const message = result && 'content' in result ? result.content : '';
+
+      expect(message).toContain('zh-CN');
+      expect(message).not.toContain('de-DE');
+    });
+
     it('rejects --project in an untrusted workspace without persisting', async () => {
       if (!languageCommand.action) {
         throw new Error('The language command must have an action.');
