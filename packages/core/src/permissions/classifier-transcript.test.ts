@@ -677,6 +677,91 @@ describe('historical action budget', () => {
   });
 });
 
+describe('the pending call recorded in history', () => {
+  // The scheduler reads history after the model turn that issued the pending
+  // call was recorded, so that turn already holds the call being classified.
+  const pendingDelete = (callId?: string): Pending => ({
+    ...shell('git branch -D tmp/spike'),
+    ...(callId !== undefined ? { callId } : {}),
+  });
+  const priorActions = (output: Content[]) =>
+    output.map(textOf).filter((text) => text.startsWith('Prior action:'));
+  const shellCall = (command: string, id: string) =>
+    fnCall('run_shell_command', { command }, id);
+  const shellReply = (id: string) =>
+    content('user', fnResponse('run_shell_command', { output: 'ok' }, id));
+
+  it('is not rendered as a prior action, only as the call to classify', () => {
+    const messages = [
+      userText('delete the tmp/spike branch'),
+      content('model', shellCall('git branch --list tmp/spike', 'call-1')),
+      shellReply('call-1'),
+      content('model', shellCall('git branch -D tmp/spike', 'call-2')),
+    ];
+    const before = structuredClone(messages);
+
+    const output = build(messages, pendingDelete('call-2'));
+
+    const prior = priorActions(output);
+    expect(prior).toHaveLength(1);
+    expectText(prior[0], ['git branch --list'], ['git branch -D']);
+    expectText(textOf(output.at(-1)), [
+      '## Pending tool call to classify',
+      'git branch -D tmp/spike',
+    ]);
+    expect(messages).toEqual(before);
+  });
+
+  it('keeps an earlier call with the same command, which did run', () => {
+    const output = build(
+      [
+        userText('delete the tmp/spike branch'),
+        content('model', shellCall('git branch -D tmp/spike', 'call-1')),
+        shellReply('call-1'),
+        userText('now rebase feat/login onto main'),
+        content('model', shellCall('git branch -D tmp/spike', 'call-2')),
+      ],
+      pendingDelete('call-2'),
+    );
+
+    const prior = priorActions(output);
+    expect(prior).toHaveLength(1);
+    expectText(prior[0], ['git branch -D tmp/spike']);
+  });
+
+  it('keeps the other calls issued in the same model turn', () => {
+    const output = build(
+      [
+        userText('tidy up the stash'),
+        content(
+          'model',
+          shellCall('git stash list', 'call-1'),
+          shellCall('git branch -D tmp/spike', 'call-2'),
+          shellCall('git stash list', 'call-3'),
+        ),
+      ],
+      pendingDelete('call-2'),
+    );
+
+    const prior = priorActions(output);
+    expect(prior).toHaveLength(2);
+    for (const text of prior) {
+      expectText(text, ['git stash list'], ['git branch -D']);
+    }
+  });
+
+  it('drops nothing when the call id is missing or not in history', () => {
+    const messages = [
+      userText('delete the tmp/spike branch'),
+      content('model', shellCall('git branch -D tmp/spike', 'call-1')),
+    ];
+
+    for (const pending of [pendingDelete(), pendingDelete('call-9')]) {
+      expect(priorActions(build(messages, pending))).toHaveLength(1);
+    }
+  });
+});
+
 describe('retained memory catalogs', () => {
   it('excludes catalog data before projecting user intent, without text matching', () => {
     const snapshot = getAutoMemorySnapshot([], 'CATALOG_ONLY_SENTINEL')!;
