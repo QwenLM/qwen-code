@@ -650,6 +650,7 @@ export async function runForkedAgent(
         : await chat.sendMessageStream(model, sendParams, 'forked_query');
 
       let fullText = '';
+      let resultModel = model;
       let usage: ForkedQueryResult['usage'] = {
         inputTokens: 0,
         outputTokens: 0,
@@ -660,11 +661,27 @@ export async function runForkedAgent(
 
       for await (const event of stream) {
         if (event.type === StreamEventType.RETRY) {
+          // Every retry revokes pending function calls, including
+          // respond_in_schema; a continuation keeps only text and usage.
+          jsonResult = undefined;
           const restart = !event.isContinuation;
-          if (restart) fullText = '';
+          if (restart) {
+            fullText = '';
+            usage = { inputTokens: 0, outputTokens: 0, cacheHitTokens: 0 };
+          }
           if (params.onRetry) {
             await params.onRetry({ restart, retryInfo: event.retryInfo });
           }
+          continue;
+        }
+        if (event.type === StreamEventType.MODEL_FALLBACK) {
+          fullText = '';
+          usage = { inputTokens: 0, outputTokens: 0, cacheHitTokens: 0 };
+          jsonResult = undefined;
+          resultModel = event.info.toModel;
+          // The fallback model answers from scratch, so text already passed
+          // to onText is void.
+          if (params.onRetry) await params.onRetry({ restart: true });
           continue;
         }
         if (event.type !== StreamEventType.CHUNK) continue;
@@ -717,7 +734,7 @@ export async function runForkedAgent(
         text: trimmed,
         jsonResult,
         usage,
-        model,
+        model: resultModel,
         ...(toolCallName ? { toolCallName } : {}),
       };
     });

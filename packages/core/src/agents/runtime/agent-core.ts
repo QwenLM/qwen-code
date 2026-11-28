@@ -1180,6 +1180,7 @@ export class AgentCore {
       // parent propagation; the try/finally below guarantees reverse-cleanup
       // fires for every exit (success, break, return, throw).
       const roundAbortController = createChildAbortController(abortController);
+      let responseStream: AsyncIterableIterator<StreamEvent> | undefined;
       let retryWaitScope: RetryWaitScope | undefined;
 
       try {
@@ -1286,20 +1287,17 @@ export class AgentCore {
         // The request (and any send-time compaction) runs partly before the
         // stream is returned and partly while it is iterated; both belong to
         // this round's retry-wait observer.
-        const responseStream:
-          | AsyncIterable<StreamEvent>
-          | Iterable<StreamEvent> = sharedRound
-          ? []
-          : retryWaitScope
+        if (!sharedRound) {
+          responseStream = retryWaitScope
             ? retryWaitScope.bind(await retryWaitScope.run(sendMessage))
             : await sendMessage();
-        if (!sharedRound)
           this.eventEmitter?.emit(AgentEventType.ROUND_START, {
             subagentId: this.subagentId,
             round: turnCounter,
             promptId,
             timestamp: Date.now(),
           } as AgentRoundEvent);
+        }
 
         const functionCalls: FunctionCall[] = [];
         // callIds already counted toward the tool-call cap this attempt.
@@ -1315,7 +1313,7 @@ export class AgentCore {
         let wasOutputTruncated = false;
         let loopDetectedInStream = false;
 
-        for await (const streamEvent of responseStream) {
+        for await (const streamEvent of responseStream ?? []) {
           if (roundAbortController.signal.aborted) {
             return {
               text: finalText,
@@ -1663,6 +1661,13 @@ export class AgentCore {
         // long-running parents like the per-message roundAbortController in
         // AgentInteractive or the session-lived externalSignal in headless.
         roundAbortController.abort();
+        try {
+          await responseStream?.return?.(undefined);
+        } catch (error) {
+          this.runtimeContext
+            .getDebugLogger()
+            .warn(`Failed to close response stream: ${String(error)}`);
+        }
       }
     }
 

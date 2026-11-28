@@ -1038,6 +1038,51 @@ describe('subagent.ts', () => {
         expect(scope.getFinalText()).toBe('');
       });
 
+      it('releases an unstarted response stream when a round listener throws (legacy loop)', async () => {
+        // Pinned to the legacy agent-core loop: this PR's fix lives on that
+        // path only; the default shared-loop path is not covered here.
+        vi.spyOn(Config.prototype, 'isUnifiedAgentLoopEnabled').mockReturnValue(
+          false,
+        );
+        const { config } = await createMockConfig();
+        const responseStream = (async function* () {
+          yield {
+            type: 'chunk' as const,
+            value: {
+              candidates: [
+                {
+                  finishReason: 'STOP',
+                  content: { parts: [{ text: 'unused' }] },
+                },
+              ],
+            },
+          };
+        })();
+        const returnSpy = vi
+          .spyOn(responseStream, 'return')
+          .mockRejectedValueOnce(new Error('stream teardown failed'));
+        mockSendMessageStream.mockResolvedValue(responseStream);
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.ROUND_START, () => {
+          throw new Error('round listener failed');
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          defaultRunConfig,
+          { tools: [] },
+          eventEmitter,
+        );
+
+        await expect(scope.execute(new ContextState())).rejects.toThrow(
+          'round listener failed',
+        );
+        expect(returnSpy).toHaveBeenCalledOnce();
+      });
+
       it('should append userMemory to the system prompt when available', async () => {
         const { system } = await runPrompt(
           await memoryConfig(
