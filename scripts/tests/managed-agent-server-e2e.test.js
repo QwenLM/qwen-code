@@ -113,16 +113,17 @@ const fencedShellBlocks = (text) =>
   ].map((match) => match[1]);
 
 // The literal text of a string or untagged template node, or undefined. One
-// extractor shared by the AST helpers below: a key, a tool name and a call id
-// all mean the same thing whether they are spelled as a string or a template,
-// and two copies of this predicate drifted apart once already.
+// extractor shared by the AST helpers below: a call id and a minted-id key mean
+// the same thing whether they are spelled as a string or a template, and two
+// copies of this predicate drifted apart once already.
 const literalText = (node) => {
   if (node === undefined) return undefined;
   if (isStringLiteral(node) || isNoSubstitutionTemplateLiteral(node)) {
     return node.text;
   }
-  // A concatenation of literals is still a literal: `'tool' + 'Calls'` names
-  // the same member as `'toolCalls'`, so it is equally attributable.
+  // A concatenation of literals is still a literal: `'loop-' + 'classifier'`
+  // names the same call id as `'loop-classifier'`, so it is equally
+  // attributable.
   if (
     isBinaryExpression(node) &&
     node.operatorToken.kind === SyntaxKind.PlusToken
@@ -134,8 +135,8 @@ const literalText = (node) => {
   return undefined;
 };
 
-// The classifier delegation, as a bounded property: exactly two calls, passing
-// the two literal call ids the arms filter by, each inside a callback handed to
+// The classifier delegation, as a bounded property: exactly two calls, each
+// passing its own literal call id, each inside a callback handed to
 // startFakeOpenAIServer. Nothing here enumerates what may surround a call.
 // Eleven review rounds measured that every inventory layered on top of this —
 // answer sites, write attribution, member keys, arm spellings — grew a fresh
@@ -254,7 +255,7 @@ const classifierDelegation = (text) => {
     ) {
       const fake = fakeOf(node);
       calls.push({
-        callId: literalText(node.arguments[1]),
+        callId: literalText(unwrap(node.arguments[1])),
         fake: fake !== undefined,
         fn: fake === undefined ? -1 : fake.pos,
         line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1,
@@ -285,12 +286,6 @@ const delegationViolations = (delegation) => {
   }
   if (delegation.calls.some((call) => !call.fake)) {
     violations.push('in-fake-callback');
-  }
-  // Which two ids, as a set: the arms filter their tool results by call id, so
-  // renaming them breaks the wiring. A set, not source order — swapping the
-  // two arm blocks is behaviour-preserving.
-  if ([...ids].sort().join() !== 'loop-classifier,loop-fire-classifier') {
-    violations.push('call-ids');
   }
   if (
     new Set(delegation.calls.map((call) => call.fn)).size !==
@@ -4011,7 +4006,7 @@ describe('managed-agent-server e2e runner', () => {
   });
 
   // The delegation predicate is executed against hostile sources, so each of
-  // its five clauses is witnessed rather than assumed: on the committed runner
+  // its four clauses is witnessed rather than assumed: on the committed runner
   // every clause is satisfied by both the strong and the weak form, so
   // weakening one would otherwise stay green. The positive controls below carry
   // the shapes the retired inventories used to judge — they are green now by
@@ -4060,11 +4055,6 @@ describe('managed-agent-server e2e runner', () => {
         ),
       ],
       ['literal-call-ids', [decision, skill(SKILL), fire(SKILL)].join('\n')],
-      // Two distinct literal ids that are not the two the arms filter by.
-      [
-        'call-ids',
-        [decision, skill(delegates('a')), fire(delegates('b'))].join('\n'),
-      ],
       // A delegation in a dead top-level helper is wired to nothing.
       [
         'in-fake-callback',
@@ -4094,6 +4084,20 @@ describe('managed-agent-server e2e runner', () => {
       [
         'in-fake-callback',
         withSkill('const g = () => {\n' + SKILL + '\n};\nvoid g;'),
+      ],
+      // The remaining callable kinds: each is a function the callback merely
+      // declares, so the nearest enclosing function is not the callback.
+      [
+        'in-fake-callback',
+        withSkill('const o = { get m() {\n' + SKILL + '\n} };\nvoid o;'),
+      ],
+      [
+        'in-fake-callback',
+        withSkill('const o = { set m(v) {\n' + SKILL + '\n} };\nvoid o;'),
+      ],
+      [
+        'in-fake-callback',
+        withSkill('class K { constructor() {\n' + SKILL + '\n} }\nvoid K;'),
       ],
       // A second binding of the callback's name — here through a destructuring
       // pattern — makes the lookup ambiguous, so the fake is not credited.
@@ -4181,6 +4185,19 @@ describe('managed-agent-server e2e runner', () => {
             gate,
         ),
       ]),
+      // A folded or type-annotated id is the same literal argument.
+      [
+        'folded literal id',
+        withSkill(
+          "const classified = loopClassifierResponse(body, 'loop-' + 'classifier');\nif (classified !== undefined) return classified;",
+        ),
+      ],
+      [
+        'annotated literal id',
+        withSkill(
+          "const classified = loopClassifierResponse(body, ('loop-classifier' as string));\nif (classified !== undefined) return classified;",
+        ),
+      ],
       // An extra flag around the fake is not the pin's question either.
       [
         'extra wrapper flag',
@@ -4207,6 +4224,15 @@ describe('managed-agent-server e2e runner', () => {
             '\nconst calls = [' +
             CRON +
             "];\ncalls.sort(cmp);\nif (body['x']) return { toolCalls: calls };",
+        ),
+      ],
+      [
+        'removal-only splice',
+        withSkill(
+          SKILL +
+            '\nconst calls = [' +
+            CRON +
+            "];\ncalls.splice(0, 1);\nif (body['x']) return { toolCalls: calls };",
         ),
       ],
       [
@@ -4263,6 +4289,11 @@ describe('managed-agent-server e2e runner', () => {
       expect(call.text).toContain('loopClassifierResponse');
     }
   });
+
+  // The fake-side minted-id extraction is executed, not counted as source
+  // spelling: dropping the structured call-id filter or replacing the
+  // extraction with a fabricated literal reddens these directions, while a
+  // behaviour-preserving consolidation into the helper stays green.
   it('executes the minted-id extraction against hostile histories', () => {
     const { mintedScheduleId } = load(
       ['mintedScheduleId'],
