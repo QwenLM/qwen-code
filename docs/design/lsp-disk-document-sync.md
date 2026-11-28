@@ -13,8 +13,8 @@ for restarted servers and retains unchanged servers' state.
 Saved changes from edit/write tools, hooks, shell commands, or manual editors
 are covered when that target is next queried, regardless of the writer. Unsaved
 buffers and edit-time feedback are not covered. #3170's edit-time `didSave` work
-is complementary; #3029/#3034 diagnostics work and #11418 documentation updates
-remain separate.
+is complementary; #3029's push-diagnostics fallback is described below, and
+#11418 documentation updates remain separate.
 
 Initialization retains only `textDocumentSync`. Numeric Full/Incremental imply
 open/close support; options honor `openClose` and `change` independently. Full
@@ -77,6 +77,28 @@ healthy siblings. Root freshness and connection changes still reject the whole
 request, even for an empty result or request error. Non-file URIs remain unsigned
 and report “cannot be traversed; prepare at a file location instead”, not a
 retryable stale error. Ordinary non-file requests pass through unchanged.
+
+## Push diagnostics fallback
+
+Pull diagnostics remains the primary path. The client advertises
+`textDocument.publishDiagnostics` and keeps the latest notification per server
+connection and URI. A `-32601` reply to `textDocument/diagnostic` reads that
+cache; when the document was just opened or changed, the query waits a bounded
+time for the matching notification instead of sampling after a fixed delay.
+Silence is not a clean report, so an empty cache leaves the existing
+unsupported refusal intact. Every other pull failure still rejects: the cache
+never hides a crash, timeout or malformed report.
+
+The cache is connection-local. `didOpen`, `didChange`, `didClose`, stop,
+restart and reconnect discard the affected entries, and a report whose version
+does not match the delivered document is ignored. `workspaceDiagnostics`
+replays cached reports from `-32601` servers after parsing each URI with
+`fileURLToPath()` and checking the normalized path against the workspace; it
+never uses a raw URI prefix match and never claims a complete workspace. Before
+replaying, it waits a bounded time for tracked documents that have no cached
+report yet. A non-empty pushed report whose entries all fail normalization is a
+failure, not a clean workspace. The result covers documents the server has
+already pushed, not files it never opened or analyzed.
 
 ## Boundaries
 

@@ -91,6 +91,7 @@ export class LspServerManager {
       this.serverHandles.set(config.name, {
         config,
         status: 'NOT_STARTED',
+        pushedDiagnostics: new Map(),
       });
       this.serverConfigHashes.set(config.name, lspServerConfigHash(config));
     }
@@ -218,6 +219,7 @@ export class LspServerManager {
         const nextHandle: LspServerHandle = {
           config: nextConfig,
           status: 'NOT_STARTED',
+          pushedDiagnostics: new Map(),
         };
         this.serverHandles.set(name, nextHandle);
         await this.startServer(name, nextHandle);
@@ -240,6 +242,7 @@ export class LspServerManager {
       const handle: LspServerHandle = {
         config,
         status: 'NOT_STARTED',
+        pushedDiagnostics: new Map(),
       };
       this.serverHandles.set(name, handle);
       await this.startServer(name, handle);
@@ -472,6 +475,7 @@ export class LspServerManager {
       handle.processDiagnostics = undefined;
       handle.warmedUp = false;
       handle.textDocumentSync = undefined;
+      handle.pushedDiagnostics?.clear();
       handle.status = 'IN_PROGRESS';
       debugLogger.info(
         `Starting LSP server ${name}: command=${
@@ -552,6 +556,7 @@ export class LspServerManager {
     handle.connection = undefined;
     handle.process = undefined;
     handle.processDiagnostics = undefined;
+    handle.pushedDiagnostics?.clear();
     handle.status = 'NOT_STARTED';
     handle.warmedUp = false;
     handle.restartAttempts = 0;
@@ -778,6 +783,7 @@ export class LspServerManager {
     handle.connection = undefined;
     handle.process = undefined;
     handle.processDiagnostics = undefined;
+    handle.pushedDiagnostics?.clear();
     handle.status = 'NOT_STARTED';
     handle.error = undefined;
     handle.warmedUp = false;
@@ -1211,6 +1217,13 @@ export class LspServerManager {
           references: { dynamicRegistration: false },
           documentSymbol: { dynamicRegistration: false },
           codeAction: { dynamicRegistration: false },
+          publishDiagnostics: {
+            relatedInformation: true,
+            tagSupport: { valueSet: [1, 2] },
+            versionSupport: true,
+            codeDescriptionSupport: true,
+            dataSupport: true,
+          },
         },
         workspace: {
           workspaceFolders: true,

@@ -53,7 +53,11 @@ beforeEach(() => {
       getProjectRoot: () => directory,
       isTrustedFolder: () => true,
     } as unknown as Config,
-    { getDirectories: () => [directory] } as unknown as WorkspaceContext,
+    {
+      getDirectories: () => [directory],
+      isPathWithinWorkspace: (candidate: string) =>
+        candidate === directory || candidate.startsWith(directory + path.sep),
+    } as unknown as WorkspaceContext,
     new EventEmitter(),
     { shouldIgnoreFile: () => false } as unknown as FileDiscoveryService,
     {} as IdeContextStore,
