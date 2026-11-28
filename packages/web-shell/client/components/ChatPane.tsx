@@ -2112,6 +2112,7 @@ export function ChatPane({
               time={sessionStamp ? formatDateTime(sessionStamp) : ''}
               completedUnread={false}
               workspaceLabel={workspaceLabel}
+              readOnly={connection.sessionContext?.kind === 'standalone'}
               side="bottom"
             >
               <span className={styles.title}>{headerLabel}</span>

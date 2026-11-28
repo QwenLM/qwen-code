@@ -29,6 +29,7 @@ import { GitDiffContent } from './GitDiffDialog';
 import { GitLogContent } from './GitLogDialog';
 import { GitHubPrsContent } from './GitHubPrsDialog';
 import { GitWorktreesContent } from './GitWorktreesDialog';
+import { AutofixPrActionButton } from '../autofixPr/AutofixPrActionButton';
 import styles from './GitDialog.module.css';
 
 export type GitDialogView = 'diff' | 'log' | 'prs' | 'worktrees' | 'commit';
@@ -113,6 +114,7 @@ export function GitDialog({
     msg: string;
     type: 'error' | 'success';
     url?: string;
+    number?: number;
   } | null>(null);
   const [commitStatus, setCommitStatus] = useState<{
     msg: string;
@@ -583,6 +585,7 @@ export function GitDialog({
         msg: t('gitCommit.prCreated', { number: result.number ?? '' }),
         type: 'success',
         url: result.url,
+        ...(typeof result.number === 'number' ? { number: result.number } : {}),
       });
       setPrFormOpen(false);
       // Bind the PR to the current session so the sidebar can badge and
@@ -705,6 +708,7 @@ export function GitDialog({
             <GitHubPrsContent
               workspaceCwd={workspaceCwd}
               onSubtitleChange={setSubtitle}
+              onActionTriggered={onClose}
             />
           )}
         </div>
@@ -857,7 +861,7 @@ export function GitDialog({
             )}
             {prStatus && (
               <div
-                className={`${styles.commitStatus} ${
+                className={`${styles.commitStatus} ${styles.prStatusRow} ${
                   prStatus.type === 'error'
                     ? styles.commitStatusError
                     : styles.commitStatusSuccess
@@ -873,8 +877,20 @@ export function GitDialog({
                     {prStatus.msg}
                   </a>
                 ) : (
-                  prStatus.msg
+                  <span>{prStatus.msg}</span>
                 )}
+                {prStatus.type === 'success' &&
+                  prStatus.url &&
+                  typeof prStatus.number === 'number' && (
+                    <AutofixPrActionButton
+                      prNumber={prStatus.number}
+                      prUrl={prStatus.url}
+                      prState="open"
+                      workspaceCwd={workspaceCwd}
+                      prominent
+                      onTriggered={onClose}
+                    />
+                  )}
               </div>
             )}
           </div>

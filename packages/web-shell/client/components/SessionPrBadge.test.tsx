@@ -8,27 +8,84 @@
 
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionPrInfo } from '@qwen-code/sdk/daemon';
+import type { DaemonAutofixPrWatch } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../i18n';
+import { indexAutofixPrWatches } from '../utils/autofixPrWatches';
+import {
+  AutofixPrContext,
+  type AutofixPrContextValue,
+} from './autofixPr/AutofixPrContext';
 import { SessionPrBadge, openableSessionPrs } from './SessionPrBadge';
 import badgeStyles from './SessionPrBadge.module.css';
 import styles from './SessionPrStateIcon.module.css';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-function renderBadge(prs: DaemonSessionPrInfo[], compact = false): HTMLElement {
+function renderBadge(
+  prs: DaemonSessionPrInfo[],
+  compact = false,
+  autofixCtx?: AutofixPrContextValue,
+): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <SessionPrBadge prs={prs} compact={compact} />
+        {autofixCtx ? (
+          <AutofixPrContext.Provider value={autofixCtx}>
+            <SessionPrBadge prs={prs} compact={compact} />
+          </AutofixPrContext.Provider>
+        ) : (
+          <SessionPrBadge prs={prs} compact={compact} />
+        )}
       </I18nProvider>,
     );
   });
   return container;
+}
+
+const makeWatch = (
+  over: Partial<DaemonAutofixPrWatch> = {},
+): DaemonAutofixPrWatch => ({
+  pr: 9500,
+  repo: 'o/r',
+  host: 'github.com',
+  url: 'https://github.com/o/r/pull/9500',
+  headRefName: 'feat',
+  headSha: 'a'.repeat(40),
+  pushes: 0,
+  maxPushes: 10,
+  session: 's1',
+  preparedAt: null,
+  lastCheck: null,
+  checkedRecently: true,
+  lastRound: null,
+  stopped: null,
+  watch: { every: 2, reply: true, instructions: '', task: 'feedc0ffee12' },
+  ended: null,
+  needsHuman: [],
+  worktreeExists: true,
+  fix: null,
+  ...over,
+});
+
+function makeAutofixCtx(
+  watches: DaemonAutofixPrWatch[],
+): AutofixPrContextValue {
+  const lists = new Map([['', { available: true, watches }]]);
+  return {
+    watchIndex: indexAutofixPrWatches(lists),
+    lists,
+    error: null,
+    loaded: true,
+    reload: vi.fn().mockResolvedValue(undefined),
+    canStartInWorkspace: () => true,
+    startInNewSession: vi.fn().mockResolvedValue(undefined),
+    openWatch: vi.fn().mockResolvedValue(undefined),
+  };
 }
 
 const pr = (
@@ -128,6 +185,76 @@ describe('SessionPrBadge', () => {
       renderBadge([{ number: 1, url: 'javascript:alert(1)' }]).querySelector(
         'a',
       ),
+    ).toBeNull();
+  });
+
+  it('shows a visible watch indicator dot and status suffix when an open PR is watched, fixing, or needs human input', () => {
+    const watchingBadge = renderBadge(
+      [pr(9500, 'open')],
+      false,
+      makeAutofixCtx([makeWatch()]),
+    );
+    const watchingDot = watchingBadge.querySelector(
+      '[data-autofix-pr-badge-state]',
+    );
+    expect(watchingDot?.getAttribute('data-autofix-pr-badge-state')).toBe(
+      'watching',
+    );
+    expect(watchingDot?.className).toContain(badgeStyles.watchDotWatching);
+    expect(
+      watchingBadge.querySelector('a')?.getAttribute('aria-label'),
+    ).toContain('Watching');
+
+    const fixingBadge = renderBadge(
+      [pr(9500, 'open')],
+      false,
+      makeAutofixCtx([
+        makeWatch({
+          fix: { attempt: '0123456789ab', startedAt: null, fresh: true },
+        }),
+      ]),
+    );
+    const fixingDot = fixingBadge.querySelector(
+      '[data-autofix-pr-badge-state]',
+    );
+    expect(fixingDot?.getAttribute('data-autofix-pr-badge-state')).toBe(
+      'fixing',
+    );
+    expect(fixingDot?.className).toContain(badgeStyles.watchDotFixing);
+
+    const needsHumanBadge = renderBadge(
+      [pr(9500, 'open')],
+      false,
+      makeAutofixCtx([
+        makeWatch({
+          needsHuman: [
+            {
+              sha: 'a'.repeat(40),
+              at: '2026-11-28T00:00:00Z',
+              text: 'Needs decision',
+            },
+          ],
+        }),
+      ]),
+    );
+    const needsHumanDot = needsHumanBadge.querySelector(
+      '[data-autofix-pr-badge-state]',
+    );
+    expect(needsHumanDot?.getAttribute('data-autofix-pr-badge-state')).toBe(
+      'needsHuman',
+    );
+    expect(needsHumanDot?.className).toContain(badgeStyles.watchDotAttention);
+    expect(
+      needsHumanBadge.querySelector('a')?.getAttribute('aria-label'),
+    ).toContain('Needs you (1)');
+
+    const mergedBadge = renderBadge(
+      [pr(9500, 'merged')],
+      false,
+      makeAutofixCtx([makeWatch()]),
+    );
+    expect(
+      mergedBadge.querySelector('[data-autofix-pr-badge-state]'),
     ).toBeNull();
   });
 });

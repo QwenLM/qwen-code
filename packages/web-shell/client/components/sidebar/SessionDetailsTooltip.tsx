@@ -34,6 +34,7 @@ import {
   sessionPrStateLabel,
 } from '../SessionPrStateIcon';
 import { openableSessionPrs } from '../SessionPrBadge';
+import { AutofixPrActionButton } from '../autofixPr/AutofixPrActionButton';
 import styles from './WebShellSidebar.module.css';
 import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
 import { SidebarHoverSuppressionContext } from './sidebar-hover-suppression';
@@ -46,6 +47,7 @@ interface SessionDetailsTooltipProps {
   statusLabel?: string;
   workspaceLabel?: string;
   details?: ReactNode;
+  readOnly?: boolean;
   openOnClick?: boolean;
   ownerToken?: string;
   open?: boolean;
@@ -62,6 +64,7 @@ export function SessionDetailsTooltip({
   statusLabel,
   workspaceLabel,
   details,
+  readOnly = false,
   openOnClick = false,
   ownerToken,
   open: controlledOpen,
@@ -215,6 +218,15 @@ export function SessionDetailsTooltip({
     window.clearTimeout(copyResetTimerRef.current);
     setCopyStatus('idle');
   }, [cancelClose, setOpen]);
+  const dismissForNavigation = useCallback(() => {
+    window.clearTimeout(openTimerRef.current);
+    cancelClose();
+    restoreFocusRef.current = false;
+    setOpen(false);
+    copyAttemptRef.current += 1;
+    window.clearTimeout(copyResetTimerRef.current);
+    setCopyStatus('idle');
+  }, [cancelClose, setOpen]);
 
   useEffect(() => {
     if (hoverSuppressionActive) {
@@ -278,10 +290,9 @@ export function SessionDetailsTooltip({
         data-web-shell-session-details-content={detailsOwner}
         aria-label={label}
         onOpenAutoFocus={(event) => {
-          if (!openOnClick) {
-            event.preventDefault();
-            return;
-          }
+          event.preventDefault();
+          if (!openOnClick) return;
+          copyButtonRef.current?.focus({ preventScroll: true });
           requestAnimationFrame(() => {
             copyButtonRef.current?.scrollIntoView({ block: 'nearest' });
           });
@@ -347,6 +358,17 @@ export function SessionDetailsTooltip({
                     <span className="sr-only">{` · ${stateLabel}`}</span>
                   ) : null}
                 </a>
+                {!readOnly && (
+                  <AutofixPrActionButton
+                    prNumber={pr.number}
+                    prUrl={pr.url}
+                    prState={pr.state}
+                    workspaceCwd={session.workspaceCwd}
+                    compact
+                    tabIndex={openOnClick ? undefined : -1}
+                    onTriggered={dismissForNavigation}
+                  />
+                )}
               </div>
             );
           })}

@@ -305,6 +305,48 @@
   color: currentColor;
 }
 
+.prWatchesNavDot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+}
+
+.prWatchesNavDotAttention {
+  background: var(--warning-color);
+}
+
+.prWatchesNavDotActive {
+  background: var(--success-color);
+}
+
+.prWatchesNavBadge {
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.prWatchesNavBadgeAttention {
+  background: color-mix(in srgb, var(--warning-color) 18%, transparent);
+  color: var(--warning-color);
+}
+
+.prWatchesNavBadgeActive {
+  background: color-mix(in srgb, var(--success-color) 16%, transparent);
+  color: var(--success-color);
+}
+
 .navIcon svg,
 .iconButton svg,
 .collapseButton svg {
@@ -1206,6 +1248,10 @@ button.livePendingSession:hover {
 /* Match the session-row badge text: neutral muted tone, not the global link
    blue — a blue/purple link would clash with the merged state icon's purple. */
 .sessionDetailsRow a {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: color-mix(
     in srgb,
     var(--muted-foreground, #6b7280) 75%,

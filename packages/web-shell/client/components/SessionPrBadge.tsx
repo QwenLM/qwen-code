@@ -8,6 +8,8 @@ import type { DaemonSessionPrInfo } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
 import { useExternalLinkOpener } from '../hooks/useExternalLinkOpener';
 import { isExternalOpenUrl } from '../utils/externalOpen';
+import { summarizeSessionPrWatchStatus } from '../utils/autofixPrWatches';
+import { useAutofixPrOptional } from './autofixPr/AutofixPrContext';
 import { SessionPrStateIcon, sessionPrStateLabel } from './SessionPrStateIcon';
 import styles from './SessionPrBadge.module.css';
 
@@ -49,6 +51,7 @@ export function SessionPrBadge({
 }: SessionPrBadgeProps) {
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
+  const autofixPr = useAutofixPrOptional();
   const openable = openableSessionPrs(prs);
   if (openable.length === 0) return null;
   const latest = openable[openable.length - 1];
@@ -60,6 +63,30 @@ export function SessionPrBadge({
       })
     : t('sidebar.sessionPr', { number: latest.number });
   const stateSuffix = sessionPrStateLabel(t, latest.state);
+  const watchStatus = autofixPr
+    ? summarizeSessionPrWatchStatus(autofixPr.watchIndex, openable)
+    : null;
+  const watchLabel = watchStatus
+    ? watchStatus.status === 'needsHuman'
+      ? t('autofixPr.action.needsHuman', {
+          count: watchStatus.needsHumanCount,
+        })
+      : watchStatus.status === 'fixing'
+        ? t('autofixPr.action.fixing')
+        : watchStatus.status === 'retrying'
+          ? t('autofixPr.action.retrying')
+          : t('autofixPr.action.watching')
+    : null;
+  const ariaParts = [label, stateSuffix, watchLabel].filter(Boolean);
+  const baseTitle = multiple ? label : latest.url;
+  const title = watchLabel ? `${baseTitle} · ${watchLabel}` : baseTitle;
+  const dotClass = watchStatus
+    ? watchStatus.status === 'watching'
+      ? styles.watchDotWatching
+      : watchStatus.status === 'fixing'
+        ? styles.watchDotFixing
+        : styles.watchDotAttention
+    : undefined;
   return (
     <a
       className={
@@ -70,8 +97,8 @@ export function SessionPrBadge({
       href={latest.url}
       target="_blank"
       rel="noreferrer"
-      aria-label={stateSuffix ? `${label} · ${stateSuffix}` : label}
-      title={multiple ? label : latest.url}
+      aria-label={ariaParts.join(' · ')}
+      title={title}
       {...(tabIndex !== undefined ? { tabIndex } : {})}
       onClick={(event) => {
         event.stopPropagation();
@@ -88,6 +115,13 @@ export function SessionPrBadge({
     >
       <SessionPrStateIcon state={latest.state} />#{latest.number}
       {multiple ? ` +${openable.length - 1}` : ''}
+      {watchStatus && (
+        <span
+          className={`${styles.watchDot} ${dotClass}`}
+          data-autofix-pr-badge-state={watchStatus.status}
+          aria-hidden="true"
+        />
+      )}
     </a>
   );
 }

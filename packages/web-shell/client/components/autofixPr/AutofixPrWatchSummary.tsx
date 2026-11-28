@@ -10,6 +10,13 @@ import { watchPhase } from '../../utils/autofixPrWatches';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import styles from './AutofixPrWatchSummary.module.css';
 
+export interface AutofixPrWatchAction {
+  label: string;
+  hint?: string;
+  busy?: boolean;
+  onClick: () => void;
+}
+
 interface AutofixPrWatchSummaryProps {
   watch: DaemonAutofixPrWatch;
   /** The scheduled task showing it no longer drives the watch. */
@@ -20,10 +27,15 @@ interface AutofixPrWatchSummaryProps {
   /** Open the session that owns the watch; absent when it is no session of
    * this Web Shell. */
   onOpenSession?: () => void;
-  /** Run `/autofix-pr stop <n>` in the session that owns the watch; absent
-   * when it is no session of this Web Shell. */
+  /** Optional primary recovery action (e.g. Resume or Restart watch). */
+  primaryAction?: AutofixPrWatchAction;
+  /** Run `/autofix-pr stop <n>` (in the owning session or a new session). */
   onStop?: () => void;
+  stopLabel?: string;
+  stopHint?: string;
   stopping?: boolean;
+  /** Disable primary and stop actions while another watch action is in flight. */
+  actionsDisabled?: boolean;
   /** Its session is no session of this Web Shell: say where to stop it. */
   outsideDaemon?: boolean;
 }
@@ -40,8 +52,12 @@ export function AutofixPrWatchSummary({
   stale = false,
   showPr = false,
   onOpenSession,
+  primaryAction,
   onStop,
+  stopLabel,
+  stopHint,
   stopping = false,
+  actionsDisabled = false,
   outsideDaemon = false,
 }: AutofixPrWatchSummaryProps) {
   const { t } = useI18n();
@@ -139,7 +155,7 @@ export function AutofixPrWatchSummary({
           </ul>
         </details>
       )}
-      {(onOpenSession || onStop) && (
+      {(onOpenSession || primaryAction || onStop) && (
         <div className={styles.actions}>
           {onOpenSession && (
             <button
@@ -150,15 +166,28 @@ export function AutofixPrWatchSummary({
               {t('autofixPrWatches.openSession')}
             </button>
           )}
+          {primaryAction && (
+            <button
+              type="button"
+              className={styles.action}
+              onClick={primaryAction.onClick}
+              disabled={actionsDisabled || primaryAction.busy || stopping}
+              title={primaryAction.hint}
+            >
+              {primaryAction.label}
+            </button>
+          )}
           {onStop && (
             <button
               type="button"
               className={styles.action}
               onClick={onStop}
-              disabled={stopping}
-              title={t('autofixPrWatches.stopHint', { pr: watch.pr })}
+              disabled={actionsDisabled || stopping || primaryAction?.busy}
+              title={
+                stopHint ?? t('autofixPrWatches.stopHint', { pr: watch.pr })
+              }
             >
-              {t('autofixPrWatches.stop')}
+              {stopLabel ?? t('autofixPrWatches.stop')}
             </button>
           )}
         </div>

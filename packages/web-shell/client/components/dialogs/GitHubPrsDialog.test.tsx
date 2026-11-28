@@ -10,6 +10,11 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonGitHubPullRequest } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
+import { indexAutofixPrWatches } from '../../utils/autofixPrWatches';
+import {
+  AutofixPrContext,
+  type AutofixPrContextValue,
+} from '../autofixPr/AutofixPrContext';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -41,17 +46,31 @@ let root: Root;
 function mount(
   language: 'en' | 'zh-CN' = 'en',
   onSubtitleChange?: (subtitle: string | undefined) => void,
+  options?: {
+    autofixCtx?: AutofixPrContextValue;
+    onActionTriggered?: () => void;
+  },
 ) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
+  const content = (
+    <GitHubPrsContent
+      workspaceCwd="/repo"
+      onSubtitleChange={onSubtitleChange}
+      onActionTriggered={options?.onActionTriggered}
+    />
+  );
   act(() => {
     root.render(
       <I18nProvider language={language}>
-        <GitHubPrsContent
-          workspaceCwd="/repo"
-          onSubtitleChange={onSubtitleChange}
-        />
+        {options?.autofixCtx ? (
+          <AutofixPrContext.Provider value={options.autofixCtx}>
+            {content}
+          </AutofixPrContext.Provider>
+        ) : (
+          content
+        )}
       </I18nProvider>,
     );
   });
@@ -250,5 +269,101 @@ describe('GitHubPrsContent', () => {
     const text = document.body.textContent ?? '';
     expect(text).toContain('已批准');
     expect(text).toContain('2分钟前');
+  });
+
+  it('shows autofix action buttons, highlights failing PRs, and launches or opens watches', async () => {
+    const startInNewSession = vi.fn().mockResolvedValue(undefined);
+    const openWatch = vi.fn().mockResolvedValue(undefined);
+    const onActionTriggered = vi.fn();
+    const lists = new Map([
+      [
+        '',
+        {
+          available: true,
+          watches: [
+            {
+              pr: 42,
+              repo: 'o/r',
+              host: 'github.com',
+              url: 'https://github.com/o/r/pull/42',
+              headRefName: 'fix/flaky-test',
+              headSha: 'a'.repeat(40),
+              pushes: 1,
+              maxPushes: 10,
+              session: 'watch-session',
+              preparedAt: null,
+              lastCheck: null,
+              checkedRecently: true,
+              lastRound: null,
+              stopped: null,
+              watch: {
+                every: 2,
+                reply: true,
+                instructions: '',
+                task: 'feedc0ffee12',
+              },
+              ended: null,
+              needsHuman: [],
+              worktreeExists: true,
+              fix: null,
+            },
+          ],
+        },
+      ],
+    ]);
+    const autofixCtx: AutofixPrContextValue = {
+      watchIndex: indexAutofixPrWatches(lists, new Map([['', '/repo']])),
+      lists,
+      error: null,
+      loaded: true,
+      reload: vi.fn().mockResolvedValue(undefined),
+      canStartInWorkspace: () => true,
+      startInNewSession,
+      openWatch,
+    };
+
+    workspaceGitHubPullRequests.mockResolvedValue(
+      listPayload([
+        pr({ number: 42, checks: 'passing', reviewDecision: 'approved' }),
+        pr({
+          number: 43,
+          url: 'https://github.com/o/r/pull/43',
+          checks: 'failing',
+          reviewDecision: 'changes_requested',
+        }),
+      ]),
+    );
+    mount('en', undefined, { autofixCtx, onActionTriggered });
+    await flush();
+
+    const buttons = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="autofix-pr-action"]',
+      ),
+    );
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0]?.textContent).toBe('Watching');
+    expect(buttons[1]?.textContent).toBe('Autofix');
+    expect(buttons[1]?.className).toContain('prominent');
+
+    await act(async () => {
+      buttons[1]!.click();
+      await Promise.resolve();
+    });
+    expect(onActionTriggered).toHaveBeenCalledTimes(1);
+    expect(startInNewSession).toHaveBeenCalledWith({
+      prompt: '/autofix-pr https://github.com/o/r/pull/43',
+      workspaceCwd: '/repo',
+      sessionTitle: 'Autofix PR #43',
+    });
+
+    await act(async () => {
+      buttons[0]!.click();
+      await Promise.resolve();
+    });
+    expect(onActionTriggered).toHaveBeenCalledTimes(2);
+    expect(openWatch).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: 'watching' }),
+    );
   });
 });

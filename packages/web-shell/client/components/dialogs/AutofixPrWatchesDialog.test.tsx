@@ -11,19 +11,35 @@ import { createRoot, type Root } from 'react-dom/client';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-const { actions } = vi.hoisted(() => ({
-  actions: {
-    listAutofixPrWatches: vi.fn(),
-    listScheduledTasks: vi.fn(),
-  },
-}));
+const { actions, workspaceClient } = vi.hoisted(() => {
+  const workspaceGitHubPullRequests = vi.fn().mockResolvedValue({
+    v: 1,
+    workspaceCwd: '/w/main',
+    available: true,
+    pullRequests: [],
+  });
+  return {
+    actions: {
+      listAutofixPrWatches: vi.fn(),
+      listScheduledTasks: vi.fn(),
+    },
+    workspaceClient: {
+      workspaceByCwd: () => ({ workspaceGitHubPullRequests }),
+    },
+  };
+});
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspaceActions: () => actions,
+  useWorkspace: () => ({ client: workspaceClient }),
 }));
+
+import type { AutofixPrContextValue } from '../autofixPr/AutofixPrContext';
 
 const { AutofixPrWatchesDialog } = await import('./AutofixPrWatchesDialog');
 const { I18nProvider } = await import('../../i18n');
+const { indexAutofixPrWatches } = await import('../../utils/autofixPrWatches');
+const { AutofixPrContext } = await import('../autofixPr/AutofixPrContext');
 
 const SESSION = '10000000-0000-4000-8000-000000000001';
 
@@ -83,6 +99,12 @@ async function mount(
   props: {
     onRunPrompt?: (prompt: string, sessionId: string) => Promise<void>;
     onOpenSession?: (sessionId: string) => void;
+    onStartWatch?: (request: {
+      prompt: string;
+      workspaceCwd?: string;
+      sessionTitle?: string;
+    }) => Promise<void>;
+    defaultWorkspaceCwd?: string;
     workspaces?: Array<{
       id: string;
       cwd: string;
@@ -108,6 +130,8 @@ async function mount(
         <AutofixPrWatchesDialog
           onRunPrompt={props.onRunPrompt ?? vi.fn()}
           onOpenSession={props.onOpenSession ?? vi.fn()}
+          onStartWatch={props.onStartWatch}
+          defaultWorkspaceCwd={props.defaultWorkspaceCwd}
           workspaces={props.workspaces as never}
           lockedWorkspace={props.lockedWorkspace as never}
           onError={vi.fn()}
@@ -361,5 +385,209 @@ describe('AutofixPrWatchesDialog', () => {
     expect(text).toContain(
       'Could not read the watch of PR #9: state.json: bad',
     );
+  });
+
+  it('offers Watch a PR and one-click resume, restart, and cleanup actions when onStartWatch is wired', async () => {
+    actions.listAutofixPrWatches.mockResolvedValue({
+      available: true,
+      watches: [
+        watch({ pr: 12, checkedRecently: false }),
+        watch({
+          pr: 13,
+          url: 'https://github.com/o/r/pull/13',
+          watch: null,
+          ended: { at: '2026-10-26T10:00:00.000Z', reason: 'stopped' },
+        }),
+        watch({
+          pr: 14,
+          url: 'https://github.com/o/r/pull/14',
+          stopped: 'merged',
+          checkedRecently: false,
+        }),
+      ],
+    });
+    actions.listScheduledTasks.mockResolvedValue([]);
+    const onStartWatch = vi.fn().mockResolvedValue(undefined);
+    await mount({
+      onStartWatch,
+      defaultWorkspaceCwd: '/w/main',
+      workspaces: [
+        {
+          id: 'main',
+          cwd: '/w/main',
+          primary: true,
+          trusted: true,
+          kind: 'ordinary',
+        },
+      ],
+    });
+
+    await act(async () => button('Resume watch')!.click());
+    expect(onStartWatch).toHaveBeenLastCalledWith({
+      prompt: '/autofix-pr resume 12',
+      workspaceCwd: '/w/main',
+      sessionTitle: 'Autofix PR #12',
+    });
+
+    await act(async () => button('Restart watch')!.click());
+    expect(onStartWatch).toHaveBeenLastCalledWith({
+      prompt: '/autofix-pr https://github.com/o/r/pull/13',
+      workspaceCwd: '/w/main',
+      sessionTitle: 'Autofix PR #13',
+    });
+
+    await act(async () => button('Clean up')!.click());
+    expect(onStartWatch).toHaveBeenLastCalledWith({
+      prompt: '/autofix-pr stop 14',
+      workspaceCwd: '/w/main',
+      sessionTitle: 'Autofix PR #14',
+    });
+
+    // Clicking "Watch a PR" opens StartAutofixPrDialog.
+    act(() => {
+      container!
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="autofix-pr-add-watch"]',
+        )!
+        .click();
+    });
+    await flush();
+    expect(document.body.textContent).toContain('Watch a pull request');
+  });
+
+  it('resumes an owned idle watch in its owning session', async () => {
+    actions.listAutofixPrWatches.mockResolvedValue({
+      available: true,
+      watches: [watch({ checkedRecently: false })],
+    });
+    actions.listScheduledTasks.mockResolvedValue([task()]);
+    const onRunPrompt = vi.fn().mockResolvedValue(undefined);
+    await mount({
+      onRunPrompt,
+      onStartWatch: vi.fn().mockResolvedValue(undefined),
+      workspaces: [
+        {
+          id: 'main',
+          cwd: '/w/main',
+          primary: true,
+          trusted: true,
+          kind: 'ordinary',
+        },
+      ],
+    });
+
+    await act(async () => button('Resume watch')!.click());
+    expect(onRunPrompt).toHaveBeenCalledWith(
+      '/autofix-pr resume 12',
+      SESSION,
+      '/w/main',
+    );
+  });
+
+  it('uses --in-place --watch when restarting an in-place watch and disables all cards while one action is in flight', async () => {
+    actions.listAutofixPrWatches.mockResolvedValue({
+      available: true,
+      watches: [
+        watch({
+          pr: 12,
+          watch: null,
+          inPlace: true,
+          checkedRecently: false,
+        }),
+        watch({
+          pr: 13,
+          url: 'https://github.com/o/r/pull/13',
+          checkedRecently: false,
+        }),
+      ],
+    });
+    actions.listScheduledTasks.mockResolvedValue([]);
+    let resolveStart!: () => void;
+    const onStartWatch = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    await mount({
+      onStartWatch,
+      defaultWorkspaceCwd: '/w/main',
+      workspaces: [
+        {
+          id: 'main',
+          cwd: '/w/main',
+          primary: true,
+          trusted: true,
+          kind: 'ordinary',
+        },
+      ],
+    });
+
+    const restartBtn = button('Restart watch')!;
+    const resumeBtn = button('Resume watch')!;
+    expect(restartBtn.disabled).toBe(false);
+    expect(resumeBtn.disabled).toBe(false);
+
+    act(() => restartBtn.click());
+    expect(onStartWatch).toHaveBeenCalledWith({
+      prompt: '/autofix-pr https://github.com/o/r/pull/12 --in-place --watch',
+      workspaceCwd: '/w/main',
+      sessionTitle: 'Autofix PR #12',
+    });
+    // Second card's buttons are also disabled while first card's action is in flight.
+    expect(restartBtn.disabled).toBe(true);
+    expect(resumeBtn.disabled).toBe(true);
+
+    await act(async () => {
+      resolveStart();
+      await Promise.resolve();
+    });
+    expect(restartBtn.disabled).toBe(false);
+    expect(resumeBtn.disabled).toBe(false);
+  });
+
+  it('consumes shared AutofixPrContext without duplicate polling and triggers reload once on mount', async () => {
+    const sharedLists = new Map([
+      ['', { available: true, watches: [watch({ checkedRecently: false })] }],
+    ]);
+    const reload = vi.fn().mockResolvedValue(undefined);
+    const ctx: AutofixPrContextValue = {
+      watchIndex: indexAutofixPrWatches(
+        sharedLists,
+        new Map([['', '/w/main']]),
+      ),
+      lists: sharedLists,
+      error: null,
+      loaded: true,
+      reload,
+      canStartInWorkspace: () => true,
+      startInNewSession: vi.fn().mockResolvedValue(undefined),
+      openWatch: vi.fn().mockResolvedValue(undefined),
+    };
+    actions.listScheduledTasks.mockResolvedValue([]);
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <AutofixPrContext.Provider value={ctx}>
+            <AutofixPrWatchesDialog
+              onRunPrompt={vi.fn()}
+              onOpenSession={vi.fn()}
+              onStartWatch={vi.fn()}
+              defaultWorkspaceCwd="/w/main"
+              onError={vi.fn()}
+            />
+          </AutofixPrContext.Provider>
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    expect(reload).toHaveBeenCalledOnce();
+    expect(actions.listAutofixPrWatches).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('o/r#12');
   });
 });

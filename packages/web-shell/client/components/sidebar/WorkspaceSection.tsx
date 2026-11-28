@@ -930,6 +930,7 @@ export function WorkspaceSection({
         label={label}
         time={stamp ? formatDateTime(stamp) : ''}
         completedUnread={false}
+        readOnly
       >
         {row}
       </SessionDetailsTooltip>

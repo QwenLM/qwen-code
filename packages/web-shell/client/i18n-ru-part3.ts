@@ -441,6 +441,63 @@ export const RU_PART3: Record<
   'autofixPrWatches.stopFailed': 'Не удалось остановить наблюдение',
   'autofixPrWatches.noOwner': (v) =>
     `Ни одна сессия этого Web Shell его не выполняет. В сессии его рабочей области /autofix-pr stop ${v?.pr ?? ''} очистит его, а /autofix-pr resume ${v?.pr ?? ''} запустит снова.`,
+  'autofixPrWatches.addWatch': 'Отслеживать PR',
+  'autofixPrWatches.resume': 'Возобновить',
+  'autofixPrWatches.resumeHint': (v) =>
+    `Запускает /autofix-pr resume ${v?.pr ?? ''} для возобновления наблюдения`,
+  'autofixPrWatches.restart': 'Запустить снова',
+  'autofixPrWatches.restartHint': (v) =>
+    `Запускает /autofix-pr ${v?.pr ?? ''} в новой сессии для повторного наблюдения`,
+  'autofixPrWatches.cleanUp': 'Очистить',
+  'autofixPrWatches.cleanUpHint': (v) =>
+    `Запускает /autofix-pr stop ${v?.pr ?? ''} для удаления завершённого наблюдения`,
+  'autofixPrWatches.resumeFailed': 'Не удалось возобновить наблюдение',
+  'autofixPrWatches.startFailed': 'Не удалось запустить /autofix-pr',
+  'autofixPr.action.start': 'Автоисправление',
+  'autofixPr.action.startHint': (v) =>
+    `Запустить /autofix-pr для PR #${v?.number ?? ''} в новой сессии`,
+  'autofixPr.action.resume': 'Возобновить',
+  'autofixPr.action.resumeHint': (v) =>
+    `Возобновить наблюдение /autofix-pr для PR #${v?.number ?? ''}`,
+  'autofixPr.action.watching': 'Наблюдение',
+  'autofixPr.action.fixing': 'Исправление',
+  'autofixPr.action.retrying': 'Повтор',
+  'autofixPr.action.needsHuman': (v) => `Ждёт вас (${v?.count ?? 0})`,
+  'autofixPr.action.openWatchHint': (v) =>
+    `Открыть наблюдение /autofix-pr для PR #${v?.number ?? ''}`,
+  'autofixPr.sessionTitle': (v) => `Автоисправление PR #${v?.number ?? ''}`,
+  'autofixPr.dialog.title': 'Отслеживать пулл-реквест',
+  'autofixPr.dialog.workspace': 'Рабочая область',
+  'autofixPr.dialog.prLabel': 'Пулл-реквест',
+  'autofixPr.dialog.prPlaceholder': 'URL PR или #номер',
+  'autofixPr.dialog.prInvalid':
+    'Введите URL пулл-реквеста GitHub или положительный номер PR.',
+  'autofixPr.dialog.openPrs': 'Открытые пулл-реквесты',
+  'autofixPr.dialog.loadingPrs': 'Загрузка открытых пулл-реквестов…',
+  'autofixPr.dialog.watchedBadge': 'Отслеживается',
+  'autofixPr.dialog.mode': 'Режим',
+  'autofixPr.dialog.modeWatch': 'Постоянное наблюдение',
+  'autofixPr.dialog.modeOnce': 'Один проход (--once)',
+  'autofixPr.dialog.every': 'Интервал проверки (мин)',
+  'autofixPr.dialog.everyInvalid':
+    'Выберите одно из допустимых значений в минутах: 1, 2, 5, 10, 15, 30 или 60.',
+  'autofixPr.dialog.reply': 'Публиковать ответы в PR',
+  'autofixPr.dialog.instructions': 'Дополнительные инструкции (необязательно)',
+  'autofixPr.dialog.instructionsPlaceholder':
+    'например: Не менять публичный API',
+  'autofixPr.dialog.cancel': 'Отмена',
+  'autofixPr.dialog.submit': 'Запустить автоисправление',
+  'autofixPr.error.workspaceUnavailable':
+    'Выбранная рабочая область недоступна или не является доверенной.',
+  'autofixPr.menu.start': (v) => `Автоисправить PR #${v?.number ?? ''}`,
+  'autofixPr.menu.resume': (v) =>
+    `Возобновить наблюдение PR #${v?.number ?? ''}`,
+  'autofixPr.menu.openWatch': (v) =>
+    `Наблюдение PR #${v?.number ?? ''} (${v?.status ?? ''})`,
+  'sidebar.prWatchesActive': (v) =>
+    `Наблюдение за PR · активно: ${v?.count ?? 0}`,
+  'sidebar.prWatchesNeedsHuman': (v) =>
+    `Наблюдение за PR · ждёт вас: ${v?.count ?? 0}`,
   'scheduledTasks.gate.notRunYet': 'гейт ещё не запускался',
   'scheduledTasks.gate.neverDelivered': 'никогда',
   'scheduledTasks.gate.lastFailed': 'последний запуск не удался',

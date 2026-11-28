@@ -21,6 +21,7 @@ import type {
 import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { timeAgo } from '../../utils/timeAgo';
+import { AutofixPrActionButton } from '../autofixPr/AutofixPrActionButton';
 import styles from './GitHubPrsDialog.module.css';
 
 function errorCode(error: unknown): string | null {
@@ -73,9 +74,13 @@ function ChecksIcon({ checks }: { checks: DaemonGitHubPullRequestChecks }) {
 function PullRequestRow({
   pr,
   now,
+  workspaceCwd,
+  onActionTriggered,
 }: {
   pr: DaemonGitHubPullRequest;
   now: number;
+  workspaceCwd: string;
+  onActionTriggered?: () => void;
 }) {
   const { t, language } = useI18n();
   const openExternalLink = useExternalLinkOpener();
@@ -95,42 +100,56 @@ function PullRequestRow({
         {t('githubPrs.reviewRequired')}
       </span>
     ) : null;
+  const needsAutofixAttention =
+    pr.checks === 'failing' || pr.reviewDecision === 'changes_requested';
 
   return (
-    <a
-      href={pr.url}
-      target="_blank"
-      rel="noopener noreferrer"
-      className={styles.prRow}
-      aria-label={t('githubPrs.open', { number: pr.number })}
-      onClick={(event) => openExternalLink(event, pr.url)}
-    >
-      <span className={styles.prLine}>
-        <StateIcon
-          size={12}
-          className={
-            pr.state === 'draft' ? styles.stateDraft : styles.stateOpen
-          }
-        />
-        <span className={styles.prTitle}>{pr.title}</span>
-        {reviewBadge}
-        <ChecksIcon checks={pr.checks} />
-      </span>
-      <span className={styles.prMeta}>
-        #{pr.number} · {pr.headRefName}
-        {pr.author ? ` · ${pr.author}` : ''} ·{' '}
-        {timeAgo(pr.updatedAt, now, language)}
-      </span>
-    </a>
+    <div className={styles.prRow}>
+      <a
+        href={pr.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={styles.prMain}
+        aria-label={t('githubPrs.open', { number: pr.number })}
+        onClick={(event) => openExternalLink(event, pr.url)}
+      >
+        <span className={styles.prLine}>
+          <StateIcon
+            size={12}
+            className={
+              pr.state === 'draft' ? styles.stateDraft : styles.stateOpen
+            }
+          />
+          <span className={styles.prTitle}>{pr.title}</span>
+          {reviewBadge}
+          <ChecksIcon checks={pr.checks} />
+        </span>
+        <span className={styles.prMeta}>
+          #{pr.number} · {pr.headRefName}
+          {pr.author ? ` · ${pr.author}` : ''} ·{' '}
+          {timeAgo(pr.updatedAt, now, language)}
+        </span>
+      </a>
+      <AutofixPrActionButton
+        prNumber={pr.number}
+        prUrl={pr.url}
+        prState={pr.state}
+        workspaceCwd={workspaceCwd}
+        prominent={needsAutofixAttention}
+        onTriggered={onActionTriggered}
+      />
+    </div>
   );
 }
 
 export function GitHubPrsContent({
   workspaceCwd,
   onSubtitleChange,
+  onActionTriggered,
 }: {
   workspaceCwd: string;
   onSubtitleChange?: (subtitle: string | undefined) => void;
+  onActionTriggered?: () => void;
 }) {
   const { client } = useWorkspace();
   const { t } = useI18n();
@@ -192,7 +211,13 @@ export function GitHubPrsContent({
     body = (
       <div className={styles.prList}>
         {list.pullRequests.map((pr) => (
-          <PullRequestRow key={pr.number} pr={pr} now={now} />
+          <PullRequestRow
+            key={pr.number}
+            pr={pr}
+            now={now}
+            workspaceCwd={workspaceCwd}
+            onActionTriggered={onActionTriggered}
+          />
         ))}
       </div>
     );

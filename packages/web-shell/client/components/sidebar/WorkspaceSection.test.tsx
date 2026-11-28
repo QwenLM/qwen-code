@@ -62,6 +62,11 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   };
 });
 
+import {
+  AutofixPrContext,
+  type AutofixPrContextValue,
+} from '../autofixPr/AutofixPrContext';
+
 // A stable client whose `workspaceByCwd` always returns the same `workspaceGit`
 // mock, so call assertions accumulate regardless of how often the component
 // re-resolves the workspace handle.
@@ -405,6 +410,77 @@ describe('WorkspaceSection label', () => {
     expect(tooltip?.textContent).toContain('A very long session name');
     expect(tooltip?.textContent).toContain('danger');
     expect(tooltip?.querySelector('[title="/tmp/danger"]')).not.toBeNull();
+    vi.useRealTimers();
+  });
+
+  it('passes readOnly to untrusted row hover details so autofix PR buttons never appear', async () => {
+    const listWorkspaceSessionsPage = vi.fn().mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'session-untrusted-pr',
+          displayName: 'Untrusted PR session',
+          workspaceCwd: '/tmp/danger',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          prs: [
+            {
+              number: 77,
+              url: 'https://github.com/o/r/pull/77',
+              state: 'open',
+            },
+          ],
+        } as DaemonSessionSummary,
+      ],
+    });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    const permissiveCtx: AutofixPrContextValue = {
+      watchIndex: new Map(),
+      lists: new Map([['', { available: true, watches: [] }]]),
+      error: null,
+      loaded: true,
+      reload: vi.fn().mockResolvedValue(undefined),
+      canStartInWorkspace: () => true,
+      startInNewSession: vi.fn().mockResolvedValue(undefined),
+      openWatch: vi.fn().mockResolvedValue(undefined),
+    };
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <AutofixPrContext.Provider value={permissiveCtx}>
+            <WorkspaceSection
+              workspace={untrustedWorkspace}
+              client={client}
+              expanded
+              onToggle={() => {}}
+              onNewSession={() => {}}
+              onSelectSession={() => {}}
+              activeSessionId={undefined}
+              renderSessionRow={() => null}
+            />
+          </AutofixPrContext.Provider>
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const row = container.querySelector<HTMLElement>('[role="note"]');
+    if (!row) throw new Error('read-only row was not rendered');
+    vi.useFakeTimers();
+    act(() => {
+      row.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      vi.advanceTimersByTime(300);
+    });
+    const tooltip = document.querySelector('[role="dialog"]');
+    expect(tooltip?.textContent).toContain('Pull Request #77');
+    expect(
+      tooltip?.querySelector('[data-testid="autofix-pr-action"]'),
+    ).toBeNull();
     vi.useRealTimers();
   });
 
