@@ -67,7 +67,7 @@ export const ToolsList: React.FC<ToolsListProps> = ({
         <Text color={theme.text.secondary}>
           {'  '}
           {t(
-            'Tools marked "(on demand)" are not offered to the model upfront; tool_search can load them when enabled. Use tools.eager for eager-by-default tools or tools.visible for on-demand tools to send a schema upfront.',
+            'For tools marked "(on demand)", direct mode uses tool_search then tool_call. Code mode uses tool_search then exec. If a direct-mode bridge tool is missing, check tools.toolSearch.enabled, tools.disabled, permissions.deny, and --exclude-tools. Restart Qwen Code after changing these settings or flags. To send schemas upfront, use tools.eager for eager-by-default tools or tools.visible for on-demand tools.',
           )}
         </Text>
       </>

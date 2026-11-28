@@ -7334,7 +7334,9 @@ describe('loadCliConfig tools.eager wiring (#9827, #10075)', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
 
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('tools.eager: ignoring 1 unusable entry'),
+      expect.stringMatching(
+        /tools\.eager: ignoring 1 unusable entry.*Other non-exempt tools are deferred\. tools\.visible can show deferred tools at startup/,
+      ),
     );
     // The collapse to the active-but-empty allowlist is deliberate
     // (fail-closed); only the silence was the bug.

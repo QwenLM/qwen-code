@@ -456,9 +456,8 @@ export interface ToolDefinition {
    * from the model's declarations, so /tools annotates it for the human. */
   fixedOnly?: boolean;
   /**
-   * Registered, but its schema is not in the eager model request — the tool
-   * is reached on demand via `tool_search`. Set for `shouldDefer` tools and
-   * for tools the `tools.eager` allowlist omits (#9827, #10075).
+   * Registered tool whose schema is hidden from the model. Set for
+   * `shouldDefer` tools and tools omitted by `tools.eager` (#9827, #10075).
    */
   deferred?: boolean;
 }

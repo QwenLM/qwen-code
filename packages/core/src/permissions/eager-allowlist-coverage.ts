@@ -135,8 +135,8 @@ export function warnOnUnmatchedEagerToolEntries(config: Config): void {
       // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
       console.warn(
         `tools.eager: "${entry}" matches no discovered tool, so it keeps ` +
-          `nothing eager and every other non-exempt tool stays deferred to ` +
-          `tool_search. Check the spelling or drop the entry.`,
+          `nothing eager. Other non-exempt tools are deferred. tools.visible ` +
+          `can show deferred tools at startup. Check the spelling or drop the entry.`,
       );
     }
   } catch {

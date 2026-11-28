@@ -1287,7 +1287,8 @@ export interface ConfigParameters {
   /**
    * Eager-by-default built-in tool names whose schemas remain eligible for
    * the initial model request. Unlisted non-exempt tools are demoted to
-   * deferred but stay registered and loadable via `tool_search`. Tools
+   * deferred but stay registered. In direct mode, invoking a hidden tool
+   * through the bridge requires both `tool_search` and `tool_call`. Tools
    * already deferred by default stay deferred even when listed; use
    * `visibleTools` to surface one at startup (#9827).
    *
@@ -13762,10 +13763,9 @@ export class Config {
     // PermissionManager handles the coreTools allowlist, deny rules, and
     // the `tools.eager` allowlist in a single check. A tool the active
     // eager allowlist omits comes back `deferred`, not `disabled`: it is
-    // still registered — listed in `/tools` and reachable through the
-    // `tool_search` + `tool_call` bridge —
-    // but its schema stays out of the eager model request (#9827) without
-    // the tool silently disappearing (#10075).
+    // still registered and listed in `/tools` (#10075), even when either
+    // bridge tool is unavailable. Deferred tools listed in `tools.visible`
+    // can still be shown at startup (#9827).
     let status: ToolRegistrationStatus = 'registered';
     try {
       // Resolve through the getter, not the `permissionManager` field: on
