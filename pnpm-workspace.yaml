@@ -90,6 +90,13 @@ overrides:
   '@types/react-dom': '^19.2.0'
   axios: '^1.20.0'
   '@grpc/grpc-js': '^1.14.5'
+  # 2026-11 CVE wave. @opentelemetry/otlp-transformer 0.211.x pins protobufjs
+  # 8.0.0 exactly, which carries the critical arbitrary-code-execution advisory
+  # plus five high ones; the patched line is 8.4.1. The 7.6.x copies come from
+  # the protobufjs 7 line through @grpc/grpc-js, which is why the override is
+  # scoped: the 8 line cannot be lifted into 7.x callers.
+  'protobufjs@8': '8.8.1'
+  'protobufjs@7': '7.6.1'
   # @node-rs/jieba-wasm32-wasi brings in @napi-rs/wasm-runtime, which accepts
   # ^0.10.3. Unpinned it resolves to 0.10.4, published 2026-09-13, which the
   # minimumReleaseAge gate rejects until it ages out. The gate is enforced by

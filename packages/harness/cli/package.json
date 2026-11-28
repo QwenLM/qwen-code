@@ -91,7 +91,7 @@
     "@qwen-code/core": "file:../core",
     "@qwen-code/resource": "file:../resource",
     "@google/genai": "1.30.0",
-    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/client": "2.4.0",
     "ansi-regex": "^6.2.2",
     "auto-bind": "^5.0.1",
     "bidi-js": "^1.0.3",
