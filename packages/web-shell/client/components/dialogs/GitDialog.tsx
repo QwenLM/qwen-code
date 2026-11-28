@@ -108,14 +108,13 @@ export function GitDialog({
   // per-file rows (`hiddenCount`) and returns `available: false` for a
   // transient state, and either way a paths-only commit would cover a subset.
   const [commitListComplete, setCommitListComplete] = useState(true);
+  const commitListUnavailable =
+    !commitListComplete && commitFiles?.length === 0;
   const loadedPathsRef = useRef<Set<string>>(new Set());
   // A commit consumes the selection: the listing that follows reports the
   // tree the commit produced, and an empty one shows no rows at all, so the
   // next listing is a fresh starting point rather than a set the user cleared.
   const selectionSpentRef = useRef(false);
-  // Files whose deletion must be committed together with their addition.
-  // Map of `path` -> `oldPath`; both paths are sent for a renamed file.
-  const renameOldPaths = useRef(new Map<string, string>());
   const [commitBusy, setCommitBusy] = useState<'commit' | 'push' | null>(null);
   const [generating, setGenerating] = useState(false);
   const [genFailed, setGenFailed] = useState(false);
@@ -229,16 +228,6 @@ export function GitDialog({
         }
         return next;
       });
-      // A rename's old path has to be forwarded or the commit stages only the
-      // new one. A COPY reports the same shape (`diff.renames=copies`), but its
-      // source is still a live path in this list — forwarding it would commit a
-      // file the user left unchecked — so that is the discriminator.
-      const livePaths = new Set(files.map((file) => file.path));
-      renameOldPaths.current = new Map(
-        files
-          .filter((file) => file.oldPath && !livePaths.has(file.oldPath))
-          .map((file) => [file.path, file.oldPath as string]),
-      );
     },
     [],
   );
@@ -264,17 +253,6 @@ export function GitDialog({
       return next;
     });
   }, []);
-
-  const commitPathList = useCallback((): string[] => {
-    const paths: string[] = [];
-    for (const file of commitFiles ?? []) {
-      if (!selectedPaths.has(file.path)) continue;
-      paths.push(file.path);
-      const oldPath = renameOldPaths.current.get(file.path);
-      if (oldPath && !paths.includes(oldPath)) paths.push(oldPath);
-    }
-    return paths;
-  }, [commitFiles, selectedPaths]);
 
   // The file checklist only needs git, so it loads even when no session is
   // available for message generation.
@@ -430,42 +408,30 @@ export function GitDialog({
   const doCommit = useCallback(
     async (andPush: boolean) => {
       if (commitBusy || prBusy || !commitMsg.trim()) return;
-      // A click while the first listing is still in flight has no checklist on
-      // screen and no selection behind it. Falling through to `all` would
-      // commit the whole tree with nothing disclosing it — refuse and let the
-      // list arrive instead. A listing that loaded and *is* capped still goes
-      // to `all`, which the legend says so.
-      if (commitFilesRef.current === null) {
+      if (!commitFiles) {
         setCommitStatus({ msg: t('gitCommit.listLoading'), type: 'error' });
         return;
       }
-      const paths = commitPathList();
-      // A capped or unavailable listing cannot express the tree as a path
-      // list: the rows it dropped would silently stay uncommitted, and an
-      // empty list is indistinguishable from "nothing selected". In that case
-      // commit everything — `all` and `paths` are mutually exclusive, so the
-      // request carries `all` alone. A listing that never loaded counts too:
-      // `commitListComplete` starts `true`, so without this the Commit click
-      // would die on the "select at least one file" guard while no checklist
-      // is rendered at all. The ref reads the same never-loaded state without
-      // putting the files array in this callback's dependencies.
+      if (commitListUnavailable) return;
+      // A capped list with visible rows discloses that the action commits
+      // every change. If every file fits, commit only the checked rows.
       const commitAll = !commitListComplete;
-      // The request is built from a diff read at commit time, not from the
-      // checklist: a row can appear after the snapshot loaded, and a commit
-      // empties it while the tree may be dirty again by the next click. A
-      // list that would leave every row out is shown instead of committed.
       setCommitBusy(andPush ? 'push' : 'commit');
       setCommitStatus(null);
       try {
         const ws = client.workspaceByCwd(workspaceCwd);
-        let request: { all?: true; paths?: string[] } = commitAll
-          ? { all: true }
-          : { paths };
+        let request: Parameters<typeof ws.workspaceGitCommit>[1] = {
+          all: true,
+        };
         if (!commitAll) {
+          const selected = commitFiles.filter((file) =>
+            selectedPaths.has(file.path),
+          );
+          let kept = selected;
+          let pairing: typeof commitFiles | undefined;
           try {
             const diff = await ws.workspaceGitDiff(gitCwd, gitSessionId);
-            const complete = diff.available && diff.hiddenCount === 0;
-            if (complete) {
+            if (diff.available && diff.hiddenCount === 0) {
               if (diff.files.length === 0) {
                 setCommitStatus({
                   msg: t('gitCommit.nothingToCommit'),
@@ -473,33 +439,13 @@ export function GitDialog({
                 });
                 return;
               }
-              const live = new Set(diff.files.map((file) => file.path));
-              // The pairing comes from the listing read just now, not from the
-              // snapshot the checklist was built on. A rename the tree no
-              // longer pairs — its old name was recreated, or the pair fell
-              // below git's similarity threshold — would otherwise forward a
-              // pre-image whose current occupant is committed in place of a
-              // deletion the user never selected rows for.
-              const oldPaths = new Map(
-                diff.files
-                  .filter((file) => file.oldPath && !live.has(file.oldPath))
-                  .map((file) => [file.path, file.oldPath as string]),
+              pairing = diff.files;
+              const live = new Map(diff.files.map((file) => [file.path, file]));
+              kept = selected.filter((file) => live.has(file.path));
+              const changedDeletion = kept.some(
+                (file) => file.isDeleted && !live.get(file.path)?.isDeleted,
               );
-              // The request is the rows the user ticked, re-checked against the
-              // listing read now. A path that only rode along as a rename's
-              // pre-image is not a row of its own: it comes back below only
-              // while the tree still pairs it.
-              const kept = paths.filter(
-                (p) => live.has(p) && selectedPaths.has(p),
-              );
-              if (kept.length === 0) {
-                // Nothing the previous listing offered survives. Either the
-                // user cleared every row, or the tree moved on under the
-                // dialog (a commit elsewhere, an agent edit) and the rows on
-                // screen are stale. Committing the new tree unasked is the
-                // hazard the path list exists to prevent, so show it instead:
-                // the refreshed checklist renders every row selected, and the
-                // user can confirm with one click.
+              if (kept.length === 0 || changedDeletion) {
                 applyCommitFiles(diff.files);
                 setCommitStatus({
                   msg: t('gitCommit.listRefreshed'),
@@ -507,24 +453,46 @@ export function GitDialog({
                 });
                 return;
               }
-              const refreshed: string[] = [];
-              for (const p of kept) {
-                refreshed.push(p);
-                const oldPath = oldPaths.get(p);
-                if (oldPath && !refreshed.includes(oldPath))
-                  refreshed.push(oldPath);
-              }
-              // Rows that appeared after the snapshot start unchecked, so they
-              // stay out of this commit rather than riding along unasked.
               if (kept.length < diff.files.length) {
                 applyCommitFiles(diff.files);
               }
-              request = { paths: refreshed };
             }
           } catch {
-            // The snapshot is still usable; the commit below reports the real
-            // error if the tree really is unreadable.
+            // Use the selected rows, without implicit rename sources.
           }
+          if (kept.length === 0) {
+            setCommitStatus({
+              msg: t('gitCommit.selectFiles'),
+              type: 'error',
+            });
+            return;
+          }
+
+          const paths = new Set(kept.map((file) => file.path));
+          const deletedPaths = kept
+            .filter((file) => file.isDeleted)
+            .map((file) => file.path);
+          const renameSources = new Set(
+            commitFiles.map((file) => file.oldPath),
+          );
+          const recreatedPaths = kept
+            .filter((file) => file.isUntracked && renameSources.has(file.path))
+            .map((file) => file.path);
+          const live = new Set(pairing?.map((file) => file.path));
+          for (const file of pairing ?? []) {
+            if (
+              file.oldPath &&
+              paths.has(file.path) &&
+              !live.has(file.oldPath)
+            ) {
+              paths.add(file.oldPath);
+            }
+          }
+          request = {
+            paths: [...paths],
+            ...(deletedPaths.length > 0 && { deletedPaths }),
+            ...(recreatedPaths.length > 0 && { recreatedPaths }),
+          };
         }
         const result = await ws.workspaceGitCommit(
           commitMsg.trim(),
@@ -582,7 +550,8 @@ export function GitDialog({
       commitBusy,
       prBusy,
       commitListComplete,
-      commitPathList,
+      commitListUnavailable,
+      commitFiles,
       selectedPaths,
       refreshCommitFiles,
       applyCommitFiles,
@@ -946,6 +915,11 @@ export function GitDialog({
         </div>
         {isCommit && (
           <div className={styles.commitPanel}>
+            {commitListUnavailable && (
+              <div role="status" className={styles.commitStatus}>
+                {t('gitCommit.listUnavailable')}
+              </div>
+            )}
             {commitFiles !== null && commitFiles.length > 0 && (
               <fieldset className={styles.commitFiles}>
                 <legend className={styles.commitFilesLegend}>
@@ -1036,7 +1010,12 @@ export function GitDialog({
               <button
                 type="button"
                 className={`${styles.commitBtn} ${styles.commitBtnPrimary}`}
-                disabled={!commitMsg.trim() || !!commitBusy || prBusy}
+                disabled={
+                  !commitMsg.trim() ||
+                  !!commitBusy ||
+                  prBusy ||
+                  commitListUnavailable
+                }
                 onClick={() => void doCommit(false)}
               >
                 {commitBusy === 'commit' && (
@@ -1047,7 +1026,12 @@ export function GitDialog({
               <button
                 type="button"
                 className={`${styles.commitBtn} ${styles.commitBtnSecondary}`}
-                disabled={!commitMsg.trim() || !!commitBusy || prBusy}
+                disabled={
+                  !commitMsg.trim() ||
+                  !!commitBusy ||
+                  prBusy ||
+                  commitListUnavailable
+                }
                 onClick={() => void doCommit(true)}
               >
                 {commitBusy === 'push' && (

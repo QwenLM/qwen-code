@@ -632,6 +632,8 @@ export const ZH: Messages = {
   'gitCommit.listRefreshed': '文件列表已变化——请确认后再次提交',
   'gitCommit.listCapped': '列表已截断——将提交全部变更',
   'gitCommit.listLoading': '文件列表仍在加载——请稍后重试',
+  'gitCommit.listUnavailable': '文件列表不可用。请刷新提交视图后再提交。',
+  'gitCommit.selectFiles': '请至少选择一个要提交的文件。',
   'gitCommit.fileAdded': '已新增',
   'gitCommit.fileDeleted': '已删除',
   'gitCommit.fileRenamed': '已重命名',

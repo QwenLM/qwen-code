@@ -775,8 +775,29 @@ async function handleCommit(
     }
   }
   const paths = rawPaths as string[] | undefined;
+  const deletedPaths = body['deletedPaths'];
+  const recreatedPaths = body['recreatedPaths'];
+  const isSelectedPathList = (value: unknown): value is string[] =>
+    Array.isArray(value) &&
+    value.every((file) => typeof file === 'string' && paths?.includes(file));
+  if (
+    (deletedPaths !== undefined && !isSelectedPathList(deletedPaths)) ||
+    (recreatedPaths !== undefined && !isSelectedPathList(recreatedPaths))
+  ) {
+    res.status(400).json({
+      error: 'invalid_path_states',
+      message:
+        'deletedPaths and recreatedPaths must contain only selected paths',
+    });
+    return;
+  }
   try {
-    const result = await gitCommit(cwd, message.trim(), { all, paths }, env);
+    const result = await gitCommit(
+      cwd,
+      message.trim(),
+      { all, paths, deletedPaths, recreatedPaths },
+      env,
+    );
     res.status(200).json(result);
   } catch (err) {
     sendGitError(res, err, route, sendBridgeError, cwd);

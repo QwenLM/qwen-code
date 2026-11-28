@@ -211,6 +211,15 @@ describe('workspace Git branch routes', () => {
     expect(response.status).toBe(400);
     expect(response.body.error).toBe('paths_conflict_with_all');
   });
+
+  it('rejects commit path states for files outside the selection', async () => {
+    const response = await request(app())
+      .post('/workspace/git/commit')
+      .send({ message: 'x', paths: ['a.txt'], deletedPaths: ['b.txt'] });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_path_states');
+  });
 });
 
 describe('legacy route trust guard', () => {
@@ -341,6 +350,24 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(JSON.stringify(response.body)).toContain(
       'none of the selected paths have changes',
     );
+  });
+
+  it('commits a recreated file explicitly selected alongside its rename target', async () => {
+    const dir = makeRepo();
+    git(dir, 'mv', 'a.txt', 'b.txt');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'new separate file\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/commit')
+      .send({
+        message: 'rename and replace',
+        paths: ['a.txt', 'b.txt'],
+        recreatedPaths: ['a.txt'],
+      });
+
+    expect(response.status).toBe(200);
+    expect(git(dir, 'show', 'HEAD:a.txt')).toBe('new separate file\n');
+    expect(git(dir, 'status', '--porcelain')).toBe('');
   });
 
   it('redacts the main checkout path from a linked-worktree Git error', async () => {

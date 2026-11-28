@@ -1827,6 +1827,10 @@ export interface GitCommitOptions {
    * the deletion and the addition always land in the same commit.
    */
   paths?: readonly string[];
+  /** Checked deletion rows whose paths must still be deleted. */
+  deletedPaths?: readonly string[];
+  /** Checked untracked rows at the source of a rename. */
+  recreatedPaths?: readonly string[];
 }
 
 /**
@@ -1898,10 +1902,10 @@ function parseStatusEntries(output: string): Array<{
   path: string;
   oldPath?: string;
   copied?: boolean;
+  untracked?: boolean;
 }> {
   const tokens = output.split('\0');
-  const entries: Array<{ path: string; oldPath?: string; copied?: boolean }> =
-    [];
+  const entries: ReturnType<typeof parseStatusEntries> = [];
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
     if (token.length < 4) continue;
@@ -1914,7 +1918,7 @@ function parseStatusEntries(output: string): Array<{
       // guard: the old path is not a deletion this commit publishes.
       entries.push({ path: token.slice(3), oldPath, copied: xy.includes('C') });
     } else {
-      entries.push({ path: token.slice(3) });
+      entries.push({ path: token.slice(3), untracked: xy === '??' });
     }
   }
   return entries;
@@ -1934,6 +1938,21 @@ function lstatOrNull(root: string, relPath: string): fs.Stats | null {
   }
 }
 
+function assertRecreatedPath(root: string, file: string): void {
+  const stats = lstatOrNull(root, file);
+  if (!stats?.isFile() || stats.nlink !== 1) {
+    throw new Error(`cannot commit: recreated file ${file} has changed`);
+  }
+}
+
+function refuseOccupiedDeletion(root: string, deleted: string): void {
+  if (lstatOrNull(root, deleted) !== null) {
+    throw new Error(
+      `cannot commit: ${deleted} is staged for deletion, but a file now sits at that path`,
+    );
+  }
+}
+
 /**
  * Resolve the caller's selection against what git actually sees. A selection
  * can name a path that is already committed as-is (toggled on, then reverted),
@@ -1949,11 +1968,9 @@ function lstatOrNull(root: string, relPath: string): fs.Stats | null {
 async function resolveCommitPaths(
   cwd: string,
   paths: string[],
-  env?: Readonly<Record<string, string | undefined>>,
-  staged: Readonly<StagedIndexChanges> = {
-    deleted: new Set(),
-    renamed: [],
-  },
+  env: Readonly<Record<string, string | undefined>> | undefined,
+  staged: Readonly<StagedIndexChanges>,
+  recreated: ReadonlySet<string>,
 ): Promise<string[]> {
   const output = await runGit(
     cwd,
@@ -1971,6 +1988,14 @@ async function resolveCommitPaths(
     env,
   );
   const entries = parseStatusEntries(output);
+  const untracked = new Set(
+    entries.filter((entry) => entry.untracked).map((entry) => entry.path),
+  );
+  for (const file of recreated) {
+    if (!untracked.has(file)) {
+      throw new Error(`cannot commit: recreated file ${file} has changed`);
+    }
+  }
   if (entries.length === 0) {
     throw new Error('cannot commit: none of the selected paths have changes');
   }
@@ -1992,6 +2017,9 @@ async function resolveCommitPaths(
   const preImageCandidates: Array<{ path: string; oldPath: string }> = [];
   for (const entry of entries) {
     if (entry.oldPath) {
+      if (recreated.has(entry.oldPath) && !selectedOrPrefix(entry.path)) {
+        continue;
+      }
       if (!selectedOrPrefix(entry.path) && !selectedOrPrefix(entry.oldPath)) {
         continue;
       }
@@ -2040,14 +2068,18 @@ async function resolveCommitPaths(
   const root = (
     await runGit(cwd, ['rev-parse', '--show-toplevel'], env).catch(() => '')
   ).trim();
+  for (const file of recreated) assertRecreatedPath(root || cwd, file);
   const tokens = diffOutput.split('\0');
   for (let i = 0; i + 2 < tokens.length; i += 3) {
     if (!tokens[i].startsWith('R')) continue;
     const oldPath = tokens[i + 1];
     const newPath = tokens[i + 2];
     if (!selectedOrPrefix(newPath) && !selectedOrPrefix(oldPath)) continue;
+    if (recreated.has(oldPath) && !selectedOrPrefix(newPath)) continue;
     for (const p of [newPath, oldPath]) push(p);
-    refuseOccupiedPreImage(root || cwd, oldPath, newPath);
+    if (!recreated.has(oldPath)) {
+      refuseOccupiedPreImage(root || cwd, oldPath, newPath);
+    }
   }
   // A staged rename this view no longer pairs — its post-image was rewritten
   // past the similarity threshold, or the repo sets `diff.renames=false` —
@@ -2055,7 +2087,9 @@ async function resolveCommitPaths(
   // the user selected. Skipping the guard there would stage and publish
   // whatever recreated the old path in place of that deletion.
   for (const pair of preImageCandidates) {
-    refuseOccupiedPreImage(root || cwd, pair.oldPath, pair.path);
+    if (!recreated.has(pair.oldPath)) {
+      refuseOccupiedPreImage(root || cwd, pair.oldPath, pair.path);
+    }
   }
   // Neither leg above sees a rename in a repo that sets `status.renames=false`:
   // `status` reports the two halves unpaired, so there is no `oldPath` to
@@ -2065,7 +2099,8 @@ async function resolveCommitPaths(
   // selection that does not reach the old path commits exactly what it did
   // before, and the deletion it never selected stays uncommitted.
   for (const pair of staged.renamed) {
-    if (!selectedOrPrefix(pair.oldPath)) continue;
+    if (!selectedOrPrefix(pair.oldPath) || recreated.has(pair.oldPath))
+      continue;
     refuseOccupiedPreImage(root || cwd, pair.oldPath, pair.newPath);
   }
   // A plain staged deletion has no rename entry to pair, so the loops above
@@ -2073,11 +2108,8 @@ async function resolveCommitPaths(
   // and takes whatever now sits at that path from the worktree, publishing an
   // occupant in place of the deletion the user selected.
   for (const deleted of staged.deleted) {
-    if (!selectedOrPrefix(deleted)) continue;
-    if (lstatOrNull(root || cwd, deleted) !== null) {
-      throw new Error(
-        `cannot commit: ${deleted} is staged for deletion, but a file now sits at that path`,
-      );
+    if (selectedOrPrefix(deleted) && !recreated.has(deleted)) {
+      refuseOccupiedDeletion(root || cwd, deleted);
     }
   }
   return resolved;
@@ -2208,6 +2240,14 @@ export async function gitCommit(
   if (paths && paths.length === 0) {
     throw new Error('cannot commit: no paths selected');
   }
+  const deletedPaths = normalizeCommitPaths(opts?.deletedPaths ?? []);
+  const recreated = new Set(normalizeCommitPaths(opts?.recreatedPaths ?? []));
+  if (
+    [...deletedPaths, ...recreated].some((file) => !paths?.includes(file)) ||
+    deletedPaths.some((file) => recreated.has(file))
+  ) {
+    throw new Error('commit path states must describe distinct selected paths');
+  }
   // `git commit -- <paths>` is a partial commit, which git refuses outright
   // while a merge, cherry-pick, revert or rebase is parked. Say so here
   // instead of surfacing git's raw fatal, and point at the whole-index commit
@@ -2229,7 +2269,7 @@ export async function gitCommit(
     ? await readStagedIndexChanges(cwd, paths, env)
     : { deleted: new Set<string>(), renamed: [] };
   const selection = paths
-    ? await resolveCommitPaths(cwd, paths, env, staged)
+    ? await resolveCommitPaths(cwd, paths, env, staged, recreated)
     : undefined;
   const stagesEverything = opts?.all === true;
   // Snapshot the index before staging so a failed commit (e.g. a rejecting
@@ -2299,6 +2339,23 @@ export async function gitCommit(
       const indexRenamedOld = new Set(
         stagedNow.renamed.map((pair) => pair.oldPath),
       );
+      const worktreeDeleted = await runGit(
+        cwd,
+        [
+          'ls-files',
+          '--full-name',
+          '--deleted',
+          '-z',
+          '--',
+          ...literalPathspecs(selection),
+        ],
+        env,
+      );
+      const selectedDeletions = new Set([
+        ...deletedPaths,
+        ...indexDeleted,
+        ...worktreeDeleted.split('\0').filter(Boolean),
+      ]);
       const existing = selection.filter((p) => known.has(p));
       // `resolveCommitPaths` ran before staging, and staging is what can empty
       // the selection — a rename whose halves the resolver dropped, or a path
@@ -2346,15 +2403,15 @@ export async function gitCommit(
       // of the deletion the user selected. Re-assert the same guards against
       // the `stagedNow` view, last thing before the commit, to narrow that
       // window to the few operations below.
+      for (const file of recreated) assertRecreatedPath(root || cwd, file);
       for (const pair of stagedNow.renamed) {
-        refuseOccupiedPreImage(root || cwd, pair.oldPath, pair.newPath);
-      }
-      for (const deleted of indexDeleted) {
-        if (lstatOrNull(root || cwd, deleted) !== null) {
-          throw new Error(
-            `cannot commit: ${deleted} is staged for deletion, but a file now sits at that path`,
-          );
+        if (!recreated.has(pair.oldPath)) {
+          refuseOccupiedPreImage(root || cwd, pair.oldPath, pair.newPath);
         }
+      }
+      for (const deleted of selectedDeletions) {
+        if (!recreated.has(deleted))
+          refuseOccupiedDeletion(root || cwd, deleted);
       }
       await runGit(
         cwd,

@@ -2868,6 +2868,26 @@ describe('gitCommit', () => {
     );
   });
 
+  it.each([true, false])(
+    'includes an independently selected recreated rename source (post-image selected: %s)',
+    async (includeRenameTarget) => {
+      const dir = makeRepo();
+      commitFile(dir, 'old.txt', 'original\n', 'add old');
+      git(dir, 'mv', 'old.txt', 'new.txt');
+      write(dir, { 'old.txt': 'new separate file\n' });
+
+      await gitCommit(dir, 'commit selected files', {
+        paths: includeRenameTarget ? ['old.txt', 'new.txt'] : ['old.txt'],
+        recreatedPaths: ['old.txt'],
+      });
+
+      expect(git(dir, 'show', 'HEAD:old.txt')).toBe('new separate file\n');
+      expect(git(dir, 'status', '--porcelain').trim()).toBe(
+        includeRenameTarget ? '' : 'A  new.txt',
+      );
+    },
+  );
+
   it('commits a copy when `status.renames=copies` reports it as `C`', async () => {
     // A copy keeps its source in place, so it has no pre-image to guard. The
     // status pair names the live source, which a shipped dialog would have
@@ -3214,6 +3234,39 @@ describe('gitCommit', () => {
     );
 
     expect(git(dir, 'show', 'HEAD:a.txt')).toBe('content\n');
+  });
+
+  it('preserves a worktree deletion selected before a replacement appeared', async () => {
+    const dir = makeRepo();
+    commitFile(dir, 'a.txt', 'content\n', 'add a');
+    write(dir, { 'a.txt': 'regenerated\n' });
+
+    await expect(
+      gitCommit(dir, 'remove a', {
+        paths: ['a.txt'],
+        deletedPaths: ['a.txt'],
+      }),
+    ).rejects.toThrow(/a file now sits at that path/);
+    expect(git(dir, 'show', 'HEAD:a.txt')).toBe('content\n');
+    expect(git(dir, 'diff', '--cached', '--name-only')).toBe('');
+  });
+
+  it('preserves a worktree deletion when a file is recreated during staging', async () => {
+    const dir = makeRepo();
+    commitFile(dir, 'a.txt', 'content\n', 'add a');
+    fs.unlinkSync(path.join(dir, 'a.txt'));
+    const env = gitShim(hermeticEnv(), [
+      {
+        match: '"add -A"*',
+        before: `printf 'regenerated\\n' > "${path.join(dir, 'a.txt')}"`,
+      },
+    ]);
+
+    await expect(
+      gitCommit(dir, 'remove a', { paths: ['a.txt'] }, env),
+    ).rejects.toThrow(/a file now sits at that path/);
+    expect(git(dir, 'show', 'HEAD:a.txt')).toBe('content\n');
+    expect(git(dir, 'diff', '--cached', '--name-only')).toBe('');
   });
 
   it('refuses a rename pre-image an occupant recreates after the guards ran', async () => {

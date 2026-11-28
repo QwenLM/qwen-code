@@ -646,6 +646,9 @@ const EN: Messages = {
     'The file list changed — review it and commit again',
   'gitCommit.listCapped': 'The list is truncated — committing every change',
   'gitCommit.listLoading': 'The file list is still loading — try again shortly',
+  'gitCommit.listUnavailable':
+    'No file list is available. Refresh the commit view before committing.',
+  'gitCommit.selectFiles': 'Select at least one file to commit.',
   'gitCommit.fileAdded': 'Added',
   'gitCommit.fileDeleted': 'Deleted',
   'gitCommit.fileRenamed': 'Renamed',
