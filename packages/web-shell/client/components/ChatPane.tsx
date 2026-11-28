@@ -143,6 +143,7 @@ import { useDaemonChatControllerFromState } from '../daemon/useDaemonChatControl
 import type { MessageListHandle } from './MessageList';
 import { StreamingStatus } from './StreamingStatus';
 import type { ComposerToolbarAction } from './ChatEditor';
+import { DAEMON_COMPOSER_INTEGRATIONS } from './composer/daemon-composer-integrations';
 import { SessionRecoveryBanner } from './SessionRecoveryBanner';
 import { ComposerStatusStack } from './ComposerStatusStack';
 import { GoalEditDialog } from './dialogs/GoalEditDialog';
@@ -2445,6 +2446,7 @@ export function ChatPane({
                     disabled: approvalActive,
                     voiceTarget: hidden ? undefined : voiceTarget,
                     voiceStatusRevision,
+                    composerIntegrations: DAEMON_COMPOSER_INTEGRATIONS,
                     followupState,
                     onAcceptFollowup,
                     onDismissFollowup,

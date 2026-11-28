@@ -702,30 +702,14 @@ function collectManagedHostGraph(
 
 /**
  * Remaining transitive daemon value-import edges (`file => module`) reachable
- * from `client/managed-host.tsx` (burned down from 47 to 31 in Slice 6a).
+ * from `client/managed-host.tsx` (burned down from 47 to 31 in Slice 6a and
+ * from 31 to 16 in Slice 6b).
  *
- * Slices 6b (`ChatEditor` toolbar/upload decoupling) and 6c
- * (`TranscriptViewport` / `TurnOutputs` / `ToolApproval` / `SystemMessage`
- * decoupling + `dist-managed-host/index.js` CI grep gate) will empty this list.
- * Never add entries; remove entries as each slice lands.
+ * Slice 6c (`TranscriptViewport` / `TurnOutputs` / `ToolApproval` /
+ * `SystemMessage` decoupling + `dist-managed-host/index.js` CI grep gate) will
+ * empty this list. Never add entries; remove entries as each slice lands.
  */
 const REMAINING_MANAGED_HOST_DAEMON_EDGES: readonly string[] = [
-  // Slice 6b: ChatEditor daemon-only toolbar/upload controls (15 edges)
-  'components/BranchPickerPopover.tsx => @qwen-code/sdk/daemon',
-  'components/BranchPickerPopover.tsx => @qwen-code/web-shell/daemon-react-sdk',
-  'hooks/useFileUpload.ts => ../daemon/availability-context.js',
-  'hooks/useFileUpload.ts => ../daemon/availability.js',
-  'live/useLiveBrowserHost.ts => ../daemon/availability-context.js',
-  'live/useLiveVoice.ts => ../daemon/availability-context.js',
-  'live/useLiveVoice.ts => ../daemon/availability.js',
-  'live/useLiveVoice.ts => @qwen-code/web-shell/daemon-react-sdk',
-  'session-catalog/session-catalog-hooks.ts => ../daemon/availability-context.js',
-  'session-catalog/session-catalog-hooks.ts => ../daemon/availability.js',
-  'session-catalog/session-catalog-hooks.ts => @qwen-code/web-shell/daemon-react-sdk',
-  'session-catalog/session-catalog-store.ts => ../daemon/availability.js',
-  'voice/VoiceButton.tsx => @qwen-code/web-shell/daemon-react-sdk',
-  'voice/useVoiceCapture.ts => ../daemon/availability-context.js',
-  'voice/useVoiceCapture.ts => ../daemon/availability.js',
   // Slice 6c: TranscriptViewport / TurnOutputs / ToolApproval / SystemMessage (16 edges)
   'adapters/transcriptToMessages.ts => @qwen-code/sdk/daemon',
   'browser-turn-notifications.tsx => ./daemon/session/turn-notification-context',
@@ -745,7 +729,7 @@ const REMAINING_MANAGED_HOST_DAEMON_EDGES: readonly string[] = [
   'hooks/useTranscriptViewport.ts => ../daemon/session/DaemonSessionProvider',
 ].sort();
 
-describe('chat-core and managed-host boundary guards (slice 6a)', () => {
+describe('chat-core and managed-host boundary guards (slice 6a/6b)', () => {
   it('enforces zero daemon imports (value or type, static or dynamic) recursively across chat-core/**', () => {
     const { files, violations } = findChatCoreDaemonViolations(CHAT_CORE_DIR);
     expect(files.length).toBeGreaterThan(0);
