@@ -772,6 +772,12 @@ export async function start_sandbox(
   if (process.env['OPENAI_MODEL']) {
     args.push('--env', `OPENAI_MODEL=${process.env['OPENAI_MODEL']}`);
   }
+  if (process.env['OPENAI_WIRE_API']) {
+    args.push('--env', `OPENAI_WIRE_API=${process.env['OPENAI_WIRE_API']}`);
+  }
+  if (process.env['QWEN_MODEL']) {
+    args.push('--env', `QWEN_MODEL=${process.env['QWEN_MODEL']}`);
+  }
 
   // copy GOOGLE_GENAI_USE_VERTEXAI
   if (process.env['GOOGLE_GENAI_USE_VERTEXAI']) {

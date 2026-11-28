@@ -854,6 +854,36 @@ describe('downgradeRejectedReasoningItems', () => {
     ]);
   });
 
+  it('preserves plaintext reasoning_text content when downgrading summary-empty reasoning items', () => {
+    const plaintextReasoning = Object.freeze({
+      type: 'reasoning',
+      id: LONG,
+      status: 'completed',
+      summary: [],
+      content: [
+        { type: 'reasoning_text', text: 'first plain step' },
+        { type: 'reasoning_text', text: 'second plain step' },
+      ],
+    }) as ResponsesApiInputItem;
+    const keep = userItem('hi');
+    const items = Object.freeze([
+      keep,
+      plaintextReasoning,
+      userItem('bye'),
+    ]) as ResponsesApiInputItem[];
+    expect(
+      downgradeRejectedReasoningItems(items, { namedIndex: 1, maxLength: 64 }),
+    ).toEqual([
+      keep,
+      {
+        type: 'message',
+        role: 'assistant',
+        content: 'first plain step\nsecond plain step',
+      },
+      items[2],
+    ]);
+  });
+
   it('never mutates the input array or its items', () => {
     const items = Object.freeze([
       reasoningItem(LONG, ['thought']),

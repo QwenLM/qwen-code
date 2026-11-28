@@ -124,4 +124,22 @@ describe('getEffectiveOmniUploadConfig', () => {
       model: 'qwen3.5-omni-plus',
     });
   });
+
+  it('resolves legacy static DashScope upload configuration for OpenAI Responses auth', () => {
+    const config = {
+      getOmniUploadConfig: () => undefined,
+      getContentGeneratorConfig: () => ({
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        apiKey: 'responses-key',
+        baseUrl: DASH_SCOPE_BASE_URL,
+      }),
+      getModel: () => 'qwen3.8-omni-flash',
+    } as unknown as Config;
+
+    expect(getEffectiveOmniUploadConfig(config)).toEqual({
+      baseUrl: DASH_SCOPE_BASE_URL,
+      apiKey: 'responses-key',
+      model: 'qwen3.8-omni-flash',
+    });
+  });
 });

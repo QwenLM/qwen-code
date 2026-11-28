@@ -181,6 +181,26 @@ describe('modelConfigResolver', () => {
         expect(result.config.model).toBe('qwen-model');
         expect(result.sources['model'].envKey).toBe('QWEN_MODEL');
       });
+
+      it('reads QWEN_MODEL as fallback for OPENAI_MODEL under USE_OPENAI_RESPONSES', () => {
+        const fallback = resolve({
+          authType: AuthType.USE_OPENAI_RESPONSES,
+          env: { QWEN_MODEL: 'qwen3.8-omni-flash', OPENAI_API_KEY: 'key' },
+        });
+        expect(fallback.config.model).toBe('qwen3.8-omni-flash');
+        expect(fallback.sources['model'].envKey).toBe('QWEN_MODEL');
+
+        const preferred = resolve({
+          authType: AuthType.USE_OPENAI_RESPONSES,
+          env: {
+            OPENAI_MODEL: 'gpt-5',
+            QWEN_MODEL: 'qwen3.8-omni-flash',
+            OPENAI_API_KEY: 'key',
+          },
+        });
+        expect(preferred.config.model).toBe('gpt-5');
+        expect(preferred.sources['model'].envKey).toBe('OPENAI_MODEL');
+      });
     });
 
     describe('Qwen OAuth auth type', () => {

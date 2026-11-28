@@ -87,6 +87,12 @@ export interface RequestContext {
   // Default keeps tool result text as content parts; "string" is an opt-in
   // compatibility mode for older OpenAI-compatible tool templates.
   toolResultContentFormat?: ContentGeneratorConfig['toolResultContentFormat'];
+  // Controls whether `input_audio.data` uses DashScope Data URI encoding
+  // (`data:audio/...;base64,...`) or standard OpenAI raw base64. Computed
+  // automatically in pipeline.ts from the endpoint (DashScope/Qwen OAuth =>
+  // true; standard OpenAI / SGLang / others => false). Defaults to true when
+  // omitted so direct converter callers retain existing behavior.
+  useAudioDataUri?: boolean;
   /**
    * Per-stream mutable state for cumulative-delta normalization on the visible
    * content channel. Initialised lazily on first use. Must NOT be shared or

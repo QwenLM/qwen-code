@@ -21,6 +21,11 @@ import {
   cleanOrphanedFunctionCalls,
   normalizeResponsesParameters,
 } from './responses-converter.js';
+import {
+  DASHSCOPE_RESPONSES_DIALECT,
+  OPENAI_RESPONSES_DIALECT,
+  type ResponsesWireDialect,
+} from './responses-dialect.js';
 import type {
   ResponsesApiContentPart,
   ResponsesApiFunctionCallItem,
@@ -32,7 +37,10 @@ import type {
 } from './types.js';
 import { ToolCallTool } from '../../tools/tool-call.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
-import { getThoughtSummary } from '../../utils/thoughtUtils.js';
+import {
+  getThoughtSummary,
+  isOpenAIReasoningThoughtPart,
+} from '../../utils/thoughtUtils.js';
 import {
   content,
   fnCall,
@@ -390,7 +398,35 @@ describe('convertResponsesEventToGemini', () => {
     );
     expect(textDone).toBeNull();
     const item = reasoning('rs_raw', 'Let me think.', null);
-    expect(outputItem(state, 'done', item)).toBeNull();
+    // Streaming `response.reasoning_text.delta` captures the server item id as
+    // a plaintext replay signature even when `output_item.done` omits `content`,
+    // without duplicating the already-streamed thought text.
+    expect(partsOf(outputItem(state, 'done', item))).toEqual([
+      {
+        thought: true,
+        thoughtSignature: JSON.stringify({ id: 'rs_raw', plaintext: true }),
+      },
+    ]);
+  });
+
+  it('returns null on output_item.done for summary-only OpenAI reasoning without encrypted_content', () => {
+    const state = new ResponsesStreamState();
+    expect(
+      partsOf(
+        conv(
+          'response.reasoning_summary_text.delta',
+          { output_index: 0, delta: 'summary only' },
+          state,
+        ),
+      ),
+    ).toEqual([{ text: 'summary only', thought: true }]);
+    expect(
+      outputItem(
+        state,
+        'done',
+        reasoning('rs_openai_no_enc', 'summary only', null),
+      ),
+    ).toBeNull();
   });
 
   it.each(['**Checking the input**', 'Use **grep** first.'])(
@@ -786,7 +822,7 @@ describe('convertGeminiContentsToResponsesInput', () => {
 
   it.each([
     [
-      'falls back to a plain assistant message when thoughtSignature is missing (does not guess a reasoning item)',
+      'falls back to a plain assistant message when thoughtSignature is missing (does not fabricate an invalid OpenAI reasoning item)',
       undefined,
     ],
     [
@@ -794,11 +830,11 @@ describe('convertGeminiContentsToResponsesInput', () => {
       'not-json-and-not-ours',
     ],
     // A JSON-parseable foreign signature (cross-provider / migrated / hand-
-    // edited history) with no encrypted_content must hit the shape guard and
-    // fall back, not produce a reasoning item with encrypted_content:undefined
-    // that JSON serialization silently drops.
+    // edited history) with neither encrypted_content nor plaintext:true must
+    // fall back rather than sending a synthetic reasoning item that OpenAI
+    // `/v1/responses` (`store: false`) would reject with HTTP 400.
     [
-      'falls back to a plain assistant message when thoughtSignature is valid JSON but the wrong shape',
+      'falls back to a plain assistant message when thoughtSignature is valid JSON without encrypted_content or plaintext marker',
       JSON.stringify({ id: 'rs_1' }),
     ],
   ])('%s', (_title, thoughtSignature) => {
@@ -810,6 +846,163 @@ describe('convertGeminiContentsToResponsesInput', () => {
       }),
     );
     expect(input).toEqual([msgItem('assistant', 'because X')]);
+  });
+
+  const plainReasoningItem = (id: string, text: string) => ({
+    type: 'reasoning' as const,
+    id,
+    status: 'completed' as const,
+    summary: [],
+    content: [{ type: 'reasoning_text' as const, text }],
+  });
+
+  it('round-trips plaintext reasoning items without duplicating streamed deltas', () => {
+    const state = new ResponsesStreamState();
+    expect(
+      outputItem(state, 'added', {
+        type: 'reasoning',
+        id: 'rs_plain_42',
+        summary: [],
+      }),
+    ).toBeNull();
+    expect(
+      partsOf(
+        conv(
+          'response.reasoning_text.delta',
+          { output_index: 0, item_id: 'rs_plain_42', delta: 'Inspect audio.' },
+          state,
+        ),
+      ),
+    ).toEqual([{ text: 'Inspect audio.', thought: true }]);
+    // Dual-channel guard drops duplicate summary deltas for the same item.
+    expect(
+      conv(
+        'response.reasoning_summary_text.delta',
+        { output_index: 0, item_id: 'rs_plain_42', delta: 'Inspect audio.' },
+        state,
+      ),
+    ).toBeNull();
+    const doneResp = outputItem(
+      state,
+      'done',
+      plainReasoningItem('rs_plain_42', 'Inspect audio.'),
+    );
+    expect(partsOf(doneResp)).toEqual([
+      {
+        thought: true,
+        thoughtSignature: JSON.stringify({
+          id: 'rs_plain_42',
+          plaintext: true,
+        }),
+      },
+    ]);
+
+    const thoughtContent = content('model', {
+      text: 'Inspect audio.',
+      thought: true,
+      thoughtSignature: sigOf(doneResp),
+    });
+    expect(
+      convertGeminiContentsToResponsesInput(
+        { model: 'qwen3.8-omni-flash', contents: [thoughtContent] },
+        false,
+        { dialect: DASHSCOPE_RESPONSES_DIALECT },
+      ).input,
+    ).toEqual([plainReasoningItem('rs_plain_42', 'Inspect audio.')]);
+    expect(
+      convertGeminiContentsToResponsesInput(
+        { model: 'gpt-5', contents: [thoughtContent] },
+        false,
+        { dialect: OPENAI_RESPONSES_DIALECT },
+      ).input,
+    ).toEqual([msgItem('assistant', 'Inspect audio.')]);
+  });
+
+  it('consumes unkeyed reasoning deltas once without suppressing a later keyed reasoning item', () => {
+    const state = new ResponsesStreamState();
+    expect(
+      partsOf(
+        conv('response.reasoning_text.delta', { delta: 'first step' }, state),
+      ),
+    ).toEqual([{ text: 'first step', thought: true }]);
+    expect(
+      partsOf(
+        outputItem(state, 'done', plainReasoningItem('rs_first', 'first step')),
+      ),
+    ).toEqual([
+      {
+        thought: true,
+        thoughtSignature: JSON.stringify({ id: 'rs_first', plaintext: true }),
+      },
+    ]);
+    expect(
+      partsOf(
+        conv(
+          'response.output_item.done',
+          {
+            output_index: 1,
+            item: plainReasoningItem('rs_second', 'second step'),
+          },
+          state,
+        ),
+      ),
+    ).toEqual([
+      {
+        thought: true,
+        text: 'second step',
+        thoughtSignature: JSON.stringify({ id: 'rs_second', plaintext: true }),
+      },
+    ]);
+  });
+
+  it('clears stale unkeyed default channel when a mixed-key reasoning item finishes', () => {
+    const state = new ResponsesStreamState();
+    // Item A starts with an unkeyed delta (populating 'default'), then sends a
+    // keyed delta (populating 'id:rs_mixed'). Completing item A must clear
+    // 'default' so a later plaintext-only item B is not suppressed.
+    expect(
+      partsOf(
+        conv('response.reasoning_text.delta', { delta: 'part 1 ' }, state),
+      ),
+    ).toEqual([{ text: 'part 1 ', thought: true }]);
+    expect(
+      partsOf(
+        conv(
+          'response.reasoning_text.delta',
+          { output_index: 0, item_id: 'rs_mixed', delta: 'part 2' },
+          state,
+        ),
+      ),
+    ).toEqual([{ text: 'part 2', thought: true }]);
+    expect(
+      partsOf(
+        outputItem(
+          state,
+          'done',
+          plainReasoningItem('rs_mixed', 'part 1 part 2'),
+        ),
+      ),
+    ).toEqual([
+      {
+        thought: true,
+        thoughtSignature: JSON.stringify({ id: 'rs_mixed', plaintext: true }),
+      },
+    ]);
+
+    const itemBDone = outputItem(
+      state,
+      'done',
+      plainReasoningItem('rs_next', 'unstreamed item B'),
+      1,
+    );
+    expect(partsOf(itemBDone)).toEqual([
+      {
+        thought: true,
+        text: 'unstreamed item B',
+        thoughtSignature: JSON.stringify({ id: 'rs_next', plaintext: true }),
+      },
+    ]);
+    expect(isOpenAIReasoningThoughtPart(partsOf(itemBDone)![0]!)).toBe(true);
   });
 
   it('drops the thought part entirely when both thoughtSignature and text are missing', () => {
@@ -948,20 +1141,24 @@ describe('convertGeminiContentsToResponsesInput', () => {
     );
 
     it.each(supportedImageMimes)(
-      'serializes tool-result %s inlineData as a follow-up input_image',
+      'serializes tool-result %s inlineData inline inside function_call_output.output',
       (_name, mimeType) => {
         const input = toolResultInput(
           'call_image',
           'image.bin',
           inlineData(mimeType),
         );
-        expect(input).toEqual(
-          toolResultExpected(
-            'call_image',
-            'image.bin',
-            inImage(`data:${mimeType};base64,${imageData}`),
-          ),
-        );
+        expect(input).toEqual([
+          callItem('call_image', 'read_file', { path: 'image.bin' }),
+          {
+            type: 'function_call_output',
+            call_id: 'call_image',
+            output: [
+              inText(toolOutput),
+              inImage(`data:${mimeType};base64,${imageData}`),
+            ],
+          } satisfies ResponsesApiFunctionCallOutputItem,
+        ]);
       },
     );
 
@@ -1075,14 +1272,485 @@ describe('convertGeminiContentsToResponsesInput', () => {
     ]);
   });
 
-  it('surfaces tool-result image media as a follow-up user input_image message instead of dropping it', () => {
-    // A tool image lives in functionResponse.parts; the string-only
-    // function_call_output.output can't carry it, so it must be emitted as a
-    // follow-up user message rather than silently dropped.
+  it('surfaces tool-result image media inline inside function_call_output.output', () => {
     expect(inputOf(toolResponse({ output: 'see image' }, [png()]))).toEqual([
-      outItem('call_1', 'see image'),
-      mediaFollowUp(inImage(PNG_URL)),
+      {
+        type: 'function_call_output',
+        call_id: 'call_1',
+        output: [inText('see image'), inImage(PNG_URL)],
+      } satisfies ResponsesApiFunctionCallOutputItem,
     ]);
+  });
+
+  describe('Omni audio, video, fileData, modalities, and tool promotion', () => {
+    const ALL_MOD = { image: true, audio: true, video: true };
+    const inline = (mimeType: string, data: string): Part => ({
+      inlineData: { mimeType, data },
+    });
+    const file = (mimeType: string, fileUri: string): Part => ({
+      fileData: { mimeType, fileUri },
+    });
+    const inAudio = (format: string, data: string) => ({
+      type: 'input_audio' as const,
+      format,
+      data,
+    });
+    const inVideo = (video_url: string) => ({
+      type: 'input_video' as const,
+      video_url,
+    });
+    const convertWith = (
+      contents: Content[],
+      options?: Parameters<typeof convertGeminiContentsToResponsesInput>[2],
+      model = 'qwen3.8-omni-flash',
+    ) =>
+      convertGeminiContentsToResponsesInput({ model, contents }, false, options)
+        .input;
+
+    it('converts user inlineData and fileData media under DASHSCOPE_RESPONSES_DIALECT', () => {
+      const ds = { modalities: ALL_MOD, dialect: DASHSCOPE_RESPONSES_DIALECT };
+      expect(
+        convertWith(
+          [
+            content(
+              'user',
+              { text: 'Inspect all media' },
+              inline('image/png', 'IMG'),
+              inline('audio/x-wav', 'WAV'),
+              inline('video/mp4', 'MP4'),
+            ),
+          ],
+          { ...ds, imageDetail: 'high' },
+        ),
+      ).toEqual([
+        msgItem('user', [
+          inText('Inspect all media'),
+          {
+            type: 'input_image',
+            image_url: 'data:image/png;base64,IMG',
+            detail: 'high',
+          },
+          inAudio('wav', 'data:audio/wav;base64,WAV'),
+          inVideo('data:video/mp4;base64,MP4'),
+        ]),
+      ]);
+
+      expect(
+        convertWith(
+          [
+            content(
+              'user',
+              file('image/jpeg', 'oss://bucket/frame.jpg'),
+              file('audio/aac', 'https://cdn.example.com/clip.aac'),
+              file('video/mp4', 'oss://bucket/talk.mp4'),
+            ),
+          ],
+          ds,
+        ),
+      ).toEqual([
+        msgItem('user', [
+          inImage('oss://bucket/frame.jpg'),
+          {
+            type: 'input_audio',
+            format: 'aac',
+            audio_url: 'https://cdn.example.com/clip.aac',
+          },
+          inVideo('oss://bucket/talk.mp4'),
+        ]),
+      ]);
+    });
+
+    it('keeps tool-result images inline while promoting audio and video to a trailing user message under DASHSCOPE_RESPONSES_DIALECT', () => {
+      expect(
+        convertWith(
+          [
+            content('model', fnCall('read_file', { path: 'all' }, 'call_mix')),
+            content('user', {
+              functionResponse: {
+                id: 'call_mix',
+                name: 'read_file',
+                response: { output: 'Loaded files' },
+                parts: [
+                  inline('image/png', 'PNG'),
+                  inline('audio/mpeg', 'MP3'),
+                  inline('video/mp4', 'MP4'),
+                ] as FunctionResponsePart[],
+              },
+            }),
+          ],
+          { modalities: ALL_MOD, dialect: DASHSCOPE_RESPONSES_DIALECT },
+        ),
+      ).toEqual([
+        callItem('call_mix', 'read_file', { path: 'all' }),
+        {
+          type: 'function_call_output',
+          call_id: 'call_mix',
+          output: [
+            inText(
+              'Loaded files\n[Attached audio media in following user message]\n[Attached video media in following user message]',
+            ),
+            inImage('data:image/png;base64,PNG'),
+          ],
+        } satisfies ResponsesApiFunctionCallOutputItem,
+        msgItem('user', [
+          inText('(attached media from previous tool call)'),
+          inAudio('mp3', 'data:audio/mpeg;base64,MP3'),
+          inVideo('data:video/mp4;base64,MP4'),
+        ]),
+      ]);
+    });
+
+    it('promotes custom_tool_call_output images with an attachment pointer in output', () => {
+      const input = convertGeminiContentsToResponsesInput(
+        {
+          model: 'qwen3.8-omni-flash',
+          contents: [
+            content(
+              'model',
+              fnCall('exec', { source: 'screenshot' }, 'call_exec_img'),
+            ),
+            content('user', {
+              functionResponse: {
+                id: 'call_exec_img',
+                name: 'exec',
+                response: { output: 'Captured screenshot' },
+                parts: [inline('image/png', 'PNG')] as FunctionResponsePart[],
+              },
+            }),
+          ],
+        },
+        true,
+        { modalities: ALL_MOD, dialect: DASHSCOPE_RESPONSES_DIALECT },
+      ).input;
+
+      expect(input).toEqual([
+        {
+          type: 'custom_tool_call',
+          call_id: 'call_exec_img',
+          name: 'exec',
+          input: 'screenshot',
+        },
+        {
+          type: 'custom_tool_call_output',
+          call_id: 'call_exec_img',
+          output:
+            'Captured screenshot\n[Attached image media in following user message]',
+        },
+        msgItem('user', [
+          inText('(attached media from previous tool call)'),
+          inImage('data:image/png;base64,PNG'),
+        ]),
+      ]);
+    });
+
+    it('enforces presence-as-true InputModalities with actionable modality placeholders distinct from unsupported MIME notices', () => {
+      const disabledMsg = (modality: string, label: string) =>
+        `[Unsupported ${modality} file: "${label}". This model does not support ${modality} input. The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.]`;
+
+      expect(
+        convertWith(
+          [
+            content(
+              'user',
+              inline('image/png', 'IMG'),
+              inline('audio/wav', 'WAV'),
+              inline('video/mp4', 'MP4'),
+            ),
+          ],
+          { modalities: { image: true }, dialect: DASHSCOPE_RESPONSES_DIALECT },
+          'gpt-5',
+        ),
+      ).toEqual([
+        msgItem('user', [
+          inImage('data:image/png;base64,IMG'),
+          inText(disabledMsg('audio', 'audio/wav')),
+          inText(disabledMsg('video', 'video/mp4')),
+        ]),
+      ]);
+
+      expect(
+        convertWith(
+          [
+            content(
+              'user',
+              inline('image/png', 'IMG'),
+              file('image/png', 'https://cdn.example.com/frame.png'),
+            ),
+          ],
+          { modalities: {} },
+          'text-only',
+        ),
+      ).toEqual([
+        msgItem('user', [
+          inText(disabledMsg('image', 'image/png')),
+          inText(disabledMsg('image', 'image/png')),
+        ]),
+      ]);
+
+      expect(
+        convertWith(
+          [
+            content('model', fnCall('read_file', { path: 'x' }, 'call_mod')),
+            content('user', {
+              functionResponse: {
+                id: 'call_mod',
+                name: 'read_file',
+                response: { output: 'Loaded' },
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'image/png',
+                      data: 'PNG',
+                      displayName: 'photo.png',
+                    },
+                  },
+                  file('audio/mpeg', 'https://cdn.example.com/clip.mp3'),
+                  inline('image/heic', 'HEIC'),
+                ] as FunctionResponsePart[],
+              },
+            }),
+          ],
+          { modalities: {}, dialect: DASHSCOPE_RESPONSES_DIALECT },
+          'text-only',
+        ),
+      ).toEqual([
+        callItem('call_mod', 'read_file', { path: 'x' }),
+        outItem('call_mod', 'Loaded'),
+        msgItem('user', [
+          inText('(attached media from previous tool call)'),
+          inText(disabledMsg('image', 'photo.png')),
+          inText(disabledMsg('audio', 'audio/mpeg')),
+          inText('[Unsupported tool-result media type: image/heic]'),
+        ]),
+      ]);
+    });
+
+    it('applies strict OPENAI_RESPONSES_DIALECT and independent custom dialect capability overrides', () => {
+      expect(
+        convertWith(
+          [
+            content(
+              'user',
+              inline('audio/x-wav', 'data:audio/wav;base64,WAVB64'),
+              inline('audio/flac', 'FLACB64'),
+              file('audio/mpeg', 'https://cdn.example.com/clip.mp3'),
+              inline('video/mp4', 'VIDB64'),
+            ),
+          ],
+          { modalities: ALL_MOD, dialect: OPENAI_RESPONSES_DIALECT },
+          'gpt-audio',
+        ),
+      ).toEqual([
+        msgItem('user', [
+          inAudio('wav', 'WAVB64'),
+          inText('[Unsupported inline media type: audio/flac]'),
+          inText('[Unsupported file reference: audio/mpeg]'),
+          inText('[Unsupported inline media type: video/mp4]'),
+        ]),
+      ]);
+
+      const customDialect: ResponsesWireDialect = {
+        ...OPENAI_RESPONSES_DIALECT,
+        inlineAudioFormats: new Set(['wav', 'flac']),
+        supportsInputVideo: true,
+        supportsPlaintextReasoningReplay: true,
+      };
+      expect(
+        convertWith(
+          [
+            content('model', {
+              text: 'Plan check.',
+              thought: true,
+              thoughtSignature: JSON.stringify({
+                id: 'rs_custom_1',
+                plaintext: true,
+              }),
+            }),
+            content(
+              'user',
+              inline('audio/flac', 'data:audio/flac;base64,FLACB64'),
+              inline('audio/mpeg', 'MP3B64'),
+              file('audio/wav', 'https://cdn.example.com/a.wav'),
+              file('video/mp4', 'https://cdn.example.com/v.mp4'),
+            ),
+          ],
+          { modalities: ALL_MOD, dialect: customDialect },
+          'custom-omni',
+        ),
+      ).toEqual([
+        plainReasoningItem('rs_custom_1', 'Plan check.'),
+        msgItem('user', [
+          inAudio('flac', 'FLACB64'),
+          inText('[Unsupported inline media type: audio/mpeg]'),
+          inText('[Unsupported file reference: audio/wav]'),
+          inVideo('https://cdn.example.com/v.mp4'),
+        ]),
+      ]);
+
+      // When supportsFileAudio is true, fileData audio formats are also validated
+      // against the dialect's allowed audio formats and data: URIs honor
+      // dialect.inlineAudioEncoding.
+      expect(
+        convertWith(
+          [
+            content(
+              'user',
+              file('audio/wav', 'https://cdn.example.com/ok.wav'),
+              file('audio/wav', 'data:audio/wav;base64,RAW_DATA_URI'),
+              file('audio/mpeg', 'https://cdn.example.com/blocked.mp3'),
+            ),
+          ],
+          {
+            modalities: ALL_MOD,
+            dialect: { ...customDialect, supportsFileAudio: true },
+          },
+          'custom-omni',
+        ),
+      ).toEqual([
+        msgItem('user', [
+          {
+            type: 'input_audio',
+            format: 'wav',
+            audio_url: 'https://cdn.example.com/ok.wav',
+          },
+          inAudio('wav', 'RAW_DATA_URI'),
+          inText('[Unsupported file reference: audio/mpeg]'),
+        ]),
+      ]);
+    });
+
+    it('gates oss:// URIs on dialect support, rejects empty inlineData, and normalizes parameterized audio/video MIMEs', () => {
+      expect(
+        convertWith(
+          [
+            content(
+              'user',
+              file('image/jpeg', 'oss://bucket/frame.jpg'),
+              inline('image/png', ''),
+              inline('audio/wav', '   '),
+              inline('audio/x-wav; codecs=1', 'WAVDATA'),
+              inline('VIDEO/MP4; codecs=avc1', 'VIDDATA'),
+            ),
+          ],
+          { modalities: ALL_MOD, dialect: OPENAI_RESPONSES_DIALECT },
+          'gpt-audio',
+        ),
+      ).toEqual([
+        msgItem('user', [
+          inText('[Unsupported file reference: image/jpeg]'),
+          inText('[Unsupported inline media type: image/png]'),
+          inText('[Unsupported inline media type: audio/wav]'),
+          inAudio('wav', 'WAVDATA'),
+          inText('[Unsupported inline media type: VIDEO/MP4; codecs=avc1]'),
+        ]),
+      ]);
+
+      expect(
+        convertWith(
+          [content('user', inline('VIDEO/MP4; codecs=avc1', 'VIDDATA'))],
+          { modalities: ALL_MOD, dialect: DASHSCOPE_RESPONSES_DIALECT },
+        ),
+      ).toEqual([msgItem('user', [inVideo('data:video/mp4;base64,VIDDATA')])]);
+    });
+
+    it('rejects audio/webm on DashScope dialect and preserves pre-encoded data: URIs without double-prefixing', () => {
+      expect(
+        convertWith(
+          [
+            content(
+              'user',
+              inline('audio/webm', 'WEBMDATA'),
+              inline('audio/mpeg', 'data:audio/mpeg;base64,ALREADY_INLINE'),
+              file('audio/mpeg', 'data:audio/mpeg;base64,ALREADY_FILE'),
+            ),
+          ],
+          { modalities: ALL_MOD, dialect: DASHSCOPE_RESPONSES_DIALECT },
+        ),
+      ).toEqual([
+        msgItem('user', [
+          inText('[Unsupported inline media type: audio/webm]'),
+          inAudio('mp3', 'data:audio/mpeg;base64,ALREADY_INLINE'),
+          inAudio('mp3', 'data:audio/mpeg;base64,ALREADY_FILE'),
+        ]),
+      ]);
+    });
+
+    it('converts tool-result fileData image inline and promotes tool-result fileData audio/video', () => {
+      expect(
+        convertWith(
+          [
+            content('model', fnCall('read_media', {}, 'call_fd')),
+            content('user', {
+              functionResponse: {
+                id: 'call_fd',
+                name: 'read_media',
+                response: { output: 'Loaded files' },
+                parts: [
+                  file('image/png', 'https://cdn.example.com/tool.png'),
+                  file('audio/mpeg', 'https://cdn.example.com/tool.mp3'),
+                  file('video/mp4', 'https://cdn.example.com/tool.mp4'),
+                ] as FunctionResponsePart[],
+              },
+            }),
+          ],
+          { modalities: ALL_MOD, dialect: DASHSCOPE_RESPONSES_DIALECT },
+        ),
+      ).toEqual([
+        callItem('call_fd', 'read_media', {}),
+        {
+          type: 'function_call_output',
+          call_id: 'call_fd',
+          output: [
+            inText(
+              'Loaded files\n[Attached audio media in following user message]\n[Attached video media in following user message]',
+            ),
+            inImage('https://cdn.example.com/tool.png'),
+          ],
+        },
+        msgItem('user', [
+          inText('(attached media from previous tool call)'),
+          {
+            type: 'input_audio',
+            format: 'mp3',
+            audio_url: 'https://cdn.example.com/tool.mp3',
+          },
+          inVideo('https://cdn.example.com/tool.mp4'),
+        ]),
+      ]);
+    });
+
+    it('preserves plaintext reasoning content on output_item.done when only summary_text deltas were streamed', () => {
+      const state = new ResponsesStreamState();
+      expect(
+        partsOf(
+          conv(
+            'response.reasoning_summary_text.delta',
+            { output_index: 0, item_id: 'rs_sum_only', delta: 'brief summary' },
+            state,
+          ),
+        ),
+      ).toEqual([{ text: 'brief summary', thought: true }]);
+      const done = outputItem(
+        state,
+        'done',
+        plainReasoningItem('rs_sum_only', '**Step 1** full plaintext chain'),
+      );
+      expect(partsOf(done)).toEqual([
+        {
+          thought: true,
+          text: '**Step 1** full plaintext chain',
+          thoughtSignature: JSON.stringify({
+            id: 'rs_sum_only',
+            plaintext: true,
+          }),
+        },
+      ]);
+      expect(isOpenAIReasoningThoughtPart(partsOf(done)![0]!)).toBe(true);
+      expect(getThoughtSummary(done!)).toEqual({
+        subject: '',
+        description: '**Step 1** full plaintext chain',
+      });
+    });
   });
 
   it('appends functionResponse.parts text entries to the tool output (compaction-slimmer placeholders)', () => {

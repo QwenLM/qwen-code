@@ -10,9 +10,8 @@ import type { ReasoningEffort } from '../reasoning-effort.js';
 
 export type ResponsesApiVerbosity = 'low' | 'medium' | 'high';
 // The Responses API reasoning.effort enum (none, minimal, low, medium, high,
-// xhigh, max) is a superset of the unified ReasoningEffort ladder — every
-// tier we expose maps straight through with no clamping.
-export type ResponsesApiReasoningEffort = ReasoningEffort;
+// xhigh, max) is a superset of the unified ReasoningEffort ladder.
+export type ResponsesApiReasoningEffort = ReasoningEffort | 'none' | 'minimal';
 export type ResponsesApiReasoningSummary = 'auto' | 'concise' | 'detailed';
 export type ResponsesApiServiceTier = 'auto' | 'priority';
 
@@ -94,12 +93,37 @@ export type ResponsesApiInputItem =
   | ResponsesApiItemReference
   | ResponsesApiReasoningItem;
 
-export interface ResponsesApiReasoningItem {
+export type ResponsesApiReasoningStatus =
+  | 'completed'
+  | 'in_progress'
+  | 'incomplete';
+
+export interface ResponsesApiReasoningContent {
+  type: 'reasoning_text';
+  text: string;
+}
+
+export interface ResponsesApiEncryptedReasoningItem {
   type: 'reasoning';
   id: string;
+  status?: ResponsesApiReasoningStatus;
   encrypted_content: string;
   summary: Array<{ type: string; text: string }>;
+  content?: never;
 }
+
+export interface ResponsesApiPlaintextReasoningItem {
+  type: 'reasoning';
+  id: string;
+  status?: ResponsesApiReasoningStatus;
+  summary?: Array<{ type: string; text: string }>;
+  content: ResponsesApiReasoningContent[];
+  encrypted_content?: never;
+}
+
+export type ResponsesApiReasoningItem =
+  | ResponsesApiEncryptedReasoningItem
+  | ResponsesApiPlaintextReasoningItem;
 
 export interface ResponsesApiMessageItem {
   type: 'message';
@@ -110,7 +134,9 @@ export interface ResponsesApiMessageItem {
 
 export type ResponsesApiContentPart =
   | ResponsesApiTextPart
-  | ResponsesApiImagePart;
+  | ResponsesApiImagePart
+  | ResponsesApiAudioPart
+  | ResponsesApiVideoPart;
 
 export interface ResponsesApiTextPart {
   type: 'input_text';
@@ -122,6 +148,16 @@ export interface ResponsesApiImagePart {
   type: 'input_image';
   image_url: string;
   detail?: 'auto' | 'low' | 'high';
+}
+
+export type ResponsesApiAudioPart = {
+  type: 'input_audio';
+  format: string;
+} & ({ data: string; audio_url?: never } | { audio_url: string; data?: never });
+
+export interface ResponsesApiVideoPart {
+  type: 'input_video';
+  video_url: string;
 }
 
 export interface ResponsesApiFunctionCallItem {
@@ -190,7 +226,9 @@ export interface ResponsesApiOutputFunctionCall {
 export interface ResponsesApiOutputReasoningSummary {
   type: 'reasoning';
   id: string;
-  summary: ResponsesApiReasoningSummaryContent[];
+  status?: ResponsesApiReasoningStatus;
+  summary?: ResponsesApiReasoningSummaryContent[];
+  content?: ResponsesApiReasoningContent[];
   encrypted_content?: string;
 }
 

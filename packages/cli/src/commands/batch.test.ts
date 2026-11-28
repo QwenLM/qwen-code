@@ -23,6 +23,9 @@ import {
 } from './batch.js';
 
 const mockLoadSettings = vi.hoisted(() => vi.fn());
+const mockGetAuthTypeFromEnv = vi.hoisted(() =>
+  vi.fn((): AuthType | undefined => undefined),
+);
 const mockResolve = vi.hoisted(() => vi.fn());
 const mockResolveProxy = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
@@ -30,7 +33,7 @@ const mockIgnoreBrokenPipe = vi.hoisted(() => vi.fn());
 
 vi.mock('../config/settings.js', () => ({ loadSettings: mockLoadSettings }));
 vi.mock('../utils/modelConfigUtils.js', () => ({
-  getAuthTypeFromEnv: vi.fn(() => undefined),
+  getAuthTypeFromEnv: mockGetAuthTypeFromEnv,
   resolveCliGenerationConfig: mockResolve,
 }));
 vi.mock('./channel/proxy.js', () => ({ resolveProxy: mockResolveProxy }));
@@ -88,6 +91,26 @@ describe('resolveEndpoint', () => {
     });
     expect(() => resolveEndpoint({})).toThrow(
       /"qwen-plus" resolves to auth type "openai-responses"/,
+    );
+  });
+
+  it('reports the wire-protocol refusal when env infers USE_OPENAI_RESPONSES', () => {
+    mockLoadSettings.mockReturnValue({ merged: {} });
+    mockGetAuthTypeFromEnv.mockReturnValueOnce(AuthType.USE_OPENAI_RESPONSES);
+    mockResolve.mockReturnValue({
+      apiKey: 'k',
+      baseUrl: '',
+      model: 'qwen3.8-omni-flash',
+      authType: AuthType.USE_OPENAI_RESPONSES,
+    });
+    expect(() =>
+      resolveEndpoint({
+        OPENAI_API_KEY: 'k',
+        OPENAI_MODEL: 'qwen3.8-omni-flash',
+        OPENAI_WIRE_API: 'responses',
+      }),
+    ).toThrow(
+      /chat-completions wire; "qwen3\.8-omni-flash" resolves to auth type "openai-responses"/,
     );
   });
 

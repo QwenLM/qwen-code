@@ -224,8 +224,7 @@ describe('Responses stable prefix caching', () => {
     expect(result.input.map((item) => item.type)).toEqual(
       request.input.map((item) => item.type),
     );
-    expect(result.input.at(-1)).toEqual(request.input.at(-1));
-    expect(result.input.at(-2)).toEqual({
+    expect(result.input.at(-1)).toEqual({
       type: 'message',
       role: 'user',
       content: [{ type: 'input_text', text: 'memory catalog' }],

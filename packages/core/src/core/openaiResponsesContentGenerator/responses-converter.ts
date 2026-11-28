@@ -20,15 +20,27 @@ import type {
   ResponsesApiInputItem,
   ResponsesApiMessageItem,
   ResponsesApiFunctionCallItem,
-  ResponsesApiReasoningItem,
   ResponsesApiTool,
   ResponsesApiContentPart,
+  ResponsesApiImagePart,
+  ResponsesApiAudioPart,
+  ResponsesApiVideoPart,
 } from './types.js';
+import type { InputModalities } from '../contentGenerator.js';
 import { sanitizeMimeForPlaceholder } from '../../services/compactionInputSlimming.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
-import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
+import {
+  createOpenAIReasoningThoughtPart,
+  parseResponsesReasoningSignature,
+  type ResponsesReasoningSignaturePayload,
+} from '../../utils/thoughtUtils.js';
+import {
+  normalizeMediaMimeType,
+  resolveAudioMimeAndFormat,
+  stripBase64DataUriPrefix,
+} from '../../utils/media-mime.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { REATTACH_BOUNDARY_METADATA } from '../../services/image-payload-references.js';
 import type { ResponsesCacheBoundary } from './prompt-caching.js';
@@ -38,6 +50,10 @@ import {
   type ResponsesTextPart,
 } from '../../utils/responses-message.js';
 import { followingCallGroup } from './responses-reasoning-rejection.js';
+import {
+  OPENAI_RESPONSES_DIALECT,
+  type ResponsesWireDialect,
+} from './responses-dialect.js';
 
 const debugLogger = createDebugLogger('RESPONSES_CONVERTER');
 
@@ -48,6 +64,32 @@ const SUPPORTED_RESPONSE_IMAGE_MIME_TYPES = new Set([
   'image/gif',
 ]);
 
+const SUPPORTED_RESPONSE_VIDEO_MIME_TYPES = new Set([
+  'video/mp4',
+  'video/webm',
+  'video/quicktime',
+  'video/x-msvideo',
+  'video/avi',
+  'video/mpeg',
+  'video/x-matroska',
+  'video/mkv',
+  'video/x-flv',
+  'video/3gpp',
+  'video/x-m4v',
+]);
+
+export interface ResponsesInputConversionOptions {
+  modalities?: InputModalities;
+  imageDetail?: 'low' | 'high' | 'auto';
+  /**
+   * Declarative wire capabilities for the target Responses endpoint.
+   * Defaults to `OPENAI_RESPONSES_DIALECT` (strict OpenAI Responses spec).
+   */
+  dialect?: ResponsesWireDialect;
+}
+
+// Keep image MIME matching strict (exact lowercase allowlist) to preserve
+// upstream's Responses image MIME allowlist contract.
 function isSupportedResponseImageMime(
   mimeType: string | undefined,
 ): mimeType is string {
@@ -56,9 +98,223 @@ function isSupportedResponseImageMime(
   );
 }
 
+function resolveResponseVideoMime(
+  mimeType: string | undefined,
+): string | undefined {
+  const normalized = normalizeMediaMimeType(mimeType);
+  return normalized && SUPPORTED_RESPONSE_VIDEO_MIME_TYPES.has(normalized)
+    ? normalized
+    : undefined;
+}
+
+function isSupportedResponsesFileUri(
+  uri: string | undefined,
+  dialect: ResponsesWireDialect,
+): uri is string {
+  if (!uri) return false;
+  const trimmed = uri.trim();
+  if (trimmed.startsWith('oss://')) {
+    return dialect.supportsOssResourceResolveHeader;
+  }
+  return (
+    trimmed.startsWith('https://') ||
+    trimmed.startsWith('http://') ||
+    trimmed.startsWith('data:')
+  );
+}
+
+function buildResponsesImagePart(
+  imageUrl: string,
+  imageDetail?: 'low' | 'high' | 'auto',
+): ResponsesApiImagePart {
+  return imageDetail
+    ? { type: 'input_image', image_url: imageUrl, detail: imageDetail }
+    : { type: 'input_image', image_url: imageUrl };
+}
+
+type ResponsesMediaModality = 'image' | 'audio' | 'video';
+
+type ResponsesMediaConversionResult =
+  | {
+      ok: true;
+      part:
+        | ResponsesApiImagePart
+        | ResponsesApiAudioPart
+        | ResponsesApiVideoPart;
+    }
+  | {
+      ok: false;
+      reason: 'unsupported_modality';
+      modality: ResponsesMediaModality;
+    }
+  | {
+      ok: false;
+      reason: 'unsupported_mime';
+    };
+
+function convertInlineDataToResponsesPart(
+  inlineData: NonNullable<Part['inlineData']>,
+  options?: ResponsesInputConversionOptions,
+): ResponsesMediaConversionResult {
+  const mimeType = inlineData.mimeType;
+  const rawData = inlineData.data ?? '';
+  // Avoid rawData.trim() on potentially multi-MB base64 payloads: .trim()
+  // allocates a full string copy, while !/\S/.test(rawData) stops on the first
+  // non-whitespace character in O(1) with zero allocation.
+  if (rawData.length === 0 || !/\S/.test(rawData)) {
+    return { ok: false, reason: 'unsupported_mime' };
+  }
+  const dialect = options?.dialect ?? OPENAI_RESPONSES_DIALECT;
+
+  if (isSupportedResponseImageMime(mimeType)) {
+    if (options?.modalities && !options.modalities.image) {
+      return { ok: false, reason: 'unsupported_modality', modality: 'image' };
+    }
+    const url = rawData.startsWith('data:')
+      ? rawData
+      : `data:${mimeType};base64,${rawData}`;
+    return {
+      ok: true,
+      part: buildResponsesImagePart(url, options?.imageDetail),
+    };
+  }
+
+  const audio = resolveAudioMimeAndFormat(mimeType);
+  if (audio) {
+    if (options?.modalities && !options.modalities.audio) {
+      return { ok: false, reason: 'unsupported_modality', modality: 'audio' };
+    }
+    if (!dialect.inlineAudioFormats.has(audio.format)) {
+      return { ok: false, reason: 'unsupported_mime' };
+    }
+    let data: string;
+    if (dialect.inlineAudioEncoding === 'data_uri') {
+      data = rawData.startsWith('data:')
+        ? rawData
+        : `data:${audio.mimeType};base64,${rawData}`;
+    } else {
+      data = stripBase64DataUriPrefix(rawData);
+    }
+    return {
+      ok: true,
+      part: {
+        type: 'input_audio',
+        format: audio.format,
+        data,
+      },
+    };
+  }
+
+  const videoMime = resolveResponseVideoMime(mimeType);
+  if (videoMime) {
+    if (options?.modalities && !options.modalities.video) {
+      return { ok: false, reason: 'unsupported_modality', modality: 'video' };
+    }
+    if (!dialect.supportsInputVideo) {
+      return { ok: false, reason: 'unsupported_mime' };
+    }
+    const videoUrl = rawData.startsWith('data:')
+      ? rawData
+      : `data:${videoMime};base64,${rawData}`;
+    return {
+      ok: true,
+      part: {
+        type: 'input_video',
+        video_url: videoUrl,
+      },
+    };
+  }
+
+  return { ok: false, reason: 'unsupported_mime' };
+}
+
+function convertFileDataToResponsesPart(
+  fileData: NonNullable<Part['fileData']>,
+  options?: ResponsesInputConversionOptions,
+): ResponsesMediaConversionResult {
+  const dialect = options?.dialect ?? OPENAI_RESPONSES_DIALECT;
+  if (!isSupportedResponsesFileUri(fileData.fileUri, dialect)) {
+    return { ok: false, reason: 'unsupported_mime' };
+  }
+  const uri = fileData.fileUri.trim();
+  const mimeType = fileData.mimeType;
+
+  if (isSupportedResponseImageMime(mimeType)) {
+    if (options?.modalities && !options.modalities.image) {
+      return { ok: false, reason: 'unsupported_modality', modality: 'image' };
+    }
+    return {
+      ok: true,
+      part: buildResponsesImagePart(uri, options?.imageDetail),
+    };
+  }
+
+  const audio = resolveAudioMimeAndFormat(mimeType);
+  if (audio) {
+    if (options?.modalities && !options.modalities.audio) {
+      return { ok: false, reason: 'unsupported_modality', modality: 'audio' };
+    }
+    if (
+      !dialect.supportsFileAudio ||
+      !dialect.inlineAudioFormats.has(audio.format)
+    ) {
+      return { ok: false, reason: 'unsupported_mime' };
+    }
+    if (uri.startsWith('data:')) {
+      const data =
+        dialect.inlineAudioEncoding === 'data_uri'
+          ? uri
+          : stripBase64DataUriPrefix(uri);
+      return {
+        ok: true,
+        part: { type: 'input_audio', format: audio.format, data },
+      };
+    }
+    return {
+      ok: true,
+      part: { type: 'input_audio', format: audio.format, audio_url: uri },
+    };
+  }
+
+  const videoMime = resolveResponseVideoMime(mimeType);
+  if (videoMime) {
+    if (options?.modalities && !options.modalities.video) {
+      return { ok: false, reason: 'unsupported_modality', modality: 'video' };
+    }
+    if (!dialect.supportsInputVideo) {
+      return { ok: false, reason: 'unsupported_mime' };
+    }
+    return {
+      ok: true,
+      part: {
+        type: 'input_video',
+        video_url: uri,
+      },
+    };
+  }
+
+  return { ok: false, reason: 'unsupported_mime' };
+}
+
 function placeholderMimeType(mimeType: string | undefined): string {
   const sanitized = mimeType ? sanitizeMimeForPlaceholder(mimeType) : '';
   return sanitized || 'unknown mime type';
+}
+
+function unsupportedModalityPlaceholder(
+  modality: ResponsesMediaModality,
+  displayName: string | undefined,
+  mimeType: string | undefined,
+  model: string,
+): ResponsesApiContentPart {
+  const label = placeholderMimeType(displayName || mimeType);
+  debugLogger.warn(
+    `Model '${model}' does not support ${modality} input. Replacing with text placeholder: ${label}`,
+  );
+  return {
+    type: 'input_text',
+    text: `[Unsupported ${modality} file: "${label}". This model does not support ${modality} input. The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.]`,
+  };
 }
 
 /**
@@ -95,37 +351,10 @@ function makeResponsesStreamError(
   return err;
 }
 
-/**
- * Opaque payload stashed in `part.thoughtSignature` for a Responses API
- * reasoning item, so it round-trips through this app's own Content[] history
- * (and therefore through compaction, session persistence, and history
- * consolidation in geminiChat.ts) without ever appearing as visible text.
- */
-interface ReasoningSignaturePayload {
-  id: string;
-  encrypted_content: string;
-}
-
-function encodeReasoningSignature(payload: ReasoningSignaturePayload): string {
+function encodeReasoningSignature(
+  payload: ResponsesReasoningSignaturePayload,
+): string {
   return JSON.stringify(payload);
-}
-
-function decodeReasoningSignature(
-  signature: string | undefined,
-): ReasoningSignaturePayload | undefined {
-  if (!signature) return undefined;
-  try {
-    const parsed = JSON.parse(signature) as Partial<ReasoningSignaturePayload>;
-    if (
-      typeof parsed.id === 'string' &&
-      typeof parsed.encrypted_content === 'string'
-    ) {
-      return { id: parsed.id, encrypted_content: parsed.encrypted_content };
-    }
-  } catch {
-    // Not our JSON shape — treat as absent rather than guess.
-  }
-  return undefined;
 }
 
 /**
@@ -135,6 +364,86 @@ function decodeReasoningSignature(
 export class ResponsesStreamState {
   responseId: string | null = null;
   private messages = new Map<number, ResponsesMessageMetadata>();
+  private reasoningItemIds = new Map<number, string>();
+  private reasoningChannels = new Map<
+    string,
+    'reasoning_text' | 'summary_text'
+  >();
+
+  registerReasoningItem(outputIndex: number, id?: string): void {
+    if (id) {
+      this.reasoningItemIds.set(outputIndex, id);
+    }
+  }
+
+  private reasoningKey(data: {
+    output_index?: number;
+    item_id?: string;
+  }): string {
+    if (data.item_id) return `id:${data.item_id}`;
+    if (data.output_index !== undefined) {
+      const knownId = this.reasoningItemIds.get(data.output_index);
+      return knownId ? `id:${knownId}` : `idx:${data.output_index}`;
+    }
+    return 'default';
+  }
+
+  /**
+   * Claims a single reasoning stream channel (`reasoning_text` or
+   * `summary_text`) per reasoning output item. Returns `false` if the other
+   * channel already streamed for the same item so dual-channel proxies never
+   * double-count reasoning text.
+   */
+  claimReasoningChannel(
+    data: { output_index?: number; item_id?: string },
+    channel: 'reasoning_text' | 'summary_text',
+  ): boolean {
+    const key = this.reasoningKey(data);
+    const existing = this.reasoningChannels.get(key);
+    if (existing && existing !== channel) {
+      return false;
+    }
+    this.reasoningChannels.set(key, channel);
+    return true;
+  }
+
+  getReasoningChannel(
+    outputIndex: number,
+    itemId?: string,
+  ): 'reasoning_text' | 'summary_text' | undefined {
+    if (itemId) {
+      const byId = this.reasoningChannels.get(`id:${itemId}`);
+      if (byId) return byId;
+    }
+    return this.reasoningChannels.get(`idx:${outputIndex}`);
+  }
+
+  /**
+   * Resolve the streamed reasoning channel for a completing reasoning item.
+   * Consumes the unkeyed `'default'` slot at most once (binding it to this
+   * item) so an earlier delta that omitted `item_id`/`output_index` cannot
+   * falsely mark a later reasoning item as already streamed.
+   */
+  consumeReasoningChannel(
+    outputIndex: number,
+    itemId?: string,
+  ): 'reasoning_text' | 'summary_text' | undefined {
+    const keyed = this.getReasoningChannel(outputIndex, itemId);
+    if (keyed) {
+      this.reasoningChannels.delete('default');
+      return keyed;
+    }
+    const fallback = this.reasoningChannels.get('default');
+    if (fallback) {
+      this.reasoningChannels.delete('default');
+      this.reasoningChannels.set(
+        itemId ? `id:${itemId}` : `idx:${outputIndex}`,
+        fallback,
+      );
+      return fallback;
+    }
+    return undefined;
+  }
 
   updateMessage(index: number, item: { id: string; phase?: string }): void {
     const metadata = this.messages.get(index) ?? { id: item.id };
@@ -223,6 +532,8 @@ export function convertResponsesEventToGemini(
         state.initFunctionCall(data.output_index, fc.id, fc.call_id, fc.name);
       } else if (data.item.type === 'message') {
         state.updateMessage(data.output_index, data.item);
+      } else if (data.item.type === 'reasoning') {
+        state.registerReasoningItem(data.output_index, data.item.id);
       }
       return null;
     }
@@ -256,14 +567,28 @@ export function convertResponsesEventToGemini(
       return null;
 
     case 'response.reasoning_text.delta': {
-      const data = event.data as { delta: string };
+      const data = event.data as {
+        delta: string;
+        output_index?: number;
+        item_id?: string;
+      };
+      if (!state.claimReasoningChannel(data, 'reasoning_text')) {
+        return null;
+      }
       return makeChunkResponse(model, state, [
         createOpenAIReasoningThoughtPart(data.delta),
       ]);
     }
 
     case 'response.reasoning_summary_text.delta': {
-      const data = event.data as { delta: string };
+      const data = event.data as {
+        delta: string;
+        output_index?: number;
+        item_id?: string;
+      };
+      if (!state.claimReasoningChannel(data, 'summary_text')) {
+        return null;
+      }
       return makeChunkResponse(model, state, [
         { text: data.delta, thought: true },
       ]);
@@ -363,26 +688,62 @@ export function convertResponsesEventToGemini(
       if (data.item.type === 'reasoning') {
         const reasoningItem = data.item as ResponsesApiOutputReasoningSummary;
         const encryptedContent = reasoningItem.encrypted_content;
-        // No encrypted_content means this turn's reasoning can't be replayed
-        // (e.g. `include` wasn't honored for this model). Drop the signature
-        // rather than emit one we can't reconstruct later — the thought text
-        // itself already streamed via reasoning text or summary deltas above.
-        if (!encryptedContent) return null;
-        // NOTE: a single turn can contain multiple reasoning output items
-        // (e.g. one per parallel function call), each emitted here as its own
-        // signature-only chunk. llm-chat.ts's thought-episode consolidation
-        // concatenates thoughtSignature chunks until one parses as a complete
-        // Responses signature, so the items' encrypted_content folds into the
-        // surviving episode in emission order.
-        return makeChunkResponse(model, state, [
-          {
-            thought: true,
-            thoughtSignature: encodeReasoningSignature({
-              id: reasoningItem.id,
-              encrypted_content: encryptedContent,
-            }),
-          },
-        ]);
+        if (encryptedContent) {
+          // NOTE: a single turn can contain multiple reasoning output items
+          // (e.g. one per parallel function call), each emitted here as its own
+          // signature-only chunk. llm-chat.ts's thought-episode consolidation
+          // concatenates thoughtSignature chunks until one parses as a complete
+          // Responses signature, so the items' encrypted_content folds into the
+          // surviving episode in emission order.
+          return makeChunkResponse(model, state, [
+            {
+              thought: true,
+              thoughtSignature: encodeReasoningSignature({
+                id: reasoningItem.id,
+                encrypted_content: encryptedContent,
+              }),
+            },
+          ]);
+        }
+        // Some OpenAI-compatible Responses endpoints return plaintext
+        // reasoning items without encrypted_content: `{ type: 'reasoning', id,
+        // status: 'completed', summary: [], content: [{ type: 'reasoning_text',
+        // text }] }`. Capture the server item id whenever plaintext reasoning
+        // content was returned or streamed via `response.reasoning_text.delta`
+        // (never for OpenAI `summary_text`-only items without
+        // encrypted_content).
+        const streamedChannel = state.consumeReasoningChannel(
+          data.output_index,
+          reasoningItem.id,
+        );
+        const alreadyStreamed = streamedChannel === 'reasoning_text';
+        const plaintextChunks = Array.isArray(reasoningItem.content)
+          ? reasoningItem.content
+              .filter(
+                (entry) =>
+                  entry?.type === 'reasoning_text' &&
+                  typeof entry.text === 'string' &&
+                  entry.text.length > 0,
+              )
+              .map((entry) => entry.text)
+          : [];
+        if (
+          reasoningItem.id &&
+          (plaintextChunks.length > 0 || streamedChannel === 'reasoning_text')
+        ) {
+          const thoughtSignature = encodeReasoningSignature({
+            id: reasoningItem.id,
+            plaintext: true,
+          });
+          const part: Part = alreadyStreamed
+            ? { thought: true, thoughtSignature }
+            : Object.assign(
+                createOpenAIReasoningThoughtPart(plaintextChunks.join('')),
+                { thoughtSignature },
+              );
+          return makeChunkResponse(model, state, [part]);
+        }
+        return null;
       }
       return null;
     }
@@ -534,6 +895,7 @@ function mapFinishReason(reason: string): FinishReason {
 export function convertGeminiContentsToResponsesInput(
   request: GenerateContentParameters,
   freeformExec = false,
+  options?: ResponsesInputConversionOptions,
 ): {
   instructions: string | undefined;
   input: ResponsesApiInputItem[];
@@ -638,17 +1000,23 @@ export function convertGeminiContentsToResponsesInput(
 
       if ('thought' in part && part.thought) {
         flushPendingMessage();
-        // Prior-turn reasoning can only be replayed as a real 'reasoning'
-        // item if we captured its id + encrypted_content via thoughtSignature
-        // when it first streamed in. If it's missing (older history, a model
-        // that didn't return encrypted_content, or cross-provider history),
-        // fall back to a plain assistant message rather than guessing at a
-        // 'reasoning' item reconstruction the API would reject — this still
-        // loses the unreplayable encrypted payload, but preserves the
-        // human-readable summary instead of discarding it outright.
+        // Prior-turn reasoning replays in three distinct modes:
+        // 1. OpenAI encrypted reasoning (`{ id, encrypted_content }`) -> replay
+        //    as an encrypted `reasoning` item.
+        // 2. Verified plaintext reasoning (`{ id, plaintext: true }`, from
+        //    OpenAI-compatible Responses endpoints without encrypted_content)
+        //    -> replay as a plaintext `reasoning` item with the exact server
+        //    `id` and `reasoning_text` content.
+        // 3. Missing or foreign signature (older history, OpenAI without
+        //    encrypted_content, or cross-provider Gemini/Anthropic history) ->
+        //    fall back to a plain assistant message rather than fabricating a
+        //    synthetic `reasoning` item that OpenAI `/v1/responses` (`store:
+        //    false`) would reject with HTTP 400.
         if (role === 'assistant') {
-          const payload = decodeReasoningSignature(part.thoughtSignature);
-          if (payload) {
+          const payload = parseResponsesReasoningSignature(
+            part.thoughtSignature,
+          );
+          if (payload && 'encrypted_content' in payload) {
             items.push({
               type: 'reasoning',
               id: payload.id,
@@ -656,7 +1024,22 @@ export function convertGeminiContentsToResponsesInput(
               summary: part.text
                 ? [{ type: 'summary_text', text: part.text }]
                 : [],
-            } as ResponsesApiReasoningItem);
+            });
+          } else if (
+            payload &&
+            'plaintext' in payload &&
+            (options?.dialect ?? OPENAI_RESPONSES_DIALECT)
+              .supportsPlaintextReasoningReplay
+          ) {
+            if (part.text) {
+              items.push({
+                type: 'reasoning',
+                id: payload.id,
+                status: 'completed',
+                summary: [],
+                content: [{ type: 'reasoning_text', text: part.text }],
+              });
+            }
           } else if (part.text) {
             debugLogger.warn(
               'Dropping unreplayable reasoning signature; preserving summary text as a plain message',
@@ -732,12 +1115,43 @@ export function convertGeminiContentsToResponsesInput(
         } else {
           output = JSON.stringify(fr.response ?? {});
         }
-        // A tool can return media (e.g. read_file on an image) in
-        // functionResponse.parts alongside its textual output. Surface the
-        // media the way the sibling Chat converter does
-        // (createToolMessage/splitToolMedia) instead of dropping it: append
-        // any text entries (e.g. compaction-slimmer placeholders) to the
-        // output, and stage image entries for a follow-up user message.
+        // A tool can return media (e.g. read_file on an image, audio, or video)
+        // in functionResponse.parts alongside its textual output. Keep
+        // `input_image` inline inside `function_call_output.output`, and
+        // promote `input_audio` / `input_video` (as well as images on
+        // string-only `custom_tool_call_output`) to a trailing `user` message
+        // with a concise pointer in the tool output.
+        const inlineToolImages: ResponsesApiContentPart[] = [];
+        const promotedMediaNotes: string[] = [];
+        const isCustomToolOutput =
+          freeformExec &&
+          (fr.name === ToolNames.EXEC || customCallIds.has(fr.id ?? ''));
+        const promoteMediaPart = (
+          mediaPart:
+            | ResponsesApiImagePart
+            | ResponsesApiAudioPart
+            | ResponsesApiVideoPart,
+        ): void => {
+          if (mediaPart.type === 'input_image' && !isCustomToolOutput) {
+            inlineToolImages.push(mediaPart);
+            return;
+          }
+          pendingToolMediaParts.push(mediaPart);
+          if (mediaPart.type === 'input_image') {
+            promotedMediaNotes.push(
+              '[Attached image media in following user message]',
+            );
+          } else if (mediaPart.type === 'input_audio') {
+            promotedMediaNotes.push(
+              '[Attached audio media in following user message]',
+            );
+          } else if (mediaPart.type === 'input_video') {
+            promotedMediaNotes.push(
+              '[Attached video media in following user message]',
+            );
+          }
+        };
+
         for (const frPart of fr.parts ?? []) {
           if (
             'text' in frPart &&
@@ -747,14 +1161,25 @@ export function convertGeminiContentsToResponsesInput(
             const text = (frPart as { text: string }).text;
             output += (output ? '\n' : '') + text;
           } else if (frPart.inlineData) {
-            const mimeType = frPart.inlineData.mimeType;
-            if (isSupportedResponseImageMime(mimeType)) {
-              pendingToolMediaParts.push({
-                type: 'input_image',
-                image_url: `data:${mimeType};base64,${frPart.inlineData.data}`,
-              });
+            const converted = convertInlineDataToResponsesPart(
+              frPart.inlineData,
+              options,
+            );
+            if (converted.ok) {
+              promoteMediaPart(converted.part);
+            } else if (converted.reason === 'unsupported_modality') {
+              pendingToolMediaParts.push(
+                unsupportedModalityPlaceholder(
+                  converted.modality,
+                  frPart.inlineData.displayName,
+                  frPart.inlineData.mimeType,
+                  request.model,
+                ),
+              );
             } else {
-              const placeholderMime = placeholderMimeType(mimeType);
+              const placeholderMime = placeholderMimeType(
+                frPart.inlineData.mimeType,
+              );
               debugLogger.warn(
                 `Dropping unsupported tool-result inline media type: ${placeholderMime}`,
               );
@@ -764,36 +1189,84 @@ export function convertGeminiContentsToResponsesInput(
               });
             }
           } else if (frPart.fileData) {
-            const placeholderMime = placeholderMimeType(
-              frPart.fileData.mimeType,
+            const converted = convertFileDataToResponsesPart(
+              frPart.fileData,
+              options,
             );
-            debugLogger.warn(
-              `Dropping unsupported tool-result file reference: ${placeholderMime}`,
-            );
-            pendingToolMediaParts.push({
-              type: 'input_text',
-              text: `[Unsupported tool-result file reference: ${placeholderMime}]`,
-            });
+            if (converted.ok) {
+              promoteMediaPart(converted.part);
+            } else if (converted.reason === 'unsupported_modality') {
+              pendingToolMediaParts.push(
+                unsupportedModalityPlaceholder(
+                  converted.modality,
+                  frPart.fileData.displayName,
+                  frPart.fileData.mimeType,
+                  request.model,
+                ),
+              );
+            } else {
+              const placeholderMime = placeholderMimeType(
+                frPart.fileData.mimeType,
+              );
+              debugLogger.warn(
+                `Dropping unsupported tool-result file reference: ${placeholderMime}`,
+              );
+              pendingToolMediaParts.push({
+                type: 'input_text',
+                text: `[Unsupported tool-result file reference: ${placeholderMime}]`,
+              });
+            }
           }
         }
-        items.push({
-          type:
-            freeformExec &&
-            (fr.name === ToolNames.EXEC || customCallIds.has(fr.id ?? ''))
-              ? 'custom_tool_call_output'
-              : 'function_call_output',
-          call_id: fr.id || `call_${Date.now()}_${callIdCounter++}`,
-          output,
-        });
+
+        if (promotedMediaNotes.length > 0) {
+          const noteText = promotedMediaNotes.join('\n');
+          output += (output ? '\n' : '') + noteText;
+        }
+
+        const callId = fr.id || `call_${Date.now()}_${callIdCounter++}`;
+        if (isCustomToolOutput) {
+          items.push({
+            type: 'custom_tool_call_output',
+            call_id: callId,
+            output,
+          });
+        } else if (inlineToolImages.length > 0) {
+          const outputParts: ResponsesApiContentPart[] = [];
+          if (output) {
+            outputParts.push({ type: 'input_text', text: output });
+          }
+          outputParts.push(...inlineToolImages);
+          items.push({
+            type: 'function_call_output',
+            call_id: callId,
+            output: outputParts,
+          });
+        } else {
+          items.push({
+            type: 'function_call_output',
+            call_id: callId,
+            output,
+          });
+        }
       }
 
       if ('inlineData' in part && part.inlineData && role === 'user') {
-        const mimeType = part.inlineData.mimeType;
-        if (isSupportedResponseImageMime(mimeType)) {
-          pendingContentParts.push({
-            type: 'input_image',
-            image_url: `data:${mimeType};base64,${part.inlineData.data}`,
-          });
+        const converted = convertInlineDataToResponsesPart(
+          part.inlineData,
+          options,
+        );
+        if (converted.ok) {
+          pendingContentParts.push(converted.part);
+        } else if (converted.reason === 'unsupported_modality') {
+          pendingContentParts.push(
+            unsupportedModalityPlaceholder(
+              converted.modality,
+              part.inlineData.displayName,
+              part.inlineData.mimeType,
+              request.model,
+            ),
+          );
         } else {
           // No input_file part type is wired up for this generator yet
           // (unlike the sibling Chat Completions converter, which sends
@@ -803,16 +1276,33 @@ export function convertGeminiContentsToResponsesInput(
           // explanation instead of "I don't see a document".
           pendingContentParts.push({
             type: 'input_text',
-            text: `[Unsupported inline media type: ${placeholderMimeType(mimeType)}]`,
+            text: `[Unsupported inline media type: ${placeholderMimeType(part.inlineData.mimeType)}]`,
           });
         }
       }
 
       if ('fileData' in part && part.fileData && role === 'user') {
-        pendingContentParts.push({
-          type: 'input_text',
-          text: `[Unsupported file reference: ${placeholderMimeType(part.fileData.mimeType)}]`,
-        });
+        const converted = convertFileDataToResponsesPart(
+          part.fileData,
+          options,
+        );
+        if (converted.ok) {
+          pendingContentParts.push(converted.part);
+        } else if (converted.reason === 'unsupported_modality') {
+          pendingContentParts.push(
+            unsupportedModalityPlaceholder(
+              converted.modality,
+              part.fileData.displayName,
+              part.fileData.mimeType,
+              request.model,
+            ),
+          );
+        } else {
+          pendingContentParts.push({
+            type: 'input_text',
+            text: `[Unsupported file reference: ${placeholderMimeType(part.fileData.mimeType)}]`,
+          });
+        }
       }
     }
     flushPendingMessage();

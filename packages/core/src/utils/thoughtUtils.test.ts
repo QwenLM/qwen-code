@@ -10,6 +10,7 @@ import {
   createOpenAIReasoningThoughtPart,
   getThoughtSummary,
   isResponsesReasoningSignature,
+  parseResponsesReasoningSignature,
   parseThought,
 } from './thoughtUtils.js';
 
@@ -142,6 +143,19 @@ describe('isResponsesReasoningSignature', () => {
 
   it('recognizes a Responses reasoning replay payload', () => {
     expect(isResponsesReasoningSignature(replayPayload)).toBe(true);
+    expect(parseResponsesReasoningSignature(replayPayload)).toEqual({
+      id: 'rs_68c6c0c9ff5c8191a29b2e78c1a40c83',
+      encrypted_content: 'gAAAAABvcmVhc29uaW5nLXJlcGxheS1wYXlsb2Fk',
+    });
+    const plaintextPayload = JSON.stringify({
+      id: 'rs_plain_1',
+      plaintext: true,
+    });
+    expect(isResponsesReasoningSignature(plaintextPayload)).toBe(true);
+    expect(parseResponsesReasoningSignature(plaintextPayload)).toEqual({
+      id: 'rs_plain_1',
+      plaintext: true,
+    });
   });
 
   it('recognizes a payload with leading whitespace', () => {

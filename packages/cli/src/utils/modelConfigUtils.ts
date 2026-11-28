@@ -31,7 +31,7 @@ import { sanitizeProviderBaseUrl } from './acpModelUtils.js';
  */
 const AUTH_ENV_MODEL_VARS: Record<AuthType, string[]> = {
   [AuthType.USE_OPENAI]: ['OPENAI_MODEL', 'QWEN_MODEL'],
-  [AuthType.USE_OPENAI_RESPONSES]: ['OPENAI_MODEL'],
+  [AuthType.USE_OPENAI_RESPONSES]: ['OPENAI_MODEL', 'QWEN_MODEL'],
   [AuthType.USE_GEMINI]: ['GEMINI_MODEL'],
   [AuthType.USE_VERTEX_AI]: ['GOOGLE_MODEL'],
   [AuthType.USE_ANTHROPIC]: ['ANTHROPIC_MODEL'],
@@ -226,12 +226,14 @@ export function getAuthTypeFromEnv(
     return AuthType.QWEN_OAUTH;
   }
 
+  const wantsResponses =
+    env['OPENAI_WIRE_API']?.trim().toLowerCase() === 'responses';
   if (
     env['OPENAI_API_KEY'] &&
     (env['OPENAI_MODEL'] || env['QWEN_MODEL']) &&
-    env['OPENAI_BASE_URL']
+    (env['OPENAI_BASE_URL'] || wantsResponses)
   ) {
-    return AuthType.USE_OPENAI;
+    return wantsResponses ? AuthType.USE_OPENAI_RESPONSES : AuthType.USE_OPENAI;
   }
 
   if (env['GEMINI_API_KEY'] && env['GEMINI_MODEL']) {
@@ -264,7 +266,7 @@ export function getAuthTypeFromEnv(
  * - argv.model > settings.model.name > auth-specific env model vars
  *
  * Env var mapping by auth type (mirrors core's AUTH_ENV_MAPPINGS):
- * - USE_OPENAI: OPENAI_MODEL, QWEN_MODEL
+ * - USE_OPENAI / USE_OPENAI_RESPONSES: OPENAI_MODEL, QWEN_MODEL
  * - USE_GEMINI: GEMINI_MODEL
  * - USE_VERTEX_AI: GOOGLE_MODEL
  * - USE_ANTHROPIC: ANTHROPIC_MODEL

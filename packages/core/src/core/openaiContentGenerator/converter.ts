@@ -24,6 +24,11 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 import { markToolCallArgumentsIncomplete } from '../incomplete-tool-call-args.js';
 import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import {
+  normalizeMediaMimeType,
+  resolveAudioMimeAndFormat,
+  stripBase64DataUriPrefix,
+} from '../../utils/media-mime.js';
+import {
   estimateTextTokens,
   estimateTextTokenUnits,
   TOKEN_ESTIMATE_UNITS_PER_TOKEN,
@@ -1030,9 +1035,10 @@ function createMediaContentPart(
   const { modalities, imageDetail } = requestContext;
 
   if (part.inlineData?.mimeType && part.inlineData?.data) {
-    const mimeType = part.inlineData.mimeType;
+    const rawMimeType = part.inlineData.mimeType;
+    const mimeType = normalizeMediaMimeType(rawMimeType) ?? rawMimeType;
     const mediaType = getMediaType(mimeType);
-    const displayName = part.inlineData.displayName || mimeType;
+    const displayName = part.inlineData.displayName || rawMimeType;
 
     if (mediaType === 'image') {
       if (!modalities.image) {
@@ -1080,11 +1086,20 @@ function createMediaContentPart(
       }
       const format = getAudioFormat(mimeType);
       if (format) {
+        const rawData = part.inlineData.data;
+        let data: string;
+        if (requestContext.useAudioDataUri !== false) {
+          data = rawData.startsWith('data:')
+            ? rawData
+            : `data:${mimeType};base64,${rawData}`;
+        } else {
+          data = stripBase64DataUriPrefix(rawData);
+        }
         return {
           type: 'input_audio' as const,
           input_audio: {
-            data: `data:${mimeType};base64,${part.inlineData.data}`,
-            // DashScope accepts flac/ogg/m4a beyond the OpenAI SDK's
+            data,
+            // DashScope accepts flac/ogg/m4a/aac beyond the OpenAI SDK's
             // wav|mp3 union; the request wire format is identical.
             format: format as 'wav' | 'mp3',
           },
@@ -1110,14 +1125,15 @@ function createMediaContentPart(
 
     return {
       type: 'text' as const,
-      text: `Unsupported inline media type: ${mimeType} (${displayName}).`,
+      text: `Unsupported inline media type: ${rawMimeType} (${displayName}).`,
     };
   }
 
   if (part.fileData?.mimeType && part.fileData?.fileUri) {
     const filename = part.fileData.displayName || 'file';
     const fileUri = part.fileData.fileUri;
-    const mimeType = part.fileData.mimeType;
+    const rawMimeType = part.fileData.mimeType;
+    const mimeType = normalizeMediaMimeType(rawMimeType) ?? rawMimeType;
     const mediaType = getMediaType(mimeType);
 
     if (mediaType === 'image') {
@@ -1238,26 +1254,23 @@ function getMediaType(mimeType: string): 'image' | 'audio' | 'video' | 'file' {
 }
 
 /**
- * Audio formats the DashScope input_audio channel accepts. Kept in
+ * Audio formats accepted on the Chat Completions `input_audio` channel. Kept in
  * lockstep with the omni recognizer's audio sniff set — an upload the
  * recognizer accepts must never textify here after paying for transfer.
  *
- * flac/ogg/m4a are a DashScope acceptance extension beyond the OpenAI
- * SDK's wav|mp3 union, applied unconditionally because RequestContext
- * carries no provider identity to scope on. The trade is deliberate:
- * a non-DashScope endpoint that rejects the format returns an explicit
- * 400, whereas textifying would silently drop the audio. Revisit if a
- * provider flag ever lands on RequestContext.
+ * `flac`/`ogg`/`m4a`/`aac` extend beyond the OpenAI SDK's `wav|mp3` union and
+ * remain accepted regardless of `RequestContext.useAudioDataUri`, because many
+ * OpenAI-compatible servers (DashScope, SGLang, vLLM) support wider audio
+ * codecs. The trade is deliberate: a stricter endpoint that rejects an extended
+ * format returns an explicit 400, whereas textifying would silently drop the
+ * user's audio.
  */
 function getAudioFormat(
   mimeType: string,
-): 'wav' | 'mp3' | 'flac' | 'ogg' | 'm4a' | null {
-  if (mimeType.includes('wav')) return 'wav';
-  if (mimeType.includes('mp3') || mimeType.includes('mpeg')) return 'mp3';
-  if (mimeType.includes('flac')) return 'flac';
-  if (mimeType.includes('ogg')) return 'ogg';
-  if (mimeType === 'audio/mp4' || mimeType.includes('m4a')) return 'm4a';
-  return null;
+): 'wav' | 'mp3' | 'flac' | 'ogg' | 'm4a' | 'aac' | null {
+  const resolved = resolveAudioMimeAndFormat(mimeType);
+  if (!resolved || resolved.format === 'webm') return null;
+  return resolved.format;
 }
 
 function isContentObject(

@@ -4475,6 +4475,27 @@ describe('LlmChat', async () => {
       );
     });
 
+    it('should preserve two consecutive plaintext Responses reasoning episodes as separate signed parts', async () => {
+      const sigA = JSON.stringify({ id: 'rs_plain_1', plaintext: true });
+      const sigB = JSON.stringify({ id: 'rs_plain_2', plaintext: true });
+      await expectConsolidated(
+        [
+          thought('plain thought 1'),
+          sig(sigA),
+          thought('plain thought 2'),
+          sig(sigB),
+          toolCall('call1'),
+        ],
+        [
+          signed('plain thought 1', sigA),
+          signed('plain thought 2', sigB),
+          toolCall('call1'),
+        ],
+        'responses-plaintext-episodes',
+        'p-responses-plaintext-episodes',
+      );
+    });
+
     it.each([
       ['', ''],
       ['', 'second summary'],
