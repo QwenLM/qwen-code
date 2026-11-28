@@ -30,14 +30,14 @@ final class WorkspaceStorageKindGuard {
     }
 
     static void requireLocalAlias(JdbcTemplate jdbc, String tenantId, String storageId) {
-        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE tenant_id = ? AND storage_id = ? AND storage_kind IN ('SSH_LOCAL', 'EXTERNAL')",
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE tenant_id = ? AND storage_id = ? AND storage_kind IN ('SSH_LOCAL', 'EXTERNAL', 'EPHEMERAL')",
                 Long.class, tenantId, storageId) != 0) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }
 
     static void requireExecutionAlias(JdbcTemplate jdbc, String tenantId, String storageId) {
-        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE tenant_id = ? AND storage_id = ? AND storage_kind = 'EXTERNAL'",
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE tenant_id = ? AND storage_id = ? AND storage_kind IN ('EXTERNAL', 'EPHEMERAL')",
                 Long.class, tenantId, storageId) != 0) {
             throw WorkspaceExecutionStore.unavailable();
         }
