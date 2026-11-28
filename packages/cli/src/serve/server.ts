@@ -2476,7 +2476,7 @@ export function createServeApp(
   // PRIMARY gate is a pass-through (the bearer gate authenticates there);
   // the Local Control listener keeps its own Host gate whatever the primary
   // bind is.
-  app.use(hostAllowlist(opts.hostname, getPort));
+  app.use(hostAllowlist(opts.hostname));
 
   installRemoteSelfOriginMiddleware(
     app,

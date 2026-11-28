@@ -42,6 +42,7 @@ import {
 import {
   canonicalHost,
   formatHostForAuthority,
+  hostHeaderMatchesLoopbackBind,
   isLoopbackBind,
 } from '../loopback-binds.js';
 import {
@@ -1714,10 +1715,11 @@ export function mountAcpHttp(
         !upgradeCredentials.isOpen(upgradeListenerIdentity);
 
       // Host allowlist: mirror REST surface's hostAllowlist middleware
-      // (auth.ts:196). Prevents DNS-rebinding attacks where a malicious
+      // (auth.ts). Prevents DNS-rebinding attacks where a malicious
       // domain resolves to 127.0.0.1 and the browser sends the
-      // attacker's Host header. Match the full host:port string like
-      // the REST middleware does; extract port from the socket.
+      // attacker's Host header. Match the Host name only — the port is
+      // ignored — so a port-forwarding hop (#12059) is not rejected
+      // before the bearer check can run.
       if (upgradeListenerIdentity.kind !== 'primary') {
         const authority = upgradeListenerIdentity.authority;
         const browserHost =
@@ -1739,30 +1741,14 @@ export function mountAcpHttp(
         fromLoopback &&
         (managedTerminalUpgrade !== undefined || !authenticatedRemoteBind)
       ) {
-        const allowed = new Set([
-          `localhost:${localPort}`,
-          `127.0.0.1:${localPort}`,
-          `[::1]:${localPort}`,
-          `host.docker.internal:${localPort}`,
-        ]);
-        if (opts.hostname && isLoopbackBind(opts.hostname)) {
-          allowed.add(`${formatHostForAuthority(opts.hostname)}:${localPort}`);
-        }
-        // RFC 7230 §5.4: browsers omit the port suffix when it matches the
-        // scheme default (http→80, https→443). On TLS/port 443 the browser
-        // sends `Host: localhost`, which won't match `localhost:443` and
-        // every WS upgrade is rejected. Mirror the REST host allowlist
-        // (auth.ts) and accept the port-less forms on default ports.
-        if (localPort === 80 || localPort === 443) {
-          allowed.add('localhost');
-          allowed.add('127.0.0.1');
-          allowed.add('[::1]');
-          allowed.add('host.docker.internal');
-          if (opts.hostname && isLoopbackBind(opts.hostname)) {
-            allowed.add(formatHostForAuthority(opts.hostname));
-          }
-        }
-        if (!allowed.has(host)) {
+        if (
+          !hostHeaderMatchesLoopbackBind(
+            host,
+            opts.hostname && isLoopbackBind(opts.hostname)
+              ? opts.hostname
+              : undefined,
+          )
+        ) {
           logReject(`host-not-allowed ${host || '(missing)'}`);
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
           socket.destroy();
