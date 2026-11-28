@@ -799,7 +799,7 @@ export const HOSTED_WORKSPACE_EXTERNAL_SHELL_TOOLS: FunctionDeclaration[] = [
 const HOSTED_GLOB_TOOL: FunctionDeclaration = {
   name: 'glob',
   description:
-    'Find files by name pattern in the remote Workspace, for example "**/*.ts". Returns paths relative to the saved Session working directory, sorted by modification time (newest first).',
+    'Find files and directories by name pattern in the remote Workspace, for example "**/*.ts". Returns paths relative to the saved Session working directory, sorted by modification time (newest first).',
   parametersJsonSchema: {
     type: 'object',
     properties: {

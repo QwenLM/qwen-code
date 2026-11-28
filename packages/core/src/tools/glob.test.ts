@@ -118,6 +118,7 @@ describe('GlobTool', () => {
           fullpath: () =>
             path.join(tempRootDir, `${prefix}${fileNumber}.${extension}`),
           mtimeMs: baseMtimeMs + fileNumber,
+          isDirectory: () => false,
         } as unknown as GlobResultPath;
       }
     }
@@ -176,6 +177,47 @@ describe('GlobTool', () => {
         'No files found matching pattern "*.nonexistent"',
       );
       expect(result.returnDisplay).toBe('No files found');
+    });
+
+    it('should match a real directory by name', async () => {
+      // `nodir: true` used to drop this: a "does the directory exist" probe
+      // answered "No files found", which the model reads as proof of absence.
+      expectFound(await run({ pattern: 'sub' }), 1, 'sub');
+    });
+
+    it('reports a directory match in the same message shape the docs quote', async () => {
+      // docs/developers/tools/file-system.md §5 shows this exact wording, so a
+      // change to the header or the separator has to update the page too.
+      const result = await run({ pattern: 'sub' });
+
+      expect(result.llmContent).toBe(
+        `Found 1 file(s) matching "sub" in the workspace directory, sorted by modification time (newest first):\n---\n${path.join(tempRootDir, 'sub')}`,
+      );
+    });
+
+    it('should match real and symlinked directories alike', async () => {
+      await fs.symlink(
+        path.join(tempRootDir, 'sub'),
+        path.join(tempRootDir, 'linked'),
+        'dir',
+      );
+
+      expectFound(await run({ pattern: 'l*' }), 1, 'linked');
+      expectFound(await run({ pattern: 's*' }), 1, 'sub');
+    });
+
+    it('gives the same answer for a directory reached by name and by path', async () => {
+      const byName = await run({ pattern: 'sub' });
+      const byPath = await run({ pattern: 'sub', path: '.' });
+
+      expect(byName.resultFilePaths).toEqual(byPath.resultFilePaths);
+      expect(byName.resultFilePaths).toEqual([path.join(tempRootDir, 'sub')]);
+      // The location phrase is part of the tool contract: a path-scoped call
+      // names the directory it searched, a path-less one never claims to.
+      expect(partListUnionToString(byPath.llmContent)).toContain(
+        `within ${path.join(tempRootDir)}`,
+      );
+      expect(partListUnionToString(byName.llmContent)).not.toContain('within');
     });
 
     it('should find files with special characters in the name', async () => {
@@ -652,6 +694,55 @@ describe('GlobTool', () => {
       } finally {
         await fs.rm(externalDir, { recursive: true, force: true });
       }
+    });
+
+    it('keeps a gitignored directory out of the results now that directories match', async () => {
+      // Directories are reported as matches, so a directory-only rule must
+      // still hide one. The post-filter appends the trailing '/' the way the
+      // traversal predicate does, which is what this asserts.
+      await put('.gitignore', 'builddir/\n');
+      await mkdirp('builddir');
+      await mkdirp('plaindir');
+
+      expectFound(await runFresh({ pattern: 'plaindir' }), 1, 'plaindir');
+
+      const service = new FileDiscoveryService(tempRootDir);
+      const options = { respectGitIgnore: true, respectQwenIgnore: true };
+      expect(service.filterFiles(['builddir'], options)).toEqual(['builddir']);
+      expect(service.filterFiles(['builddir/'], options)).toEqual([]);
+    });
+
+    it('keeps an ignored directory out when the traversal prune fails open', async () => {
+      // The post-filter is the source of truth when a prune throws, so it has
+      // to judge a directory the same way the prune would.
+      await put('.gitignore', 'builddir/\n');
+      await mkdirp('builddir');
+      const ignoreSpy = vi
+        .spyOn(FileDiscoveryService.prototype, 'shouldIgnoreFile')
+        .mockReturnValue(false);
+
+      try {
+        const result = await runFresh({ pattern: 'builddir' });
+        expect(result.llmContent).toContain(
+          'No files found matching pattern "builddir"',
+        );
+      } finally {
+        ignoreSpy.mockRestore();
+      }
+    });
+
+    it('answers No files found for a directory an ignore rule hides', async () => {
+      // The docs call `glob 'src'` an existence probe and qualify it: a hidden
+      // directory still answers absent. This is the case an agent hits most
+      // often (node_modules, dist), and it is the one the docs carve out.
+      await put('.gitignore', 'builddir/\n');
+      await mkdirp('builddir');
+
+      const result = await runFresh({ pattern: 'builddir' });
+
+      expect(result.llmContent).toContain(
+        'No files found matching pattern "builddir"',
+      );
     });
 
     it('honors gitignore negation re-inclusion during traversal', async () => {

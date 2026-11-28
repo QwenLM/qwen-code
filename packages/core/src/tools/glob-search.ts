@@ -20,6 +20,7 @@ const debugLogger = createDebugLogger('GLOB');
 export interface GlobPath {
   fullpath(): string;
   mtimeMs?: number;
+  isDirectory?: () => boolean;
 }
 
 export interface GlobDirectorySearch {
@@ -140,15 +141,25 @@ export async function searchGlobDirectory(
 
   const isAllowedByFileFilters = (entry: GlobPath): boolean => {
     const relativePath = path.relative(projectRoot, entry.fullpath());
+    // Same trailing '/' as isTraversalIgnored: a directory-only rule such as
+    // `builddir/` does not match the bare path, and this filter is the one a
+    // fail-open prune falls back on.
+    const ignorePath = entry.isDirectory?.()
+      ? relativePath + '/'
+      : relativePath;
     return (
-      fileService.filterFiles([relativePath], fileFilteringOptions).length > 0
+      fileService.filterFiles([ignorePath], fileFilteringOptions).length > 0
     );
   };
 
   const stream = globStream(effectivePattern, {
     cwd: searchDir,
     withFileTypes: true,
-    nodir: true,
+    // Directories are matches too: an agent asking whether a tool or package
+    // directory exists reads "No files found" as proof of absence. `nodir`
+    // dropped every real directory while a symlink to one survived, so the
+    // same probe answered differently depending on how the entry was stored.
+    nodir: false,
     stat: true,
     nocase: true,
     dot: true,
