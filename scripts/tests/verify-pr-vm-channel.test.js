@@ -1562,34 +1562,42 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
         server.listen(socketPath, resolve);
       });
       try {
-        for (const client of ['python', 'node']) {
-          const outDir = join(root, client);
-          mkdirSync(outDir);
-          writeFileSync(join(outDir, 'sentinel.txt'), 'keep');
-          mkdirSync(join(outDir, 'entropy.hex'));
-          if (client === 'python') {
-            const result = await runAsync('python3', [
-              GUEST_VSOCK_PY,
-              'fetch-inputs',
-              '--unix',
-              socketPath,
-              '--out',
-              outDir,
-            ]);
-            expect(result.status, result.stderr).toBe(1);
-            expect(result.stderr).toContain('entropy.hex');
-          } else {
-            await expect(
-              fetchRoundInputFromSocket({ socketPath, outDir }),
-            ).rejects.toThrow('entropy.hex');
+        for (const blockedFile of [
+          'round.bundle',
+          'manifest.json',
+          'entropy.hex',
+        ]) {
+          for (const client of ['python', 'node']) {
+            const outDir = join(root, `${client}-${blockedFile}`);
+            mkdirSync(outDir);
+            writeFileSync(join(outDir, 'sentinel.txt'), 'keep');
+            mkdirSync(join(outDir, blockedFile));
+            if (client === 'python') {
+              const result = await runAsync('python3', [
+                GUEST_VSOCK_PY,
+                'fetch-inputs',
+                '--unix',
+                socketPath,
+                '--out',
+                outDir,
+              ]);
+              expect(result.status, result.stderr).toBe(1);
+              expect(result.stderr).toContain(blockedFile);
+            } else {
+              await expect(
+                fetchRoundInputFromSocket({ socketPath, outDir }),
+              ).rejects.toThrow(blockedFile);
+            }
+            expect(requests).toEqual(['GET manifest\n', 'GET bundle\n']);
+            expect(readdirSync(outDir).sort()).toEqual(
+              [blockedFile, 'sentinel.txt'].sort(),
+            );
+            expect(readdirSync(join(outDir, blockedFile))).toEqual([]);
+            expect(readFileSync(join(outDir, 'sentinel.txt'), 'utf8')).toBe(
+              'keep',
+            );
+            requests.length = 0;
           }
-          expect(requests).toEqual(['GET manifest\n', 'GET bundle\n']);
-          expect(readdirSync(outDir)).toEqual(['entropy.hex', 'sentinel.txt']);
-          expect(readdirSync(join(outDir, 'entropy.hex'))).toEqual([]);
-          expect(readFileSync(join(outDir, 'sentinel.txt'), 'utf8')).toBe(
-            'keep',
-          );
-          requests.length = 0;
         }
       } finally {
         await new Promise((resolve) => server.close(resolve));
@@ -1789,14 +1797,22 @@ threading.Thread = StartFailureThread
           await expect
             .poll(() => bridge.exitCode, { timeout: 5_000 })
             .toBeNull();
+          const capMatch = readFileSync(GUEST_VSOCK_PY, 'utf8').match(
+            /^MAX_BRIDGE_CONNECTIONS\s*=\s*(\d+)\s*$/m,
+          );
+          expect(capMatch).not.toBeNull();
+          const maxBridgeConnections = Number(capMatch[1]);
+          const heldCount = maxBridgeConnections - 1;
+          const totalRecoveredClients = heldCount + 2;
+          const totalRecoveredRelays = totalRecoveredClients * 2;
           const held = [];
           // Leave one slot: a leaked slot turns the next healthy echo into a refusal.
-          for (let index = 0; index < 63; index += 1) {
+          for (let index = 0; index < heldCount; index += 1) {
             held.push(await connectClient());
           }
           await expect
             .poll(() => upstreamSockets.size, { timeout: 5_000 })
-            .toBe(63);
+            .toBe(heldCount);
           for (let index = 0; index < 2; index += 1) {
             const completedClientsBeforeHealthy = completedClients();
             const healthy = await connectClient();
@@ -1833,7 +1849,7 @@ threading.Thread = StartFailureThread
             phase = `healthy-close-${index}`;
             await healthy.closed;
             // Wait for handle_bridge_client (strictly after on_done()/finish_client())
-            // rather than relay_half completion so the 64th slot is returned.
+            // rather than relay_half completion so the final slot is returned.
             await expect
               .poll(completedClients, { timeout: 5_000 })
               .toBe(completedClientsBeforeHealthy + 1);
@@ -1845,10 +1861,10 @@ threading.Thread = StartFailureThread
             .toBe(0);
           await expect
             .poll(completedClients, { timeout: 5_000 })
-            .toBe(failedClientsBeforeRecovery + 65);
+            .toBe(failedClientsBeforeRecovery + totalRecoveredClients);
           await expect
             .poll(completedRelays, { timeout: 5_000 })
-            .toBe(failedRelaysBeforeRecovery + 130);
+            .toBe(failedRelaysBeforeRecovery + totalRecoveredRelays);
           expect(bridge.exitCode).toBeNull();
           expect(stderr).toBe('');
         } catch (error) {
@@ -1949,7 +1965,7 @@ def socket_identity(sock):
         identity['error'] = str(error)
     return identity
 
-counts = {'accepted': 0, 'handled': 0, 'rejected': 0}
+counts = {'accepted': 0, 'handled': 0, 'rejected': 0, 'listenBacklog': None}
 counts_lock = threading.Lock()
 snapshot_lock = threading.Lock()
 last_written_total = -1
@@ -1989,7 +2005,12 @@ def record(kind):
 class ScannedSocket(socket.socket):
     def listen(self, *args):
         result = super().listen(*args)
-        trace_event('listen', fd=self.fileno(), listener=self.getsockname())
+        backlog = args[0] if args else None
+        with counts_lock:
+            counts['listenBacklog'] = backlog
+            current = dict(counts)
+        write_snapshot(current)
+        trace_event('listen', fd=self.fileno(), listener=self.getsockname(), backlog=backlog)
         return result
 
     def accept(self):
@@ -2174,6 +2195,7 @@ atexit.register(write_final_counts)
       };
       try {
         const faultEpochBefore = readEpoch();
+        expect(faultEpochBefore.listenBacklog).toBeGreaterThanOrEqual(128);
         expect(upstream.listening).toBe(false);
         expect(existsSync(upstreamPath)).toBe(false);
         await Promise.all(
@@ -2244,59 +2266,57 @@ atexit.register(write_final_counts)
             threadDumpError = dumpError.message;
           }
         }
-        const directory = mkdtempSync('/tmp/qc-bridge-attribution-');
-        const peerTracePath = join(root, 'python-attribution.jsonl');
-        let currentEpoch;
         try {
-          currentEpoch = readEpoch();
-        } catch (epochError) {
-          currentEpoch = { readError: epochError.message };
-        }
-        const report = {
-          phase: 'before-cleanup',
-          error: error.stack,
-          bridgePid: bridge.pid,
-          address,
-          root,
-          epoch: currentEpoch,
-          epochBytes: existsSync(epochPath)
-            ? readFileSync(epochPath, 'utf8')
-            : null,
-          upstream: {
-            active: upstreamActive,
-            peak: upstreamPeak,
-            connections: upstreamConnections,
-          },
-          nodeEvents,
-          clientMeta: Array.from(clientMeta.values()).map(
-            ({ client, ...meta }) => ({
-              ...meta,
-              destroyed: client.destroyed,
-            }),
-          ),
-          peerEvents: existsSync(peerTracePath)
-            ? readFileSync(peerTracePath, 'utf8')
-            : null,
-          threadDump: existsSync(threadDumpPath)
-            ? readFileSync(threadDumpPath, 'utf8')
-            : null,
-          threadDumpError,
-          stderr,
-        };
-        try {
+          const directory = mkdtempSync('/tmp/qc-bridge-attribution-');
+          const peerTracePath = join(root, 'python-attribution.jsonl');
+          let currentEpoch;
+          try {
+            currentEpoch = readEpoch();
+          } catch (epochError) {
+            currentEpoch = { readError: epochError.message };
+          }
+          const report = {
+            phase: 'before-cleanup',
+            error: error.stack,
+            bridgePid: bridge.pid,
+            address,
+            root,
+            epoch: currentEpoch,
+            epochBytes: existsSync(epochPath)
+              ? readFileSync(epochPath, 'utf8')
+              : null,
+            upstream: {
+              active: upstreamActive,
+              peak: upstreamPeak,
+              connections: upstreamConnections,
+            },
+            nodeEvents,
+            clientMeta: Array.from(clientMeta.values()).map(
+              ({ client, ...meta }) => ({
+                ...meta,
+                destroyed: client?.destroyed ?? null,
+              }),
+            ),
+            peerEvents: existsSync(peerTracePath)
+              ? readFileSync(peerTracePath, 'utf8')
+              : null,
+            threadDump: existsSync(threadDumpPath)
+              ? readFileSync(threadDumpPath, 'utf8')
+              : null,
+            threadDumpError,
+            stderr,
+          };
           writeFileSync(
             join(directory, 'failure.json'),
             `${JSON.stringify(report, null, 2)}\n`,
             { mode: 0o600 },
           );
+          console.error(`bridge failure attribution: ${directory}`);
         } catch (dumpError) {
-          throw new AggregateError(
-            [error, dumpError],
-            'bridge test and attribution dump both failed',
-            { cause: error },
+          console.error(
+            `bridge failure attribution dump failed: ${dumpError.message}`,
           );
         }
-        console.error(`bridge failure attribution: ${directory}`);
         throw error;
       } finally {
         for (const client of clients) client.destroy();

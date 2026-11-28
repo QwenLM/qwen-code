@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { DAEMON_APPROVAL_MODES } from '../test/sidebarHarness';
+import { DAEMON_COMPOSER_INTEGRATIONS } from './composer/daemon-composer-integrations';
 import {
   DaemonHttpError,
   GOAL_PAUSE_REASON_COMMAND,
@@ -2163,6 +2164,9 @@ describe('ChatPane', () => {
       user: 3,
       workspace: 5,
     });
+    expect(latestChatEditorProps.composerIntegrations).toBe(
+      DAEMON_COMPOSER_INTEGRATIONS,
+    );
   });
 
   it('binds split Voice to the legacy primary workspace without a workspace list', () => {
