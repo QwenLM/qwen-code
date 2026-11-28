@@ -60,6 +60,9 @@ public interface HarnessConnector extends AutoCloseable {
 
     public default boolean supportsSideQueries() { return false; }
 
+    /** Whether the Harness can push an admitted Turn's events (event-ingest/1). */
+    public default boolean supportsEventIngest() { return false; }
+
     /** Selects an instance without acquiring or changing Session placement. */
     public default SideQueryTarget prepareSideQuery() {
         throw new UnsupportedOperationException("Side queries are unavailable");
@@ -294,6 +297,12 @@ public interface HarnessConnector extends AutoCloseable {
 
     public Admission submit(String tenantId, String sessionId, String promptId,
             List<Map<String, Object>> input, String payloadDigest);
+
+    /** Submits and asks the Harness to push the Turn's events; see {@link #supportsEventIngest()}. */
+    public default Admission submit(String tenantId, String sessionId, String promptId,
+            List<Map<String, Object>> input, String payloadDigest, String ingestTurnId) {
+        throw new UnsupportedOperationException("Hosted event ingest is unavailable");
+    }
 
     public default Admission continueManagedRuntime(String tenantId,
             String sessionId, String promptId, String checkpointId,

@@ -890,6 +890,11 @@
       "zh": "允许 Hosted Harness 在 Session 唯一活跃的 Turn 正等待可恢复的审批或提问 Action 时挂起该 Session。Session Store 会在 writer grant 中公告该能力，挂起时的 seal 携带停靠 Turn 证书，控制面据此释放派发租约，直到决定、取消、审批模式变更或到期。需要同时开启 `qwen.managed-agent.wake-dispatch.enabled`，只开启 Action parking 会在启动时拒绝。默认关闭。关闭后不再产生新的停靠；已停靠的 Turn 仍经现有派发扫描恢复。",
       "type": "boolean"
     },
+    "qwen.managed-agent.event-ingest.enabled": {
+      "en": "Hands a freshly submitted Turn's event delivery to the Hosted Harness that admitted it. When the Session Store is enabled and the Harness advertises `event-ingest/1`, the dispatcher records the admission, gives the Turn's dispatch lease to that Harness and opens no event stream; the Harness pushes the committed events to any server instance through the Session Store and renews the lease with each request. Recovery, continuation and cancellation keep the stream, and a cancel takes a Harness-held Turn back at once. Turn it on only after every server instance serves the ingest route. Defaults off. Disabling it affects new admissions only; Turns the Harness already holds finish through ingest.",
+      "zh": "把一次全新提交的 Turn 的事件投递交给受理它的 Hosted Harness。在 Session Store 已开启且 Harness 声明 `event-ingest/1` 时，派发器记录受理后把该 Turn 的派发租约交给这个 Harness，不再打开事件流；Harness 经 Session Store 把已提交的事件推送给任一服务端实例，每次请求都会续租。恢复、续跑和取消仍走事件流，取消会立即收回 Harness 持有的 Turn。请在所有服务端实例都提供 ingest 路由之后再开启。默认关闭。关闭只影响新的受理；Harness 已持有的 Turn 仍经 ingest 完成。",
+      "type": "boolean"
+    },
     "qwen.managed-agent.wake-dispatch.enabled": {
       "en": "Lets a Hosted Harness suspend an idle Session whose only pending inputs are deferred, unattempted wake inputs. The Session Store advertises the capability in its writer grants, the suspension seal stamps the head with the earliest due time, and the wake recovery scan loads the Session when that time arrives without replaying its journal. Defaults off. Disabling it stops new such suspensions; heads already stamped are still delivered when due.",
       "zh": "允许 Hosted Harness 挂起一个空闲 Session，前提是它的待处理输入全部是延后到期且未被尝试过的唤醒输入。Session Store 会在 writer grant 中公告该能力，挂起时的 seal 会在 head 上记下最早的到期时间，唤醒恢复扫描在到期时加载该 Session，无需重放 journal。默认关闭。关闭后不再产生新的此类挂起；已带戳的 head 仍会在到期时投递。",
