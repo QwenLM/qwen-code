@@ -897,11 +897,20 @@ export class ModelsConfig {
    * outlives the model it described and is sent to the manually configured one.
    */
   private clearProviderSourcedConfig(): void {
+    const registryModel =
+      this.generationConfigSources['model']?.kind === 'modelProviders';
     for (const field of PROVIDER_SOURCED_FIELDS) {
       const source = this.generationConfigSources[field];
+      // Built-in models have no user provider entry to record in `via`. Their
+      // computed/default generation fields still belong to the selected model.
+      const ownedRegistryDefault =
+        registryModel &&
+        (source?.kind === 'computed' || source?.kind === 'default') &&
+        MODEL_GENERATION_CONFIG_FIELDS.some((key) => key === field);
       if (
         source?.kind === 'modelProviders' ||
-        source?.via?.kind === 'modelProviders'
+        source?.via?.kind === 'modelProviders' ||
+        ownedRegistryDefault
       ) {
         // Clear the value - let other layers resolve it
         delete (this._generationConfig as Record<string, unknown>)[field];

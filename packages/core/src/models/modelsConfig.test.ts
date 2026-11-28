@@ -1411,6 +1411,30 @@ describe('ModelsConfig', () => {
     ).toBeUndefined();
   });
 
+  it('clears built-in registry modalities when credentials select a manual model', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.QWEN_OAUTH,
+    });
+    await modelsConfig.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
+    expect(modelsConfig.getGenerationConfig().modalities).toMatchObject({
+      image: true,
+    });
+    expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
+      kind: 'computed',
+      detail: 'auto-detected from model',
+    });
+
+    modelsConfig.updateCredentials({
+      apiKey: 'manual-api-key',
+      model: 'text-only-llm',
+    });
+
+    expect(modelsConfig.getGenerationConfig().modalities).toBeUndefined();
+    expect(
+      modelsConfig.getGenerationConfigSources()['modalities'],
+    ).toBeUndefined();
+  });
+
   it('labels only the modality value as auto-detected, not the filed defaults', async () => {
     const modelsConfig = openaiConfig([entry('text-only-model', 'Text only')]);
 
