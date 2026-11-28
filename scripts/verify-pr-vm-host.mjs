@@ -160,10 +160,35 @@ export function renderVfkitSeatbeltProfile({ vfkitBin = null } = {}) {
   ].join('\n');
 }
 
+function canonicalizePreservingLeaf(absPath) {
+  const leaf = basename(absPath);
+  let cursor = dirname(absPath);
+  const tail = [];
+  while (true) {
+    try {
+      const real = realpathSync(cursor);
+      return tail.length > 0
+        ? join(real, ...tail.reverse(), leaf)
+        : join(real, leaf);
+    } catch {
+      const next = dirname(cursor);
+      if (next === cursor) return absPath;
+      tail.push(basename(cursor));
+      cursor = next;
+    }
+  }
+}
+
 function readSingleLinkFile(filePath, maxBytes = MAX_CONFIG_BYTES) {
   let fd;
   try {
-    fd = openSync(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    // O_NONBLOCK prevents blocking indefinitely if an attacker plants a FIFO.
+    fd = openSync(
+      filePath,
+      fsConstants.O_RDONLY |
+        fsConstants.O_NOFOLLOW |
+        (fsConstants.O_NONBLOCK ?? 0),
+    );
     const st = fstatSync(fd);
     if (!st.isFile()) return { error: 'non-regular', text: null };
     if (st.nlink !== 1)
@@ -218,9 +243,9 @@ function findInPath(binaryName, envPath = process.env.PATH ?? '') {
     try {
       const st = lstatSync(candidate);
       if (st.isFile() || st.isSymbolicLink()) {
-        const real = realpathSync(candidate);
-        accessSync(real, fsConstants.X_OK);
-        return real;
+        // Return the unresolved candidate so isRegularExecutable applies the
+        // same non-symlink policy to PATH discovery and explicit --*-bin flags.
+        return candidate;
       }
     } catch {
       // Try next PATH entry.
@@ -338,8 +363,21 @@ export function probeSeatbeltEnforcement({
     writeFileSync(canaryFile, `${canaryToken}\n`, { mode: 0o600 });
 
     if (profileToUse === null) {
+      let renderedProfile;
+      try {
+        renderedProfile = renderVfkitSeatbeltProfile({ vfkitBin });
+      } catch (error) {
+        return {
+          enforcing: false,
+          positiveReadOk: false,
+          positiveWriteOk: false,
+          canaryReadDenied: false,
+          outsideWriteDenied: false,
+          reasons: [`seatbelt-profile-render:${error.message}`],
+        };
+      }
       profileToUse = join(probeRoot, 'vfkit.sb');
-      writeFileSync(profileToUse, renderVfkitSeatbeltProfile({ vfkitBin }), {
+      writeFileSync(profileToUse, renderedProfile, {
         mode: 0o600,
       });
     }
@@ -761,10 +799,62 @@ function assertApprovedDestination(
   if (!isPathWithinApprovedRoots(abs, approvedRoots)) {
     throw new Error(`${label} ${abs} is outside approvedRoots`);
   }
-  if (realVault && withinDir(realVault, abs)) {
-    throw new Error(`${label} ${abs} must not reside inside vaultDir`);
+  const canonical = canonicalizePreservingLeaf(abs);
+  if (
+    realVault &&
+    (withinDir(realVault, abs) || withinDir(realVault, canonical))
+  ) {
+    throw new Error(`${label} ${canonical} must not reside inside vaultDir`);
   }
   return abs;
+}
+
+function ensureApprovedDirHierarchy(
+  label,
+  dirPath,
+  mode,
+  { approvedRoots, realVault, createdDirs = null },
+) {
+  const abs = assertApprovedDestination(
+    label,
+    dirPath,
+    approvedRoots,
+    realVault,
+  );
+  const missing = [];
+  let cursor = abs;
+  while (true) {
+    let st = null;
+    try {
+      st = lstatSync(cursor);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    if (st !== null) {
+      if (cursor === abs && (st.isSymbolicLink() || !st.isDirectory())) {
+        throw new Error(`${label} must be a real directory: ${abs}`);
+      }
+      break;
+    }
+    assertApprovedDestination(label, cursor, approvedRoots, realVault);
+    missing.push(cursor);
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+  for (let i = missing.length - 1; i >= 0; i -= 1) {
+    const nextDir = missing[i];
+    mkdirSync(nextDir, { mode });
+    if (createdDirs) createdDirs.push(nextDir);
+  }
+  const realDir = realpathSync(abs);
+  if (!isPathWithinApprovedRoots(realDir, approvedRoots)) {
+    throw new Error(`${label} escaped approvedRoots: ${realDir}`);
+  }
+  if (realVault && withinDir(realVault, realDir)) {
+    throw new Error(`${label} ${realDir} must not reside inside vaultDir`);
+  }
+  return realDir;
 }
 
 /**
@@ -781,9 +871,12 @@ export function copyIsolatedAsset(
     mode = 0o640,
     chownUid = null,
     chownGid = null,
+    createdDirs = null,
   } = {},
 ) {
-  const realVault = vaultDir ? realpathSync(resolve(vaultDir)) : null;
+  const realVault = vaultDir
+    ? canonicalizePreservingLeaf(resolve(vaultDir))
+    : null;
   const src = assertSafeSourceAsset('source asset', sourcePath, realVault);
   const absDest = assertApprovedDestination(
     'staged asset',
@@ -802,11 +895,18 @@ export function copyIsolatedAsset(
   }
 
   const parent = dirname(absDest);
-  mkdirSync(parent, { recursive: true, mode: 0o750 });
-  const realParent = realpathSync(parent);
+  const realParent = ensureApprovedDirHierarchy(
+    'staged asset parent',
+    parent,
+    0o750,
+    { approvedRoots, realVault, createdDirs },
+  );
   const safeDest = join(realParent, basename(absDest));
   if (!isPathWithinApprovedRoots(safeDest, approvedRoots)) {
     throw new Error(`staged asset parent escaped approvedRoots: ${realParent}`);
+  }
+  if (realVault && withinDir(realVault, safeDest)) {
+    throw new Error(`staged asset ${safeDest} must not reside inside vaultDir`);
   }
   try {
     lstatSync(safeDest);
@@ -895,7 +995,14 @@ export function copyIsolatedAsset(
 function writeAtomicStagedFile(
   destPath,
   content,
-  { approvedRoots, realVault, mode = 0o640, chownUid = null, chownGid = null },
+  {
+    approvedRoots,
+    realVault,
+    mode = 0o640,
+    chownUid = null,
+    chownGid = null,
+    createdDirs = null,
+  },
 ) {
   const absDest = assertApprovedDestination(
     'staged file',
@@ -910,11 +1017,18 @@ function writeAtomicStagedFile(
     if (error.code !== 'ENOENT') throw error;
   }
   const parent = dirname(absDest);
-  mkdirSync(parent, { recursive: true, mode: 0o750 });
-  const realParent = realpathSync(parent);
+  const realParent = ensureApprovedDirHierarchy(
+    'staged file parent',
+    parent,
+    0o750,
+    { approvedRoots, realVault, createdDirs },
+  );
   const safeDest = join(realParent, basename(absDest));
   if (!isPathWithinApprovedRoots(safeDest, approvedRoots)) {
     throw new Error(`staged file parent escaped approvedRoots: ${realParent}`);
+  }
+  if (realVault && withinDir(realVault, safeDest)) {
+    throw new Error(`staged file ${safeDest} must not reside inside vaultDir`);
   }
   try {
     lstatSync(safeDest);
@@ -1078,28 +1192,19 @@ export function stageLocalVmRound({
   if (!Array.isArray(approvedRoots) || approvedRoots.length === 0) {
     throw new Error('stageLocalVmRound requires non-empty approvedRoots');
   }
-  const realVault = vaultDir ? realpathSync(resolve(vaultDir)) : null;
+  const realVault = vaultDir
+    ? canonicalizePreservingLeaf(resolve(vaultDir))
+    : null;
   const createdFiles = [];
   const createdDirs = [];
+  let firecrackerJailRoot = null;
 
-  const ensureApprovedDir = (label, dirPath, mode) => {
-    const abs = assertApprovedDestination(
-      label,
-      dirPath,
+  const ensureApprovedDir = (label, dirPath, mode) =>
+    ensureApprovedDirHierarchy(label, dirPath, mode, {
       approvedRoots,
       realVault,
-    );
-    if (existsSync(abs)) {
-      const st = lstatSync(abs);
-      if (st.isSymbolicLink() || !st.isDirectory()) {
-        throw new Error(`${label} must be a real directory: ${abs}`);
-      }
-      return abs;
-    }
-    mkdirSync(abs, { recursive: true, mode });
-    createdDirs.push(abs);
-    return abs;
-  };
+      createdDirs,
+    });
 
   const cleanup = () => {
     for (let i = createdFiles.length - 1; i >= 0; i -= 1) {
@@ -1111,21 +1216,29 @@ export function stageLocalVmRound({
         // Best-effort rollback.
       }
     }
+    const seen = new Set();
     for (let i = createdDirs.length - 1; i >= 0; i -= 1) {
       const dir = createdDirs[i];
+      if (seen.has(dir)) continue;
+      seen.add(dir);
       if (!isPathWithinApprovedRoots(dir, approvedRoots)) continue;
-      try {
-        rmSync(dir, { recursive: true, force: true });
-      } catch {
-        // Best-effort rollback.
+      if (realVault && withinDir(realVault, canonicalizePreservingLeaf(dir))) {
+        continue;
       }
-      const parent = dirname(dir);
-      if (isPathWithinApprovedRoots(parent, approvedRoots)) {
+      if (firecrackerJailRoot !== null && dir === firecrackerJailRoot) {
+        // Firecracker's jailer populates chroot device nodes and binary copies
+        // inside jailRoot; clear only the per-round jailRoot we created.
         try {
-          rmdirSync(parent);
+          rmSync(dir, { recursive: true, force: true });
         } catch {
-          // Leave non-empty shared parent directories untouched.
+          // Best-effort rollback.
         }
+        continue;
+      }
+      try {
+        rmdirSync(dir);
+      } catch {
+        // Leave non-empty shared parent directories untouched.
       }
     }
   };
@@ -1142,17 +1255,22 @@ export function stageLocalVmRound({
       const uid = shouldChown ? plan.vmmUid : null;
       const gid = shouldChown ? plan.vmmGid : null;
 
+      const jailRootExisted = existsSync(resolve(plan.jailRoot));
       const jailRoot = ensureApprovedDir(
         'firecracker jailRoot',
         plan.jailRoot,
         0o750,
       );
+      if (!jailRootExisted) {
+        firecrackerJailRoot = resolve(plan.jailRoot);
+      }
       const kernel = copyIsolatedAsset(sourceKernelPath, plan.kernelPath, {
         approvedRoots,
         vaultDir,
         mode: 0o640,
         chownUid: uid,
         chownGid: gid,
+        createdDirs,
       });
       createdFiles.push(kernel.path);
 
@@ -1165,6 +1283,7 @@ export function stageLocalVmRound({
           mode: 0o640,
           chownUid: uid,
           chownGid: gid,
+          createdDirs,
         },
       );
       createdFiles.push(disk.path);
@@ -1178,6 +1297,7 @@ export function stageLocalVmRound({
           mode: 0o640,
           chownUid: uid,
           chownGid: gid,
+          createdDirs,
         },
       );
       createdFiles.push(configPath);
@@ -1191,6 +1311,7 @@ export function stageLocalVmRound({
           mode: 0o640,
           chownUid: uid,
           chownGid: gid,
+          createdDirs,
         },
       );
       createdFiles.push(consoleLogPath);
@@ -1238,6 +1359,7 @@ export function stageLocalVmRound({
       approvedRoots,
       vaultDir,
       mode: 0o600,
+      createdDirs,
     });
     createdFiles.push(kernel.path);
 
@@ -1248,6 +1370,7 @@ export function stageLocalVmRound({
         approvedRoots,
         vaultDir,
         mode: 0o600,
+        createdDirs,
       },
     );
     createdFiles.push(initramfs.path);
@@ -1259,11 +1382,15 @@ export function stageLocalVmRound({
         approvedRoots,
         vaultDir,
         mode: 0o600,
+        createdDirs,
       },
     );
     createdFiles.push(disk.path);
 
     let seatbeltProfilePath = parsed.seatbeltProfile;
+    const expectedProfile = renderVfkitSeatbeltProfile({
+      vfkitBin: parsed.vfkitBin,
+    });
     let existingProfileStat = null;
     try {
       existingProfileStat = lstatSync(seatbeltProfilePath);
@@ -1275,20 +1402,43 @@ export function stageLocalVmRound({
       }
     }
     if (existingProfileStat !== null) {
+      assertApprovedDestination(
+        'vfkit Seatbelt profile',
+        seatbeltProfilePath,
+        approvedRoots,
+        realVault,
+      );
       const check = readSingleLinkFile(seatbeltProfilePath);
       if (check.error) {
         throw new Error(
           `existing vfkit Seatbelt profile rejected (${check.error})`,
         );
       }
+      if (check.text !== expectedProfile) {
+        throw new Error(
+          'existing vfkit Seatbelt profile does not match the deny-default profile',
+        );
+      }
+      if (process.platform === 'darwin') {
+        const probe = probeSeatbeltEnforcement({
+          seatbeltProfilePath,
+          vfkitBin: parsed.vfkitBin,
+        });
+        if (!probe.enforcing) {
+          throw new Error(
+            `existing vfkit Seatbelt profile failed live enforcement probe (${probe.reasons.join(', ')})`,
+          );
+        }
+      }
     } else {
       seatbeltProfilePath = writeAtomicStagedFile(
         seatbeltProfilePath,
-        renderVfkitSeatbeltProfile({ vfkitBin: parsed.vfkitBin }),
+        expectedProfile,
         {
           approvedRoots,
           realVault,
           mode: 0o600,
+          createdDirs,
         },
       );
       createdFiles.push(seatbeltProfilePath);

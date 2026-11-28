@@ -2436,11 +2436,16 @@ async function main(argv) {
       seatbeltProfilePath: null,
       vmmUid: 65534,
       vmmGid: 65534,
+      hasProbeOnlyFlag: false,
       error: null,
     };
     const takeValue = (flag, index) => {
       const value = args[index + 1];
-      if (value === undefined || value.trim() === '') {
+      if (
+        value === undefined ||
+        value.trim() === '' ||
+        value.startsWith('--')
+      ) {
         parsed.error = `missing value for ${flag}`;
         return null;
       }
@@ -2479,30 +2484,36 @@ async function main(argv) {
         const val = takeValue(arg, i);
         if (val === null) break;
         parsed.firecrackerBin = val;
+        parsed.hasProbeOnlyFlag = true;
         i += 1;
       } else if (arg === '--jailer-bin') {
         const val = takeValue(arg, i);
         if (val === null) break;
         parsed.jailerBin = val;
+        parsed.hasProbeOnlyFlag = true;
         i += 1;
       } else if (arg === '--vfkit-bin') {
         const val = takeValue(arg, i);
         if (val === null) break;
         parsed.vfkitBin = val;
+        parsed.hasProbeOnlyFlag = true;
         i += 1;
       } else if (arg === '--seatbelt-profile') {
         const val = takeValue(arg, i);
         if (val === null) break;
         parsed.seatbeltProfilePath = val;
+        parsed.hasProbeOnlyFlag = true;
         i += 1;
       } else if (arg === '--vmm-uid') {
         const val = parsePositiveInt(arg, args[(i += 1)]);
         if (val === null) break;
         parsed.vmmUid = val;
+        parsed.hasProbeOnlyFlag = true;
       } else if (arg === '--vmm-gid') {
         const val = parsePositiveInt(arg, args[(i += 1)]);
         if (val === null) break;
         parsed.vmmGid = val;
+        parsed.hasProbeOnlyFlag = true;
       } else {
         parsed.error = `unknown option ${arg}`;
         break;
@@ -2680,6 +2691,12 @@ async function main(argv) {
   ) {
     process.stderr.write(
       'verify-pr vm-runner select: --probe cannot be combined with manual --kvm/--vfkit/--seatbelt-enforcing flags\n',
+    );
+    return 2;
+  }
+  if (!opts.useProbe && opts.hasProbeOnlyFlag) {
+    process.stderr.write(
+      'verify-pr vm-runner select: probe-only flags (--firecracker-bin/--jailer-bin/--vfkit-bin/--seatbelt-profile/--vmm-uid/--vmm-gid) require --probe\n',
     );
     return 2;
   }
