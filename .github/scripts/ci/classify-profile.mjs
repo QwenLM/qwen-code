@@ -92,6 +92,7 @@ export const TEST_READ_MARKDOWN = new Set([
   'integrations/test-failure-explorer/skills/test-failure-explorer/SKILL.md',
   'packages/cua-driver/docs/tool-output-format.md',
   'packages/cua-driver/scripts/README.md',
+  'packages/managed-agent-server/AGENTS.md',
   'packages/managed-agent-server/README.md',
   'packages/managed-agent-server/distribution/systemd/README.md',
   'packages/managed-agent-server/distribution/systemd/README.zh-CN.md',

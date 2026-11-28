@@ -53,6 +53,7 @@ import {
   REVIEW_STATE_QUERY,
   reviewState,
 } from '../../scripts/verify-pr-prepare.mjs';
+import { managedAgentCoverage } from '../../.github/scripts/managed-agent-gate-scope.mjs';
 
 const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 const hasGnuRealpath =
@@ -8566,6 +8567,187 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(labelsAt(publishStep.indexOf(trust))).toEqual(new Set(VERDICTS));
     expect(labelsAt(publishStep.lastIndexOf(marker))).toEqual(
       new Set(VERDICTS),
+    );
+  });
+
+  // The rules sit in Scope selection, the plan the agent follows, and each
+  // instance is checked against the repository so the example cannot rot.
+  function scopeRule(start, end) {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    const scope = flat.slice(
+      flat.indexOf('## Scope selection'),
+      flat.indexOf('## Method'),
+    );
+    const from = scope.indexOf(start);
+    expect(from).toBeGreaterThan(-1);
+    const to = end ? scope.indexOf(end, from) : scope.length;
+    expect(to).toBeGreaterThan(from);
+    return scope.slice(from, to);
+  }
+
+  // A green battery on a substitute runtime (H2 for MySQL, a stub for the
+  // real process, one OS for another) is not a test of a claim that lives in
+  // the real runtime.
+  it('tests a claim only on the runtime it depends on', () => {
+    const rule = scopeRule(
+      '**A claim is tested only on the runtime it depends on.**',
+      '**Name every triggered suite the round cannot run.**',
+    );
+    for (const runtime of [
+      'the database engine',
+      'the real process or service',
+      'the operating system',
+      'the device or API level',
+      'the network peer',
+    ]) {
+      expect(rule).toContain(runtime);
+    }
+    expect(rule).toContain(
+      'is a secondary signal, not a test of that claim, however green',
+    );
+    expect(rule).toContain(
+      'A stand-in for a peer the claim does not depend on stays a fine harness',
+    );
+    expect(rule).toContain(
+      'say that a substitute does not establish some behaviour, that settles it',
+    );
+    expect(rule).toContain(
+      'counts as tested only when the round ran the real runtime inside its boundary, and the report names that runtime beside the result',
+    );
+    expect(rule).toContain(
+      'when it is the central claim the verdict is `inconclusive`, never `merge-ready`',
+    );
+
+    const moduleAgents = readFileSync(
+      'packages/managed-agent-server/AGENTS.md',
+      'utf8',
+    ).replace(/\s+/g, ' ');
+    expect(moduleAgents).toContain(
+      'H2 tests alone do not establish MySQL or process-recovery behavior',
+    );
+    expect(rule).toContain(
+      '`packages/managed-agent-server/AGENTS.md` states that H2 does not establish MySQL or process-recovery behaviour',
+    );
+    expect(rule).toContain(
+      'a claim about SQL, transactions, locking, writer leases or recovery is not tested by the H2 battery',
+    );
+    const profiles = [...rule.matchAll(/`([a-z0-9-]+)`/g)]
+      .map((match) => match[1])
+      .filter((name) => /-(integration|mysql|gates)$/.test(name));
+    expect(profiles).toEqual([
+      'mysql-integration',
+      'hosted-harness-mysql',
+      'hosted-harness-gates',
+      'o4-mysql-gates',
+    ]);
+    const verificationPom = readFileSync(
+      'packages/managed-agent-server/verification/pom.xml',
+      'utf8',
+    );
+    for (const profile of profiles) {
+      expect(verificationPom).toContain(`<id>${profile}</id>`);
+    }
+  });
+
+  it('names every triggered suite the round cannot run', () => {
+    const rule = scopeRule(
+      '**Name every triggered suite the round cannot run.**',
+      "**Module instructions bind the evidence, not the round's budget.**",
+    );
+    expect(rule).toContain(
+      'A toolchain or service missing from the round is never evidence that nothing needed it',
+    );
+    expect(rule).toContain(
+      "**base** revision's workflow `on:` path filters, job conditions and any scope script",
+    );
+    expect(rule).toContain('(`git show <base>:<path>`). The base is the floor');
+    // Reading only the base would miss a suite the PR adds; reading only the
+    // head would let the PR narrow a filter and hide one.
+    expect(rule).toContain(
+      "the head's copies, which the PR can edit, may add a suite but never remove one",
+    );
+    expect(rule).toContain('with its workflow and job');
+
+    // The instance holds only while the lane's JDK trigger stays narrower
+    // than the daemon coverage that runs a JDK job in sdk-java.yml.
+    const resolve = stepIn('verify', 'Resolve PR and snapshot metadata');
+    const javaTrigger = resolve.match(
+      /grep -qE '([^']+)' <<<.*\n\s*echo "java=true"/,
+    )?.[1];
+    expect(javaTrigger).toBe('^packages/(sdk-java|managed-agent-server)/');
+    expect(rule).toContain(
+      'the verify lane provisions a JDK only for diffs under `packages/sdk-java/` and `packages/managed-agent-server/`',
+    );
+    const laneJdk = new RegExp(javaTrigger);
+    for (const dir of [
+      'packages/cli/src/serve/',
+      'packages/core/src/managed-runtime/',
+    ]) {
+      expect(rule).toContain(`\`${dir}\``);
+      expect(managedAgentCoverage([`${dir}index.ts`])).toBe('daemon');
+      expect(laneJdk.test(`${dir}index.ts`)).toBe(false);
+    }
+    expect(rule).toContain(
+      '`daemon` coverage that runs the `Real daemon E2E / Java 11` job in `sdk-java.yml`',
+    );
+    expect(rule).toContain(
+      'so a round with no JDK lists that job under _Not covered_ for a diff under those paths even when no Java changed',
+    );
+    const daemonJob = sdkJavaWorkflow.slice(
+      sdkJavaWorkflow.indexOf('\n  daemon-e2e:\n'),
+    );
+    expect(daemonJob).toMatch(
+      /^\n {2}daemon-e2e:\n {4}if: "\$\{\{ inputs\.tier != 'fast' \|\| inputs\.coverage == 'daemon' \|\| inputs\.coverage == 'both' \}\}"\n {4}name: 'Real daemon E2E \/ Java 11'\n/,
+    );
+
+    // The script reads NUL-separated paths, so a round that feeds it a
+    // newline list misreads a mixed diff as needing nothing.
+    expect(rule).toContain(
+      'Run a scope script the way its workflow invokes it, input format included',
+    );
+    expect(rule).toContain(
+      'splits its input on NUL: the gate pipes it the output of `git diff --name-only --no-renames -z`',
+    );
+    expect(
+      readFileSync('.github/workflows/managed-agent-gate.yml', 'utf8'),
+    ).toContain(
+      'git diff --name-only --no-renames -z "${base}" HEAD | node .github/scripts/managed-agent-gate-scope.mjs',
+    );
+    const classify = (input) =>
+      spawnSync('node', ['.github/scripts/managed-agent-gate-scope.mjs'], {
+        input,
+        encoding: 'utf8',
+      }).stdout.trim();
+    const mixed = ['docs/design/x.md', 'packages/cli/src/serve/a.ts'];
+    expect(classify(mixed.join('\0'))).toBe('daemon');
+    expect(classify(mixed.join('\n'))).toBe('none');
+    expect(rule).toContain(
+      'classified as `daemon` that way, and as `none` from a newline-separated list',
+    );
+  });
+
+  it('lets module instructions bind the evidence but not the round budget', () => {
+    const rule = scopeRule(
+      "**Module instructions bind the evidence, not the round's budget.**",
+    );
+    expect(rule).toContain(
+      'When such a cap yields to a budget the user sets, invoking this skill is that budget',
+    );
+    expect(rule).toContain(
+      'a cap that admits no exception is followed, and what it left out goes under _Not covered_',
+    );
+    expect(rule).toContain("The module's evidence rules still bind");
+    expect(rule).toContain(
+      "the round follows the base revision's copy, reviews the head's edit as part of the diff, and says so in the report",
+    );
+
+    const moduleAgents = readFileSync(
+      'packages/managed-agent-server/AGENTS.md',
+      'utf8',
+    ).replace(/\s+/g, ' ');
+    expect(moduleAgents).toContain('including invoked skills');
+    expect(moduleAgents).toContain(
+      'Unless the user explicitly sets another budget',
     );
   });
 });

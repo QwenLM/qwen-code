@@ -1711,6 +1711,62 @@ Everything else is explicitly out of scope — and is **listed as not covered**
 in the report. Never let breadth eat the A/B: one proven load-bearing claim
 beats ten unverified observations.
 
+**A claim is tested only on the runtime it depends on.** Before crediting a
+claim, name the runtime its behaviour depends on — the database engine, the
+real process or service, the operating system, the device or API level, the
+network peer — and check that the round actually ran it. A substitute the
+repository uses for speed (an embedded or in-memory database standing in
+for the production engine, a stub for the real process, one OS for another,
+a fake of the very peer the claim is about) is a secondary signal, not a
+test of that claim, however green. A stand-in for a peer the claim does not
+depend on stays a fine harness. When the touched module's instructions — a
+nested `AGENTS.md`, or the test-profile section of its README — say that a
+substitute does not establish some behaviour, that settles it. The claim
+counts as tested only when the round ran the real runtime inside its
+boundary, and the report names that runtime beside the result so a reader
+can check it; otherwise the environment prevented the test: name the CI lane or
+profile that owns the real runtime under _Not covered_, and when it is the
+central claim the verdict is `inconclusive`, never `merge-ready`. Instance:
+`packages/managed-agent-server/AGENTS.md` states that H2 does not establish
+MySQL or process-recovery behaviour, so a claim about SQL, transactions,
+locking, writer leases or recovery is not tested by the H2 battery; its real
+runtime is the `mysql-integration`, `hosted-harness-mysql`,
+`hosted-harness-gates` and `o4-mysql-gates` profiles.
+
+**Name every triggered suite the round cannot run.** The round's environment
+carries a subset of the repository's toolchains, services and platforms. A
+toolchain or service missing from the round is never evidence that nothing
+needed it. Find the CI suites the diff triggers that need something the
+round lacks, from the **base** revision's workflow `on:` path filters, job
+conditions and any scope script those workflows call
+(`git show <base>:<path>`). The base is the floor: the head's copies, which
+the PR can edit, may add a suite but never remove one. Run a scope script
+the way its workflow invokes it, input format included.
+List each one the round did not run under _Not covered_, with its workflow
+and job. Instance: the verify lane provisions a JDK only for diffs under
+`packages/sdk-java/` and `packages/managed-agent-server/`, while
+`.github/scripts/managed-agent-gate-scope.mjs` also gives
+`packages/cli/src/serve/` and `packages/core/src/managed-runtime/` the
+`daemon` coverage that runs the `Real daemon E2E / Java 11` job in
+`sdk-java.yml`, so a round with no JDK lists that job under _Not covered_
+for a diff under those paths even when no Java changed. That script splits
+its input on NUL: the gate pipes it the output of
+`git diff --name-only --no-renames -z`. Measured example: a real commit
+touching `packages/cli/src/serve/` and design docs classified as `daemon`
+that way, and as `none` from a newline-separated list.
+
+**Module instructions bind the evidence, not the round's budget.** A nested
+`AGENTS.md` may cap local verification time for everyday changes, sometimes
+naming invoked skills. When such a cap yields to a budget the user sets,
+invoking this skill is that budget, and the round runs on the environment
+contract's budget; a cap that admits no exception is followed, and what it
+left out goes under _Not covered_. The module's evidence rules still bind —
+which checks a change requires, environment preflight, isolated dependency
+caches, which full profiles stay with CI — and they feed the runtime rule
+above. When the diff edits those instructions, the round follows the base
+revision's copy, reviews the head's edit as part of the diff, and says so in
+the report.
+
 ## Method
 
 ### A/B load-bearing proof
