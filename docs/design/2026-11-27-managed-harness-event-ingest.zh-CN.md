@@ -203,7 +203,8 @@ Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到�
 
 - `server/.../api/ManagedSessionStoreController.java`：`events:ingest` 路由。
 - `persistence/.../JournalWriterLifecycle.java`、`JdbcManagedSessionStore.java`：上报认证，分存活和干净 seal 两种情况。
-- `persistence/.../AgentTurnExecution.java`：准入交接，`findDispatchable` 与 `claimTurn` 中 CANCELLING 收回的条件，以及无事件时推进游标。
+- `persistence/.../AgentTurnHandOff.java`：准入交接，以及 CANCELLING 收回的条件（`HARNESS_HELD_CANCEL`）。
+- `persistence/.../AgentTurnExecution.java`：`findDispatchable` 与 `claimTurn` 中使用该条件，以及无事件时推进游标。
 - `control-plane/.../HarnessCoordinator.java`：全新提交时请求上报并交接。`consumeStream` 中逐个 envelope 的逻辑移到一个共用类，供拉流和上报处理共同使用。
 - `adapters/.../QwenHostedHarnessConnector.java`、`contracts/.../HarnessConnector.java`：submit 携带 `eventDelivery`，以及 feature 检测。
 - `adapters/.../harness/HarnessFeature.java`：`event-ingest/1` 的定义。
