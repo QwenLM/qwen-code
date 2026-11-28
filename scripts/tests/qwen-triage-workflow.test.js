@@ -115,17 +115,26 @@ function job(name) {
     : workflow.slice(start, start + 1 + nextJob);
 }
 
-function ecsProxyEnv(text) {
+function ecsProxyEnv() {
   return {
     HTTP_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
     HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
     ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
     NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}',
-    http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
-    https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
-    all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
-    no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}',
   };
+}
+
+function expectLowercaseProxyBootstrap(configuredJob) {
+  const bootstrap = configuredJob.steps.find(
+    (candidate) => candidate.name === 'Configure lowercase proxy aliases',
+  );
+  expect(bootstrap).toBeDefined();
+  expect(configuredJob.steps[0]).toBe(bootstrap);
+  expect(bootstrap.run).toContain(
+    'printf \'%s_PROXY=%s\\n\' "$name" "${!upper}" >> "$GITHUB_ENV"',
+  );
+  expect(bootstrap.run).toContain('for name in http https all no; do');
+  expect(bootstrap.run).toContain('upper="${name^^}_PROXY"');
 }
 
 // Executed-harness factory shared by the claim and finalize lifecycle tests
@@ -12004,10 +12013,12 @@ describe('qwen-triage pnpm store producer', () => {
     for (const jobName of ['triage', 'tmux-testing', 'verify']) {
       expect(workflows.jobs[jobName].env).toEqual(ecsProxyEnv());
       expect(workflows.jobs[jobName].container.env).toBeUndefined();
+      expectLowercaseProxyBootstrap(workflows.jobs[jobName]);
     }
     for (const producer of producers) {
       expect(producer.jobs.save.env).toEqual(ecsProxyEnv());
       expect(producer.jobs.save.container.env).toBeUndefined();
+      expectLowercaseProxyBootstrap(producer.jobs.save);
     }
   });
 

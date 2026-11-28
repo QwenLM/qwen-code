@@ -25,10 +25,6 @@ jobs:
       HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
       ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
       NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
-      http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-      https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-      all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-      no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     name: 'Save pnpm store'
     # Share the verify/tmux consumers' runs-on + container (qwen-triage.yml).
     # actions/cache scopes an entry by a hash of the literal cache path plus
@@ -49,6 +45,14 @@ jobs:
     # pool's other install steps.
     timeout-minutes: 30
     steps:
+      - name: 'Configure lowercase proxy aliases'
+        run: |-
+          set -euo pipefail
+          for name in http https all no; do
+            upper="${name^^}_PROXY"
+            printf '%s_PROXY=%s\n' "$name" "${!upper}" >> "$GITHUB_ENV"
+          done
+
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           fetch-depth: 1

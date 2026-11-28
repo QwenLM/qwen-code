@@ -31,10 +31,6 @@ jobs:
       HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
       ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
       NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
-      http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-      https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-      all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-      no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     name: 'Save verify Maven repo'
     # Same runs-on and image as the verify consumer. actions/cache versions
     # an entry by the literal path plus the compression method; a different
@@ -50,6 +46,14 @@ jobs:
     # setup tier.
     timeout-minutes: 45
     steps:
+      - name: 'Configure lowercase proxy aliases'
+        run: |-
+          set -euo pipefail
+          for name in http https all no; do
+            upper="${name^^}_PROXY"
+            printf '%s_PROXY=%s\n' "$name" "${!upper}" >> "$GITHUB_ENV"
+          done
+
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           fetch-depth: 1

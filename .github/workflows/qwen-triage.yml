@@ -461,10 +461,6 @@ jobs:
       HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
       ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
       NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
-      http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-      https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-      all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-      no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     needs: ['authorize']
     # TUNABLE WITHOUT A CODE CHANGE: set the repository variable in
     # Settings → Variables. Why the fallback is 60: the fixed 30 was
@@ -585,6 +581,14 @@ jobs:
     steps:
       # The job runs in a bare node container; gh/jq/git are not in the image.
       # Same toolchain step as the tmux lane.
+      - name: 'Configure lowercase proxy aliases'
+        run: |-
+          set -euo pipefail
+          for name in http https all no; do
+            upper="${name^^}_PROXY"
+            printf '%s_PROXY=%s\n' "$name" "${!upper}" >> "$GITHUB_ENV"
+          done
+
       - name: 'Install triage tools'
         run: |-
           set -euo pipefail
@@ -1811,10 +1815,6 @@ jobs:
       HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
       ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
       NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
-      http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-      https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-      all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-      no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     needs: ['authorize']
     if: >-
       always() &&
@@ -1872,6 +1872,14 @@ jobs:
       verdict: '${{ steps.run.outputs.verdict || steps.prepare.outputs.verdict || steps.pr.outputs.verdict }}'
       failure_phase: '${{ steps.prepare.outputs.failure_phase }}'
     steps:
+      - name: 'Configure lowercase proxy aliases'
+        run: |-
+          set -euo pipefail
+          for name in http https all no; do
+            upper="${name^^}_PROXY"
+            printf '%s_PROXY=%s\n' "$name" "${!upper}" >> "$GITHUB_ENV"
+          done
+
       - name: 'Install PR resolver tools'
         run: |-
           set -euo pipefail
@@ -2837,10 +2845,6 @@ jobs:
       HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
       ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
       NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
-      http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-      https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-      all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
-      no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     needs: ['authorize']
     if: >-
       always() &&
@@ -2944,6 +2948,17 @@ jobs:
       flake_summary: '${{ steps.flake.outputs.flake_summary }}'
       skip_reason: '${{ steps.pr.outputs.skip_reason }}'
     steps:
+      # Actions rejects case-insensitively duplicate job env keys. Write
+      # lowercase aliases through the environment file for apt and npm:
+      # available to every later step, but not to this bootstrap itself.
+      - name: 'Configure lowercase proxy aliases'
+        run: |-
+          set -euo pipefail
+          for name in http https all no; do
+            upper="${name^^}_PROXY"
+            printf '%s_PROXY=%s\n' "$name" "${!upper}" >> "$GITHUB_ENV"
+          done
+
       - name: 'Install PR resolver tools'
         run: |-
           set -euo pipefail
