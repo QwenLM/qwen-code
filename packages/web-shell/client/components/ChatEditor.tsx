@@ -4616,8 +4616,10 @@ export const ChatEditor = memo(
                   {...touchDownGuard}
                   aria-label={t('composerMobile.stop')}
                   onKeyDown={(event) => {
+                    // A held key must not repeat the cancel, and Shift+Enter
+                    // is the composer's newline shortcut: neither stops here.
                     if (
-                      event.repeat &&
+                      (event.repeat || event.shiftKey) &&
                       (event.key === 'Enter' || event.key === ' ')
                     ) {
                       event.preventDefault();
@@ -4650,8 +4652,11 @@ export const ChatEditor = memo(
               data-web-shell-composer-submit
               {...touchDownGuard}
               onKeyDown={(event) => {
+                // A held key must not repeat the press. In the stop role
+                // Shift+Enter is the composer's newline shortcut, so it
+                // never cancels the turn.
                 if (
-                  event.repeat &&
+                  (event.repeat || (stopAffordance && event.shiftKey)) &&
                   (event.key === 'Enter' || event.key === ' ')
                 ) {
                   event.preventDefault();

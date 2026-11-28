@@ -1016,7 +1016,13 @@ describe('ChatEditor simple composer', () => {
         }
         if (!freshPress.defaultPrevented) stop.click();
       });
-      expect(onCancel).toHaveBeenCalledOnce();
+      if (shiftKey) {
+        // Shift+Enter is the composer's newline shortcut: it never stops.
+        expect(freshPress.defaultPrevented).toBe(true);
+        expect(onCancel).not.toHaveBeenCalled();
+      } else {
+        expect(onCancel).toHaveBeenCalledOnce();
+      }
       expect(composerCoreState.submitText).toHaveBeenCalledOnce();
 
       composerCoreState.hasContent = true;
@@ -1081,7 +1087,12 @@ describe('ChatEditor simple composer', () => {
         }
         if (!freshPress.defaultPrevented) stop.click();
       });
-      expect(onCancel).toHaveBeenCalledOnce();
+      if (shiftKey) {
+        expect(freshPress.defaultPrevented).toBe(true);
+        expect(onCancel).not.toHaveBeenCalled();
+      } else {
+        expect(onCancel).toHaveBeenCalledOnce();
+      }
       expect(composerCoreState.submitText).not.toHaveBeenCalled();
     },
   );
