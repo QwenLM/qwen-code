@@ -1565,17 +1565,20 @@ node <trusted-clone>/scripts/verify-pr-check.mjs \
   <artifact-dir>
 ```
 
-A `--snapshot` refresh re-checks `reviews` and `reviewComments` and then runs
-one non-paginated closing GraphQL probe **after** all paginated fetches finish
-to confirm PR head, PR state, formal review count and recent reviews (state,
+A `--snapshot` refresh re-checks `reviews` and `reviewComments`, runs
+incremental `since`-based checks on inline review comments and top-level
+comments (catching edits to already-read pages during multi-page REST
+pagination and same-second `updatedAt` ties), and then runs a closing GraphQL probe **after**
+all REST fetches finish (paginating backward when a PR has more than 100 formal
+reviews) to confirm PR head, PR state, every formal review (state,
 `submittedAt`, and body), top-level comment count and latest created comment,
 and most-recently-updated top-level comment all stayed unchanged (requiring
 valid JSON objects/arrays and rejecting mid-fetch pushes, state changes,
 `CHANGES_REQUESTED` reviews, earlier review edits/dismissals, body-only review
-edits, inline review comments, new top-level comments, or in-place edits of
-earlier top-level comments), and removes any stale regular snapshot already at
-that path on either fetch failure or write failure (while refusing to touch
-symlinks, hardlinks, or non-regular files).
+edits, inline review comment edits across pages, new top-level comments, or
+in-place edits of earlier top-level comments), and removes any stale regular
+snapshot already at that path on either fetch failure or write failure (while
+refusing to touch symlinks, hardlinks, or non-regular files).
 `--compare --out` overwrites the verdict on dirty runs and invalidates any
 stale regular verdict on write failure (so an older `clean: true` file cannot
 survive), and `verify-pr-check.mjs` with `--require-guard` refuses a missing

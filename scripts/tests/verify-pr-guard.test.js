@@ -62,7 +62,9 @@ function fakeRun(responses) {
           ? 'graphql'
           : args[2]
         : 'pr view';
-    const response = responses[key];
+    const response =
+      responses[key] ??
+      (key.includes('?') ? responses[key.split('?')[0]] : undefined);
     if (response === undefined) {
       return { status: 1, stdout: '', stderr: `no stub for ${key}` };
     }
@@ -75,43 +77,58 @@ function ok(body) {
 }
 
 function confirmPayload(overrides = {}) {
-  const comments = overrides.comments ?? {
-    totalCount: 0,
-    nodes: [],
-  };
-  const latestEditedComment =
-    overrides.latestEditedComment ??
-    (Array.isArray(comments?.nodes) && comments.nodes.length > 0
-      ? {
+  const comments =
+    'comments' in overrides
+      ? overrides.comments
+      : {
+          totalCount: 0,
+          nodes: [],
+        };
+  const rawReviews =
+    'reviews' in overrides
+      ? overrides.reviews
+      : {
+          totalCount: 1,
           nodes: [
             {
-              databaseId: comments.nodes[0].databaseId,
-              updatedAt: comments.nodes[0].updatedAt,
-              body: comments.nodes[0].body ?? '',
+              databaseId: 1,
+              state: 'COMMENTED',
+              submittedAt: '2026-10-28T00:00:00Z',
+              body: '',
             },
           ],
+        };
+  const reviews =
+    rawReviews && typeof rawReviews === 'object' && !Array.isArray(rawReviews)
+      ? {
+          pageInfo: { hasPreviousPage: false, startCursor: null },
+          ...rawReviews,
         }
-      : { nodes: [] });
+      : rawReviews;
+  const latestEditedComment =
+    'latestEditedComment' in overrides
+      ? overrides.latestEditedComment
+      : Array.isArray(comments?.nodes) && comments.nodes.length > 0
+        ? {
+            nodes: [
+              {
+                databaseId: comments.nodes[0].databaseId,
+                updatedAt: comments.nodes[0].updatedAt,
+                body: comments.nodes[0].body ?? '',
+              },
+            ],
+          }
+        : { nodes: [] };
   return {
     data: {
       repository: {
         pullRequest: {
           headRefOid: HEAD,
           state: 'OPEN',
-          reviews: {
-            totalCount: 1,
-            nodes: [
-              {
-                databaseId: 1,
-                state: 'COMMENTED',
-                submittedAt: '2026-10-28T00:00:00Z',
-                body: '',
-              },
-            ],
-          },
+          ...overrides,
+          reviews,
           comments,
           latestEditedComment,
-          ...overrides,
         },
       },
     },
@@ -175,19 +192,23 @@ describe('fetchSnapshot', () => {
     const paginatedCalls = calls.filter(
       (args) => args[0] === 'api' && args[1] !== 'graphql',
     );
-    // 3 initial paginated list fetches + 2 closing confirmations (reviews, reviewComments).
-    expect(paginatedCalls).toHaveLength(5);
+    // 3 initial paginated list fetches + 2 full confirmations (reviews,
+    // reviewComments) + 2 incremental `?since=` probes (reviewComments,
+    // issueComments).
+    expect(paginatedCalls).toHaveLength(7);
     for (const args of paginatedCalls) expect(args).toContain('--paginate');
+    expect(paginatedCalls[5][2]).toMatch(/pulls\/7\/comments\?since=/);
+    expect(paginatedCalls[6][2]).toMatch(/issues\/7\/comments\?since=/);
 
-    // The single non-paginated closing GraphQL probe must run strictly AFTER
-    // all paginated list fetches finish.
+    // The closing GraphQL probe must run strictly AFTER all REST paginated and
+    // `?since=` fetches finish.
     const lastCall = calls.at(-1);
     expect(lastCall[0]).toBe('api');
     expect(lastCall[1]).toBe('graphql');
     expect(lastCall).not.toContain('--paginate');
     expect(lastCall).toContain(`query=${GUARD_CONFIRM_QUERY}`);
     expect(GUARD_CONFIRM_QUERY).toBe(
-      'query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid state reviews(last: 100) { totalCount nodes { databaseId state submittedAt body } } comments(last: 1) { totalCount nodes { databaseId updatedAt } } latestEditedComment: comments(first: 1, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { databaseId updatedAt body } } } } }',
+      'query($owner: String!, $name: String!, $number: Int!, $before: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid state reviews(last: 100, before: $before) { totalCount pageInfo { hasPreviousPage startCursor } nodes { databaseId state submittedAt body } } comments(last: 1) { totalCount nodes { databaseId updatedAt } } latestEditedComment: comments(first: 1, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { databaseId updatedAt body } } } } }',
     );
   });
 
@@ -1810,7 +1831,7 @@ esac`,
     expect(firstCommentTry.stage).toBe('snapshot');
     expect(firstCommentTry.res.status).toBe(1);
     expect(firstCommentTry.res.stderr).toContain(
-      'issueComments changed during snapshot fetch (0 -> 1)',
+      'issueComments changed during snapshot fetch',
     );
     const secondCommentTry = runPublishChain(
       commentRoundDir,
@@ -2054,6 +2075,326 @@ esac`,
       expect(try2.stage).toBe('compare');
       expect(try2.res.status).toBe(1);
       expect(try2.res.stdout).toContain(reviewCase.expectedCompare);
+    }
+
+    // Case 5 (101 formal reviews > 100 cap): When review #1 (the earliest of
+    // 101 formal reviews) is edited to P1 during the second `pulls/7/comments`
+    // pass, backward `before`-cursor pagination in the closing GraphQL probe
+    // reaches review #1 and blocks publication on the very first attempt.
+    {
+      const r101Dir = join(dir, 'guard-101-reviews');
+      mkdirSync(r101Dir, { recursive: true });
+      const makeReviews = (editFirst) =>
+        Array.from({ length: 101 }, (_, idx) => {
+          const id = idx + 1;
+          return {
+            id,
+            submitted_at: `2026-10-28T00:${String(Math.floor(idx / 60)).padStart(2, '0')}:${String(idx % 60).padStart(2, '0')}Z`,
+            body:
+              editFirst && id === 1 ? '[P1] edited earliest review' : `r${id}`,
+            state: 'COMMENTED',
+          };
+        });
+      const toGqlNodes = (list) =>
+        list.map((r) => ({
+          databaseId: r.id,
+          state: r.state,
+          submittedAt: r.submitted_at,
+          body: r.body,
+        }));
+      const init101 = makeReviews(false);
+      const after101 = makeReviews(true);
+      const page1Nodes = toGqlNodes(init101.slice(1)); // 100 latest (#2..#101)
+      const page2Init = toGqlNodes(init101.slice(0, 1)); // earliest (#1)
+      const page2After = toGqlNodes(after101.slice(0, 1)); // edited (#1)
+
+      const page1File = join(dir, 'r101-page1.json');
+      const page2InitFile = join(dir, 'r101-page2-init.json');
+      const page2AfterFile = join(dir, 'r101-page2-after.json');
+      const restInitFile = join(dir, 'r101-rest-init.json');
+      const restAfterFile = join(dir, 'r101-rest-after.json');
+      writeFileSync(
+        page1File,
+        JSON.stringify(
+          confirmPayload({
+            reviews: {
+              totalCount: 101,
+              pageInfo: { hasPreviousPage: true, startCursor: 'cursor-100' },
+              nodes: page1Nodes,
+            },
+          }),
+        ),
+      );
+      writeFileSync(
+        page2InitFile,
+        JSON.stringify(
+          confirmPayload({
+            reviews: {
+              totalCount: 101,
+              pageInfo: { hasPreviousPage: false, startCursor: 'cursor-1' },
+              nodes: page2Init,
+            },
+          }),
+        ),
+      );
+      writeFileSync(
+        page2AfterFile,
+        JSON.stringify(
+          confirmPayload({
+            reviews: {
+              totalCount: 101,
+              pageInfo: { hasPreviousPage: false, startCursor: 'cursor-1' },
+              nodes: page2After,
+            },
+          }),
+        ),
+      );
+      writeFileSync(restInitFile, JSON.stringify(init101));
+      writeFileSync(restAfterFile, JSON.stringify(after101));
+
+      const start101Env = withGh(
+        join(dir, 'gh-101-start'),
+        `case "$*" in
+  *graphql*before=cursor-100*) cat "${page2InitFile}" ;;
+  *graphql*) cat "${page1File}" ;;
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
+  *pulls/7/reviews*) cat "${restInitFile}" ;;
+  *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *issues/7/comments*) echo '[]' ;;
+esac`,
+      );
+      expect(
+        run(
+          [
+            '--pr',
+            '7',
+            '--repo',
+            'owner/repo',
+            '--snapshot',
+            join(r101Dir, 'guard-start.json'),
+            '--no-clobber',
+          ],
+          start101Env,
+        ).status,
+      ).toBe(0);
+
+      const rcCnt101 = join(dir, 'r101-rc-cnt');
+      const flag101 = join(dir, 'r101-flag');
+      const edit101Env = withGh(
+        join(dir, 'gh-101-edit'),
+        `case "$*" in
+  *graphql*before=cursor-100*)
+    if [ -f "${flag101}" ]; then cat "${page2AfterFile}"; else cat "${page2InitFile}"; fi ;;
+  *graphql*) cat "${page1File}" ;;
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
+  *pulls/7/reviews*)
+    if [ -f "${flag101}" ]; then cat "${restAfterFile}"; else cat "${restInitFile}"; fi ;;
+  *pulls/7/comments*since=*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *pulls/7/comments*)
+    n=$(cat "${rcCnt101}" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "${rcCnt101}"
+    if [ "$n" -ge 2 ]; then touch "${flag101}"; fi
+    echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *issues/7/comments*) echo '[]' ;;
+esac`,
+      );
+      const try1 = runPublishChain(r101Dir, edit101Env);
+      expect(try1.stage).toBe('snapshot');
+      expect(try1.res.status).toBe(1);
+      expect(try1.res.stderr).toContain(
+        'reviews changed during snapshot fetch',
+      );
+      const try2 = runPublishChain(r101Dir, edit101Env);
+      expect(try2.stage).toBe('compare');
+      expect(try2.res.status).toBe(1);
+      expect(try2.res.stdout).toContain('reviews: 1 was edited');
+    }
+
+    // Case 6 (169 inline review comments across 2 REST pages): During the
+    // second `pulls/7/comments` fetch, after page 1 (1..100) was already read
+    // and while page 2 (101..169) is read, comment #1 on page 1 is edited to
+    // P1. The incremental `?since=` probe catches the edited page-1 comment on
+    // the first publish attempt.
+    {
+      const r169Dir = join(dir, 'guard-169-rc');
+      mkdirSync(r169Dir, { recursive: true });
+      const makeRc = (editFirst) =>
+        Array.from({ length: 169 }, (_, idx) => {
+          const id = idx + 1;
+          return {
+            id,
+            updated_at:
+              editFirst && id === 1
+                ? '2026-10-28T00:09:00Z'
+                : `2026-10-28T00:${String(Math.floor(idx / 60)).padStart(2, '0')}:${String(idx % 60).padStart(2, '0')}Z`,
+            body: editFirst && id === 1 ? '[P1] edited on page 1' : `rc${id}`,
+          };
+        });
+      const rcInit = makeRc(false);
+      const rcAfter = makeRc(true);
+      const rcInitFile = join(dir, 'rc169-init.json');
+      const rcAfterFile = join(dir, 'rc169-after.json');
+      const rcSinceInitFile = join(dir, 'rc169-since-init.json');
+      const rcSinceAfterFile = join(dir, 'rc169-since-after.json');
+      writeFileSync(rcInitFile, JSON.stringify(rcInit));
+      writeFileSync(rcAfterFile, JSON.stringify(rcAfter));
+      // Before edit, max updated_at is #169; after edit of #1 to 00:09:00Z,
+      // `?since=00:02:48Z` returns both #169 and the newly edited #1.
+      writeFileSync(rcSinceInitFile, JSON.stringify([rcInit[168]]));
+      writeFileSync(
+        rcSinceAfterFile,
+        JSON.stringify([rcAfter[0], rcAfter[168]]),
+      );
+
+      const start169Env = withGh(
+        join(dir, 'gh-169-start'),
+        `case "$*" in
+  *graphql*) echo '${GH_OK_GRAPHQL}' ;;
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
+  *pulls/7/reviews*) echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":"","state":"COMMENTED"}]' ;;
+  *pulls/7/comments*since=*) cat "${rcSinceInitFile}" ;;
+  *pulls/7/comments*) cat "${rcInitFile}" ;;
+  *issues/7/comments*) echo '[]' ;;
+esac`,
+      );
+      expect(
+        run(
+          [
+            '--pr',
+            '7',
+            '--repo',
+            'owner/repo',
+            '--snapshot',
+            join(r169Dir, 'guard-start.json'),
+            '--no-clobber',
+          ],
+          start169Env,
+        ).status,
+      ).toBe(0);
+
+      const rcCnt169 = join(dir, 'rc169-cnt');
+      const flag169 = join(dir, 'rc169-flag');
+      const edit169Env = withGh(
+        join(dir, 'gh-169-edit'),
+        `case "$*" in
+  *graphql*) echo '${GH_OK_GRAPHQL}' ;;
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
+  *pulls/7/reviews*) echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":"","state":"COMMENTED"}]' ;;
+  *pulls/7/comments*since=*)
+    if [ -f "${flag169}" ]; then cat "${rcSinceAfterFile}"; else cat "${rcSinceInitFile}"; fi ;;
+  *pulls/7/comments*)
+    n=$(cat "${rcCnt169}" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "${rcCnt169}"
+    if [ "$n" -eq 2 ]; then
+      # Second full paginated read already consumed page 1 (old #1) before #1
+      # is edited while page 2 is returned: returns stale full list while
+      # activating flag169 for subsequent calls.
+      touch "${flag169}"
+      cat "${rcInitFile}"
+    elif [ -f "${flag169}" ]; then
+      cat "${rcAfterFile}"
+    else
+      cat "${rcInitFile}"
+    fi ;;
+  *issues/7/comments*) echo '[]' ;;
+esac`,
+      );
+      const try1 = runPublishChain(r169Dir, edit169Env);
+      expect(try1.stage).toBe('snapshot');
+      expect(try1.res.status).toBe(1);
+      expect(try1.res.stderr).toContain(
+        'reviewComments changed during snapshot fetch',
+      );
+      const try2 = runPublishChain(r169Dir, edit169Env);
+      expect(try2.stage).toBe('compare');
+      expect(try2.res.status).toBe(1);
+      expect(try2.res.stdout).toContain('reviewComments: 1 was edited');
+    }
+
+    // Case 7 (same-second tie on top-level comments): #71 and #72 share the
+    // exact max updatedAt second; #71 is edited within that same second while
+    // GraphQL `latestEditedComment` tie-breaks to unedited #72. The
+    // `issues/7/comments?since=` probe fetches both #71 and #72 and blocks on
+    // the very first attempt.
+    {
+      const rTieDir = join(dir, 'guard-same-sec-tie');
+      mkdirSync(rTieDir, { recursive: true });
+      const tieGql = JSON.stringify(
+        confirmPayload({
+          comments: {
+            totalCount: 2,
+            nodes: [{ databaseId: 72, updatedAt: '2026-10-28T00:03:00Z' }],
+          },
+          latestEditedComment: {
+            nodes: [
+              {
+                databaseId: 72,
+                updatedAt: '2026-10-28T00:03:00Z',
+                body: 'Peer comment',
+              },
+            ],
+          },
+        }),
+      );
+      const tieInit =
+        '[{"id":71,"updated_at":"2026-10-28T00:03:00Z","body":"Checks passed"},{"id":72,"updated_at":"2026-10-28T00:03:00Z","body":"Peer comment"}]';
+      const tieAfter =
+        '[{"id":71,"updated_at":"2026-10-28T00:03:00Z","body":"[P1] edited same second"},{"id":72,"updated_at":"2026-10-28T00:03:00Z","body":"Peer comment"}]';
+      const startTieEnv = withGh(
+        join(dir, 'gh-tie-start'),
+        `case "$*" in
+  *graphql*) echo '${tieGql}' ;;
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
+  *pulls/7/reviews*) echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":"","state":"COMMENTED"}]' ;;
+  *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *issues/7/comments*) echo '${tieInit}' ;;
+esac`,
+      );
+      expect(
+        run(
+          [
+            '--pr',
+            '7',
+            '--repo',
+            'owner/repo',
+            '--snapshot',
+            join(rTieDir, 'guard-start.json'),
+            '--no-clobber',
+          ],
+          startTieEnv,
+        ).status,
+      ).toBe(0);
+
+      const tieCnt = join(dir, 'tie-cnt');
+      const tieFlag = join(dir, 'tie-flag');
+      const editTieEnv = withGh(
+        join(dir, 'gh-tie-edit'),
+        `case "$*" in
+  *graphql*) echo '${tieGql}' ;;
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
+  *pulls/7/reviews*)
+    n=$(cat "${tieCnt}" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "${tieCnt}"
+    if [ "$n" -ge 2 ]; then touch "${tieFlag}"; fi
+    echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":"","state":"COMMENTED"}]' ;;
+  *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *issues/7/comments*)
+    if [ -f "${tieFlag}" ]; then echo '${tieAfter}'; else echo '${tieInit}'; fi ;;
+esac`,
+      );
+      const try1 = runPublishChain(rTieDir, editTieEnv);
+      expect(try1.stage).toBe('snapshot');
+      expect(try1.res.status).toBe(1);
+      expect(try1.res.stderr).toContain(
+        'issueComments changed during snapshot fetch',
+      );
+      const try2 = runPublishChain(rTieDir, editTieEnv);
+      expect(try2.stage).toBe('compare');
+      expect(try2.res.status).toBe(1);
+      expect(try2.res.stdout).toContain('issueComments: 71 was edited');
     }
   });
 
