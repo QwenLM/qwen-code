@@ -1592,6 +1592,33 @@ describe('applyMcpServerAction (real server actions)', () => {
     expect(result.changed).toBe(true);
   });
 
+  it('does not report Enabled while an unwritable exclusion still disables it', async () => {
+    // The runtime list merges every scope plus `--disable-mcp-server`; a
+    // pattern this action cannot write survives the rewrite, so discovery
+    // refuses the server again. Reporting success there is a lie the next
+    // refresh contradicts (finding R5-4).
+    const discoverToolsForServer = vi.fn(async () => {});
+    const config = stubConfig({
+      getToolRegistry: (() => ({
+        discoverToolsForServer,
+      })) as unknown as Config['getToolRegistry'],
+      getExcludedMcpServers: () => ['docs*'],
+      setExcludedMcpServers: () => {},
+      isMcpServerDisabled: () => true,
+    } as Partial<Config>);
+    const { settings } = createFakeSettings();
+    const result = await applyMcpServerAction(
+      config,
+      settings,
+      serverInfo({ name: 'docs', isDisabled: true }),
+      'toggle-disable',
+    );
+
+    expect(result.changed).toBe(false);
+    expect(result.message).not.toContain("Enabled 'docs'");
+    expect(result.message).toContain('cannot');
+  });
+
   it('disable writes mcp.excluded to the user scope and disables the server', async () => {
     const disableMcpServer = vi.fn(async () => {});
     const config = stubConfig({
@@ -1674,6 +1701,78 @@ describe('applyMcpServerAction (real server actions)', () => {
       ),
     ).toBe(true);
     expect(result.message).toContain('Enabled');
+  });
+
+  it('enable also lifts a glob exclusion covering the server (#14465)', async () => {
+    const discoverToolsForServer = vi.fn(async () => {});
+    const setExcludedMcpServers = vi.fn();
+    const config = stubConfig({
+      getMcpServers: (() => ({
+        srv: {},
+      })) as unknown as Config['getMcpServers'],
+      getToolRegistry: (() => ({
+        discoverToolsForServer,
+      })) as unknown as Config['getToolRegistry'],
+      getExcludedMcpServers: (() => [
+        'srv*',
+        'other',
+      ]) as unknown as Config['getExcludedMcpServers'],
+      setExcludedMcpServers,
+    } as Partial<Config>);
+    const { settings, written } = createFakeSettings({
+      user: { mcp: { excluded: ['srv*', 'keep-*'] } } as Settings,
+      workspace: { mcp: { excluded: ['srv'] } } as Settings,
+    });
+    const result = await applyMcpServerAction(
+      config,
+      settings,
+      serverInfo({ isDisabled: true }),
+      'toggle-disable',
+    );
+    expect(setExcludedMcpServers).toHaveBeenCalledWith(['other']);
+    expect(written).toContainEqual({
+      scope: SettingScope.User,
+      key: 'mcp.excluded',
+      value: ['keep-*'],
+    });
+    expect(written).toContainEqual({
+      scope: SettingScope.Workspace,
+      key: 'mcp.excluded',
+      value: [],
+    });
+    expect(discoverToolsForServer).toHaveBeenCalledWith('srv');
+    expect(result.message).toContain('Enabled');
+  });
+
+  it('keeps an operator-scope exclusion out of the enable runtime list', async () => {
+    const setExcludedMcpServers = vi.fn();
+    const config = stubConfig({
+      getMcpServers: (() => ({
+        srv: {},
+      })) as unknown as Config['getMcpServers'],
+      getToolRegistry: (() => ({
+        discoverToolsForServer: vi.fn(async () => {}),
+      })) as unknown as Config['getToolRegistry'],
+      // Merged across scopes: `srv*` comes from a System file neither write
+      // below can touch, `srv` from the user file the action does clear.
+      getExcludedMcpServers: (() => [
+        'srv*',
+        'srv',
+      ]) as unknown as Config['getExcludedMcpServers'],
+      setExcludedMcpServers,
+    } as Partial<Config>);
+    const { settings } = createFakeSettings({
+      user: { mcp: { excluded: ['srv'] } } as Settings,
+    });
+    await applyMcpServerAction(
+      config,
+      settings,
+      serverInfo({ isDisabled: true }),
+      'toggle-disable',
+    );
+    // Dropping `srv*` here would connect the server while the operator's
+    // exclusion is still on disk.
+    expect(setExcludedMcpServers).toHaveBeenCalledWith(['srv*']);
   });
 
   it('clear-auth deletes stored tokens and disconnects', async () => {
