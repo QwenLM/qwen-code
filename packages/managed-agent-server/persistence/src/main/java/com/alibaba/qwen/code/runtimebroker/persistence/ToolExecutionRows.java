@@ -15,12 +15,28 @@ import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionR
 
 /**
  * The row codec of the Tool execution ledger: column writes, row mapping,
- * JSON codecs and the candidate/replacement identity guards. Split out of
- * JdbcToolExecutionRepository verbatim; the SQL and verdicts are the ones the
- * repository ran inline.
+ * JSON codecs and the candidate/replacement identity guards.
  */
 final class ToolExecutionRows {
     private ToolExecutionRows() {
+    }
+
+    static ToolExecutionRecord selectByIdempotencyKey(
+            Connection connection, String key) throws SQLException {
+        String sql = "SELECT " + EXECUTION_COLUMNS
+                + " FROM ma_tool_execution WHERE idempotency_key = ?";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            JdbcRepositorySupport.setIdentity(statement, 1, key);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                if (!key.equals(result.getString("idempotency_key"))) {
+                    throw new IllegalStateException("Tool idempotency hash collision");
+                }
+                return mapExecution(result);
+            }
+        }
     }
 
     static ToolExecutionRecord selectByExecutionId(
@@ -38,12 +54,10 @@ final class ToolExecutionRows {
                 if (!result.next()) {
                     return null;
                 }
-                ToolExecutionRecord record = mapExecution(result);
-                if (!executionCallId.equals(record.getExecutionCallId())) {
-                    throw new IllegalStateException(
-                            "Tool execution-call hash collision");
+                if (!executionCallId.equals(result.getString("execution_call_id"))) {
+                    throw new IllegalStateException("Tool execution-call hash collision");
                 }
-                return record;
+                return mapExecution(result);
             }
         }
     }

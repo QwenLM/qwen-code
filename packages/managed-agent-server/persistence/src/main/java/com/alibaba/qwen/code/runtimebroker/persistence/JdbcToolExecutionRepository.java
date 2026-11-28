@@ -30,6 +30,7 @@ import static com.alibaba.qwen.code.runtimebroker.persistence.ToolExecutionRows.
 import static com.alibaba.qwen.code.runtimebroker.persistence.ToolExecutionRows.requireCandidate;
 import static com.alibaba.qwen.code.runtimebroker.persistence.ToolExecutionRows.requireReplacement;
 import static com.alibaba.qwen.code.runtimebroker.persistence.ToolExecutionRows.selectByExecutionId;
+import static com.alibaba.qwen.code.runtimebroker.persistence.ToolExecutionRows.selectByIdempotencyKey;
 import static com.alibaba.qwen.code.runtimebroker.persistence.ToolExecutionRows.updateExecution;
 
 /** JDBC ledger for idempotent Tool executions. */
@@ -206,34 +207,6 @@ public final class JdbcToolExecutionRepository
         }
         return JdbcRepositorySupport.read(dataSource,
                 connection -> selectByIdempotencyKey(connection, key));
-    }
-
-    static ToolExecutionRecord selectByIdempotencyKey(Connection connection,
-            String key) throws SQLException {
-        return selectByIdempotencyKey(connection, key, false);
-    }
-
-    static ToolExecutionRecord selectByIdempotencyKey(
-            Connection connection, String key, boolean lock) throws SQLException {
-        String sql = "SELECT " + EXECUTION_COLUMNS
-                + " FROM ma_tool_execution "
-                + "WHERE idempotency_key = ?"
-                        + (lock ? " FOR UPDATE" : "");
-        try (PreparedStatement statement = connection.prepareStatement(
-                sql)) {
-            JdbcRepositorySupport.setIdentity(statement, 1, key);
-            try (ResultSet result = statement.executeQuery()) {
-                if (!result.next()) {
-                    return null;
-                }
-                ToolExecutionRecord record = mapExecution(result);
-                if (!key.equals(record.getIdempotencyKey())) {
-                    throw new IllegalStateException(
-                            "Tool idempotency hash collision");
-                }
-                return record;
-            }
-        }
     }
 
     public boolean usesDataSource(DataSource source) {

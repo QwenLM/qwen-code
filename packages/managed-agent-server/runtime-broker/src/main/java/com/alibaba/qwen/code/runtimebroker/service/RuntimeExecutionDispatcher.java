@@ -48,6 +48,7 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.i
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isPublicationV3;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isV3Family;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.renewalDelayMillis;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.safeStage;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sshNoStartReceipt;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unavailable;
@@ -264,8 +265,7 @@ final class RuntimeExecutionDispatcher {
                     return;
                 }
                 try {
-                    com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport
-                            .requireOpen(closed);
+                    requireOpen(closed);
                     if (!clock.instant().isBefore(deadline)) {
                         // The slot never freed. The conflict below feeds a
                         // write-only future (dispatches is consumed solely by
@@ -334,6 +334,7 @@ final class RuntimeExecutionDispatcher {
             }
         };
         try {
+            requireOpen(closed);
             scheduler.schedule(tick, 250, TimeUnit.MILLISECONDS);
         } catch (RuntimeException | Error rejected) {
             // The dispatch between the null claim and this first schedule can

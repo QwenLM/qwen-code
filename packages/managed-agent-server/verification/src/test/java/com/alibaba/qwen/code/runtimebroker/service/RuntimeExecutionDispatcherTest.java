@@ -28,6 +28,7 @@ import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -400,18 +401,18 @@ class RuntimeExecutionDispatcherTest {
                 any(Instant.class));
     }
 
-    // The initial schedule is the one exit the tick's own catch cannot cover:
-    // a dispatch that lost the race to RuntimeBrokerService.close() (scheduler
-    // shut down after the null claim) must still settle its PREPARED row, or
-    // the record stays active and fences the binding's release forever.
-    @Test
-    void aRejectedInitialScheduleSettlesTheStrandedPreparedRecord() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aClosingBrokerSettlesTheStrandedPreparedRecord(boolean alreadyClosed) {
         var registry = mock(RuntimeBindingRegistry.class);
         var bindings = mock(RuntimeBindingRepository.class);
         var sessions = mock(RuntimeSessionRepository.class);
         var executions = mock(ToolExecutionRepository.class);
-        var scheduler = new java.util.concurrent.ScheduledThreadPoolExecutor(1);
-        scheduler.shutdownNow();
+        var scheduler = mock(ScheduledExecutorService.class);
+        if (!alreadyClosed) {
+            when(scheduler.schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS)))
+                    .thenThrow(new RejectedExecutionException());
+        }
         var context = mock(SessionContext.class);
         var binding = mock(RuntimeBindingRecord.class);
         var session = mock(RuntimeSession.class);
@@ -437,14 +438,16 @@ class RuntimeExecutionDispatcherTest {
                 sessions, executions, mock(RuntimeProvisioner.class), mock(RuntimeTransport.class),
                 mock(RuntimePublicationVerifier.class), "broker", Duration.ofSeconds(60),
                 Duration.ofSeconds(10), Clock.fixed(Instant.parse("2026-11-01T00:00:00Z"), ZoneOffset.UTC),
-                scheduler, mock(ScheduledExecutorService.class), new AtomicBoolean());
+                scheduler, mock(ScheduledExecutorService.class), new AtomicBoolean(alreadyClosed));
         var failure = assertThrows(RuntimeBrokerException.class, () -> dispatcher.beginDispatch(
                 context, prepared, Map.of("toolName", "read_file", "input", Map.of()), null,
                 com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload.of("digest", "read_file")));
-        // The caller still observes the rejection; only the stranded row is
-        // settled first.
         assertEquals("runtime_execution_dispatch_failed", failure.getCode());
-        assertTrue(failure.getCause() instanceof java.util.concurrent.RejectedExecutionException);
+        if (alreadyClosed) {
+            verify(scheduler, never()).schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS));
+        } else {
+            assertTrue(failure.getCause() instanceof RejectedExecutionException);
+        }
         verify(executions).settlePrepared(eq(prepared), argThat(result ->
                 "not_started".equals(result.get("executionStatus"))
                         && result.get("error") instanceof Map<?, ?> refusal

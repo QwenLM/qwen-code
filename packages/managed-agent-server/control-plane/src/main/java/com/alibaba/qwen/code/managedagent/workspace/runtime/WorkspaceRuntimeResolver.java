@@ -369,24 +369,6 @@ public final class WorkspaceRuntimeResolver {
         verifyMountIntact(mount);
     }
 
-    /** 共享 external Workspace 没有 owning Session，只校验原注册和 scope 连续性。 */
-    public void requireExternalWorkspaceCurrent(
-            RuntimeScope scope, String storageId) {
-        if (externalRegistrations == null
-                || !scope.getWorkspaceId().equals(storageId)
-                || !WorkspaceExecutionProfile.isBoundWorkspaceScope(scope)
-                || !"workspace".equals(scope.getIsolationClass())) {
-            throw WorkspaceExecutionStore.unavailable();
-        }
-        var registered = externalRegistrations.find(
-                        scope.getTenantId(), storageId)
-                .orElseThrow(WorkspaceExecutionStore::unavailable);
-        if (!storageId.equals(registered.tenantWorkspaceId())
-                || !scope.getCanonicalCwd().equals(registered.mountRoot())) {
-            throw WorkspaceExecutionStore.unavailable();
-        }
-    }
-
     private Mount mount(ContextBinding binding) {
         if (!local) {
             throw WorkspaceExecutionStore.unavailable();

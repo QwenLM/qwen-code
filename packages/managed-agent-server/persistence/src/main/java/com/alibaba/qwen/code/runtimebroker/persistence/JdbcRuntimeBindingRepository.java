@@ -399,10 +399,9 @@ public final class JdbcRuntimeBindingRepository
                                         true),
                                 candidate);
                         ToolExecutionRecord receipt =
-                                JdbcToolExecutionRepository.selectByIdempotencyKey(
+                                ToolExecutionRows.selectByIdempotencyKey(
                                         connection,
-                                        candidate.getIdempotencyKey(),
-                                        false);
+                                        candidate.getIdempotencyKey());
                         if (receipt != null) {
                             return receipt;
                         }

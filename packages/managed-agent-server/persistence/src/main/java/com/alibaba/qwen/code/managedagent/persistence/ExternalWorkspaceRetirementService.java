@@ -122,7 +122,7 @@ public final class ExternalWorkspaceRetirementService {
             require(identity.equals(identity(request, current)));
             verifyProof(identity, proof);
             // placement、Workspace、Session/head 和 binding 的原生锁覆盖整个检查与提交，不留新准入空窗。
-            requireIdle(request, current);
+            requireIdle(request);
             // The live provision/recovery lease on the binding itself is the
             // one refusal requireIdle does not cover; it must answer 409 like
             // the others, not surface as the repository's IllegalStateException.
@@ -139,12 +139,10 @@ public final class ExternalWorkspaceRetirementService {
             }
             String digest = proofDigest(request, proof);
             operations.create(KIND, request.retirementId(), WorkspaceOperations.values(
-                    "state", "DRAINING", "binding_id", current.getBindingId(),
+                    "state", "RELEASED", "binding_id", current.getBindingId(),
                     "runtime_generation", current.getGeneration(), "storage_id", current.getRequest().getStorageId(),
                     "request_json", encode(new Plan(1, request, identity)), "proof_json", encode(proof),
                     "proof_digest", digest, "fenced_version", released.getVersion(), "resumed", false));
-            operations.update(KIND, request.retirementId(), WorkspaceOperations.values("state", "PLATFORM_CLEANED"));
-            operations.update(KIND, request.retirementId(), WorkspaceOperations.values("state", "RELEASED"));
             return receipt(request, operations.find(KIND, request.retirementId(), true));
         });
     }
@@ -230,7 +228,7 @@ public final class ExternalWorkspaceRetirementService {
                 binding.getProvisionSeed().getProvisionRequestId(), (String) binding.getResourceHandle().getValue().get("identity"));
     }
 
-    private void requireIdle(Request request, RuntimeBindingRecord binding) {
+    private void requireIdle(Request request) {
         requireNoOtherBinding(request, request.bindingId());
         var members = jdbc.query("SELECT session_id, session_kind, status, tool_profile, workspace_generation,"
                 + " workspace_storage_id FROM ma_session WHERE tenant_id = ? AND workspace_id = ? ORDER BY session_id FOR UPDATE",
