@@ -14,6 +14,8 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
+import type { WebShellSessionAdapter } from './daemon/session/session-adapter';
+export type { WebShellSessionAdapter } from './daemon/session/session-adapter';
 export { WebShellTranscript } from './components/WebShellTranscript';
 export type { WebShellTranscriptProps } from './components/WebShellTranscript';
 export * from './daemon-react-sdk';
@@ -93,6 +95,8 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   browserNotifications?: WebShellBrowserNotificationsOptions;
   /** Daemon API base URL. Defaults to the browser origin when omitted. */
   baseUrl?: string;
+  /** Optional host integration for an explicitly selected standalone session. */
+  sessionAdapter?: WebShellSessionAdapter;
   /** Bearer token passed to daemon requests. */
   token?: string;
   /** Session id to load. Undefined starts on an empty page. */
@@ -177,6 +181,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
     browserNotifications,
     urlNavigation,
     baseUrl,
+    sessionAdapter,
     token,
     sessionId,
     workspaceId,
@@ -190,14 +195,26 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
     ...webShellProps
   } = props;
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
+  const standaloneAdapter =
+    sessionContext?.kind === 'standalone' &&
+    !lockWorkspaceCwd &&
+    !workspaceCwd &&
+    !workspaceId
+      ? sessionAdapter
+      : undefined;
   const shell = (
-    <DaemonWorkspaceProvider baseUrl={resolvedBaseUrl} token={token}>
+    <DaemonWorkspaceProvider
+      baseUrl={resolvedBaseUrl}
+      token={token}
+      sessionAdapter={standaloneAdapter}
+    >
       <WorkspaceSessionProvider
         urlNavigation={urlNavigation}
         sessionId={sessionId}
         workspaceId={workspaceId}
         workspaceCwd={workspaceCwd}
         sessionContext={sessionContext}
+        sessionAdapter={standaloneAdapter}
         lockWorkspaceCwd={lockWorkspaceCwd}
         clientId={clientId}
         restartSseOnPrompt={restartSseOnPrompt}
