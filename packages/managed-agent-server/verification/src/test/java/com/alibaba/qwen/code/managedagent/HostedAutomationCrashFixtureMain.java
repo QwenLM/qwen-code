@@ -62,7 +62,6 @@ public final class HostedAutomationCrashFixtureMain {
         String cli = args[2];
         String tenant = args[3];
         int internalPort = Integer.parseInt(args[4]);
-        int brokerPort = Integer.parseInt(args[5]);
         int publicPort = Integer.parseInt(args[6]);
         int storeBasePort = Integer.parseInt(args[7]);
         ObjectMapper mapper = new ObjectMapper();
@@ -86,7 +85,6 @@ public final class HostedAutomationCrashFixtureMain {
                         + "a".repeat(64),
                 "--qwen.managed-agent.harness.workspace-files-enabled=true",
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                 "--qwen.managed-agent.runtime-broker.token=fg11-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",

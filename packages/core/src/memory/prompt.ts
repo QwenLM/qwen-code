@@ -11,8 +11,10 @@ import { EMPTY_AUTO_MEMORY_CATALOG } from './request-context.js';
 import {
   describeDroppedIndexEntries,
   formatIndexEntry,
+  getProjectIndexBudget,
   INDEX_SCAN_CAP_NOTICE_START,
   INDEX_TRUNCATION_NOTICE_START,
+  MAX_DROPPED_INDEX_DESCRIPTION_CHARS,
   MAX_INDEX_LINES as MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
   MAX_INDEX_CHARS,
   MAX_INDEX_LINE_CHARS,
@@ -204,13 +206,16 @@ function descriptionFreeIndexEntry(
   return { min, max };
 }
 
-function truncateManagedAutoMemoryIndex(indexContent: string): string {
+function truncateManagedAutoMemoryIndex(
+  indexContent: string,
+  projectBudget?: ReturnType<typeof getProjectIndexBudget>,
+): string {
   const trimmed = normalizeContent(indexContent).trim();
   const noticeStart = Math.max(
     trimmed.lastIndexOf(INDEX_TRUNCATION_NOTICE_START),
     trimmed.lastIndexOf(INDEX_SCAN_CAP_NOTICE_START),
   );
-  // Exempt only bounded, single-paragraph writer metadata from entry budgets.
+  // Generated diagnostics are a suffix, separate from topic links.
   const hasWriterNotice =
     noticeStart !== -1 &&
     trimmed.length - noticeStart <= 1024 &&
@@ -220,17 +225,19 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
     hasWriterNotice ? trimmed.slice(0, noticeStart) : trimmed
   ).trimEnd();
   const entries = entryContent.split('\n');
-  const lineCount = entries.length;
-  const charCount = entryContent.length;
-  const wasLineTruncated = lineCount > MAX_MANAGED_AUTO_MEMORY_INDEX_LINES;
-  const wasCharTruncated = charCount > MAX_INDEX_CHARS;
+  const maxLines =
+    projectBudget?.maxLines ?? MAX_MANAGED_AUTO_MEMORY_INDEX_LINES;
+  const maxChars = projectBudget?.maxChars ?? MAX_INDEX_CHARS;
+  const lineCount = entries.length + (projectBudget && writerNotice ? 2 : 0);
+  const charCount = projectBudget ? trimmed.length : entryContent.length;
+  const wasLineTruncated = lineCount > maxLines;
+  const wasCharTruncated = charCount > maxChars;
 
   if (!wasLineTruncated && !wasCharTruncated) {
     return trimmed;
   }
 
-  const { content, dropped } = trimIndexToBudgetDetailed(entries);
-  const candidates = entries.slice(0, MAX_MANAGED_AUTO_MEMORY_INDEX_LINES);
+  const candidates = entries.slice(0, maxLines);
   const candidateCharCount = candidates.join('\n').length;
   let allOverlongEntriesShortenable = true;
   const ordinaryCharCount = candidates
@@ -262,26 +269,26 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
   }
   const canFitWithoutDescriptions = !allRecognized
     ? undefined
-    : maximumCharCount <= MAX_INDEX_CHARS
+    : maximumCharCount <= maxChars
       ? true
-      : minimumCharCount > MAX_INDEX_CHARS
+      : minimumCharCount > maxChars
         ? false
         : undefined;
   // Blame long candidates only when the ordinary-entry bound clears overflow.
   const overlongEntriesCauseOverflow =
     allOverlongEntriesShortenable &&
-    candidateCharCount > MAX_INDEX_CHARS &&
-    ordinaryCharCount <= MAX_INDEX_CHARS;
+    candidateCharCount > maxChars &&
+    ordinaryCharCount <= maxChars;
 
   const reason =
     wasCharTruncated && !wasLineTruncated
-      ? `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — ${
+      ? `${charCount} UTF-16 code units (limit: ${maxChars}) — ${
           overlongEntriesCauseOverflow
             ? 'index entries are too long'
             : `too many index entries (${entries.length})`
         }`
       : wasLineTruncated && !wasCharTruncated
-        ? `${lineCount} lines (limit: ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES})`
+        ? `${lineCount} lines (limit: ${maxLines})`
         : `${lineCount} lines and ${charCount} UTF-16 code units`;
 
   const shorteningAdvice =
@@ -293,7 +300,7 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
 
   const lever = overlongEntriesCauseOverflow
     ? ` Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units by shortening topic-file frontmatter; never cut link targets. Prune or merge memory files if the count is still over budget.`
-    : wasLineTruncated && candidateCharCount > MAX_INDEX_CHARS
+    : wasLineTruncated && candidateCharCount > maxChars
       ? ` Shortening entries cannot reduce the line count — prune or merge entries. The first ${candidates.length} entries also exceed the character budget; ${combinedCharacterAdvice}`
       : wasLineTruncated
         ? ' Shortening entries cannot reduce the line count — prune or merge entries.'
@@ -301,10 +308,18 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
           ? ` ${shorteningAdvice}`
           : ' Prune or merge entries to fit the character budget.';
 
-  return `${content}${writerNotice}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded.${describeDroppedIndexEntries(
-    dropped,
-    entries.length,
-  )}${lever} Make edits in the topic files; changes to regenerated index lines do not persist.`;
+  const head = `${writerNotice}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded.`;
+  const tail = `${lever} Make edits in the topic files; changes to regenerated index lines do not persist.`;
+  const { content, dropped } = trimIndexToBudgetDetailed(
+    entries,
+    0,
+    maxLines - (projectBudget ? (writerNotice ? 4 : 2) : 0),
+    maxChars -
+      (projectBudget
+        ? head.length + tail.length + MAX_DROPPED_INDEX_DESCRIPTION_CHARS
+        : 0),
+  );
+  return `${content}${head}${describeDroppedIndexEntries(dropped, entries.length)}${tail}`;
 }
 
 /**
@@ -347,7 +362,7 @@ export const TEAM_SCOPE_SECTION: readonly string[] = [
   '- `user` memories are always private — never save them to TEAM.',
   '- `project` memories stay private to you by default. Save to TEAM only for durable shared facts every contributor needs — not time-bound state like freezes or in-flight task status, which stays private and decays.',
   '- You MUST NOT save sensitive data to TEAM memory — never API keys, tokens, or credentials. It is visible to everyone who can read the repository, and such writes are rejected automatically.',
-  '- For TEAM memory you only write the memory file (Step 1). Its `MEMORY.md` index is generated automatically from the saved files — do NOT hand-edit the team index (that two-step rule applies only to the private directories).',
+  '- Save TEAM memories in topic files. The TEAM index is generated automatically from the saved files.',
   '',
 ];
 
@@ -376,13 +391,14 @@ export const MEMORY_PERSISTENCE_SECTION: readonly string[] = [
 function renderIndexBlock(
   memoryDir: string,
   indexContent: string | null | undefined,
+  projectBudget?: ReturnType<typeof getProjectIndexBudget>,
 ): string[] {
   const trimmed = indexContent?.trim();
   return [
     `## ${memoryDir}/MEMORY.md`,
     '',
     trimmed
-      ? truncateManagedAutoMemoryIndex(trimmed)
+      ? truncateManagedAutoMemoryIndex(trimmed, projectBudget)
       : 'Your MEMORY.md is currently empty. When you save new memories, they will appear here.',
   ];
 }
@@ -392,6 +408,7 @@ function buildIndexSections(
   indexContent: string | null | undefined,
   userSection: UserAutoMemorySection | undefined,
   teamSection: TeamAutoMemorySection | undefined,
+  projectBudget?: ReturnType<typeof getProjectIndexBudget>,
 ): string[] {
   const sections: string[] = [];
   if (userSection !== undefined) {
@@ -400,7 +417,7 @@ function buildIndexSections(
       '',
     );
   }
-  sections.push(...renderIndexBlock(memoryDir, indexContent));
+  sections.push(...renderIndexBlock(memoryDir, indexContent, projectBudget));
   if (teamSection !== undefined) {
     sections.push(
       '',
@@ -421,6 +438,7 @@ export interface BuildMemoryPromptOptions {
    */
   includeIndexes?: boolean;
   keywordVocabularySnapshot?: string;
+  projectContextWindowSize?: number;
 }
 
 export function buildStructuredAutoMemoryPrompt(
@@ -475,13 +493,16 @@ export function buildManagedAutoMemoryPrompt(
     ? [
         '## How to save memories',
         '',
-        'Saving a memory is a two-step process:',
-        '',
-        '**Step 1** — write the memory to its own file inside the directory chosen by its `<scope>`, organising it under the matching type subdirectory (e.g., `user/role.md`, `feedback/testing.md`) using this frontmatter format:',
+        'Write the memory to its own file inside the directory chosen by its `<scope>`, organising it under the matching type subdirectory (e.g., `user/role.md`, `feedback/testing.md`) using this frontmatter format:',
         '',
         ...MEMORY_FRONTMATTER_EXAMPLE,
         '',
-        '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to (each directory has its own index — never cross-reference). Each entry should be one line, under ~150 characters: `- [Title](file.md) — one-line hook`. It has no frontmatter. If a trailing warning is present, insert new pointers above it so it stays last. Never write memory content directly into `MEMORY.md`.',
+        'The runtime rebuilds the PROJECT and TEAM indexes from topic files. Edit the topics directly.',
+        ...(userSection
+          ? [
+              'For USER memory, keep one pointer per entry in the USER index using `- [Title](file.md) — one-line hook` without frontmatter.',
+            ]
+          : []),
         '',
         `- Every \`MEMORY.md\` index is available to memory maintenance agents — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise`,
         ...MEMORY_WRITING_RULES,
@@ -490,13 +511,11 @@ export function buildManagedAutoMemoryPrompt(
     : [
         '## How to save memories',
         '',
-        'Saving a memory is a two-step process:',
-        '',
-        '**Step 1** — write the memory to its own file under the matching type subdirectory (e.g., `user/role.md`, `feedback/testing.md`) using this frontmatter format:',
+        'Write the memory to its own file under the matching type subdirectory (e.g., `user/role.md`, `feedback/testing.md`) using this frontmatter format:',
         '',
         ...MEMORY_FRONTMATTER_EXAMPLE,
         '',
-        `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\` (the full absolute path). This index file is an index, not a memory — each entry should be one line, under ~150 characters: \`- [Title](file.md) — one-line hook\`. It has no frontmatter. If a trailing warning is present, insert new pointers above it so it stays last. Never write memory content directly into \`${memoryDir}/MEMORY.md\`.`,
+        'Save changes to topic files. The runtime rebuilds the index from these files.',
         '',
         `- \`${memoryDir}/MEMORY.md\` is available to memory maintenance agents — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep the index concise`,
         ...MEMORY_WRITING_RULES,
@@ -506,7 +525,15 @@ export function buildManagedAutoMemoryPrompt(
   const indexSections =
     options?.includeIndexes === false
       ? []
-      : buildIndexSections(memoryDir, indexContent, userSection, teamSection);
+      : buildIndexSections(
+          memoryDir,
+          indexContent,
+          userSection,
+          teamSection,
+          options?.projectContextWindowSize === undefined
+            ? undefined
+            : getProjectIndexBudget(options.projectContextWindowSize),
+        );
 
   const lines = [
     '# auto memory',
@@ -559,7 +586,7 @@ export function buildResidentAutoMemoryPrompt(
     '',
     'Read relevant memory proactively and whenever the user refers to earlier work or asks to check, recall, or remember. If asked to ignore memory, do not read, apply, cite, or mention it. Check the current state before relying on a memory or recommending anything it names. Update or remove outdated entries.',
     '',
-    'When explicitly asked to remember or update a memory, save the change now. Check the current catalog for duplicates first. Search relevant roots if the catalog is incomplete or inconclusive. When asked to forget, find and remove the matching entry and its private index pointer.',
+    'When explicitly asked to remember or update a memory, save the change now. Check the current catalog for duplicates first. Search relevant roots if the catalog is incomplete or inconclusive. When asked to forget, find and remove the matching entry. Remove its index pointer separately for USER memory.',
     '',
     '- `user` (role, goals, expertise, preferences) goes to USER.',
     '- `feedback` (corrections and confirmed approaches) goes to USER by default, PROJECT for conventions every contributor must follow.',
@@ -578,7 +605,7 @@ export function buildResidentAutoMemoryPrompt(
     'Use 2–6 discriminative keywords, unique case-insensitively, with at most 2 exact identifiers last. Use 1–3 future tasks that differ from the description as usage_scenarios. Double-quote each keyword and scenario and keep it within 64 characters.',
     'For feedback and project, lead with the rule or fact, then add **Why:** and **How to apply:** lines.',
     '',
-    `For USER and PROJECT, keep one pointer per entry in the same directory's \`MEMORY.md\`: \`- [Title](type/name.md) — one-line hook\`. Use only pointers under ~150 characters, without frontmatter. Keep any truncation notice last. Lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} are truncated.`,
+    "The runtime generates the PROJECT index from topic files. Save changes directly to the topics. For USER memory, keep one pointer per entry in the same directory's `MEMORY.md` using `- [Title](type/name.md) — one-line hook`. Use only pointers under ~150 characters, without frontmatter. Keep any truncation notice last.",
   ];
   return lines.join('\n');
 }
@@ -590,6 +617,7 @@ export function buildAutoMemoryIndexContext(
   indexContent?: string | null,
   userSection?: UserAutoMemorySection,
   teamSection?: TeamAutoMemorySection,
+  contextWindowSize?: number,
 ): string {
   if (
     !indexContent?.trim() &&
@@ -611,6 +639,7 @@ export function buildAutoMemoryIndexContext(
         indexContent,
         userSection,
         teamSection,
+        getProjectIndexBudget(contextWindowSize),
       ).join('\n'),
     ].join('\n'),
   );

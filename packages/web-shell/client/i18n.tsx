@@ -19,6 +19,7 @@ import { BROWSER_NOTIFICATION_MESSAGES_EN } from './browser-notifications/messag
 import { WORKSPACE_REGISTRATION_MESSAGES_EN } from './components/managed/managed-workspace-messages.js';
 import { ARTIFACT_LIBRARY_MESSAGES_EN } from './components/managed/managed-artifact-library-messages.js';
 import { WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_EN } from './components/artifacts/workspace-artifact-library-messages.js';
+import { ARCHIVED_SESSIONS_MESSAGES_EN } from './components/sidebar/archived-sessions-messages.js';
 import { MANAGED_MCP_MESSAGES_EN } from './components/managed/managed-mcp-messages.js';
 import {
   createContext,
@@ -313,7 +314,6 @@ const EN: Messages = {
   'managed.discarded': 'Request discarded. The draft is back in the composer.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
-  'managed.question.title': 'Answer the questions',
   'managed.actions.title': 'Pending requests',
   'managed.actions.root': 'This session',
   'managed.actions.child': (v) => `Child session · ${v?.session}`,
@@ -1861,7 +1861,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'daemon.usage.dailyTokensTitle': 'tokens',
   'daemon.usage.dailyTokensSub': 'daily token totals',
   'daemon.usage.dailySessionsTitle': 'sessions',
-  'daemon.usage.dailySessionsSub': 'active session counts per day',
+  'daemon.usage.dailySessionsSub': 'active sessions per day',
   'delete.cannotCurrent':
     'Cannot delete the current session while it is running.',
   'delete.action': 'Delete',
@@ -2479,6 +2479,9 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.toggleMenu': 'Toggle menu',
   'sidebar.newChat': 'New chat',
   'sidebar.newTask': 'New session',
+  'sidebar.overloadPaused': 'System overloaded — new tasks paused',
+  'sidebar.overloadDetail': (v) =>
+    `Host load ratio ${v?.['ratio'] ?? '?'}, event-loop p99 ${v?.['lag'] ?? '?'} ms (${v?.['reason'] ?? 'unknown'}). New tasks resume when load subsides.`,
   'sidebar.newWorktreeTask': 'New worktree session',
   'sidebar.moveWorkspaceUp': 'Move up',
   'sidebar.moveWorkspaceDown': 'Move down',
@@ -2644,6 +2647,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.openWorkspaceTerminalFailed': 'Failed to open a terminal',
   'sidebar.openWorkspaceTerminalOpened': 'Opened a terminal at the workspace',
   'sidebar.manageWorkspace': 'Manage',
+  'sidebar.trustWorkspace': 'Trust workspace',
+  'sidebar.trustingWorkspace': 'Trusting…',
   'sidebar.reloadWorkspace': 'Reload runtime',
   'sidebar.reloadWorkspaceFailed': 'Failed to reload workspace runtime',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} workspaces`,
@@ -2680,6 +2685,13 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'} (disabled)`,
   'sidebar.overview.hooksUntrusted': (v) =>
     `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'}, ${v?.untrusted ?? 0} not loaded (folder not trusted). Enable security.folderTrust.enabled and trust the folder, or run qwen interactively to review.`,
+  'sidebar.overview.openFacet': (v) =>
+    `Manage ${v?.facet ?? ''} for ${v?.workspace ?? ''}: ${v?.detail ?? ''}`,
+  'workspaceHooks.title': 'Hooks',
+  'workspaceHooks.loading': 'Loading hooks…',
+  'workspaceHooks.empty': 'No hooks configured for this workspace.',
+  'workspaceHooks.enabled': 'Enabled',
+  'workspaceHooks.disabled': 'Disabled',
   'sidebar.forceRemoveWorkspace': 'Force remove',
   'sidebar.removeWorkspaceTitle': 'Remove workspace',
   'sidebar.removeWorkspaceConfirm': (v) =>
@@ -2862,11 +2874,6 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'This restored queue summary cannot recover its original attachments.',
   'queue.admissionUnknown':
     'Delivery is uncertain. Check the session before trying again.',
-  'queue.restoreUnknown': 'Restore local copy',
-  'queue.discardUnknown': 'Discard local copy',
-  'queue.continueEditing': 'Continue editing',
-  'queue.continueEditingConfirm':
-    'The prompt may already be running. Continue editing only if you accept the risk of sending it twice.',
   'queue.commandBlocked':
     "Slash commands can't be queued while a turn is running.",
   'queue.commandGoalBlocked':
@@ -2888,7 +2895,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'queue.insertCommandDisabled': 'Commands cannot be inserted mid-turn',
   'queue.sendNow': 'Send now',
   'queue.sendNowTip':
-    'Send queued messages now. Interrupts the model if it is responding or calling tools',
+    'Send queued messages now. May interrupt the current response or tools. Eligible shell commands continue in the background.',
   'queue.sendNowFailed': 'Failed to send queued messages now',
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',
@@ -3010,18 +3017,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'The model got stuck while using tools or reached a safety limit, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
   'error.loopDetected.explicitCap': (vars) =>
     `This turn reached the limit of ${vars?.limit} tool calls set by model.maxToolCallsPerTurn, so it was stopped. Your session is still open—raise the limit in your settings, or send a new instruction to continue.`,
-  'error.loopDetected.backstop': (vars) =>
-    `This turn reached the safety limit of ${vars?.limit} tool calls, so it was stopped. Your session is still open—send a new instruction to continue, or set model.maxToolCallsPerTurn to choose a different limit.`,
-  'error.loopDetected.stuckRepetition': (vars) =>
-    `After more than ${vars?.limit} tool calls, the model kept repeating the same call, so this turn was stopped. Your session is still open—try a different or more specific instruction.`,
-  'error.loopDetected.repeatedCall':
-    'The model kept repeating the same tool call during this turn, so it was stopped. Your session is still open—try a different or more specific instruction.',
   'error.loopDetected.providerDuplicateId':
     'The model service sent a tool call that had already run, so this turn was stopped instead of running it again. Your session is still open—send a new message to continue.',
-  'error.loopDetected.invalidToolParams':
-    'The model kept sending invalid arguments to the same tool, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
-  'error.loopDetected.repeatedToolFailure':
-    'The same tool kept failing for the same reason after a reminder, so this turn was stopped. Your session is still open—check the errors above, or try a different approach.',
   'shell.command': 'Shell Command',
   'shell.result.timedOut': 'Timed out',
   'shell.result.notices': 'Notices',
@@ -4374,6 +4371,30 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'chatHeader.toggleEnvironment': 'Toggle environment information',
   'chatHeader.toggleRightPanel': 'Toggle right panel',
   'chatHeader.openArtifacts': (v) => `Artifacts (${v?.count ?? 0})`,
+  'chatHeader.openScheduledTasks': (v) => `Scheduled tasks (${v?.count ?? 0})`,
+  'chatHeader.scheduledTasksPaused': (v) =>
+    `Scheduled tasks (${v?.count ?? 0}, paused)`,
+  'environment.scheduledTasks': 'Scheduled tasks',
+  'environment.scheduledTasks.scopeDurable': 'Persistent',
+  'environment.scheduledTasks.scopeSession': 'Session',
+  'environment.scheduledTasks.scopeWakeup': 'Loop',
+  'environment.scheduledTasks.statusActive': 'Active',
+  'environment.scheduledTasks.statusPaused': 'Paused',
+  'environment.scheduledTasks.nextRun': (v) => `Next in ${v?.when ?? ''}`,
+  'environment.scheduledTasks.stop': 'Stop',
+  'environment.scheduledTasks.viewAll': 'Manage all',
+  'scheduledTasks.durableHistoricalSnapshot':
+    'This is a durable scheduled task. Showing its creation snapshot because its live status is unavailable.',
+  'scheduledTasks.sessionScopedActive':
+    'Active in this session. Stopping cancels future runs immediately.',
+  'scheduledTasks.sessionScopedPaused':
+    'Paused in this session. Stopping removes the remaining schedule.',
+  'scheduledTasks.sessionScopedCancelled':
+    'This session-scoped scheduled task is no longer active.',
+  'scheduledTasks.stopSessionTask': 'Stop task',
+  'scheduledTasks.error.cancelFailed': 'Failed to stop the scheduled task',
+  'tasks.pill.scheduled': (v) =>
+    `${v?.count ?? 0} ${(v?.count ?? 0) === 1 ? 'scheduled task' : 'scheduled tasks'}`,
   'environment.title': 'Environment',
   'environment.changes': 'Changes',
   'environment.changeCount': (v) => `${v?.count ?? 0} changed`,
@@ -4424,8 +4445,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'userMessage.showMore': 'Show more',
   'userMessage.showLess': 'Collapse',
   'userMessage.automatic.title': 'Automatic trigger',
-  'userMessage.sendFailed': 'Failed to send',
-  'userMessage.retrySend': 'Retry sending message',
+  'userMessage.retrySend': 'Resend',
+  'userMessage.retryUncertain': 'May not have sent — click to resend',
+  'userMessage.deliveryUncertain':
+    'Message may not have sent. Click ! to resend.',
   'userMessage.edit': 'Edit message',
   'message.moreActions': 'More message actions',
   ...MESSAGE_DELETION_MESSAGES_EN,
@@ -4703,6 +4726,11 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sessionsOverview.popupBlocked':
     'Pop-up blocked. Allow pop-ups for this site to open sessions in new tabs.',
   'sessionsOverview.refresh': 'Refresh',
+  'sessionsOverview.restoreWorktree': 'Restore snapshot',
+  'sessionsOverview.restoreWorktreeUnavailable':
+    'Snapshot is unavailable for this workspace',
+  'sessionsOverview.restoringWorktree': 'Restoring…',
+  'sessionsOverview.restoreWorktreeFailed': 'Snapshot restore failed',
   'sessionsOverview.selectAll': 'Select all',
   'sessionsOverview.titleColumn': 'Title',
   'sessionsOverview.actions': 'Actions',
@@ -5435,6 +5463,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
+  ...ARCHIVED_SESSIONS_MESSAGES_EN,
 };
 
 /**

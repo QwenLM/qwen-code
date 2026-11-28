@@ -3,10 +3,12 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRef;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -26,7 +28,7 @@ import static com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRe
 
 /** Original authority reads without acquiring, renewing or quarantining anything. */
 final class WorkspaceRecoveryReader {
-    private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final JdbcTemplate jdbc;
     private final ToolPublicationObjectStore objects;
@@ -134,7 +136,7 @@ final class WorkspaceRecoveryReader {
                                     + " WHERE scope_ref = ? AND resource_id = ? AND capture_state = 'COLLECTED'",
                             Long.class, scope(head), text(ref, "resourceId"));
                     check(collected != null && collected > 0, "resource_corrupt");
-                    throw com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.failure("resource_collected");
+                    throw WorkspaceRecoveryProtocol.failure("resource_collected");
                 }
             } else if ("OSS_OBJECT".equals(row.get("storage_kind"))) {
                 check(("PUBLISHED".equals(row.get("state")) || "REFERENCED".equals(row.get("state")))
@@ -199,7 +201,7 @@ final class WorkspaceRecoveryReader {
             try (InputStream input = objects.open(key)) {
                 bytes = input.readNBytes((int) length + 1);
             } catch (IOException error) {
-                throw com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.failure("publication_object_io_failed");
+                throw WorkspaceRecoveryProtocol.failure("publication_object_io_failed");
             }
         }
         verifyBytes(bytes, length, (String) row.get("sha256"));
@@ -278,7 +280,7 @@ final class WorkspaceRecoveryReader {
                     && "VERIFIED".equals(manifest.get("capture_state"))
                     && publication.get("seal_manifest_sha256").equals(manifest.get("sha256")), "publication_seal_unverified");
             verifyBytes(bytes, number(manifest, "byte_length"), (String) manifest.get("sha256"));
-            JsonNode document = com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.parse(bytes);
+            JsonNode document = WorkspaceRecoveryProtocol.parse(bytes);
             check(document.path("schemaVersion").asInt() == 1 && document.path("seals").isArray()
                     && document.path("seals").size() <= 2, "publication_seal_invalid");
             for (JsonNode seal : document.path("seals")) {

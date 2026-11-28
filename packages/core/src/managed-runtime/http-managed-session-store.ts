@@ -187,6 +187,27 @@ export interface ManagedMemoryQuery {
   readonly expectedContent?: string;
 }
 
+/**
+ * Committed event envelopes of one Harness-owned Turn, in journal order,
+ * covering `(afterSequence, throughSequence]`.
+ */
+export interface ManagedEventIngestRequest {
+  readonly eventEpoch: string;
+  readonly turnId: string;
+  readonly promptId: string;
+  readonly afterSequence: number;
+  readonly throughSequence: number;
+  readonly events: readonly unknown[];
+  readonly end?: 'parked' | 'recovery_blocked';
+}
+
+export interface ManagedEventIngestReceipt {
+  readonly cursor: number;
+  readonly leaseRenewAfterMillis: number;
+  /** The request recorded the Turn's terminal event. */
+  readonly terminal: boolean;
+}
+
 export interface HttpManagedSessionStores {
   supportsModelDiagnostics(): boolean;
   supportsExecutionDiagnostics(): boolean;
@@ -195,6 +216,12 @@ export interface HttpManagedSessionStores {
   /** Whether this control plane lets a background Session suspend behind the pull. */
   supportsRuntimeObservation(): boolean;
   supportsActionParking(): boolean;
+  /** Whether a park certificate may share its seal with a background hold. */
+  supportsBackgroundActionParking(): boolean;
+  /** Whether a wake-started Turn's approval wait may park. */
+  supportsWakeActionParking(): boolean;
+  /** Whether a clean wake-sealed suspension may release its placement. */
+  supportsSuspensionPlacementRelease(): boolean;
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
@@ -221,6 +248,14 @@ export interface HttpManagedSessionStores {
   releaseOwnership(
     request: HostedHarnessReleaseRequest,
   ): Promise<HostedHarnessReleaseReceipt>;
+  /**
+   * Pushes a Turn's committed envelopes. After a clean seal only the park
+   * marker may follow, on the sealed incarnation and before the placement
+   * release.
+   */
+  ingestEvents(
+    request: ManagedEventIngestRequest,
+  ): Promise<ManagedEventIngestReceipt>;
   close(): Promise<void>;
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
   authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
@@ -441,6 +476,11 @@ export function createHttpManagedSessionStores(
     supportsWakeDispatch: () => client.supportsWakeDispatch(),
     supportsRuntimeObservation: () => client.supportsRuntimeObservation(),
     supportsActionParking: () => client.supportsActionParking(),
+    supportsBackgroundActionParking: () =>
+      client.supportsBackgroundActionParking(),
+    supportsWakeActionParking: () => client.supportsWakeActionParking(),
+    supportsSuspensionPlacementRelease: () =>
+      client.supportsSuspensionPlacementRelease(),
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
     publication: {
@@ -466,6 +506,7 @@ export function createHttpManagedSessionStores(
     stopWriterRenewal: () => client.stopWriterRenewal(),
     quiesceOwnership: (placement) => client.quiesceOwnership(placement),
     releaseOwnership: (request) => client.releaseOwnership(request),
+    ingestEvents: (request) => client.ingestEvents(request),
     close: () => client.seal(),
     setLifecycleAuthority: (authority) =>
       client.setLifecycleAuthority(authority),
@@ -994,6 +1035,9 @@ interface WriterGrant {
   readonly wakeDispatch: boolean;
   readonly runtimeObservation: boolean;
   readonly actionParking: boolean;
+  readonly backgroundActionParking: boolean;
+  readonly wakeActionParking: boolean;
+  readonly suspensionPlacementRelease: boolean;
   readonly activationLease?: ManagedSessionActivationLease;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
@@ -1071,6 +1115,19 @@ class ManagedSessionStoreHttpClient {
   supportsActionParking(): boolean {
     return this.grant?.actionParking === true;
   }
+
+  supportsBackgroundActionParking(): boolean {
+    return this.grant?.backgroundActionParking === true;
+  }
+
+  supportsWakeActionParking(): boolean {
+    return this.grant?.wakeActionParking === true;
+  }
+
+  supportsSuspensionPlacementRelease(): boolean {
+    return this.grant?.suspensionPlacementRelease === true;
+  }
+
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
   private readonly writerId: string;
@@ -2892,6 +2949,44 @@ class ManagedSessionStoreHttpClient {
     await this.acquirePromise?.catch(() => undefined);
   }
 
+  async ingestEvents(
+    request: ManagedEventIngestRequest,
+  ): Promise<ManagedEventIngestReceipt> {
+    let grant: WriterGrant;
+    if (this.sealed) {
+      if (
+        request.end !== 'parked' ||
+        this.grant === undefined ||
+        this.locallyStopped ||
+        this.ownershipRelease
+      )
+        throw new ManagedSessionRecordError(
+          'the HTTP Managed Session writer is not active.',
+        );
+      grant = this.grant;
+    } else {
+      await this.ensureWriter();
+      grant = this.requireGrant();
+    }
+    const receipt = asRecord(
+      await this.json('/events:ingest', 'POST', {
+        workspaceId: this.sessionKey.workspaceId,
+        writerId: this.writerId,
+        writerGeneration: grant.writerGeneration,
+        ...request,
+      }),
+      'event ingest receipt',
+    );
+    return {
+      cursor: safeCounter(receipt['cursor'], 'cursor'),
+      leaseRenewAfterMillis: safeCounter(
+        receipt['leaseRenewAfterMillis'],
+        'leaseRenewAfterMillis',
+      ),
+      terminal: boolean(receipt['terminal'], 'terminal'),
+    };
+  }
+
   async releaseOwnership(
     request: HostedHarnessReleaseRequest,
   ): Promise<HostedHarnessReleaseReceipt> {
@@ -2904,7 +2999,12 @@ class ManagedSessionStoreHttpClient {
     )
       throw corrupt('ownership release does not match the writer.');
     if (!this.ownershipRelease) {
-      const grant = this.requireGrant();
+      const grant = this.grant;
+      if (grant === undefined || this.locallyStopped) {
+        throw new ManagedSessionRecordError(
+          'the HTTP Managed Session writer is not active.',
+        );
+      }
       if (
         request.commitProof.lastCommitSequence !== grant.committedSequence ||
         request.commitProof.committedPrefixHash !== grant.lastCommitDigest
@@ -3147,6 +3247,9 @@ class ManagedSessionStoreHttpClient {
         wakeDispatch: renewed.wakeDispatch,
         runtimeObservation: renewed.runtimeObservation,
         actionParking: renewed.actionParking,
+        backgroundActionParking: renewed.backgroundActionParking,
+        wakeActionParking: renewed.wakeActionParking,
+        suspensionPlacementRelease: renewed.suspensionPlacementRelease,
       };
       this.scheduleRenewal();
     })();
@@ -3792,6 +3895,9 @@ function parseWriterGrant(value: unknown): WriterGrant {
     wakeDispatch: record['wakeDispatch'] === true,
     runtimeObservation: record['runtimeObservation'] === true,
     actionParking: record['actionParking'] === true,
+    backgroundActionParking: record['backgroundActionParking'] === true,
+    wakeActionParking: record['wakeActionParking'] === true,
+    suspensionPlacementRelease: record['suspensionPlacementRelease'] === true,
     ...(record['activationLease'] == null
       ? {}
       : { activationLease: parseActivationLease(record['activationLease']) }),

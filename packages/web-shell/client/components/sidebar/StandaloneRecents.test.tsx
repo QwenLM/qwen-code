@@ -1581,4 +1581,103 @@ describe('StandaloneRecents', () => {
       expect(onError).not.toHaveBeenCalled();
     },
   );
+
+  it('supports hideWhenSearchEmpty, matchedCount/hasMore, clientSort, and uncapped archived cards', async () => {
+    const many = Array.from({ length: 7 }, (_, index) =>
+      summary(
+        `arch-${index + 1}`,
+        index === 0
+          ? 'Zeta task'
+          : index === 1
+            ? 'Alpha task'
+            : `Task ${index + 1}`,
+        {
+          isArchived: true,
+          createdAt:
+            index === 1
+              ? '2026-10-05T00:00:00Z'
+              : `2026-10-01T0${index}:00:00Z`,
+          updatedAt: `2026-10-10T0${index}:00:00Z`,
+        },
+      ),
+    );
+    list.mockResolvedValue({ sessions: many, nextCursor: 'more-cursor' });
+    const statuses: Array<{
+      count: number;
+      matchedCount?: number;
+      hasMore?: boolean;
+    }> = [];
+
+    const onLoadSession = vi.fn();
+    const onMutated = vi.fn();
+    const onError = vi.fn();
+    const onNotice = vi.fn();
+    const renderArchived = async (
+      overrides: {
+        searchQuery?: string;
+        hideWhenSearchEmpty?: boolean;
+        clientSort?: 'updatedAt' | 'createdAt' | 'alphabetical';
+      } = {},
+    ) => {
+      await act(async () =>
+        root.render(
+          <StandaloneRecents
+            archiveState="archived"
+            searchQuery={overrides.searchQuery ?? ''}
+            hideWhenSearchEmpty={overrides.hideWhenSearchEmpty ?? true}
+            clientSort={overrides.clientSort ?? 'updatedAt'}
+            groupCountLabel={(count, hasMore) =>
+              hasMore ? `${count}+ items` : `${count} items`
+            }
+            renderSession={(item) => (
+              <div key={item.sessionId} data-testid="standalone-row">
+                {item.displayName}
+              </div>
+            )}
+            onLoadSession={onLoadSession}
+            onMutated={onMutated}
+            onStatusChange={(status) => statuses.push(status)}
+            onError={onError}
+            onNotice={onNotice}
+          />,
+        ),
+      );
+    };
+
+    await renderArchived();
+    expect(
+      container.querySelectorAll('[data-testid="standalone-row"]'),
+    ).toHaveLength(7);
+    expect(container.textContent).toContain('7+ items');
+    expect(statuses.at(-1)).toMatchObject({
+      count: 7,
+      matchedCount: 7,
+      hasMore: true,
+    });
+
+    await renderArchived({ clientSort: 'alphabetical' });
+    const rowNames = Array.from(
+      container.querySelectorAll('[data-testid="standalone-row"]'),
+    ).map((el) => el.textContent);
+    expect(rowNames[0]).toBe('Alpha task');
+    expect(rowNames.at(-1)).toBe('Zeta task');
+
+    await renderArchived({
+      searchQuery: 'nonexistent',
+      hideWhenSearchEmpty: true,
+    });
+    expect(
+      container.querySelector('[data-testid="standalone-archived-group"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="standalone-row"]'),
+    ).toBeNull();
+    expect(container.textContent).toContain('sidebar.showAllSessions');
+    expect(container.textContent).not.toContain('sidebar.archivedEmpty');
+    expect(statuses.at(-1)).toMatchObject({
+      count: 7,
+      matchedCount: 0,
+      hasMore: true,
+    });
+  });
 });

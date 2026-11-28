@@ -12,19 +12,21 @@ import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,7 +51,7 @@ public class JdbcManagedToolResultStore
         this.sessions = sessions;
     }
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    @Autowired(required = false)
     void setJournalPacks(JdbcJournalPacks packs) { this.packs = packs; }
 
     void captureEvents(String tenant, String workspace, String session, long revision, List<JsonNode> events) {
@@ -135,7 +137,7 @@ public class JdbcManagedToolResultStore
                                                 now));
                             }
                             rows.sort(
-                                    java.util.Comparator.<Map<String, Object>>comparingLong(
+                                    Comparator.<Map<String, Object>>comparingLong(
                                                     row ->
                                                             row.get("due_at")
                                                                             instanceof
@@ -520,9 +522,7 @@ public class JdbcManagedToolResultStore
     public Optional<Artifact> findArtifact(String tenant, String session, String artifactId) {
         return jdbc
                 .query(
-                        "SELECT " + ManagedSchemaProjection.ARTIFACT.columns("a") + ", r.request_json FROM ma_artifact a JOIN ma_operation r ON r.operation_kind = 'TOOL_RESULT_PROJECTION' AND "
-                                + ManagedSchemaJdbcTemplate.binaryIdentity("r.operation_id", h2())
-                                + " = a.result_id WHERE a.scope_ref = ? AND r.tenant_id = ? AND r.session_id = ? AND a.artifact_id = ? AND r.state = 'READY'",
+                        "SELECT " + ManagedSchemaProjection.ARTIFACT.columns("a") + ", r.request_json FROM ma_artifact a JOIN ma_operation r ON r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.operation_id = a.result_id WHERE a.scope_ref = ? AND r.tenant_id = ? AND r.session_id = ? AND a.artifact_id = ? AND r.state = 'READY'",
                         this::artifact,
                         scope(tenant, session),
                         tenant,
@@ -559,9 +559,7 @@ public class JdbcManagedToolResultStore
         args.add(limit + 1);
         List<Artifact> rows =
                 jdbc.query(
-                        "SELECT " + ManagedSchemaProjection.ARTIFACT.columns("a") + ", r.request_json FROM ma_artifact a JOIN ma_operation r ON r.operation_kind = 'TOOL_RESULT_PROJECTION' AND "
-                                + ManagedSchemaJdbcTemplate.binaryIdentity("r.operation_id", h2())
-                                + " = a.result_id WHERE a.scope_ref = ? AND r.tenant_id = ? AND r.session_id = ? AND a.creation_sequence <= ? AND r.state = 'READY'"
+                        "SELECT " + ManagedSchemaProjection.ARTIFACT.columns("a") + ", r.request_json FROM ma_artifact a JOIN ma_operation r ON r.operation_kind = 'TOOL_RESULT_PROJECTION' AND r.operation_id = a.result_id WHERE a.scope_ref = ? AND r.tenant_id = ? AND r.session_id = ? AND a.creation_sequence <= ? AND r.state = 'READY'"
                                 + cursor
                                 + " ORDER BY a.creation_sequence DESC, a.artifact_id DESC LIMIT ?",
                         this::artifact,
@@ -569,20 +567,13 @@ public class JdbcManagedToolResultStore
         return new ArtifactPage(List.copyOf(rows.subList(0, Math.min(rows.size(), limit))), through, rows.size() > limit);
     }
 
-    private static String workspaceArtifactSource(boolean h2) {
-        return " FROM ma_artifact a JOIN ma_operation r ON r.operation_kind = 'TOOL_RESULT_PROJECTION'"
-                    + " AND " + ManagedSchemaJdbcTemplate.binaryIdentity("r.operation_id", h2)
-                    + " = a.result_id JOIN ma_session s ON s.tenant_id = r.tenant_id"
+    private static final String WORKSPACE_ARTIFACT_SOURCE =
+            " FROM ma_artifact a JOIN ma_operation r ON r.operation_kind = 'TOOL_RESULT_PROJECTION'"
+                    + " AND r.operation_id = a.result_id JOIN ma_session s ON s.tenant_id = r.tenant_id"
                     + " AND s.session_id = r.session_id WHERE r.tenant_id = ? AND r.workspace_id = ?"
                     + " AND s.workspace_id = ? AND r.state = 'READY' AND s.session_kind = 'PUBLIC'"
                     + " AND s.status NOT IN ('DELETED', 'DELETING')"
                     + " AND (s.owner_only = 0 OR COALESCE(s.owner_actor_key, s.creator_actor_key) = ?)";
-    }
-
-    private boolean h2() {
-        return Boolean.TRUE.equals(jdbc.execute((ConnectionCallback<Boolean>) connection ->
-                "H2".equals(connection.getMetaData().getDatabaseProductName())));
-    }
 
     public WorkspaceArtifactPage listWorkspaceArtifacts(String tenant, byte[] actorKey, String workspace,
             Long watermark, Long beforeId, int limit) {
@@ -601,7 +592,7 @@ public class JdbcManagedToolResultStore
         List<WorkspaceRow> rows =
                 jdbc.query(
                         "SELECT a.id, " + ManagedSchemaProjection.ARTIFACT.columns("a")
-                                + ", r.request_json" + workspaceArtifactSource(h2())
+                                + ", r.request_json" + WORKSPACE_ARTIFACT_SOURCE
                                 + cursor + " ORDER BY a.id DESC LIMIT ?",
                         (row, index) -> new WorkspaceRow(artifact(row, index), row.getLong("id")),
                         args.toArray());
@@ -695,7 +686,7 @@ public class JdbcManagedToolResultStore
     private static Source readSource(String json) {
         try {
             return JSON.treeToValue(parse(json), Source.class);
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Stored tool result source is invalid", error);
         }
     }

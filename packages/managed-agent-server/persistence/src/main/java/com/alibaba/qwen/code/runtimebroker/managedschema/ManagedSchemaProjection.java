@@ -33,7 +33,7 @@ public enum ManagedSchemaProjection {
             "tenant_id, session_id, stream_kind, stream_id, last_sequence, "
                     + "replay_floor_sequence, covered_sequence, wake_covered_sequence, projection_version, "
                     + "artifact_refs_resource_ref, "
-                    + "output_ranges_json, is_projection_pending, gmt_modified"),
+                    + "output_ranges_json, is_projection_pending, is_replay_floor_pending, gmt_modified"),
     JOURNAL_PACK(
             "pack_id, tenant_id, workspace_id, session_id, from_revision, "
                     + "through_revision, manifest_resource_ref, object_key, state, is_put_closed, "
@@ -140,7 +140,8 @@ public enum ManagedSchemaProjection {
                     + "is_resource_gc_completed, is_publication_retention_registered, model_id, model_revision, "
                     + "model_config_digest, model_config_key_id, model_config_ciphertext, "
                     + "selected_approval_mode, approval_revision, is_plan_enabled, permission_rules_json, public_child_agents_version, harness_instance_id, "
-                    + "harness_owner_boot_id, harness_placement_epoch, harness_placement_state"),
+                    + "harness_owner_boot_id, harness_placement_epoch, harness_placement_state, "
+                    + "harness_claim_requested_at, harness_claim_reserved_until"),
     SESSION_HEAD(
             "tenant_id, workspace_id, session_id, has_activity_diagnostics, state, writer_generation, "
                     + "writer_id, writer_lease_until, lease_token_hash, journal_revision, "
@@ -151,7 +152,8 @@ public enum ManagedSchemaProjection {
                     + "activation_head_revision, harness_session_id, head_kind, "
                     + "phase, operation_id, claim_generation, claim_lease_until, is_wake_pending, "
                     + "wake_head_revision, wake_retry_at, wake_seal_revision, wake_seal_background, wake_seal_parked_prompt_id, "
-                    + "wake_seal_parked_until, wake_seal_parked_approval_revision, is_wake_scan_pending, cleanup_head_revision"),
+                    + "wake_seal_parked_until, wake_seal_parked_approval_revision, wake_seal_parked_owner, is_wake_scan_pending, "
+                    + "cleanup_head_revision"),
     SESSION_JOURNAL_TX(
             "tenant_id, workspace_id, session_id, journal_revision, command_ref, "
                     + "transaction_id, operation, command_id, content_digest, first_sequence, "

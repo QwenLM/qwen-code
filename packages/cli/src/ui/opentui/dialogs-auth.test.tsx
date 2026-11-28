@@ -128,6 +128,7 @@ vi.mock('../auth/use-subscription.js', async (importOriginal) => ({
 
 const core = vi.hoisted(() => ({
   applyProviderInstallPlan: vi.fn(),
+  discoverProviderModels: vi.fn(),
   logAuth: vi.fn(),
 }));
 
@@ -157,6 +158,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...actual,
     applyProviderInstallPlan: core.applyProviderInstallPlan,
+    discoverProviderModels: core.discoverProviderModels,
     logAuth: core.logAuth,
   };
 });
@@ -326,8 +328,10 @@ function renderDialog(overrides?: {
   };
 }
 
-/** Drive main → Custom Provider → through the full seven-step wizard. */
-async function runCustomProviderFlow(): Promise<{
+async function runCustomProviderToModels(
+  protocol: AuthType = AuthType.USE_OPENAI,
+  responses = false,
+): Promise<{
   onClose: ReturnType<typeof vi.fn>;
   notify: ReturnType<typeof vi.fn>;
 }> {
@@ -337,8 +341,13 @@ async function runCustomProviderFlow(): Promise<{
   await press('down');
   await press('down');
   await press('return'); // main: CUSTOM_PROVIDER → provider-setup (protocol)
-  await press('return'); // protocol: OpenAI-compatible → API selection
-  await press('return'); // API: Chat Completions → baseUrl input
+  if (protocol !== AuthType.USE_OPENAI) await press('down');
+  if (protocol === AuthType.USE_GEMINI) await press('down');
+  await press('return');
+  if (protocol === AuthType.USE_OPENAI) {
+    if (responses) await press('down');
+    await press('return');
+  }
   await typeText('https://api.example.com/v1');
   await press('return'); // baseUrl → apiKey
   expect(
@@ -346,10 +355,16 @@ async function runCustomProviderFlow(): Promise<{
   ).not.toBeNull();
   await typeText('sk-test');
   await press('return'); // apiKey → models
+  return { onClose, notify };
+}
+
+/** Drive main → Custom Provider → through the full seven-step wizard. */
+async function runCustomProviderFlow() {
+  const result = await runCustomProviderToModels();
   await typeText('model-1, model-2');
   await press('return'); // models → advancedConfig
   await press('return'); // advancedConfig: skip → review
-  return { onClose, notify };
+  return result;
 }
 
 /**
@@ -376,8 +391,191 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     mocks.state.pasteHandlers.length = 0;
     mocks.state.width = 100;
     core.applyProviderInstallPlan.mockReset().mockResolvedValue(undefined);
+    core.discoverProviderModels.mockReset().mockResolvedValue(null);
     core.logAuth.mockReset();
   });
+
+  it.each([
+    [AuthType.USE_OPENAI, false, 'openai'],
+    [AuthType.USE_OPENAI, true, 'openai-responses'],
+    [AuthType.USE_ANTHROPIC, false, 'anthropic'],
+  ] as const)(
+    'discovers custom %s (Responses: %s) and cancels stale results',
+    async (protocol, responses, expected) => {
+      let resolve!: (models: Array<{ id: string }>) => void;
+      core.discoverProviderModels.mockReturnValueOnce(
+        new Promise((done) => {
+          resolve = done;
+        }),
+      );
+      await runCustomProviderToModels(protocol, responses);
+      expect(screen.getByText('Loading models from provider…')).toBeTruthy();
+      expect(
+        screen.queryByText('Enter model IDs separated by commas.'),
+      ).toBeNull();
+      expect(core.discoverProviderModels).toHaveBeenCalledWith(
+        expect.objectContaining({
+          protocol: expected,
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'sk-test',
+          maxRedirects: 0,
+          signal: expect.any(AbortSignal),
+        }),
+      );
+      const signal = core.discoverProviderModels.mock.calls[0][0]
+        .signal as AbortSignal;
+      await pressEsc();
+      expect(signal.aborted).toBe(true);
+      await act(async () => {
+        resolve([{ id: 'late-model' }]);
+      });
+      expect(screen.getByText(/API Key$/)).toBeTruthy();
+      expect(screen.queryByText(/late-model/)).toBeNull();
+      expect(core.applyProviderInstallPlan).not.toHaveBeenCalled();
+    },
+  );
+
+  it('searches discovered models, restores submitted selections and saves only confirmed IDs', async () => {
+    core.discoverProviderModels.mockResolvedValue([
+      { id: 'alpha' },
+      { id: 'beta' },
+    ]);
+    const build = vi.spyOn(coreRuntime, 'buildInstallPlan');
+    await runCustomProviderToModels();
+    expect(
+      screen.getByText('Models · from the provider · 0 checked'),
+    ).toBeTruthy();
+    await typeText('manual-id');
+    await press('tab');
+    await typeText('beta');
+    expect(screen.queryByText(/^alpha(\s|$)/)).toBeNull();
+    await press('down');
+    await press('space');
+    expect(
+      screen.getByText('Models · from the provider · 1 checked'),
+    ).toBeTruthy();
+    expect(core.applyProviderInstallPlan).not.toHaveBeenCalled();
+    await press('return');
+    await pressEsc();
+    expect(core.discoverProviderModels).toHaveBeenCalledTimes(2);
+    expect(
+      screen.getByText('Models · from the provider · 1 checked'),
+    ).toBeTruthy();
+    await press('tab');
+    await press('tab');
+    await press('down');
+    await press('space');
+    expect(
+      screen.getByText('Models · from the provider · 0 checked'),
+    ).toBeTruthy();
+    await press('return');
+    await press('return');
+    expect(screen.getByText(/Review$/)).toBeTruthy();
+    expect(core.applyProviderInstallPlan).not.toHaveBeenCalled();
+    await press('return');
+    await vi.waitFor(() =>
+      expect(core.applyProviderInstallPlan).toHaveBeenCalledOnce(),
+    );
+    expect(build.mock.calls.at(-1)?.[1]?.modelIds).toEqual(['manual-id']);
+  });
+
+  it('discards unconfirmed discovery edits on back and keeps manual entry after failure', async () => {
+    core.discoverProviderModels
+      .mockResolvedValueOnce([{ id: 'discard-me' }])
+      .mockResolvedValueOnce(null);
+    const build = vi.spyOn(coreRuntime, 'buildInstallPlan');
+    await runCustomProviderToModels();
+    await typeText('unsaved-id');
+    await press('tab');
+    await press('tab');
+    await press('space');
+    await pressEsc();
+    await press('return');
+    expect(screen.queryByText(/unsaved-id/)).toBeNull();
+    expect(screen.queryByText(/discard-me/)).toBeNull();
+    expect(
+      screen.getByText('Could not list models. Enter model IDs manually.'),
+    ).toBeTruthy();
+    expect(
+      screen.getByText('Enter model IDs separated by commas.'),
+    ).toBeTruthy();
+    await typeText('fallback-model');
+    await press('return');
+    await press('return');
+    await press('return');
+    await vi.waitFor(() =>
+      expect(core.applyProviderInstallPlan).toHaveBeenCalledOnce(),
+    );
+    expect(build.mock.calls.at(-1)?.[1]?.modelIds).toEqual(['fallback-model']);
+  });
+
+  it('clears model validation on edit without committing the discovery draft', async () => {
+    core.discoverProviderModels.mockResolvedValue([{ id: 'alpha' }]);
+    await runCustomProviderToModels();
+    await press('return');
+    expect(screen.getByText('Model IDs cannot be empty.')).toBeTruthy();
+    await typeText('unsaved-id');
+    expect(screen.queryByText('Model IDs cannot be empty.')).toBeNull();
+    await pressEsc();
+    await press('return');
+    expect(screen.queryByText(/unsaved-id/)).toBeNull();
+    expect(
+      screen.getByText('Models · from the provider · 0 checked'),
+    ).toBeTruthy();
+    expect(core.applyProviderInstallPlan).not.toHaveBeenCalled();
+  });
+
+  it('keeps custom Gemini manual without discovery', async () => {
+    await runCustomProviderToModels(AuthType.USE_GEMINI);
+    expect(core.discoverProviderModels).not.toHaveBeenCalled();
+    expect(
+      screen.getByText('Enter model IDs separated by commas.'),
+    ).toBeTruthy();
+  });
+
+  it.each([true, false])(
+    'preserves built-in preset defaults (discovered: %s)',
+    async (discovered) => {
+      const preset = coreRuntime.codingPlanProvider;
+      const known = preset.models![0]!;
+      core.discoverProviderModels.mockResolvedValue(
+        discovered ? [known, { id: 'new-remote' }] : null,
+      );
+      const build = vi.spyOn(coreRuntime, 'buildInstallPlan');
+      renderDialog();
+      await press('down');
+      await press('down');
+      await press('return');
+      await press('return');
+      await press('return');
+      await typeText('sk-sp-test');
+      await press('return');
+      expect(core.discoverProviderModels).toHaveBeenCalledWith(
+        expect.objectContaining({
+          protocol: 'openai',
+          staticModels: preset.models,
+        }),
+      );
+      expect(core.discoverProviderModels.mock.calls[0][0]).not.toHaveProperty(
+        'maxRedirects',
+      );
+      expect(
+        screen.getByText(
+          discovered
+            ? 'Models · from the provider · 1 checked'
+            : /provider list unavailable, showing built-ins/,
+        ),
+      ).toBeTruthy();
+      expect(core.applyProviderInstallPlan).not.toHaveBeenCalled();
+      await press('return');
+      await vi.waitFor(() =>
+        expect(core.applyProviderInstallPlan).toHaveBeenCalledOnce(),
+      );
+      expect(build.mock.calls.at(-1)?.[1]?.modelIds).toEqual(
+        discovered ? [known.id] : preset.models!.map((model) => model.id),
+      );
+    },
+  );
 
   it('renders the main menu with the five top-level options', () => {
     renderDialog();

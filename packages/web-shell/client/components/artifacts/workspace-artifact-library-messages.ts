@@ -30,6 +30,8 @@ export const WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_EN: Record<string, string> = {
   'workspaceArtifactLibrary.activeBadge': 'Active',
   'workspaceArtifactLibrary.openSession': 'Open session',
   'workspaceArtifactLibrary.jumpToPreview': 'Open session to preview',
+  'workspaceArtifactLibrary.selectPrompt':
+    'Select an artifact to preview it here.',
   'workspaceArtifactLibrary.loadMore': 'Show more',
   'workspaceArtifactLibrary.refresh': 'Refresh',
   'workspaceArtifactLibrary.retry': 'Retry',
@@ -57,6 +59,7 @@ export const WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_ZH: Record<string, string> = {
   'workspaceArtifactLibrary.activeBadge': '活跃',
   'workspaceArtifactLibrary.openSession': '打开会话',
   'workspaceArtifactLibrary.jumpToPreview': '打开会话以预览',
+  'workspaceArtifactLibrary.selectPrompt': '选择一个产物在此预览。',
   'workspaceArtifactLibrary.loadMore': '显示更多',
   'workspaceArtifactLibrary.refresh': '刷新',
   'workspaceArtifactLibrary.retry': '重试',
@@ -90,6 +93,8 @@ export const WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_RU: Record<string, string> = {
   'workspaceArtifactLibrary.activeBadge': 'Активна',
   'workspaceArtifactLibrary.openSession': 'Открыть сессию',
   'workspaceArtifactLibrary.jumpToPreview': 'Открыть сессию для просмотра',
+  'workspaceArtifactLibrary.selectPrompt':
+    'Выберите артефакт, чтобы посмотреть его здесь.',
   'workspaceArtifactLibrary.loadMore': 'Показать ещё',
   'workspaceArtifactLibrary.refresh': 'Обновить',
   'workspaceArtifactLibrary.retry': 'Повторить',

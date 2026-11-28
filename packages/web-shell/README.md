@@ -3,6 +3,18 @@
 Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 React
 组件嵌入到其他项目中。
 
+## 场景推荐与输入历史
+
+欢迎页的场景推荐要替换输入时，宿主可通过 `composerRef` 先保存当前草稿，再填入推荐文本。
+已有文本会进入当前工作区的输入历史，可以按 Ctrl+R 搜索并恢复。空白草稿会被跳过，
+整个操作无需创建会话。
+
+```ts
+const composer = composerRef.current;
+composer?.saveCurrentDraftToHistory();
+composer?.setText(recommendation);
+```
+
 ## 宿主已有 Managed Session
 
 `ManagedAgentWebShell` 支持注入 `managedAgentProvider`；省略它时必须同时传 `baseUrl`，
@@ -816,6 +828,16 @@ load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账
 隐藏后，Sidebar 的会话目录固定查询 `sourceType: "default"`；独立 WebShell 和未配置
 该选项的宿主仍默认展示来源切换。
 
+### 方向键历史寻回
+
+用户可在 **设置 → 界面** 中关闭**用上下键寻回历史消息**。浏览器会保存选择，默认开启。
+按 Ctrl+R 可搜索历史消息。
+
+嵌入宿主可向 `WebShell`、`WebShellWithProviders` 或独立的 `ManagedAgentWebShell`
+传入 `disableArrowKeyHistory={true}`，关闭对应实例的方向键寻回。设置面板显示该开关时，
+开关会显示为关闭且不可编辑，并注明由宿主控制。省略该属性或传入 `false` 时，使用浏览器
+已保存的偏好。属性变化立即生效，已保存的偏好会保留。
+
 ### 简洁输入框
 
 通过 `composerVariant="simple"` 启用胶囊形输入框，适用于 `WebShell` 和
@@ -1025,7 +1047,7 @@ Live 和频道右侧标题都为「设置」，左栏标题与首页品牌名共
 
 `WebShellSettingsOptions.includeItems` 与 `excludeItems` 接受 `WebShellSettingItemId` 值。可导入 `WEB_SHELL_SETTING_ITEM_IDS` 获取受支持的只读列表。这些 ID 是经过整理的别名，而不是 daemon 的配置路径：`setting:language` 对应语言控件（界面语言），`setting:output-language` 对应模型输出语言（用户作用域，仅用户标签页显示），`setting:fast-model` 对应快速模型选择器。即使内部 schema 路径变化，别名也保持稳定。未知的运行时 ID 不匹配任何条目；配置白名单后，尚无公开别名的字段也会隐藏。
 
-前端内置块有自己的 ID：`builtin:chat-width`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control`、`builtin:connections`、`builtin:archived-sessions` 和 `builtin:model-management`。`builtin:connections` 区块仅在 standalone 构建中渲染，而 standalone 入口不接收 `settings` 呈现配置，因此该 ID 目前对嵌入方没有作用。模型管理块与普通 Model 字段独立过滤；仅排除普通 Model 字段时，模型列表与选择仍然可用；配置白名单时需包含 `builtin:model-management` 才会显示该块。浏览器通知与聊天宽度相互独立。既有的能力和隐藏限制仍然适用，白名单不能强制显示不可用的控件，也不会改变排序。
+前端内置块有自己的 ID：`builtin:chat-width`、`builtin:arrow-key-history`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control`、`builtin:connections`、`builtin:archived-sessions` 和 `builtin:model-management`。`builtin:connections` 区块仅在 standalone 构建中渲染，而 standalone 入口不接收 `settings` 呈现配置，因此该 ID 目前对嵌入方没有作用。模型管理块与普通 Model 字段独立过滤；仅排除普通 Model 字段时，模型列表与选择仍然可用；配置白名单时需包含 `builtin:model-management` 才会显示该块。浏览器通知与聊天宽度相互独立。既有的能力和隐藏限制仍然适用，白名单不能强制显示不可用的控件，也不会改变排序。
 
 归档会话管理位于 **设置 → 归档会话**，直接展示现有归档列表及工作区分组；侧边栏不再常驻“已归档”区块。只有进入该分类时才加载归档，离开后停止相关订阅。该分类沿用原有侧边栏归档功能的能力限制，禁用侧边栏的嵌入宿主不展示此分类；可通过 `builtin:archived-sessions` 控制其设置入口。嵌入宿主需在 `sidebar.footer.items` 中提供 `settings`，使用设置白名单时需加入 `builtin:archived-sessions`；既有白名单升级后不会自动加入该入口，隐藏设置入口或排除此分类会隐藏归档管理界面，底层归档 API 不受影响。支持来源元数据时，归档页内可独立切换任务／频道，不改变侧边栏活跃会话的筛选。
 
@@ -1137,8 +1159,9 @@ const modelPicker: WebShellModelPickerOptions = {
 ```
 
 将上面的 `modelPicker` 传给 `WebShell` 或 `WebShellWithProviders`。示例模型和
-`0.5×` 为虚构展示数据。头部位于模型搜索框上方，模型列表进入思考参数子菜单时，
-头部随列表进入；`currentModelId` 始终来自所属输入框实际选中的模型。
+`0.5×` 为虚构展示数据。桌面浮层中的头部位于搜索框上方，模型列表进入思考参数
+子菜单时，头部随列表进入。底部面板的搜索框固定在滚动区上方，头部放在模型列表
+的最前面，随模型行滚动。`currentModelId` 始终来自所属输入框实际选中的模型。
 
 map 的值是可重复挂载的工厂。同一个模型出现在不同输入框时会分别调用，不能共享
 一个 DOM 节点。key 必须与选择器的原始 id 完全一致；未知 key 不会增加模型条目。

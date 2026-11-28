@@ -84,12 +84,15 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
 }));
 
 const standaloneArchiveFailure = vi.hoisted(() => ({ current: false }));
+const archivedLeaveProp = vi.hoisted(() => vi.fn());
 vi.mock('./StandaloneRecents', () => ({
   StandaloneRecents: ({
     archiveState,
+    onLeaveCurrentSession,
     onStatusChange,
   }: {
     archiveState?: string;
+    onLeaveCurrentSession?: (sessionId: string) => Promise<boolean>;
     onStatusChange?: (status: {
       count: number;
       loading: boolean;
@@ -103,9 +106,9 @@ vi.mock('./StandaloneRecents', () => ({
         error: archiveState === 'archived' && standaloneArchiveFailure.current,
       });
     }, [archiveState, onStatusChange]);
-    return archiveState === 'archived' ? (
-      <span data-testid="standalone-archive">Standalone archive</span>
-    ) : null;
+    if (archiveState !== 'archived') return null;
+    archivedLeaveProp(onLeaveCurrentSession);
+    return <span data-testid="standalone-archive">Standalone archive</span>;
   },
 }));
 
@@ -134,6 +137,7 @@ function renderSidebar(
     archivedSessionsTarget?: HTMLElement | null;
     onSearchQueryChange?: (query: string) => void;
     onLoadStandaloneSession?: (sessionId: string) => void;
+    onLeaveCurrentStandaloneForDelete?: (sessionId: string) => Promise<boolean>;
     onStandaloneNotice?: (message: string) => void;
     onCommit?: () => void;
     lockedWorkspaceCwd?: string;
@@ -157,7 +161,9 @@ function renderSidebar(
               onOpenSessions={() => {}}
               onOpenSplitView={() => {}}
               onNewSession={() => false}
-              onLeaveCurrentStandaloneForDelete={async () => false}
+              onLeaveCurrentStandaloneForDelete={
+                props.onLeaveCurrentStandaloneForDelete ?? (async () => false)
+              }
               onLoadSession={loadSession}
               onError={onError}
               onSessionsDeleted={props.onSessionsDeleted}
@@ -716,6 +722,23 @@ describe('sidebar session selection', () => {
   });
 });
 
+it('requires the same leave callback for deletion from standalone archives', async () => {
+  workspace.capabilities = {
+    qwenCodeVersion: '1.2.3',
+    features: ['standalone_sessions_v1'],
+  };
+  const leave = vi.fn(async () => true);
+  archivedLeaveProp.mockClear();
+  renderSidebar({
+    archivedSessionsTarget,
+    onLoadStandaloneSession: vi.fn(),
+    onLeaveCurrentStandaloneForDelete: leave,
+    onStandaloneNotice: vi.fn(),
+  });
+  await flushSidebar();
+  expect(archivedLeaveProp).toHaveBeenLastCalledWith(leave);
+});
+
 it('excludes standalone archives and their errors from the Channels archive filter', async () => {
   connection.capabilities = {
     qwenCodeVersion: '1.2.3',
@@ -736,13 +759,25 @@ it('excludes standalone archives and their errors from the Channels archive filt
     archivedSessionsTarget.querySelector('[data-testid="standalone-archive"]'),
   ).not.toBeNull();
   expect(archivedSessionsTarget.textContent).toContain('Failed to load');
-  const channels = Array.from(
-    archivedSessionsTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
-  ).find((tab) => tab.textContent?.trim() === 'Channels')!;
-  await act(async () => {
-    channels.focus();
-    channels.click();
-  });
+  const trigger = archivedSessionsTarget.querySelector<HTMLButtonElement>(
+    'button[aria-label="Filter and sort archived conversations"]',
+  )!;
+  expect(trigger).not.toBeNull();
+  const selectArchivedOption = async (label: string) => {
+    await act(async () => {
+      click(trigger, true);
+      await flushSidebar();
+    });
+    const item = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ).find((candidate) => candidate.textContent?.trim() === label)!;
+    expect(item).toBeDefined();
+    await act(async () => {
+      click(item, true);
+      await flushSidebar();
+    });
+  };
+  await selectArchivedOption('Channels');
   expect(
     archivedSessionsTarget.querySelector('[data-testid="standalone-archive"]'),
   ).toBeNull();
@@ -757,13 +792,7 @@ it('excludes standalone archives and their errors from the Channels archive filt
     onCommit: () => commits.push(archivedSessionsTarget.textContent ?? ''),
   });
   commits.length = 0;
-  const tasks = Array.from(
-    archivedSessionsTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
-  ).find((tab) => tab.textContent?.trim() === 'Tasks')!;
-  await act(async () => {
-    tasks.focus();
-    tasks.click();
-  });
+  await selectArchivedOption('Tasks');
   expect(commits[0]).not.toContain('Failed to load');
 });
 
@@ -862,6 +891,33 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     expect(archivedSessionsTarget.textContent).toContain('Managed archive');
     expect(archivedSessionsTarget.textContent).toContain('Local archive');
     expect(container.textContent).toContain('Managed workspace');
+
+    const switchOrigin = async (label: string) => {
+      const trigger = archivedSessionsTarget.querySelector<HTMLButtonElement>(
+        'button[aria-label="Filter and sort archived conversations"]',
+      )!;
+      await act(async () => {
+        click(trigger, true);
+        await flushSidebar();
+      });
+      const item = Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+      ).find((candidate) => candidate.textContent?.trim() === label)!;
+      expect(item).toBeDefined();
+      await act(async () => {
+        click(item, true);
+        await flushSidebar();
+      });
+    };
+
+    await switchOrigin('Local');
+    expect(archivedSessionsTarget.textContent).toContain('Local archive');
+    expect(archivedSessionsTarget.textContent).not.toContain('Managed archive');
+
+    await switchOrigin('Cloud');
+    expect(archivedSessionsTarget.textContent).toContain('Managed archive');
+    expect(archivedSessionsTarget.textContent).not.toContain('Local archive');
+
     renderSidebar({ ...archiveProps, archivedSessionsTarget: null });
     await flushSidebar();
     expect(archivedSessionsTarget.textContent).toBe('');

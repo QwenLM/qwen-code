@@ -1052,12 +1052,8 @@ export interface ConfirmationRequest {
   signal?: AbortSignal;
   isCurrent?: () => boolean;
   prompt: ReactNode;
+  allowHistoryScroll?: boolean;
   onConfirm: (confirm: boolean) => void;
-}
-
-export interface LoopDetectionConfirmationRequest {
-  cause?: string;
-  onComplete: (result: { userSelection: 'disable' | 'keep' }) => void;
 }
 
 export interface SettingInputRequest {

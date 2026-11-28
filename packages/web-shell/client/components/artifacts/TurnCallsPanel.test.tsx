@@ -98,6 +98,18 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async () => {
   };
 });
 
+vi.mock('../../utils/workspace-context.js', () => ({
+  useOptionalWorkspaceRuntime: () => ({
+    client,
+    status: 'connected',
+    actions: fileActions,
+  }),
+}));
+
+vi.mock('./artifact-workspace-target.js', () => ({
+  useArtifactWorkspaceTargetFromRuntime: () => ({ actions: fileActions }),
+}));
+
 vi.mock('./useArtifactWorkspaceTarget', () => ({
   useArtifactWorkspaceTarget: () => ({ actions: fileActions }),
 }));

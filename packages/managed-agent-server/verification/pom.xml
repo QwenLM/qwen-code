@@ -315,7 +315,7 @@
                                     qwen.hosted.mysql.isolation = true
                                 </configurationParameters>
                             </properties>
-                            <forkedProcessTimeoutInSeconds>11862</forkedProcessTimeoutInSeconds>
+                            <forkedProcessTimeoutInSeconds>12282</forkedProcessTimeoutInSeconds>
                         </configuration>
                     </plugin>
                 </plugins>
@@ -650,11 +650,13 @@
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-failsafe-plugin</artifactId>
                         <configuration>
-                            <includes>
-                                <include>**/EventTransportMultiNodeGate.java</include>
-                            </includes>
+                            <includesFile>${project.basedir}/src/test/event-transport-multi-node-includes.txt</includesFile>
                             <failIfNoTests>true</failIfNoTests>
                             <failIfNoSpecifiedTests>true</failIfNoSpecifiedTests>
+                            <reuseForks>false</reuseForks>
+                            <systemPropertyVariables>
+                                <gc.mq.required>true</gc.mq.required>
+                            </systemPropertyVariables>
                             <forkedProcessTimeoutInSeconds>3000</forkedProcessTimeoutInSeconds>
                         </configuration>
                     </plugin>

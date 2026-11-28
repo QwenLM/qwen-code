@@ -5,7 +5,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { isShellResultDisplay } from '@qwen-code/sdk/daemon';
+import { isShellResultDisplay } from '../../../utils/shell-result-display';
 import type { ACPToolCall } from '../../../adapters/types';
 import { isActiveToolStatus } from '../toolFormatting';
 import { useI18n } from '../../../i18n';

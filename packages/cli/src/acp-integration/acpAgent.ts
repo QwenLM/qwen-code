@@ -238,7 +238,10 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { pickAuthMethodsForAuthRequired } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
-import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
+import {
+  DAEMON_ACP_NDJSON_LIMITS,
+  ndJsonStream,
+} from '@qwen-code/acp-bridge/ndJsonStream';
 import { createAcpOutput } from './acp-output.js';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
@@ -264,6 +267,7 @@ import {
   UserFeedbackRating,
 } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { formatBtwToolCallNotice } from '../ui/utils/btw-view.js';
+import { persistSessionUsageOnClose } from '../utils/usage-persistence.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -345,6 +349,13 @@ import { restoreSessionModelThenAuthenticate } from './session-model-persistence
 import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
+import { TurnSkillLeases } from './session/turn-skill-leases.js';
+import {
+  prepareTurnSkillSnapshot,
+  hasTurnResourceWork,
+  UnsupportedTurnExtensionComponentError,
+  runWithTurnSkillSnapshot,
+} from '@qwen-code/qwen-code-core';
 import { ActiveWorkReporter } from './active-work-reporter.js';
 import {
   shouldProbeChildHeap,
@@ -525,9 +536,14 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
   DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
+  TURN_SKILL_LEASE_META_KEY,
+  TURN_SKILL_LEASE_METHOD,
+  SESSION_RETIREMENT_RECEIPT_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
+  DAEMON_USER_PROMPT_META_KEY,
+  DAEMON_PROMPT_SOURCE_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
@@ -1067,7 +1083,8 @@ function buildAcpLocalReadRoots(config: Config): string[] {
     config.storage.getProjectTempDir(),
     path.join(config.storage.getProjectDir(), 'subagents'),
     path.join(config.getSessionRuntimeBaseDir(), 'tmp'),
-    getAutoMemoryRoot(config.getTargetDir()),
+    config.getProjectAutoMemoryRoot?.() ??
+      getAutoMemoryRoot(config.getTargetDir()),
     getUserAutoMemoryRoot(),
     ...config.storage.getUserSkillsDirs(),
     Storage.getUserExtensionsDir(),
@@ -1263,6 +1280,11 @@ function mapSessionRestoreRequestError(
       sessionId,
       snapshotSize: error.snapshotSize,
       maxBytes: error.maxBytes,
+      ...(error.dimension !== 'snapshot' ? { dimension: error.dimension } : {}),
+      ...(error.measuredBytes !== undefined
+        ? { measuredBytes: error.measuredBytes }
+        : {}),
+      ...(error.retryable !== undefined ? { retryable: error.retryable } : {}),
     });
   }
   if (error instanceof SessionTranscriptPageTooLargeError) {
@@ -1293,12 +1315,32 @@ function mapSessionRestoreRequestError(
   return error;
 }
 
+// Unpaged bulk session/load envelopes (`replay.kind === 'all'`) have no page
+// size and historically relied on the 64 MiB NDJSON frame ceiling
+// (`DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes`). Keep only a small wrapper margin
+// here; the complete response (including artifactSnapshot and config data) is
+// checked against the same frame ceiling before it is returned.
+const LOAD_RESPONSE_FRAME_MARGIN_BYTES = 4 * 1024;
+export const UNPAGED_BULK_LOAD_REPLAY_MAX_BYTES =
+  DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes - LOAD_RESPONSE_FRAME_MARGIN_BYTES;
+
+function assertLoadResponseFitsFrame(
+  sessionId: string,
+  response: LoadSessionResponse,
+): void {
+  const frameBytes = Buffer.byteLength(JSON.stringify(response), 'utf8');
+  const limit =
+    DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes - LOAD_RESPONSE_FRAME_MARGIN_BYTES;
+  if (frameBytes > limit) {
+    throw new HistoryReplayLimitError(sessionId, 'bytes', frameBytes, limit);
+  }
+}
+
 function validateLoadReplayEnvelope(
   sessionId: string,
   envelope: BridgeLoadReplayEnvelope,
-  enforceLimits: boolean,
+  maxBytes: number = LOAD_REPLAY_MAX_BYTES,
 ): void {
-  if (!enforceLimits) return;
   if (envelope.updates.length > LOAD_REPLAY_MAX_UPDATES) {
     throw new HistoryReplayLimitError(
       sessionId,
@@ -1308,13 +1350,8 @@ function validateLoadReplayEnvelope(
     );
   }
   const pageBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
-  if (pageBytes > LOAD_REPLAY_MAX_BYTES) {
-    throw new HistoryReplayLimitError(
-      sessionId,
-      'bytes',
-      pageBytes,
-      LOAD_REPLAY_MAX_BYTES,
-    );
+  if (pageBytes > maxBytes) {
+    throw new HistoryReplayLimitError(sessionId, 'bytes', pageBytes, maxBytes);
   }
 }
 
@@ -1328,7 +1365,7 @@ function appendGoalUpdatesWithinLimits(
   sessionId: string,
   envelope: BridgeLoadReplayEnvelope,
   goalUpdates: readonly SessionUpdate[],
-  enforceLimits: boolean,
+  maxBytes: number = LOAD_REPLAY_MAX_BYTES,
 ): boolean {
   if (goalUpdates.length === 0) return true;
   const withGoal = {
@@ -1336,7 +1373,7 @@ function appendGoalUpdatesWithinLimits(
     updates: [...envelope.updates, ...goalUpdates],
   };
   try {
-    validateLoadReplayEnvelope(sessionId, withGoal, enforceLimits);
+    validateLoadReplayEnvelope(sessionId, withGoal, maxBytes);
   } catch (error) {
     if (!(error instanceof HistoryReplayLimitError)) throw error;
     debugLogger.debug(
@@ -2830,7 +2867,7 @@ async function resolvePreferredMemoryFile(
 
 async function resolveQwenMemoryPaths(params: {
   cwd: string;
-  projectRoot: string;
+  autoMemoryDir: string;
 }): Promise<QwenMemoryPaths> {
   const fallbackFilename = getAllMemoryFilenames()[0] ?? 'QWEN.md';
   const userMemoryFile = await resolvePreferredMemoryFile(
@@ -2841,8 +2878,6 @@ async function resolveQwenMemoryPaths(params: {
     params.cwd,
     fallbackFilename,
   );
-  const autoMemoryDir = getAutoMemoryRoot(params.projectRoot);
-
   // Resolve-only: `getMemoryPaths` is a read query, so it must not create
   // files or directories as a side effect (the old code ran ensureMemoryFile
   // + fs.mkdir on every call, including against a client-controlled
@@ -2851,7 +2886,7 @@ async function resolveQwenMemoryPaths(params: {
   return {
     userMemoryFile,
     projectMemoryFile,
-    autoMemoryDir,
+    autoMemoryDir: params.autoMemoryDir,
   };
 }
 
@@ -3985,6 +4020,7 @@ async function assertManagedConversationDirectoryIdentity(
 
 class QwenAgent implements Agent {
   private readonly workspaceSettings: LoadedSettings;
+  private readonly turnSkillLeases = new TurnSkillLeases();
   private sessions: Map<string, Session> = new Map();
   /**
    * Cross-session messaging for every session this process hosts.
@@ -4607,15 +4643,22 @@ class QwenAgent implements Agent {
       const settings = loadSettings(this.config.getTargetDir());
       const discoveryConfig = this.workspaceMcpDiscoveryConfig;
       const sessions = this.getActiveSessions();
+      const sessionConfigs = new Set(
+        sessions.map((session) => session.getConfig()),
+      );
       const liveConfigs = new Set([
         this.config,
-        ...sessions.map((session) => session.getConfig()),
+        ...sessionConfigs,
         ...(discoveryConfig ? [discoveryConfig] : []),
       ]);
       const syncErrors: unknown[] = [];
       for (const config of liveConfigs) {
         try {
-          const cwd = config.getTargetDir();
+          // MCP settings and approvals belong to the workspace that admitted
+          // the session. A session/cd only moves its working directory.
+          const workspaceRoot = sessionConfigs.has(config)
+            ? this.sessionWorkspaceRoot(config)
+            : config.getTargetDir();
           // Same bare/safe guard as registerMcpHotReload (config/hot-reload.ts)
           // — each live Config in this Set may independently be bare/safe or
           // not, so the check is per-config, not hoisted outside the loop.
@@ -4632,7 +4675,7 @@ class QwenAgent implements Agent {
             ? { ...config.getTopTierMcpServers() }
             : assembleMcpServers(
                 settings.merged.mcpServers,
-                cwd,
+                workspaceRoot,
                 config.getTopTierMcpServers(),
               );
           const bootAllowed = config.getCliAllowedMcpServerNames();
@@ -4641,7 +4684,7 @@ class QwenAgent implements Agent {
             : recomputeMcpGating(
                 settings,
                 mcpServers,
-                cwd,
+                workspaceRoot,
                 bootAllowed,
                 config.getApprovalMode() === ApprovalMode.YOLO,
               );
@@ -4777,6 +4820,46 @@ class QwenAgent implements Agent {
     }
   }
 
+  private finalizeSessionUsageOnTeardown(
+    sessionId: string,
+    session: Session,
+    cleanupErrors?: unknown[],
+  ): void {
+    let sessionConfig: ReturnType<Session['getConfig']> | undefined;
+    try {
+      sessionConfig =
+        typeof session?.getConfig === 'function'
+          ? session.getConfig()
+          : undefined;
+    } catch (error) {
+      cleanupErrors?.push(error);
+    }
+    let activeSessionId: string | undefined;
+    try {
+      activeSessionId = sessionConfig?.getSessionId?.();
+    } catch (error) {
+      cleanupErrors?.push(error);
+    }
+    const sessionIdsToFinalize =
+      activeSessionId && activeSessionId !== sessionId
+        ? [sessionId, activeSessionId]
+        : [sessionId];
+    for (const id of sessionIdsToFinalize) {
+      if (sessionConfig) {
+        try {
+          persistSessionUsageOnClose(sessionConfig, id);
+        } catch (error) {
+          cleanupErrors?.push(error);
+        }
+      }
+      try {
+        uiTelemetryService.removeSession(id);
+      } catch (error) {
+        cleanupErrors?.push(error);
+      }
+    }
+  }
+
   private async removeStoredSessionEntry(
     sessionId: string,
     session: Session,
@@ -4818,8 +4901,9 @@ class QwenAgent implements Agent {
     } catch (error) {
       cleanupErrors.push(error);
     }
+    this.finalizeSessionUsageOnTeardown(sessionId, session, cleanupErrors);
     try {
-      uiTelemetryService.removeSession(sessionId);
+      await this.turnSkillLeases.collect(sessionId, true);
     } catch (error) {
       cleanupErrors.push(error);
     }
@@ -5034,6 +5118,7 @@ class QwenAgent implements Agent {
     sessionId: string,
     opts?: {
       requireFlush?: boolean;
+      retirement?: boolean;
       drainTimeoutMs?: number;
       shutdownConfig?: boolean;
       waitForCloseGate?: boolean;
@@ -5052,17 +5137,36 @@ class QwenAgent implements Agent {
       skipMemoryFlush?: boolean;
       cancelReason?: 'user';
     },
-  ): Promise<{ closed: boolean; holds: ActiveWorkHoldV1[] }> {
+  ): Promise<{
+    closed: boolean;
+    holds: ActiveWorkHoldV1[];
+    retirementUnavailable?: true;
+  }> {
     const session = this.sessions.get(sessionId);
     if (!session) {
+      if (opts?.retirement)
+        throw new Error('Retirement requires a live native session');
       this.mcpPool?.releaseSession(sessionId);
       // Already gone is the outcome the caller wanted, not a refusal.
       return { closed: true, holds: [] };
     }
 
     const recorder = session.getConfig().getChatRecordingService();
+    if (opts?.retirement && !recorder)
+      return { closed: false, holds: [], retirementUnavailable: true };
     const requireFlush = opts?.requireFlush === true;
-    if (requireFlush) await recorder?.flush();
+    if (requireFlush) {
+      try {
+        await recorder?.flush();
+      } catch (error) {
+        if (!opts?.retirement) throw error;
+        debugLogger.warn(
+          'Native retirement refused before close: recorder flush failed',
+          error,
+        );
+        return { closed: false, holds: [], retirementUnavailable: true };
+      }
+    }
     const drainTimeoutMs = opts?.drainTimeoutMs ?? SESSION_DRAIN_TIMEOUT_MS;
     // The memory flush below spends only what the close budget has left: the
     // bridge sizes drainTimeoutMs under its own outer wait.
@@ -5080,7 +5184,9 @@ class QwenAgent implements Agent {
     // into a new hold while the drain below is in progress, so this early read
     // is an optimization rather than the final authorization.
     if (opts?.onlyIfUnheld) {
-      const holds = session.collectActiveWorkHolds();
+      const holds = session.collectActiveWorkHolds({
+        includeScheduledTasks: true,
+      });
       if (holds.length > 0) {
         cancelClose();
         return { closed: false, holds };
@@ -5097,7 +5203,9 @@ class QwenAgent implements Agent {
           drainTimeoutMs,
           'close',
         );
-        const holds = session.collectActiveWorkHolds();
+        const holds = session.collectActiveWorkHolds({
+          includeScheduledTasks: true,
+        });
         if (holds.length > 0) {
           return { closed: false, holds };
         }
@@ -5175,6 +5283,8 @@ class QwenAgent implements Agent {
         sessionId,
         async () => {
           if (this.sessions.get(sessionId) !== session) {
+            if (opts?.retirement)
+              throw new Error('Native session changed during retirement');
             removedFromStore = true;
             return undefined;
           }
@@ -5184,7 +5294,9 @@ class QwenAgent implements Agent {
           // every active turn has settled, while both the close gate and the
           // history-mutation gate still block destructive races.
           if (opts?.onlyIfUnheld) {
-            const holds = session.collectActiveWorkHolds();
+            const holds = session.collectActiveWorkHolds({
+              includeScheduledTasks: true,
+            });
             if (holds.length > 0) {
               return { closed: false, holds };
             }
@@ -5220,6 +5332,7 @@ class QwenAgent implements Agent {
           } catch (error) {
             closeError = error;
           }
+          if (opts?.retirement && closeError !== undefined) throw closeError;
           if (recorder?.hasWriteOwnership()) {
             throw closeError ?? new SessionWriterUnavailableError();
           }
@@ -5507,6 +5620,12 @@ class QwenAgent implements Agent {
         }),
       ),
     );
+    // Any session whose budgeted close/drain threw before reaching
+    // removeStoredSessionEntry is still in `this.sessions`; sweep its live
+    // telemetry bucket per session so its delta is not lost on process exit.
+    for (const [sessionId, session] of [...this.sessions.entries()]) {
+      this.finalizeSessionUsageOnTeardown(sessionId, session);
+    }
     // Turn admission can return a peer item to the queue after the inbox's
     // first snapshot. Session disposal detaches those items as well.
     await Promise.all(this.pendingPeerExpiries);
@@ -5842,6 +5961,9 @@ class QwenAgent implements Agent {
     }
 
     const responseMeta: Record<string, unknown> = {
+      ...(args._meta?.[SESSION_RETIREMENT_RECEIPT_META_KEY] === 1
+        ? { [SESSION_RETIREMENT_RECEIPT_META_KEY]: 1 }
+        : {}),
       ...(this.managedToolInvocationGuard
         ? {
             [EXTERNAL_TOOL_GUARD_READY_META_KEY]:
@@ -6340,10 +6462,16 @@ class QwenAgent implements Agent {
             );
             const replayPage = projection?.replay;
             if (!replayPage || replayPage.records.length === 0) {
-              return withRestoreHint(liveSession, response);
+              const loadResponse = withRestoreHint(liveSession, response);
+              assertLoadResponseFitsFrame(sessionId, loadResponse);
+              return loadResponse;
             }
 
             const bulkReplay = isBulkLoadReplayRequest(params);
+            const maxReplayBytes =
+              restoreOptions.replay.kind === 'recent'
+                ? LOAD_REPLAY_MAX_BYTES
+                : UNPAGED_BULK_LOAD_REPLAY_MAX_BYTES;
             const replay = await profiler.time('history_replay', () =>
               collectHistoryReplayUpdates({
                 sessionId,
@@ -6367,10 +6495,10 @@ class QwenAgent implements Agent {
                 // under the gate: isTurnIdle() is structurally false while
                 // the close gate is held (#9704).
                 finalizeDangling: true,
-                ...(restoreOptions.replay.kind === 'recent'
+                ...(bulkReplay
                   ? {
                       limits: {
-                        maxBytes: LOAD_REPLAY_MAX_BYTES,
+                        maxBytes: maxReplayBytes,
                         maxUpdates: LOAD_REPLAY_MAX_UPDATES,
                       },
                     }
@@ -6434,10 +6562,17 @@ class QwenAgent implements Agent {
                   );
                 }
               }
+              // Paginated live loads already streamed their replay updates;
+              // this response carries only bounded modes/models/configOptions
+              // plus the statically capped artifactSnapshot, so it cannot
+              // exceed the frame ceiling and must not throw after streaming.
               return withRestoreHint(liveSession, response);
             }
 
-            const enforceLimits = restoreOptions.replay.kind === 'recent';
+            // Every bulk load replay travels in a single NDJSON response frame
+            // that the bridge validates against LOAD_REPLAY_MAX_UPDATES and
+            // DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes, so enforce envelope limits
+            // even when the caller omitted `historyPageSize`.
             const envelope: BridgeLoadReplayEnvelope = {
               v: LOAD_REPLAY_VERSION,
               updates: replay.updates,
@@ -6452,23 +6587,23 @@ class QwenAgent implements Agent {
                 : {}),
               ...(replayPage.hasMore ? { hasMore: true } : {}),
             };
-            if (enforceLimits) {
-              degradeReplayEnvelopeAppHtml(envelope, LOAD_REPLAY_MAX_BYTES);
-            }
-            validateLoadReplayEnvelope(sessionId, envelope, enforceLimits);
+            degradeReplayEnvelopeAppHtml(envelope, maxReplayBytes);
+            validateLoadReplayEnvelope(sessionId, envelope, maxReplayBytes);
             // The card is presentation: a full page simply goes without it.
             appendGoalUpdatesWithinLimits(
               sessionId,
               envelope,
               renderGoalUpdates(),
-              enforceLimits,
+              maxReplayBytes,
             );
-            return withRestoreHint(liveSession, {
+            const loadResponse = withRestoreHint(liveSession, {
               ...response,
               _meta: {
                 [LOAD_REPLAY_META_KEY]: envelope,
               },
             });
+            assertLoadResponseFitsFrame(sessionId, loadResponse);
+            return loadResponse;
           },
         );
       });
@@ -6556,24 +6691,28 @@ class QwenAgent implements Agent {
       let streamGoalUpdates: SessionUpdate[] = [];
       let response: LoadSessionResponse | undefined;
       const buildResponse = () =>
-        profiler.timeSync('response_build', () => ({
-          modes: this.buildModesData(config),
-          models: this.buildAvailableModels(config),
-          configOptions: this.buildConfigOptions(
-            config,
-            getDefaultReasoningConfig(config, settings),
-          ),
-          ...(projection?.runtime.artifactSnapshot
-            ? { artifactSnapshot: projection.runtime.artifactSnapshot }
-            : {}),
-          ...(replayEnvelope
-            ? {
-                _meta: {
-                  [LOAD_REPLAY_META_KEY]: replayEnvelope,
-                },
-              }
-            : {}),
-        })) as LoadSessionResponse;
+        profiler.timeSync('response_build', () => {
+          const result = {
+            modes: this.buildModesData(config),
+            models: this.buildAvailableModels(config),
+            configOptions: this.buildConfigOptions(
+              config,
+              getDefaultReasoningConfig(config, settings),
+            ),
+            ...(projection?.runtime.artifactSnapshot
+              ? { artifactSnapshot: projection.runtime.artifactSnapshot }
+              : {}),
+            ...(replayEnvelope
+              ? {
+                  _meta: {
+                    [LOAD_REPLAY_META_KEY]: replayEnvelope,
+                  },
+                }
+              : {}),
+          } as LoadSessionResponse;
+          assertLoadResponseFitsFrame(sessionId, result);
+          return result;
+        });
       try {
         if (!provisionalStandalone) {
           await restoreModel();
@@ -6595,6 +6734,10 @@ class QwenAgent implements Agent {
             ),
             replayHistory: false,
             prepareBeforeSessionCreate: async () => {
+              const maxReplayBytes =
+                restoreOptions.replay.kind === 'recent'
+                  ? LOAD_REPLAY_MAX_BYTES
+                  : UNPAGED_BULK_LOAD_REPLAY_MAX_BYTES;
               if (bulkReplay && projection?.replay) {
                 const replay = await profiler.time('history_replay', () =>
                   collectHistoryReplayUpdates({
@@ -6612,14 +6755,10 @@ class QwenAgent implements Agent {
                             projection.replay!.branchPointsByAssistantUuid,
                         }
                       : {}),
-                    ...(restoreOptions.replay.kind === 'recent'
-                      ? {
-                          limits: {
-                            maxBytes: LOAD_REPLAY_MAX_BYTES,
-                            maxUpdates: LOAD_REPLAY_MAX_UPDATES,
-                          },
-                        }
-                      : {}),
+                    limits: {
+                      maxBytes: maxReplayBytes,
+                      maxUpdates: LOAD_REPLAY_MAX_UPDATES,
+                    },
                     logger: debugLogger,
                   }),
                 );
@@ -6641,16 +6780,11 @@ class QwenAgent implements Agent {
                     : {}),
                   ...(projection.replay.hasMore ? { hasMore: true } : {}),
                 };
-                if (restoreOptions.replay.kind === 'recent') {
-                  degradeReplayEnvelopeAppHtml(
-                    replayEnvelope,
-                    LOAD_REPLAY_MAX_BYTES,
-                  );
-                }
+                degradeReplayEnvelopeAppHtml(replayEnvelope, maxReplayBytes);
                 validateLoadReplayEnvelope(
                   sessionId,
                   replayEnvelope,
-                  restoreOptions.replay.kind === 'recent',
+                  maxReplayBytes,
                 );
               }
               const goalBootstrap = replayGoalBootstrap(projection);
@@ -6694,7 +6828,7 @@ class QwenAgent implements Agent {
                   sessionId,
                   replayEnvelope,
                   rendered.updates,
-                  restoreOptions.replay.kind === 'recent',
+                  maxReplayBytes,
                 );
                 // What a full page cannot carry is the recovered Goal
                 // state, which the client must still get: it is sent as
@@ -7424,6 +7558,12 @@ class QwenAgent implements Agent {
         ? { ...params._meta }
         : {};
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
+    const skillLeaseKey =
+      this.privateParentState === 'trusted' &&
+      typeof meta[TURN_SKILL_LEASE_META_KEY] === 'string'
+        ? (meta[TURN_SKILL_LEASE_META_KEY] as string)
+        : undefined;
+    delete meta[TURN_SKILL_LEASE_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
     const suppliedApprovalMode = meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
     const suppliedModeBeforeStart =
@@ -7433,6 +7573,8 @@ class QwenAgent implements Agent {
       this.privateParentState === 'trusted'
         ? meta[DAEMON_SUBMITTED_PROMPT_META_KEY]
         : meta[SUBMITTED_PROMPT_META_KEY];
+    const userPrompt = meta[DAEMON_USER_PROMPT_META_KEY];
+    const promptSource = meta[DAEMON_PROMPT_SOURCE_META_KEY];
     const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
     const suppliedChannelOutputMode = meta[CHANNEL_OUTPUT_MODE_META_KEY];
     const suppliedChannelWorkflowOrigin =
@@ -7447,6 +7589,14 @@ class QwenAgent implements Agent {
     delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
     delete meta[SUBMITTED_PROMPT_META_KEY];
     delete meta[DAEMON_SUBMITTED_PROMPT_META_KEY];
+    delete meta[DAEMON_USER_PROMPT_META_KEY];
+    delete meta[DAEMON_PROMPT_SOURCE_META_KEY];
+    if (this.privateParentState === 'trusted' && userPrompt === false) {
+      meta[DAEMON_USER_PROMPT_META_KEY] = false;
+    }
+    if (this.privateParentState === 'trusted' && promptSource !== undefined) {
+      meta[DAEMON_PROMPT_SOURCE_META_KEY] = promptSource;
+    }
     if (typeof submittedPrompt === 'string' && suppliedChannelPrompt !== true) {
       meta[DAEMON_SUBMITTED_PROMPT_META_KEY] = submittedPrompt;
     }
@@ -7576,12 +7726,26 @@ class QwenAgent implements Agent {
     }
     calls.add(call);
     try {
-      return await session.prompt(
-        sanitizedParams,
-        invocationContext,
-        call.controller.signal,
-        modelPrompt,
-      );
+      const execute = () =>
+        session.prompt(
+          sanitizedParams,
+          invocationContext,
+          call.controller.signal,
+          modelPrompt,
+        );
+      if (!skillLeaseKey) return await execute();
+      const lease = this.turnSkillLeases.claim(sessionId, skillLeaseKey);
+      try {
+        return await runWithTurnSkillSnapshot(lease.snapshot, execute);
+      } finally {
+        this.turnSkillLeases.settle(
+          sessionId,
+          skillLeaseKey,
+          () =>
+            !hasTurnResourceWork(lease.snapshot) &&
+            session.collectActiveWorkHolds(true).length === 0,
+        );
+      }
     } finally {
       calls.delete(call);
       if (calls.size === 0) {
@@ -7607,7 +7771,7 @@ class QwenAgent implements Agent {
     await this.runInSessionContext(session, async () => {
       const abortReason = getPromptCancelAbortReason(params._meta);
       try {
-        await session.cancelPendingPrompt(abortReason);
+        await session.cancelPendingPrompt(abortReason, true);
       } catch (error) {
         if (!isNotCurrentlyGeneratingCancelError(error)) {
           throw error;
@@ -8192,7 +8356,9 @@ class QwenAgent implements Agent {
             };
             if (isGatedMcpScope(server.scope)) {
               const approvalState = approvals.getState(
-                config.getWorkingDir(),
+                scope === 'session'
+                  ? this.sessionWorkspaceRoot(config)
+                  : config.getWorkingDir(),
                 name,
                 server,
               );
@@ -10383,6 +10549,128 @@ class QwenAgent implements Agent {
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
     switch (method) {
+      case TURN_SKILL_LEASE_METHOD: {
+        const key = params['key'];
+        if (
+          this.privateParentState !== 'trusted' ||
+          typeof key !== 'string' ||
+          !UUID_V4_RE.test(key) ||
+          typeof sessionId !== 'string' ||
+          !sessionConfig
+        )
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid turn skill reservation',
+          );
+        if (params['action'] === 'release') {
+          await this.turnSkillLeases.releaseQueued(sessionId, key);
+        } else if (params['action'] === 'prepare') {
+          const session = this.sessions.get(sessionId)!;
+          if (!session.collectActiveWorkHolds().length)
+            await this.turnSkillLeases.collect(sessionId);
+          const expectedDigest = params['expectedDigest'];
+          if (
+            expectedDigest !== undefined &&
+            (typeof expectedDigest !== 'string' ||
+              !/^[a-f0-9]{64}$/.test(expectedDigest))
+          )
+            throw RequestError.invalidParams(
+              undefined,
+              'Invalid expected skill digest',
+            );
+          const expectedGeneration = params['expectedExtensionGeneration'];
+          if (
+            expectedGeneration !== undefined &&
+            (typeof expectedGeneration !== 'number' ||
+              !Number.isSafeInteger(expectedGeneration) ||
+              expectedGeneration < 0)
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Invalid expected extension generation',
+            );
+          }
+          let unavailable = false;
+          let unsupportedComponent = false;
+          let sessionSkillEffectsCompatible: boolean | undefined;
+          try {
+            const digest = await this.turnSkillLeases.prepare(
+              sessionId,
+              key,
+              async () => {
+                let releaseExtensions: (() => Promise<void>) | undefined;
+                if (typeof expectedGeneration === 'number') {
+                  try {
+                    releaseExtensions = await sessionConfig
+                      .getExtensionManager()
+                      .acquireTurnExtensionLease(expectedGeneration);
+                  } catch (error) {
+                    unavailable = true;
+                    unsupportedComponent =
+                      error instanceof UnsupportedTurnExtensionComponentError;
+                    throw error;
+                  }
+                }
+                try {
+                  const manager = sessionConfig.getSkillManager();
+                  if (!manager) throw new Error('Skill manager unavailable');
+                  const skills = await manager.listSkills({ force: true });
+                  if (manager.hasDiscoveryReadErrors())
+                    throw new Error('Skill discovery incomplete');
+                  const enabled = skills.filter(
+                    (skill) =>
+                      skill.level !== 'bundled' &&
+                      sessionConfig.isSkillEnabled(skill),
+                  );
+                  const lease = await prepareTurnSkillSnapshot(enabled, {
+                    baseDirectory: sessionConfig.storage.getProjectTempDir(),
+                    skillManager: manager,
+                    expectedDigest,
+                  });
+                  // Check the material actually reserved by this admission. Trust
+                  // can change while a turn waits for permission.
+                  sessionSkillEffectsCompatible = lease.snapshot.skills.every(
+                    (skill) =>
+                      !skill.allowedTools?.length &&
+                      !Object.keys(skill.hooks ?? {}).length,
+                  );
+                  if (!releaseExtensions) return lease;
+                  const releaseStore = releaseExtensions;
+                  return {
+                    snapshot: lease.snapshot,
+                    dispose: async () => {
+                      try {
+                        await lease.dispose();
+                      } finally {
+                        await releaseStore();
+                      }
+                    },
+                  };
+                } catch (error) {
+                  await releaseExtensions?.();
+                  throw error;
+                }
+              },
+            );
+            return {
+              digest,
+              extensionGeneration: expectedGeneration,
+              sessionSkillEffectsCompatible,
+            };
+          } catch (error) {
+            if (unavailable)
+              return unsupportedComponent
+                ? { unsupportedExtensionComponent: true }
+                : {};
+            throw error;
+          }
+        } else
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid turn skill reservation action',
+          );
+        return {};
+      }
       case SERVE_STATUS_EXT_METHODS.channelPing: {
         const nonce = params['nonce'];
         if (
@@ -10586,15 +10874,34 @@ class QwenAgent implements Agent {
       }
       case 'qwen/settings/getMemoryPaths': {
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
+        const sessionConfig =
+          !requestedCwd && typeof params['sessionId'] === 'string'
+            ? this.sessions.get(params['sessionId'])?.getConfig()
+            : undefined;
+        const memoryConfig =
+          sessionConfig ??
+          (this.isTrustedManagedParent() &&
+          process.env[QWEN_CODE_SERVE_ENV] === '1'
+            ? this.config
+            : undefined);
         const projectRoot =
+          !this.isTrustedManagedParent() &&
           typeof params['projectRoot'] === 'string'
             ? params['projectRoot']
             : settingsCwd;
         return {
-          paths: await resolveQwenMemoryPaths({
-            cwd: settingsCwd,
-            projectRoot,
-          }),
+          paths: await this.runWithPinnedRuntimeBaseDirForRequest(
+            settingsCwd,
+            () =>
+              resolveQwenMemoryPaths({
+                cwd: settingsCwd,
+                autoMemoryDir:
+                  memoryConfig?.getProjectAutoMemoryRoot?.() ??
+                  getAutoMemoryRoot(
+                    memoryConfig?.getProjectRoot() ?? projectRoot,
+                  ),
+              }),
+          ),
         };
       }
       case SERVE_STATUS_EXT_METHODS.workspaceMcp:
@@ -11058,6 +11365,15 @@ class QwenAgent implements Agent {
               sessionId,
               snapshotSize: error.snapshotSize,
               maxBytes: error.maxBytes,
+              ...(error.dimension !== 'snapshot'
+                ? { dimension: error.dimension }
+                : {}),
+              ...(error.measuredBytes !== undefined
+                ? { measuredBytes: error.measuredBytes }
+                : {}),
+              ...(error.retryable !== undefined
+                ? { retryable: error.retryable }
+                : {}),
             });
           }
           if (error instanceof SessionTranscriptPageTooLargeError) {
@@ -11178,6 +11494,15 @@ class QwenAgent implements Agent {
               sessionId,
               snapshotSize: error.snapshotSize,
               maxBytes: error.maxBytes,
+              ...(error.dimension !== 'snapshot'
+                ? { dimension: error.dimension }
+                : {}),
+              ...(error.measuredBytes !== undefined
+                ? { measuredBytes: error.measuredBytes }
+                : {}),
+              ...(error.retryable !== undefined
+                ? { retryable: error.retryable }
+                : {}),
             });
           }
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -13122,7 +13447,21 @@ class QwenAgent implements Agent {
             'Invalid session close cancellation reason',
           );
         }
+        const operationId = params['retirementOperationId'];
+        if (
+          operationId !== undefined &&
+          (typeof operationId !== 'string' ||
+            operationId.length !== 36 ||
+            params['requireFlush'] !== true ||
+            params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] !== true ||
+            cancelReason !== undefined)
+        )
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid strict retirement request',
+          );
         const outcome = await this.closeStoredSession(sessionId, {
+          retirement: operationId !== undefined,
           ...(cancelReason === 'user' ? { cancelReason } : {}),
           requireFlush: params['requireFlush'] === true,
           onlyIfUnheld: params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
@@ -13132,9 +13471,17 @@ class QwenAgent implements Agent {
         });
         // `holds` rides along only on a refusal, so the response every existing
         // caller already parses keeps its exact shape.
-        return outcome.closed
-          ? { sessionId, closed: true }
-          : { sessionId, closed: false, holds: outcome.holds };
+        return {
+          sessionId,
+          closed: outcome.closed,
+          ...(outcome.closed ? {} : { holds: outcome.holds }),
+          ...(outcome.retirementUnavailable
+            ? { retirementUnavailable: true }
+            : {}),
+          ...(operationId === undefined
+            ? {}
+            : { retirementOperationId: operationId }),
+        };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionCd: {
         const sessionId = params['sessionId'];
@@ -14217,16 +14564,30 @@ class QwenAgent implements Agent {
             'Invalid or missing taskId',
           );
         }
+        const source = params['source'];
+        if (source !== undefined && source !== 'cron' && source !== 'wakeup') {
+          throw RequestError.invalidParams(
+            undefined,
+            'source must be "cron" or "wakeup"',
+          );
+        }
         const taskKind = params['taskKind'];
         if (
           taskKind !== 'agent' &&
           taskKind !== 'shell' &&
           taskKind !== 'monitor' &&
-          taskKind !== 'workflow'
+          taskKind !== 'workflow' &&
+          taskKind !== 'cron'
         ) {
           throw RequestError.invalidParams(
             undefined,
-            'taskKind must be "agent", "shell", "monitor", or "workflow"',
+            'taskKind must be "agent", "shell", "monitor", "workflow", or "cron"',
+          );
+        }
+        if (taskKind !== 'cron' && source !== undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'source is valid only for taskKind "cron"',
           );
         }
         debugLogger.info(
@@ -14331,6 +14692,52 @@ class QwenAgent implements Agent {
               `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
             );
             return { cancelled: true, status: task.status };
+          }
+          case 'cron': {
+            if (!config.isCronEnabled?.()) {
+              return { cancelled: false, reason: 'disabled' };
+            }
+            const scheduler = config.getCronScheduler?.();
+            const candidates =
+              scheduler
+                ?.list?.()
+                .filter(
+                  (item) =>
+                    item.id === taskId &&
+                    (source === undefined ||
+                      (source === 'wakeup'
+                        ? item.cronExpr === '@wakeup'
+                        : item.cronExpr !== '@wakeup')),
+                ) ?? [];
+            const job =
+              candidates.find((item) => !item.durable) ??
+              candidates.find((item) => item.durable);
+            if (!job) {
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} source=${source ?? 'legacy'} reason=not_found`,
+              );
+              return { cancelled: false, reason: 'not_found' };
+            }
+            if (job.durable) {
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} source=${source ?? 'legacy'} reason=not_session_scoped`,
+              );
+              return { cancelled: false, reason: 'not_session_scoped' };
+            }
+            if (
+              source === undefined &&
+              candidates.filter((item) => !item.durable).length > 1
+            ) {
+              return { cancelled: false, reason: 'ambiguous' };
+            }
+            const deleted =
+              job.cronExpr === '@wakeup'
+                ? scheduler!.cancelWakeup(taskId)
+                : scheduler!.cancelSessionCron(taskId);
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} deleted=${deleted}`,
+            );
+            return { cancelled: deleted };
           }
           default: {
             const exhaustive: never = taskKind;
@@ -14758,6 +15165,15 @@ class QwenAgent implements Agent {
                 sessionId,
                 snapshotSize: error.snapshotSize,
                 maxBytes: error.maxBytes,
+                ...(error.dimension !== 'snapshot'
+                  ? { dimension: error.dimension }
+                  : {}),
+                ...(error.measuredBytes !== undefined
+                  ? { measuredBytes: error.measuredBytes }
+                  : {}),
+                ...(error.retryable !== undefined
+                  ? { retryable: error.retryable }
+                  : {}),
               });
             }
             if (error instanceof SessionTranscriptPageTooLargeError) {
@@ -17183,6 +17599,16 @@ class QwenAgent implements Agent {
         ? undefined
         : () => getProjectHooksForApproval(settings),
     );
+    if (
+      this.isTrustedManagedParent() &&
+      process.env[QWEN_CODE_SERVE_ENV] === '1' &&
+      !provisionalWorkspace &&
+      !agentHostReadOnly
+    ) {
+      config.bindProjectMemoryToWorkspace(
+        this.config.getProjectMemoryOwner().memoryBaseDir,
+      );
+    }
     workflowAncestorTrustSession.config = config;
     // /clear rotates the recording ID while the ACP transport keeps its ID.
     workflowAncestorTrustSession.sessionId = normalizeSessionIdForLookup(
@@ -17754,7 +18180,11 @@ class QwenAgent implements Agent {
       this.clientCapabilities.fs,
       config.getFileSystemService(),
       {
-        localReadRoots: buildAcpLocalReadRoots(config),
+        localReadRoots: () =>
+          Storage.runWithResolvedRuntimeBaseDir(
+            config.getSessionRuntimeBaseDir(),
+            () => buildAcpLocalReadRoots(config),
+          ),
       },
     );
     config.setFileSystemService(acpFileSystemService);
@@ -18137,7 +18567,7 @@ class QwenAgent implements Agent {
           await replaySessionHistory();
           await options.beforeStartPostReplayServices?.(session);
           await config.getLlmClient().refreshStartupContextReminder();
-          session.installRewriter();
+          session.installMods();
           config.finalizeSessionRestore?.();
           startNonInteractiveOpenAILogHousekeeping(config, settings);
         },
@@ -18293,9 +18723,9 @@ class QwenAgent implements Agent {
         await options.beforeStartPostReplayServices?.(session);
       }
 
-      // Install rewriter AFTER history replay to avoid rewriting historical messages
+      // Install Mods AFTER history replay so they do not hear historical messages
       if (options.deferWorkspaceActivation !== true) {
-        session.installRewriter();
+        session.installMods();
       }
 
       if (options.deferWorkspaceActivation !== true) {

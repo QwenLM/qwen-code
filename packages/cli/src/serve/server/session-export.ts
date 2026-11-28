@@ -5,7 +5,6 @@
  */
 
 import {
-  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionService,
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
@@ -21,6 +20,10 @@ import {
   type ExportConfig,
   type ExportSessionData,
 } from '../../ui/utils/export/index.js';
+
+// Archived export materializes the full transcript in memory, so it stays
+// bounded at 256 MiB rather than inheriting the 1 GiB streaming index ceiling.
+export const ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES = 256 * 1024 * 1024;
 
 const SESSION_EXPORT_FORMATS = ['html', 'md', 'json', 'jsonl'] as const;
 
@@ -94,7 +97,7 @@ export async function exportSessionTranscript(params: {
   const sessionData =
     params.archiveState === 'archived'
       ? await service.loadArchivedSession(sessionId, {
-          maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+          maxBytes: ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES,
         })
       : await service.loadSession(sessionId);
   if (!sessionData) {

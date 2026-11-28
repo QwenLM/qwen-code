@@ -122,7 +122,6 @@ class HostedAutomationSpringCrashIT {
         String tenant = UUID.randomUUID().toString();
         startModel();
         harnessPort = reservePort();
-        brokerPort = reservePort();
         Path root = Files.createDirectories(
                 temporary.resolve("fixture"));
         startFixture(root, tenant);
@@ -207,6 +206,7 @@ class HostedAutomationSpringCrashIT {
             fixtureInternalPort = reservePort();
             fixturePublicPort = reservePort();
         }
+        brokerPort = fixtureInternalPort;
         Child child = startChild(root, tenant, fixtureInternalPort,
                 fixturePublicPort, brokerPort, fixtureInternalPort);
         fixture = child.process();
@@ -415,7 +415,6 @@ class HostedAutomationSpringCrashIT {
         String tenantName = UUID.randomUUID().toString();
         startModel();
         harnessPort = reservePort();
-        brokerPort = reservePort();
         Path root = Files.createDirectories(temporary.resolve("fire"));
         startFixture(root, tenantName);
         startHarness();
@@ -487,7 +486,6 @@ class HostedAutomationSpringCrashIT {
         String tenantName = UUID.randomUUID().toString();
         startModel();
         harnessPort = reservePort();
-        brokerPort = reservePort();
         Path root = Files.createDirectories(
                 temporary.resolve("kill-watermark"));
         startFixture(root, tenantName);
@@ -562,7 +560,6 @@ class HostedAutomationSpringCrashIT {
         String tenantName = UUID.randomUUID().toString();
         startModel();
         harnessPort = reservePort();
-        brokerPort = reservePort();
         Path root = Files.createDirectories(temporary.resolve("kill-answer"));
         startFixture(root, tenantName);
         startHarness();
@@ -688,7 +685,6 @@ class HostedAutomationSpringCrashIT {
         String tenantName = UUID.randomUUID().toString();
         startModel();
         harnessPort = reservePort();
-        brokerPort = reservePort();
         Path rootA = Files.createDirectories(temporary.resolve("race-a"));
         Path rootB = Files.createDirectories(temporary.resolve("race-b"));
         startFixture(rootA, tenantName);

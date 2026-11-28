@@ -173,6 +173,20 @@ function escapeSkeletonNameChars(value: string): string {
   return out;
 }
 
+export interface BranchPickerPreservedState {
+  scopeKey: string;
+  search: string;
+  newBranchMode: boolean;
+  newBranchName: string;
+  checkoutRefMode: boolean;
+  checkoutRefValue: string;
+  createBranchMode: boolean;
+  createBranchValue: string;
+  view: 'branches' | 'remotes';
+  remoteName: string;
+  remoteUrl: string;
+}
+
 interface BranchPickerPopoverProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -181,6 +195,7 @@ interface BranchPickerPopoverProps {
   gitSessionId?: string;
   side?: 'top' | 'right' | 'bottom' | 'left';
   onBranchChanged?: () => void;
+  preservedStateRef?: React.MutableRefObject<BranchPickerPreservedState | null>;
   /**
    * Working-tree summary from the trigger chip. Seeds the hints beside the
    * Update / Commit / Push actions (dirty counts, in-progress operation) until
@@ -442,6 +457,7 @@ export function BranchPickerPopover({
   onOpenLog,
   onCreateWorktreeBranch,
   onHandoff,
+  preservedStateRef,
   children,
 }: BranchPickerPopoverProps) {
   const { t } = useI18n();
@@ -450,6 +466,14 @@ export function BranchPickerPopover({
     () => client.workspaceByCwd(workspaceCwd),
     [client, workspaceCwd],
   );
+  const scopeKey = `${workspaceCwd}\0${gitCwd ?? ''}\0${gitSessionId ?? ''}`;
+  const restoredOnMount =
+    open && preservedStateRef?.current?.scopeKey === scopeKey
+      ? preservedStateRef.current
+      : null;
+  const prevOpenScopeRef = useRef<string | null>(
+    restoredOnMount !== null ? scopeKey : null,
+  );
   const [data, setData] = useState<DaemonGitBranchesResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -457,13 +481,25 @@ export function BranchPickerPopover({
   const [statusType, setStatusType] = useState<
     'info' | 'error' | 'success' | 'warning'
   >('info');
-  const [search, setSearch] = useState('');
-  const [newBranchMode, setNewBranchMode] = useState(false);
-  const [newBranchName, setNewBranchName] = useState('');
-  const [checkoutRefMode, setCheckoutRefMode] = useState(false);
-  const [checkoutRefValue, setCheckoutRefValue] = useState('');
-  const [createBranchMode, setCreateBranchMode] = useState(false);
-  const [createBranchValue, setCreateBranchValue] = useState('');
+  const [search, setSearch] = useState(restoredOnMount?.search ?? '');
+  const [newBranchMode, setNewBranchMode] = useState(
+    restoredOnMount?.newBranchMode ?? false,
+  );
+  const [newBranchName, setNewBranchName] = useState(
+    restoredOnMount?.newBranchName ?? '',
+  );
+  const [checkoutRefMode, setCheckoutRefMode] = useState(
+    restoredOnMount?.checkoutRefMode ?? false,
+  );
+  const [checkoutRefValue, setCheckoutRefValue] = useState(
+    restoredOnMount?.checkoutRefValue ?? '',
+  );
+  const [createBranchMode, setCreateBranchMode] = useState(
+    restoredOnMount?.createBranchMode ?? false,
+  );
+  const [createBranchValue, setCreateBranchValue] = useState(
+    restoredOnMount?.createBranchValue ?? '',
+  );
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [pullBlocked, setPullBlocked] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
@@ -495,12 +531,16 @@ export function BranchPickerPopover({
     remote: true,
     tags: true,
   });
-  const [view, setView] = useState<'branches' | 'remotes'>('branches');
+  const [view, setView] = useState<'branches' | 'remotes'>(
+    restoredOnMount?.view ?? 'branches',
+  );
   const [remotes, setRemotes] = useState<DaemonGitRemoteInfo[] | null>(null);
   const [remotesLoading, setRemotesLoading] = useState(false);
   const [remotesError, setRemotesError] = useState<string | null>(null);
-  const [remoteName, setRemoteName] = useState('');
-  const [remoteUrl, setRemoteUrl] = useState('');
+  const [remoteName, setRemoteName] = useState(
+    restoredOnMount?.remoteName ?? '',
+  );
+  const [remoteUrl, setRemoteUrl] = useState(restoredOnMount?.remoteUrl ?? '');
   // The two-click remove confirm: holds the armed remote's name, or null.
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   // The row whose removal is in flight: busyAction only says a removal is
@@ -619,50 +659,90 @@ export function BranchPickerPopover({
   );
 
   useEffect(() => {
-    if (open) {
-      void fetchBranches();
-      void fetchStatus();
-      setSearch('');
-      setNewBranchMode(false);
-      setCheckoutRefMode(false);
-      setCreateBranchMode(false);
-      setNewBranchName('');
-      setCheckoutRefValue('');
-      setCreateBranchValue('');
-      setView('branches');
-      setRemotes(null);
-      setRemotesError(null);
-      setRemoteName('');
-      setRemoteUrl('');
-      setConfirmRemove(null);
-      // A dismissal while the remotes view was up (outside click, trigger
-      // toggle) never runs closeRemotes, so the snapshot can still be
-      // held here: restore it — message AND flag — rather than dropping
-      // the only record of the stash entry. Gated on no in-flight
-      // mutation: a settling mutation lands its own footer after this
-      // restore would run, overwriting it — the held snapshot is
-      // restored on a later open once the mutation has settled.
-      if (!busyActionRef.current) {
-        const stickySnapshot = remotesStickySnapshotRef.current;
-        remotesStickySnapshotRef.current = null;
-        // A warning armed at open time is the same warning the
-        // snapshot holds (a view-up dismissal never disarms it) or a
-        // newer one — either way the standing warning wins and the
-        // held snapshot is dropped.
-        if (stickySnapshot && !stickyWarningRef.current) {
-          setStatusMsg(stickySnapshot);
-          setStatusType('warning');
-          stickyWarningRef.current = true;
-        }
-      }
-      if (!stickyWarningRef.current) setStatusMsg(null);
-      setPullBlocked(false);
-      setConfirmDiscard(false);
-      setPullBlockedDetail(null);
-      setBlockedCheckoutRef(null);
-      setTimeout(() => searchRef.current?.focus(), 50);
+    if (!preservedStateRef) return;
+    if (!open) {
+      preservedStateRef.current = null;
+      return;
     }
-  }, [open, fetchBranches, fetchStatus]);
+    preservedStateRef.current = {
+      scopeKey,
+      search,
+      newBranchMode,
+      newBranchName,
+      checkoutRefMode,
+      checkoutRefValue,
+      createBranchMode,
+      createBranchValue,
+      view,
+      remoteName,
+      remoteUrl,
+    };
+  }, [
+    preservedStateRef,
+    open,
+    scopeKey,
+    search,
+    newBranchMode,
+    newBranchName,
+    checkoutRefMode,
+    checkoutRefValue,
+    createBranchMode,
+    createBranchValue,
+    view,
+    remoteName,
+    remoteUrl,
+  ]);
+
+  useEffect(() => {
+    if (!open) {
+      prevOpenScopeRef.current = null;
+      return;
+    }
+    const sameOpenScope = prevOpenScopeRef.current === scopeKey;
+    prevOpenScopeRef.current = scopeKey;
+    void fetchBranches();
+    void fetchStatus();
+    if (sameOpenScope) return;
+    setSearch('');
+    setNewBranchMode(false);
+    setCheckoutRefMode(false);
+    setCreateBranchMode(false);
+    setNewBranchName('');
+    setCheckoutRefValue('');
+    setCreateBranchValue('');
+    setView('branches');
+    setRemotes(null);
+    setRemotesError(null);
+    setRemoteName('');
+    setRemoteUrl('');
+    setConfirmRemove(null);
+    // A dismissal while the remotes view was up (outside click, trigger
+    // toggle) never runs closeRemotes, so the snapshot can still be
+    // held here: restore it — message AND flag — rather than dropping
+    // the only record of the stash entry. Gated on no in-flight
+    // mutation: a settling mutation lands its own footer after this
+    // restore would run, overwriting it — the held snapshot is
+    // restored on a later open once the mutation has settled.
+    if (!busyActionRef.current) {
+      const stickySnapshot = remotesStickySnapshotRef.current;
+      remotesStickySnapshotRef.current = null;
+      // A warning armed at open time is the same warning the
+      // snapshot holds (a view-up dismissal never disarms it) or a
+      // newer one — either way the standing warning wins and the
+      // held snapshot is dropped.
+      if (stickySnapshot && !stickyWarningRef.current) {
+        setStatusMsg(stickySnapshot);
+        setStatusType('warning');
+        stickyWarningRef.current = true;
+      }
+    }
+    if (!stickyWarningRef.current) setStatusMsg(null);
+    setPullBlocked(false);
+    setConfirmDiscard(false);
+    setPullBlockedDetail(null);
+    setBlockedCheckoutRef(null);
+    setTimeout(() => searchRef.current?.focus(), 50);
+  }, [open, scopeKey, fetchBranches, fetchStatus]);
 
   // The listing is fetched once on open. If a status the daemon computed
   // after that disagrees with it (upstream unset, HEAD detached, new commits
@@ -1127,6 +1207,18 @@ export function BranchPickerPopover({
     setView('remotes');
     void fetchRemotes();
   }, [pullBlocked, clearPullPanel, fetchRemotes, statusMsg]);
+
+  useEffect(() => {
+    if (
+      open &&
+      view === 'remotes' &&
+      remotes === null &&
+      !remotesLoading &&
+      !remotesError
+    ) {
+      void fetchRemotes();
+    }
+  }, [open, view, remotes, remotesLoading, remotesError, fetchRemotes]);
 
   const closeRemotes = useCallback(() => {
     setView('branches');

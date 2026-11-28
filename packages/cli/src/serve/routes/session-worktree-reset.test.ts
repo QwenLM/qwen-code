@@ -2173,4 +2173,98 @@ describe('POST /session/:id/load worktree classifications', () => {
     const oldSidecar = await expectSidecar(fixture, oldId);
     expect(oldSidecar?.supersededBy).toBeUndefined();
   });
+
+  it('refuses worktree-reset with 409 when the sidecar has a retained worktreeRemoved binding', async () => {
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    const archiveKey = `${oldId}.1.1.worktree-snapshot.tar.gz`;
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId, {
+      worktreeRemoved: { archiveKey },
+    });
+    await fixture.createMarker(oldId);
+
+    const response = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('worktree_restore_unavailable');
+    expect(fixture.fake.spawnOrAttach).not.toHaveBeenCalled();
+    const oldSidecar = await expectSidecar(fixture, oldId);
+    expect(oldSidecar?.supersededBy).toBeUndefined();
+    expect(oldSidecar?.worktreeRemoved).toEqual({ archiveKey });
+  });
+
+  it('refuses worktree-reset resume with 409 and preserves replacement data when the replacement has worktreeRemoved', async () => {
+    for (const markerState of ['missing', 'replacement'] as const) {
+      const fixture = makeFixture();
+      const oldId = randomUUID();
+      const replacementId = randomUUID();
+      const archiveKey = `${replacementId}.1.1.worktree-snapshot.tar.gz`;
+      fixture.writeTranscript(oldId);
+      fixture.writeTranscript(replacementId);
+      await fixture.writeSidecar(oldId, { supersededBy: replacementId });
+      await fixture.writeSidecar(replacementId, {
+        supersedes: oldId,
+        worktreeRemoved: { archiveKey },
+      });
+      if (markerState === 'replacement') {
+        await fixture.createMarker(replacementId);
+      }
+
+      const response = await request(fixture.app)
+        .post(`/session/${oldId}/worktree-reset`)
+        .send({});
+
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe('worktree_restore_unavailable');
+      expect(fixture.fake.spawnOrAttach).not.toHaveBeenCalled();
+      // Never disarm the superseded session's resetPending fence on refusal.
+      expect(fixture.fake.clearSessionResetPending).not.toHaveBeenCalled();
+      const replacementSidecar = await expectSidecar(fixture, replacementId);
+      expect(replacementSidecar?.worktreeRemoved).toEqual({ archiveKey });
+      const replacementTranscriptPath = path.join(
+        path.dirname(
+          fixture.sessionService.getWorktreeSessionPath(replacementId),
+        ),
+        `${replacementId}.jsonl`,
+      );
+      expect(existsSync(replacementTranscriptPath)).toBe(true);
+    }
+  });
+
+  it('refuses worktree-reset resume with 409 and preserves resetPending when an archived replacement has worktreeRemoved', async () => {
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    const replacementId = randomUUID();
+    const archiveKey = `${replacementId}.1.1.worktree-snapshot.tar.gz`;
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId, { supersededBy: replacementId });
+    const archivedReplacementSidecar =
+      fixture.sessionService.getWorktreeSessionPathForArchiveState(
+        replacementId,
+        'archived',
+      );
+    await writeWorktreeSession(archivedReplacementSidecar, {
+      slug: fixture.slug,
+      worktreePath: fixture.worktreeDir,
+      worktreeBranch: 'qwen/test-branch',
+      originalCwd: fixture.workspaceDir,
+      workspaceCwd: fixture.workspaceDir,
+      originalBranch: 'main',
+      originalHeadCommit: 'abc123',
+      supersedes: oldId,
+      worktreeRemoved: { archiveKey },
+    });
+
+    const response = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('worktree_restore_unavailable');
+    expect(fixture.fake.spawnOrAttach).not.toHaveBeenCalled();
+    expect(fixture.fake.clearSessionResetPending).not.toHaveBeenCalled();
+  });
 });

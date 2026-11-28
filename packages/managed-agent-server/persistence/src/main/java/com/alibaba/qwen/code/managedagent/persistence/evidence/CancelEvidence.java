@@ -4,12 +4,15 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.session.AcceptanceEvidence;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -22,15 +25,15 @@ import java.util.Optional;
 public class CancelEvidence implements AcceptanceEvidence {
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
-    private com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks packs;
+    private JdbcJournalPacks packs;
 
     public CancelEvidence(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.jdbc = jdbc;
         this.json = json;
     }
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
-    void setJournalPacks(com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks packs) { this.packs = packs; }
+    @Autowired(required = false)
+    void setJournalPacks(JdbcJournalPacks packs) { this.packs = packs; }
 
     @Override
     public String kind() {
@@ -43,15 +46,15 @@ public class CancelEvidence implements AcceptanceEvidence {
             return Optional.empty();
         }
         boolean h2 = Boolean.TRUE.equals(jdbc.execute(
-                (org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection ->
+                (ConnectionCallback<Boolean>) connection ->
                         "H2".equals(connection.getMetaData().getDatabaseProductName())));
         // The Turn id is VARCHAR while the operation target it mirrors stays
-        // VARBINARY; H2 refuses that comparison without the byte coercion.
+        // VARBINARY. The target is converted to text so the lookup keeps the
+        // full Turn key; a binary probe would scan every Turn of the Session.
         List<Target> targets = jdbc.query("SELECT t.turn_id, t.prompt_id, o.target_id"
                         + " FROM ma_operation o LEFT JOIN ma_turn t ON t.tenant_id = o.tenant_id"
-                        + " AND t.session_id = o.session_id AND "
-                        + com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate.binaryIdentity("t.turn_id", h2)
-                        + " = o.target_id"
+                        + " AND t.session_id = o.session_id AND t.turn_id = "
+                        + (h2 ? "UTF8TOSTRING(o.target_id)" : "CONVERT(o.target_id USING utf8mb4) COLLATE utf8mb4_bin")
                         + " WHERE o.scope_kind = 'SESSION' AND o.scope_id = ? AND o.tenant_id = ? AND o.session_id = ?"
                         + " AND o.operation_id = ? AND o.operation_kind = 'CANCEL'"
                         + " AND o.target_kind = 'TURN' AND o.state = 'RECOVERY_BLOCKED'"

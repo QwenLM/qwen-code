@@ -52,5 +52,9 @@ packages/core/src/skills/bundled/browser-use/runtime/
 # next sync. eslint.config.js already ignores packages/mobile-mcp/** for the
 # same reason; .prettierignore had cua-driver but not its sibling.
 packages/mobile-mcp/
+# Synced from the Harness repository by its scripts/sync-to-qwen-code.mjs,
+# which overwrites any local edit. eslint.config.js ignores it for the same
+# reason.
+packages/harness/
 packages/managed-agent-server/**/target/
 packages/sdk-java/**/target/
