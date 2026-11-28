@@ -599,6 +599,115 @@ jobs:
           RELEASE_CONTAINER_OWNER: '${{ github.run_id }}-${{ github.run_attempt }}-release'
         run: '.release-workflow/.github/scripts/run-release-docker-integration.sh cleanup'
 
+  login_e2e_gate:
+    name: 'Login Path Gate (Qwen Account, ${{ matrix.os }})'
+    # Hard release gate: the Qwen-account login path must complete end to end
+    # (device flow -> web sign-in/approve over HTTP -> daemon credentials).
+    # Deliberately NO force_skip_tests escape hatch: publish requires this job
+    # to succeed even when the other validation lanes are skipped.
+    # Environment matrix: a past escape happened on a single platform, so all
+    # three release platforms are verified. Hosted runners only (the ECS pool
+    # is linux-only). Each leg verifies the EXACT per-platform standalone
+    # archive produced by gate_artifacts (the same handoff publish consumes
+    # when QWEN_RELEASE_CONSUME_GATE_ARTIFACTS is true), unpacking it and
+    # driving its bundled node runtime + cli.js.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: '${{ matrix.os }}'
+    timeout-minutes: 30
+    needs:
+      - 'prepare'
+      - 'gate_artifacts'
+    permissions:
+      contents: 'read'
+    # Test-account secrets are injected into this job only; every other job
+    # (including all PR-code lanes) stays credential-free.
+    env:
+      QWEN_E2E_LOGIN_EMAIL: '${{ secrets.QWEN_E2E_LOGIN_EMAIL }}'
+      QWEN_E2E_LOGIN_PASSWORD: '${{ secrets.QWEN_E2E_LOGIN_PASSWORD }}'
+    steps:
+      # Fail closed on missing secrets so an unconfigured repo can never turn
+      # this gate into a silent skip. bash keeps the check identical on the
+      # Windows runner (default shell there is pwsh).
+      - name: 'Require login gate credentials'
+        shell: bash
+        run: |-
+          if [ -z "${QWEN_E2E_LOGIN_EMAIL}" ] || [ -z "${QWEN_E2E_LOGIN_PASSWORD}" ]; then
+            echo "::error::QWEN_E2E_LOGIN_EMAIL / QWEN_E2E_LOGIN_PASSWORD secrets are not configured; the login path gate cannot run."
+            exit 1
+          fi
+
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *install_release_dependencies
+
+      # The harness imports workspace packages whose dist must exist for
+      # vitest resolution (partial builds miss transitive workspace deps).
+      # The CLI UNDER TEST is still the unpacked release archive, not this
+      # build; this build only serves the test harness.
+      - name: 'Build Project (test harness deps)'
+        shell: bash
+        run: 'npm run build'
+
+      - name: 'Download release handoff'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          artifact-ids: '${{ needs.gate_artifacts.outputs.artifact_id }}'
+          path: '${{ runner.temp }}/release-publish-build'
+
+      - name: 'Unpack platform release archive'
+        shell: bash
+        run: |-
+          set -euo pipefail
+          handoff="${RUNNER_TEMP}/release-publish-build"
+          tar -xzf "${handoff}/release-build.tgz"
+          case "${{ matrix.os }}" in
+            ubuntu-latest) target='linux-x64'; ext='tar.gz' ;;
+            macos-latest) target='darwin-arm64'; ext='tar.gz' ;;
+            windows-latest) target='win-x64'; ext='zip' ;;
+          esac
+          archive="$(ls dist/standalone | grep "${target}" | grep -v 'opentui-preview' | grep "\.${ext}$" | head -1)"
+          if [ -z "${archive}" ]; then
+            echo "::error::no ${target} archive in the release handoff"
+            ls dist/standalone
+            exit 1
+          fi
+          dest="${RUNNER_TEMP}/gate-cli"
+          mkdir -p "${dest}"
+          if [ "${ext}" = 'zip' ]; then
+            powershell -NoProfile -Command "Expand-Archive -LiteralPath 'dist/standalone/${archive}' -DestinationPath '${dest}' -Force"
+          else
+            tar -xzf "dist/standalone/${archive}" -C "${dest}"
+          fi
+          cli="$(find "${dest}" -maxdepth 3 -name cli.js | head -1)"
+          if [ -z "${cli}" ]; then
+            echo "::error::cli.js not found inside the release archive"
+            find "${dest}" -maxdepth 2 | head -20
+            exit 1
+          fi
+          root="$(dirname "${cli}")"
+          pkg="$(dirname "${root}")"
+          # Archive layout: <pkg>/lib/cli.js + <pkg>/node/bin/node
+          # (Windows: <pkg>/node/node.exe).
+          if [ "${{ matrix.os }}" = 'windows-latest' ]; then
+            nodebin="${pkg}/node/node.exe"
+          else
+            nodebin="${pkg}/node/bin/node"
+          fi
+          if [ ! -x "${nodebin}" ]; then
+            echo "::error::archive node runtime missing or not executable: ${nodebin}"
+            exit 1
+          fi
+          echo "TEST_CLI_PATH=${cli}" >> "${GITHUB_ENV}"
+          echo "QWEN_GATE_NODE_BIN=${nodebin}" >> "${GITHUB_ENV}"
+          echo "Verifying release archive: ${archive}"
+
+      - name: 'Run Login Path Gate'
+        shell: bash
+        run: 'npm run test:release:login-gate'
+
   audio_capture_prebuilds:
     name: 'Audio Capture Prebuilds'
     needs: 'prepare'
@@ -627,6 +736,7 @@ jobs:
         always() &&
         github.repository == 'QwenLM/qwen-code' &&
         vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true' &&
+        vars.QWEN_RELEASE_CONSUME_GATE_ARTIFACTS != 'true' &&
         needs.prepare.result == 'success' &&
         (
           needs.audio_capture_prebuilds.result == 'success' ||
@@ -758,6 +868,101 @@ jobs:
           overwrite: true
           retention-days: 3
 
+  gate_artifacts:
+    name: 'Build Release Artifacts for Login Gate'
+    # Single pre-publish producer of the exact release handoff (versioned
+    # bundle + npm pack output + per-platform standalone archives). The login
+    # gate matrix verifies THESE artifacts on native runners; when
+    # QWEN_RELEASE_CONSUME_GATE_ARTIFACTS is true, publish consumes the same
+    # handoff instead of rebuilding (single build, verified once).
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 40
+    needs:
+      - 'prepare'
+      - 'audio_capture_prebuilds'
+    if: |-
+      ${{
+        always() &&
+        needs.prepare.result == 'success' &&
+        (
+          github.repository != 'QwenLM/qwen-code' ||
+          needs.audio_capture_prebuilds.result == 'success' ||
+          (needs.audio_capture_prebuilds.result == 'skipped' && needs.prepare.outputs.audio_artifact_id != '')
+        )
+      }}
+    permissions:
+      contents: 'read'
+    outputs:
+      release_commit: '${{ steps.handoff.outputs.release_commit }}'
+      artifact_id: '${{ steps.upload.outputs.artifact-id }}'
+    steps:
+      - *restore_release_workspace
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ needs.prepare.outputs.release_sha }}'
+          fetch-depth: 0
+          persist-credentials: false
+      - *setup_release_node_hosted
+      - *install_release_dependencies
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+      - name: 'Prepare release branch'
+        env:
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+        run: '.release-workflow/.github/scripts/run-release-step.sh prepare-release-branch'
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+      - name: 'Commit release version locally'
+        env:
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+        run: '.release-workflow/.github/scripts/run-release-step.sh commit-release-branch'
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+      - *verify_reused_audio
+      - *download_reused_audio
+      - *download_fresh_audio
+      - *validate_audio
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+      - name: 'Build Bundle and Prepare Package'
+        env:
+          QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
+        run: '.release-workflow/.github/scripts/run-release-step.sh build-package'
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+      - name: 'Build Standalone Archives'
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
+          QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
+        run: '.release-workflow/.github/scripts/run-release-step.sh build-archives'
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+      - name: 'Verify Standalone Archives'
+        env:
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
+        run: '.release-workflow/.github/scripts/run-release-step.sh verify-archives'
+      - *reset_release_workflow_scripts
+      - *checkout_release_workflow_scripts
+      - name: 'Pack release handoff'
+        id: 'handoff'
+        env:
+          RELEASE_SHA: '${{ needs.prepare.outputs.release_sha }}'
+          BRANCH_NAME: "${{ format('release/{0}', needs.prepare.outputs.release_tag) }}"
+        run: '.release-workflow/.github/scripts/run-release-step.sh pack-release'
+      - name: 'Upload release handoff'
+        id: 'upload'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'release-gate-build'
+          path: '${{ runner.temp }}/release-publish-build/'
+          if-no-files-found: 'error'
+          overwrite: true
+          retention-days: 3
+
   publish:
     name: 'Publish Release'
     # npm trusted publishing and provenance require GitHub-hosted runners.
@@ -767,15 +972,18 @@ jobs:
       - 'quality'
       - 'integration_none'
       - 'integration_docker'
+      - 'login_e2e_gate'
       - 'audio_capture_prebuilds'
       - 'build_release'
+      - 'gate_artifacts'
     if: |-
       ${{
         always() &&
         needs.prepare.result == 'success' &&
+        needs.login_e2e_gate.result == 'success' &&
         (
           needs.build_release.result == 'success' ||
-          (needs.build_release.result == 'skipped' && (github.repository != 'QwenLM/qwen-code' || vars.ECS_RELEASE_HOST_RUNNER_ENABLED != 'true'))
+          (needs.build_release.result == 'skipped' && (github.repository != 'QwenLM/qwen-code' || vars.ECS_RELEASE_HOST_RUNNER_ENABLED != 'true' || vars.QWEN_RELEASE_CONSUME_GATE_ARTIFACTS == 'true'))
         ) &&
         (
           github.repository != 'QwenLM/qwen-code' ||
@@ -825,17 +1033,17 @@ jobs:
 
       - *checkout_release_workflow_scripts
       - name: 'Download release handoff'
-        if: "${{ needs.build_release.result == 'success' }}"
+        if: "${{ (vars.QWEN_RELEASE_CONSUME_GATE_ARTIFACTS == 'true' && needs.gate_artifacts.result == 'success') || needs.build_release.result == 'success' }}"
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
-          artifact-ids: '${{ needs.build_release.outputs.artifact_id }}'
+          artifact-ids: "${{ (vars.QWEN_RELEASE_CONSUME_GATE_ARTIFACTS == 'true' && needs.gate_artifacts.result == 'success') && needs.gate_artifacts.outputs.artifact_id || needs.build_release.outputs.artifact_id }}"
           merge-multiple: true
           path: '${{ runner.temp }}/release-publish-build'
       - name: 'Restore release commit and outputs'
-        if: "${{ needs.build_release.result == 'success' }}"
+        if: "${{ (vars.QWEN_RELEASE_CONSUME_GATE_ARTIFACTS == 'true' && needs.gate_artifacts.result == 'success') || needs.build_release.result == 'success' }}"
         env:
           RELEASE_SHA: '${{ needs.prepare.outputs.release_sha }}'
-          RELEASE_COMMIT: '${{ needs.build_release.outputs.release_commit }}'
+          RELEASE_COMMIT: "${{ (vars.QWEN_RELEASE_CONSUME_GATE_ARTIFACTS == 'true' && needs.gate_artifacts.result == 'success') && needs.gate_artifacts.outputs.release_commit || needs.build_release.outputs.release_commit }}"
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
         run: '.release-workflow/.github/scripts/run-release-step.sh restore-release'
 
@@ -898,7 +1106,7 @@ jobs:
       - name: 'Build Bundle and Prepare Package'
         # A resume rebuilds from the adopted commit through these two steps
         # so the trusted reset/checkout pair also covers the retry path.
-        if: "${{ needs.build_release.result != 'success' || steps.push_release_branch.outputs.reused_commit == 'true' }}"
+        if: "${{ !((vars.QWEN_RELEASE_CONSUME_GATE_ARTIFACTS == 'true' && needs.gate_artifacts.result == 'success') || needs.build_release.result == 'success') || steps.push_release_branch.outputs.reused_commit == 'true' }}"
         env:
           QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
         run: '.release-workflow/.github/scripts/run-release-step.sh build-package'
@@ -907,7 +1115,7 @@ jobs:
       - *checkout_release_workflow_scripts
 
       - name: 'Build Standalone Archives'
-        if: "${{ needs.build_release.result != 'success' || steps.push_release_branch.outputs.reused_commit == 'true' }}"
+        if: "${{ !((vars.QWEN_RELEASE_CONSUME_GATE_ARTIFACTS == 'true' && needs.gate_artifacts.result == 'success') || needs.build_release.result == 'success') || steps.push_release_branch.outputs.reused_commit == 'true' }}"
         env:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
@@ -981,8 +1189,10 @@ jobs:
       - 'quality'
       - 'integration_none'
       - 'integration_docker'
+      - 'login_e2e_gate'
       - 'audio_capture_prebuilds'
       - 'build_release'
+      - 'gate_artifacts'
       - 'publish'
     if: |-
       ${{
@@ -993,6 +1203,8 @@ jobs:
         ) &&
         (
           needs.prepare.result == 'failure' ||
+          needs.login_e2e_gate.result == 'failure' ||
+          needs.gate_artifacts.result == 'failure' ||
           needs.audio_capture_prebuilds.result == 'failure' ||
           needs.build_release.result == 'failure' ||
           needs.quality.result == 'failure' ||
@@ -1035,8 +1247,10 @@ jobs:
           QUALITY_RESULT: '${{ needs.quality.result }}'
           INTEGRATION_NONE_RESULT: '${{ needs.integration_none.result }}'
           INTEGRATION_DOCKER_RESULT: '${{ needs.integration_docker.result }}'
+          LOGIN_GATE_RESULT: '${{ needs.login_e2e_gate.result }}'
           AUDIO_PREBUILDS_RESULT: '${{ needs.audio_capture_prebuilds.result }}'
           BUILD_RELEASE_RESULT: '${{ needs.build_release.result }}'
+          GATE_ARTIFACTS_RESULT: '${{ needs.gate_artifacts.result }}'
           PUBLISH_RESULT: '${{ needs.publish.result }}'
         run: '.release-workflow/.github/scripts/run-release-step.sh notify-failure'
 

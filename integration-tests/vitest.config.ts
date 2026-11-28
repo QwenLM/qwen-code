@@ -20,6 +20,9 @@ export default defineConfig({
     reporters: ['default'],
     include: ['**/*.test.ts'],
     exclude: [
+      // Release-only login gate: needs account secrets, runs solely in the
+      // release workflow's login_e2e_gate job via vitest.login-gate.config.ts.
+      '**/release-login-gate/**',
       '**/installed/**',
       '**/terminal-bench/*.test.ts',
       '**/hook-integration/**',
