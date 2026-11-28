@@ -28,9 +28,12 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  DEFAULT_GUARD_MAX_AGE_SEC,
+  GUARD_VERDICT_SCHEMA,
   checkArtifacts,
   checkBoundary,
   checkExecutionRecord,
+  checkGuardVerdict,
   checkMutationCoverage,
   checkTrustClassification,
   containerNonceErrors,
@@ -40,6 +43,9 @@ import {
 
 const SCRIPT = fileURLToPath(
   new URL('../../scripts/verify-pr-check.mjs', import.meta.url),
+);
+const GUARD_SCRIPT = fileURLToPath(
+  new URL('../../scripts/verify-pr-guard.mjs', import.meta.url),
 );
 const HEAD = 'b'.repeat(40);
 
@@ -5642,15 +5648,12 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     }
   });
 
-  it('R7-1: resolves POSIX artifact paths whose ancestor components contain backslashes', () => {
-    if (process.platform === 'win32') return;
-    const baseDir = mkdtempSync(join(tmpdir(), 'verify-pr-check-r71-'));
+  describe('POSIX backslash artifact path resolution (R7-1)', () => {
     const runCheck = (args) =>
       spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
-    try {
-      const cloneWithBs = join(baseDir, 'a\\b');
-      const roundDir = join(cloneWithBs, 'tmp', 'pr123-verify-20261127-010000');
-      mkdirSync(join(roundDir, 'evidence'), { recursive: true });
+
+    function makeBackslashFixture() {
+      const baseDir = mkdtempSync(join(tmpdir(), 'verify-pr-check-r71-'));
       const files = validFiles();
       const reportMd = [
         `findings — verified head \`${HEAD}\` on local-trust host round.`,
@@ -5665,9 +5668,6 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
         '**Boundary.** Waived host execution disclosed per policy.',
         '',
       ].join('\n');
-      writeFileSync(join(roundDir, 'report.md'), reportMd);
-      writeFileSync(join(roundDir, 'verdict.txt'), 'findings\n');
-      writeFileSync(join(roundDir, 'assertions.json'), files.assertions);
       const approval = localTrustApproval({
         by: 'octocat',
         reason: 'R7-1 POSIX backslash path test',
@@ -5678,9 +5678,6 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
         pr: 123,
         headRefOid: HEAD,
       });
-      writeFileSync(join(roundDir, 'boundary.json'), boundaryRaw);
-      writeFileSync(join(roundDir, 'context.json'), artifactCtxRaw);
-      writeFileSync(join(roundDir, 'evidence', '01-ab-cells.png'), 'png');
       const hostCtxPath = join(baseDir, 'host-context.json');
       const hostCtxRaw = JSON.stringify({
         repo: 'QwenLM/qwen-code',
@@ -5693,103 +5690,905 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
       });
       writeFileSync(hostCtxPath, hostCtxRaw);
       const ctxSha = createHash('sha256').update(hostCtxRaw).digest('hex');
-
-      const res = runCheck([
-        '--context',
-        hostCtxPath,
-        '--context-sha256',
-        ctxSha,
-        roundDir,
-      ]);
-      expect(res.stderr).not.toMatch(/could not resolve artifact directory/);
-      expect(res.status).toBe(0);
-
-      // Trust-root derivation still refuses a --context planted inside the `a\b` clone.
-      const inCloneCtx = join(cloneWithBs, 'planted-context.json');
-      writeFileSync(inCloneCtx, hostCtxRaw);
-      const plantedRes = runCheck([
-        '--context',
-        inCloneCtx,
-        '--context-sha256',
-        ctxSha,
-        roundDir,
-      ]);
-      expect(plantedRes.status).toBe(1);
-      expect(plantedRes.stderr).toMatch(/must not point inside/);
-
-      // Trailing backslash in a POSIX directory name must not be stripped by dirTrimmed.
-      const trailingBsRound = join(
-        baseDir,
-        'trail-clone',
-        'tmp',
-        'pr123-verify-20261127-010001\\',
-      );
-      mkdirSync(join(trailingBsRound, 'evidence'), { recursive: true });
-      writeFileSync(join(trailingBsRound, 'report.md'), reportMd);
-      writeFileSync(join(trailingBsRound, 'verdict.txt'), 'findings\n');
-      writeFileSync(join(trailingBsRound, 'assertions.json'), files.assertions);
-      writeFileSync(
-        join(trailingBsRound, 'boundary.json'),
-        readFileSync(join(roundDir, 'boundary.json')),
-      );
-      writeFileSync(join(trailingBsRound, 'context.json'), artifactCtxRaw);
-      writeFileSync(
-        join(trailingBsRound, 'evidence', '01-ab-cells.png'),
-        'png',
-      );
-      const trailingRes = runCheck([
-        '--context',
-        hostCtxPath,
-        '--context-sha256',
-        ctxSha,
-        trailingBsRound,
-      ]);
-      expect(trailingRes.stderr).not.toMatch(
-        /could not resolve artifact directory/,
-      );
-      expect(trailingRes.status).toBe(0);
-
-      // Ancestor directory ending with backslash (`anc\`) and relative symlink
-      // target containing backslash (`../anc\/tmp`) must resolve cleanly.
-      const ancEndClone = join(baseDir, 'anc\\');
-      const ancEndRound = join(
-        ancEndClone,
-        'tmp',
-        'pr123-verify-20261127-010002',
-      );
-      mkdirSync(join(ancEndRound, 'evidence'), { recursive: true });
-      writeFileSync(join(ancEndRound, 'report.md'), reportMd);
-      writeFileSync(join(ancEndRound, 'verdict.txt'), 'findings\n');
-      writeFileSync(join(ancEndRound, 'assertions.json'), files.assertions);
-      writeFileSync(join(ancEndRound, 'boundary.json'), boundaryRaw);
-      writeFileSync(join(ancEndRound, 'context.json'), artifactCtxRaw);
-      writeFileSync(join(ancEndRound, 'evidence', '01-ab-cells.png'), 'png');
-      const ancEndRes = runCheck([
-        '--context',
-        hostCtxPath,
-        '--context-sha256',
-        ctxSha,
-        ancEndRound,
-      ]);
-      expect(ancEndRes.stderr).not.toMatch(
-        /could not resolve artifact directory/,
-      );
-      expect(ancEndRes.status).toBe(0);
-
-      const symClone = join(baseDir, 'sym-holder');
-      mkdirSync(symClone, { recursive: true });
-      symlinkSync('../anc\\/tmp', join(symClone, 'tmp'));
-      const symRes = runCheck([
-        '--context',
-        hostCtxPath,
-        '--context-sha256',
-        ctxSha,
-        join(symClone, 'tmp', 'pr123-verify-20261127-010002'),
-      ]);
-      expect(symRes.stderr).not.toMatch(/could not resolve artifact directory/);
-      expect(symRes.status).toBe(0);
-    } finally {
-      rmSync(baseDir, { recursive: true, force: true });
+      const populateRound = (roundDir) => {
+        mkdirSync(join(roundDir, 'evidence'), { recursive: true });
+        writeFileSync(join(roundDir, 'report.md'), reportMd);
+        writeFileSync(join(roundDir, 'verdict.txt'), 'findings\n');
+        writeFileSync(join(roundDir, 'assertions.json'), files.assertions);
+        writeFileSync(join(roundDir, 'boundary.json'), boundaryRaw);
+        writeFileSync(join(roundDir, 'context.json'), artifactCtxRaw);
+        writeFileSync(join(roundDir, 'evidence', '01-ab-cells.png'), 'png');
+      };
+      return { baseDir, hostCtxPath, hostCtxRaw, ctxSha, populateRound };
     }
+
+    it.skipIf(process.platform === 'win32')(
+      'accepts artifact paths under a POSIX ancestor containing a backslash',
+      () => {
+        const { baseDir, hostCtxPath, ctxSha, populateRound } =
+          makeBackslashFixture();
+        try {
+          const roundDir = join(
+            baseDir,
+            'a\\b',
+            'tmp',
+            'pr123-verify-20261127-010000',
+          );
+          populateRound(roundDir);
+          const res = runCheck([
+            '--context',
+            hostCtxPath,
+            '--context-sha256',
+            ctxSha,
+            roundDir,
+          ]);
+          expect(res.stderr).not.toMatch(
+            /could not resolve artifact directory/,
+          );
+          expect(res.status).toBe(0);
+        } finally {
+          rmSync(baseDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'still refuses a --context planted inside a POSIX backslash clone root',
+      () => {
+        const { baseDir, hostCtxRaw, ctxSha, populateRound } =
+          makeBackslashFixture();
+        try {
+          const cloneWithBs = join(baseDir, 'a\\b');
+          const roundDir = join(
+            cloneWithBs,
+            'tmp',
+            'pr123-verify-20261127-010000',
+          );
+          populateRound(roundDir);
+          const inCloneCtx = join(cloneWithBs, 'planted-context.json');
+          writeFileSync(inCloneCtx, hostCtxRaw);
+          const plantedRes = runCheck([
+            '--context',
+            inCloneCtx,
+            '--context-sha256',
+            ctxSha,
+            roundDir,
+          ]);
+          expect(plantedRes.status).toBe(1);
+          expect(plantedRes.stderr).toMatch(/must not point inside/);
+        } finally {
+          rmSync(baseDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'preserves a trailing backslash on a POSIX artifact leaf directory',
+      () => {
+        const { baseDir, hostCtxPath, ctxSha, populateRound } =
+          makeBackslashFixture();
+        try {
+          const trailingBsRound = join(
+            baseDir,
+            'trail-clone',
+            'tmp',
+            'pr123-verify-20261127-010001\\',
+          );
+          populateRound(trailingBsRound);
+          const trailingRes = runCheck([
+            '--context',
+            hostCtxPath,
+            '--context-sha256',
+            ctxSha,
+            trailingBsRound,
+          ]);
+          expect(trailingRes.stderr).not.toMatch(
+            /could not resolve artifact directory/,
+          );
+          expect(trailingRes.status).toBe(0);
+        } finally {
+          rmSync(baseDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'resolves a POSIX ancestor ending with backslash and relative symlink target containing backslash',
+      () => {
+        const { baseDir, hostCtxPath, ctxSha, populateRound } =
+          makeBackslashFixture();
+        try {
+          const ancEndRound = join(
+            baseDir,
+            'anc\\',
+            'tmp',
+            'pr123-verify-20261127-010002',
+          );
+          populateRound(ancEndRound);
+          const ancEndRes = runCheck([
+            '--context',
+            hostCtxPath,
+            '--context-sha256',
+            ctxSha,
+            ancEndRound,
+          ]);
+          expect(ancEndRes.stderr).not.toMatch(
+            /could not resolve artifact directory/,
+          );
+          expect(ancEndRes.status).toBe(0);
+
+          const symClone = join(baseDir, 'sym-holder');
+          mkdirSync(symClone, { recursive: true });
+          symlinkSync('../anc\\/tmp', join(symClone, 'tmp'));
+          const symRes = runCheck([
+            '--context',
+            hostCtxPath,
+            '--context-sha256',
+            ctxSha,
+            join(symClone, 'tmp', 'pr123-verify-20261127-010002'),
+          ]);
+          expect(symRes.stderr).not.toMatch(
+            /could not resolve artifact directory/,
+          );
+          expect(symRes.status).toBe(0);
+        } finally {
+          rmSync(baseDir, { recursive: true, force: true });
+        }
+      },
+    );
   });
+});
+
+describe('checkGuardVerdict and --guard / --require-guard gate', () => {
+  const NOW_MS = Date.parse('2026-11-27T12:41:00.000Z');
+  const COORDS = { owner: 'QwenLM', repo: 'qwen-code', number: 18494 };
+
+  function validVerdict(overrides = {}) {
+    return {
+      schema: GUARD_VERDICT_SCHEMA,
+      clean: true,
+      repo: 'QwenLM/qwen-code',
+      pr: 18494,
+      startHeadRefOid: HEAD,
+      nowHeadRefOid: HEAD,
+      startState: 'OPEN',
+      nowState: 'OPEN',
+      startCapturedAt: '2026-11-27T12:16:38.000Z',
+      nowCapturedAt: '2026-11-27T12:40:00.000Z',
+      comparedAt: '2026-11-27T12:40:02.000Z',
+      reasons: [],
+      ...overrides,
+    };
+  }
+
+  it('accepts a clean, fresh, matching OPEN guard verdict', () => {
+    const errors = checkGuardVerdict(JSON.stringify(validVerdict()), {
+      expectedHead: HEAD,
+      coordinates: COORDS,
+      maxAgeSec: DEFAULT_GUARD_MAX_AGE_SEC,
+      nowMs: NOW_MS,
+    });
+    expect(errors).toEqual([]);
+  });
+
+  it('rejects dirty, malformed, wrong-schema, wrong-PR, wrong-head, and non-OPEN verdicts', () => {
+    expect(checkGuardVerdict('{not-json', { nowMs: NOW_MS })[0]).toMatch(
+      /not valid JSON/,
+    );
+    expect(
+      checkGuardVerdict(JSON.stringify(validVerdict({ schema: 'v0' })), {
+        nowMs: NOW_MS,
+      }).join('\n'),
+    ).toMatch(/schema must be/);
+
+    const dirtyErrors = checkGuardVerdict(
+      JSON.stringify(
+        validVerdict({
+          clean: false,
+          reasons: ['issueComments: 7218091603 is new'],
+        }),
+      ),
+      { expectedHead: HEAD, coordinates: COORDS, nowMs: NOW_MS },
+    );
+    expect(dirtyErrors.join('\n')).toMatch(
+      /--guard verdict is dirty: issueComments: 7218091603 is new/,
+    );
+
+    // Hand-editing clean=true while leaving dirty reasons fails closed.
+    expect(
+      checkGuardVerdict(
+        JSON.stringify(validVerdict({ clean: true, reasons: ['leftover'] })),
+        { nowMs: NOW_MS },
+      ).join('\n'),
+    ).toMatch(/claims clean=true but still lists 1 dirty reason/);
+
+    // Different PR or repo cannot be replayed.
+    expect(
+      checkGuardVerdict(JSON.stringify(validVerdict({ pr: 99999 })), {
+        coordinates: COORDS,
+        nowMs: NOW_MS,
+      }).join('\n'),
+    ).toMatch(/targets QwenLM\/qwen-code#99999, not QwenLM\/qwen-code#18494/);
+
+    // Head moved or mismatched verified head.
+    const movedHead = 'c'.repeat(40);
+    expect(
+      checkGuardVerdict(
+        JSON.stringify(validVerdict({ nowHeadRefOid: movedHead })),
+        { expectedHead: HEAD, nowMs: NOW_MS },
+      ).join('\n'),
+    ).toMatch(/head moved/);
+    expect(
+      checkGuardVerdict(
+        JSON.stringify(
+          validVerdict({
+            startHeadRefOid: movedHead,
+            nowHeadRefOid: movedHead,
+          }),
+        ),
+        { expectedHead: HEAD, nowMs: NOW_MS },
+      ).join('\n'),
+    ).toMatch(/does not match verified head/);
+
+    // Non-OPEN state (merged or closed mid-round) refuses publication even if
+    // both snapshots saw the same non-OPEN state.
+    expect(
+      checkGuardVerdict(
+        JSON.stringify(
+          validVerdict({ startState: 'MERGED', nowState: 'MERGED' }),
+        ),
+        { nowMs: NOW_MS },
+      ).join('\n'),
+    ).toMatch(/requires an OPEN PR/);
+  });
+
+  it('enforces capture freshness on nowCapturedAt, monotonic order, and future clock skew', () => {
+    // Re-running --compare just now against a 30-minute-old --now snapshot
+    // must still fail: freshness is anchored on nowCapturedAt, not only comparedAt.
+    const staleNow = checkGuardVerdict(
+      JSON.stringify(
+        validVerdict({
+          nowCapturedAt: '2026-11-27T12:10:00.000Z',
+          comparedAt: '2026-11-27T12:40:50.000Z',
+        }),
+      ),
+      { maxAgeSec: 600, nowMs: NOW_MS },
+    );
+    expect(staleNow.join('\n')).toMatch(/nowCapturedAt is stale/);
+
+    // Inverted timestamps fail closed.
+    const inverted = checkGuardVerdict(
+      JSON.stringify(
+        validVerdict({
+          startCapturedAt: '2026-11-27T12:40:30.000Z',
+          nowCapturedAt: '2026-11-27T12:40:00.000Z',
+        }),
+      ),
+      { nowMs: NOW_MS },
+    );
+    expect(inverted.join('\n')).toMatch(/precedes startCapturedAt/);
+
+    // Legacy snapshot without capturedAt fails closed.
+    const missingTs = checkGuardVerdict(
+      JSON.stringify(validVerdict({ nowCapturedAt: null })),
+      { nowMs: NOW_MS },
+    );
+    expect(missingTs.join('\n')).toMatch(/requires valid UTC ISO-8601/);
+
+    // Future-dated verdict beyond 60s skew is refused.
+    const futureTs = checkGuardVerdict(
+      JSON.stringify(
+        validVerdict({
+          nowCapturedAt: '2026-11-27T12:45:00.000Z',
+          comparedAt: '2026-11-27T12:45:01.000Z',
+        }),
+      ),
+      { nowMs: NOW_MS },
+    );
+    expect(futureTs.join('\n')).toMatch(/future timestamp/);
+
+    // Calendar rollover dates (e.g. Feb 31 -> Mar 3 in V8) fail closed.
+    const rolloverTs = checkGuardVerdict(
+      JSON.stringify(
+        validVerdict({
+          nowCapturedAt: '2026-02-31T12:40:00.000Z',
+          comparedAt: '2026-02-31T12:40:02.000Z',
+        }),
+      ),
+      { nowMs: Date.parse('2026-03-03T12:41:00.000Z') },
+    );
+    expect(rolloverTs.join('\n')).toMatch(/requires valid UTC ISO-8601/);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'chains verify-pr-guard --compare --out into verify-pr-check --require-guard end to end and blocks tampering, staleness, and planted files',
+    () => {
+      const baseDir = mkdtempSync(join(tmpdir(), 'verify-pr-check-guard-'));
+      try {
+        const cloneDir = join(baseDir, 'pr-clone');
+        const roundDir = join(
+          cloneDir,
+          'tmp',
+          'pr18494-verify-20261127-124000',
+        );
+        const hostDir = join(baseDir, 'host-cache');
+        mkdirSync(join(roundDir, 'evidence'), { recursive: true });
+        mkdirSync(join(roundDir, 'logs'), { recursive: true });
+        mkdirSync(hostDir, { recursive: true });
+
+        const reportMd = [
+          `**Verdict: merge-ready** — head \`${HEAD}\`.`,
+          '',
+          '## Methodology',
+          '',
+          '**Boundary.** Ran inside a credential-free `node:22` container with `--network none`.',
+        ].join('\n');
+        writeFileSync(join(roundDir, 'report.md'), reportMd);
+        writeFileSync(join(roundDir, 'verdict.txt'), 'merge-ready\n');
+        writeFileSync(
+          join(roundDir, 'assertions.json'),
+          JSON.stringify({ total: 2, pass: 2, fail: 0 }),
+        );
+        writeFileSync(
+          join(roundDir, 'boundary.json'),
+          JSON.stringify({
+            mode: 'container',
+            detail: 'node:22 --network none',
+          }),
+        );
+        writeFileSync(join(roundDir, 'boundary-gate.json'), GATE_RECORD);
+        writeFileSync(
+          join(roundDir, 'logs', 'run.log'),
+          `container-nonce: ${NONCE}\n`,
+        );
+        writeFileSync(join(roundDir, 'evidence', '01-ab.png'), 'png');
+
+        const hostCtxPath = join(hostDir, 'pr.json');
+        const hostCtxRaw = JSON.stringify({
+          repo: 'QwenLM/qwen-code',
+          pr: 18494,
+          headRefOid: HEAD,
+        });
+        writeFileSync(hostCtxPath, hostCtxRaw);
+        const ctxSha = createHash('sha256')
+          .update(hostCtxRaw, 'utf8')
+          .digest('hex');
+
+        const nowIso = new Date().toISOString();
+        const startIso = new Date(Date.now() - 30_000).toISOString();
+        const makeSnap = (capturedAt, extra = {}) => ({
+          pr: 18494,
+          repo: 'QwenLM/qwen-code',
+          headRefOid: HEAD,
+          state: 'OPEN',
+          capturedAt,
+          reviews: [],
+          reviewComments: [],
+          issueComments: [],
+          ...extra,
+        });
+        const startPath = join(hostDir, 'guard-start.json');
+        const nowPath = join(hostDir, 'guard-now.json');
+        const verdictPath = join(hostDir, 'guard-verdict.json');
+        writeFileSync(startPath, JSON.stringify(makeSnap(startIso)));
+        writeFileSync(nowPath, JSON.stringify(makeSnap(nowIso)));
+
+        const guardRun = spawnSync(
+          process.execPath,
+          [
+            GUARD_SCRIPT,
+            '--compare',
+            '--start',
+            startPath,
+            '--now',
+            nowPath,
+            '--out',
+            verdictPath,
+          ],
+          { encoding: 'utf8' },
+        );
+        expect(guardRun.status).toBe(0);
+        const shaMatch = /^ {2}guard-sha256 {2}([0-9a-f]{64})$/m.exec(
+          guardRun.stdout,
+        );
+        expect(shaMatch).toBeTruthy();
+        const guardSha = shaMatch[1];
+
+        const runCheck = (extraArgs) =>
+          spawnSync(
+            process.execPath,
+            [
+              SCRIPT,
+              '--context',
+              hostCtxPath,
+              '--context-sha256',
+              ctxSha,
+              '--context-root',
+              cloneDir,
+              ...extraArgs,
+              roundDir,
+            ],
+            { encoding: 'utf8' },
+          );
+
+        // Happy path: --require-guard + valid host verdict + matching digest passes.
+        const okRes = runCheck([
+          '--require-guard',
+          '--guard',
+          verdictPath,
+          '--guard-sha256',
+          guardSha,
+        ]);
+        expect(okRes.status).toBe(0);
+
+        // --require-guard without --context fails closed so a fresh verdict
+        // from another PR or head cannot bypass coordinate/head binding.
+        const noContextGuard = spawnSync(
+          process.execPath,
+          [
+            SCRIPT,
+            '--require-guard',
+            '--guard',
+            verdictPath,
+            '--guard-sha256',
+            guardSha,
+            roundDir,
+          ],
+          { encoding: 'utf8' },
+        );
+        expect(noContextGuard.status).toBe(1);
+        expect(noContextGuard.stdout).toMatch(
+          /--require-guard requires a digest-bound host --context snapshot/,
+        );
+
+        // --require-guard with --context but missing --context-sha256 also fails closed.
+        const unboundContextGuard = spawnSync(
+          process.execPath,
+          [
+            SCRIPT,
+            '--context',
+            hostCtxPath,
+            '--context-root',
+            cloneDir,
+            '--require-guard',
+            '--guard',
+            verdictPath,
+            '--guard-sha256',
+            guardSha,
+            roundDir,
+          ],
+          { encoding: 'utf8' },
+        );
+        expect(unboundContextGuard.status).toBe(1);
+        expect(unboundContextGuard.stdout).toMatch(
+          /--require-guard requires a digest-bound host --context snapshot/,
+        );
+
+        // --require-guard without --guard fails closed.
+        const missingGuard = runCheck(['--require-guard']);
+        expect(missingGuard.status).toBe(1);
+        expect(missingGuard.stdout).toMatch(/--require-guard requires/);
+
+        // --require-guard with --guard but without --guard-sha256 fails closed.
+        const missingSha = runCheck([
+          '--require-guard',
+          '--guard',
+          verdictPath,
+        ]);
+        expect(missingSha.status).toBe(1);
+        expect(missingSha.stdout).toMatch(
+          /--require-guard requires --guard-sha256/,
+        );
+
+        // --guard without --require-guard and without digest warns and passes.
+        const unboundWarn = runCheck(['--guard', verdictPath]);
+        expect(unboundWarn.status).toBe(0);
+        expect(unboundWarn.stdout).toMatch(/has no --guard-sha256 binding/);
+
+        // Wrong digest is refused.
+        const wrongSha = runCheck([
+          '--require-guard',
+          '--guard',
+          verdictPath,
+          '--guard-sha256',
+          '0'.repeat(64),
+        ]);
+        expect(wrongSha.status).toBe(1);
+        expect(wrongSha.stderr).toMatch(/does not match --guard-sha256/);
+
+        // In-tree, hardlink, and symlink --guard paths are refused.
+        const inTreeVerdict = join(cloneDir, 'tmp', 'in-tree-guard.json');
+        writeFileSync(inTreeVerdict, readFileSync(verdictPath));
+        expect(
+          runCheck(['--guard', inTreeVerdict, '--guard-sha256', guardSha])
+            .status,
+        ).toBe(1);
+
+        const hardVerdict = join(hostDir, 'hard-guard.json');
+        linkSync(verdictPath, hardVerdict);
+        expect(
+          runCheck(['--guard', hardVerdict, '--guard-sha256', guardSha]).status,
+        ).toBe(1);
+        unlinkSync(hardVerdict);
+
+        const symVerdict = join(hostDir, 'sym-guard.json');
+        symlinkSync(verdictPath, symVerdict);
+        expect(
+          runCheck(['--guard', symVerdict, '--guard-sha256', guardSha]).status,
+        ).toBe(1);
+        unlinkSync(symVerdict);
+
+        // A new mid-round comment makes verify-pr-guard overwrite verdictPath
+        // with clean=false, and verify-pr-check refuses it even with the new sha.
+        writeFileSync(
+          nowPath,
+          JSON.stringify(
+            makeSnap(new Date().toISOString(), {
+              issueComments: [
+                { id: 7218091603, stamp: nowIso, body: '[P1] nested loss' },
+              ],
+            }),
+          ),
+        );
+        const dirtyGuard = spawnSync(
+          process.execPath,
+          [
+            GUARD_SCRIPT,
+            '--compare',
+            '--start',
+            startPath,
+            '--now',
+            nowPath,
+            '--out',
+            verdictPath,
+          ],
+          { encoding: 'utf8' },
+        );
+        expect(dirtyGuard.status).toBe(1);
+        const dirtySha = createHash('sha256')
+          .update(readFileSync(verdictPath, 'utf8'), 'utf8')
+          .digest('hex');
+        const dirtyCheck = runCheck([
+          '--require-guard',
+          '--guard',
+          verdictPath,
+          '--guard-sha256',
+          dirtySha,
+        ]);
+        expect(dirtyCheck.status).toBe(1);
+        expect(dirtyCheck.stdout).toMatch(
+          /--guard verdict is dirty: issueComments: 7218091603 is new/,
+        );
+
+        // Stale capture fails against --guard-max-age-sec.
+        const oldIso = new Date(Date.now() - 120_000).toISOString();
+        const staleStart = join(hostDir, 'stale-start.json');
+        const staleNow = join(hostDir, 'stale-now.json');
+        const staleVerdict = join(hostDir, 'stale-verdict.json');
+        writeFileSync(staleStart, JSON.stringify(makeSnap(oldIso)));
+        writeFileSync(staleNow, JSON.stringify(makeSnap(oldIso)));
+        const staleGuard = spawnSync(
+          process.execPath,
+          [
+            GUARD_SCRIPT,
+            '--compare',
+            '--start',
+            staleStart,
+            '--now',
+            staleNow,
+            '--out',
+            staleVerdict,
+          ],
+          { encoding: 'utf8' },
+        );
+        expect(staleGuard.status).toBe(0);
+        const staleSha = /^ {2}guard-sha256 {2}([0-9a-f]{64})$/m.exec(
+          staleGuard.stdout,
+        )[1];
+        const staleCheck = runCheck([
+          '--require-guard',
+          '--guard',
+          staleVerdict,
+          '--guard-sha256',
+          staleSha,
+          '--guard-max-age-sec',
+          '30',
+        ]);
+        expect(staleCheck.status).toBe(1);
+        expect(staleCheck.stdout).toMatch(/nowCapturedAt is stale/);
+
+        // Usage errors for bad guard CLI option combinations.
+        expect(runCheck(['--guard-sha256', 'a'.repeat(64)]).status).toBe(2);
+        expect(runCheck(['--guard-max-age-sec', '60']).status).toBe(2);
+        expect(
+          runCheck(['--guard', staleVerdict, '--guard-max-age-sec', '0'])
+            .status,
+        ).toBe(2);
+        expect(
+          runCheck(['--guard', staleVerdict, '--guard-max-age-sec', '999999'])
+            .status,
+        ).toBe(2);
+
+        // A guard-verdict.json planted inside the PR-writable artifact dir is
+        // refused even when --guard is not passed.
+        writeFileSync(join(roundDir, 'guard-verdict.json'), '{}');
+        const planted = runCheck([]);
+        expect(planted.status).toBe(1);
+        expect(planted.stdout).toMatch(
+          /guard-verdict\.json must not reside inside the PR-writable artifact directory/,
+        );
+      } finally {
+        rmSync(baseDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'supports runner-backed microvm (firecracker) and provider-vm artifacts together with --require-guard',
+    () => {
+      const baseDir = mkdtempSync(join(tmpdir(), 'verify-pr-check-vm-guard-'));
+      try {
+        const BASE_OID = 'a'.repeat(40);
+        const SHA = (ch) => ch.repeat(64);
+        const sha256 = (text) =>
+          createHash('sha256').update(text, 'utf8').digest('hex');
+
+        for (const variant of [
+          {
+            name: 'firecracker',
+            backend: 'firecracker',
+            mode: 'microvm',
+            boundaryNote: 'Firecracker microVM (hardware-isolated).',
+            extraRecord: {
+              workerPid: 20002,
+              workerExe: '/firecracker-v1.18.0-aarch64',
+              workerExitEvidence: 'absent',
+            },
+          },
+          {
+            name: 'provider-vm',
+            backend: 'provider-vm',
+            mode: 'vm',
+            boundaryNote: 'Disposable provider-vm (hardware-isolated).',
+            extraRecord: {
+              backendVersion: 'aliyun-ecs-2014-05-26',
+              platform: 'aliyun-cn-hangzhou',
+              workerPid: 20002,
+              workerExe: '/firecracker-v1.18.0-aarch64',
+              workerExitEvidence: 'absent',
+              providerLifecycle: {
+                allocationId: 'i-bp1guard001',
+                freshDiskId: 'd-bp1guard001',
+                boundRunId: 'provider-vm-run-01',
+                boundHeadRefOid: HEAD,
+                terminationState: 'terminated',
+                diskDeleted: true,
+              },
+            },
+          },
+        ]) {
+          const caseRoot = join(baseDir, variant.name);
+          const vaultDir = join(caseRoot, 'vault');
+          const hostDir = join(caseRoot, 'host');
+          mkdirSync(join(vaultDir, 'evidence'), { recursive: true });
+          mkdirSync(hostDir, { recursive: true });
+
+          const hostCtxPath = join(hostDir, 'pr.json');
+          const hostCtxRaw = JSON.stringify({
+            repo: 'QwenLM/qwen-code',
+            pr: 18549,
+            baseRefOid: BASE_OID,
+            headRefOid: HEAD,
+            trustClassification: {
+              prTrust: 'external',
+              executionClass: 'hardware-isolated',
+              escalationReasons: [],
+              headRefOid: HEAD,
+            },
+          });
+          writeFileSync(hostCtxPath, hostCtxRaw);
+          const ctxSha = sha256(hostCtxRaw);
+
+          const execRecord = {
+            schemaVersion: 'verify-pr-exec-record-v1',
+            runId: `${variant.name}-run-01`,
+            repo: 'QwenLM/qwen-code',
+            pr: 18549,
+            baseRefOid: BASE_OID,
+            headRefOid: HEAD,
+            contextDigest: ctxSha,
+            prTrust: 'external',
+            executionClass: 'hardware-isolated',
+            backend: variant.backend,
+            backendVersion: 'v1.18.0',
+            platform: 'linux-aarch64',
+            kernelDigest: SHA('1'),
+            rootfsDigest: SHA('2'),
+            trustedInputDigest: SHA('3'),
+            launchPolicyDigest: SHA('4'),
+            startedAt: '2026-11-27T12:00:00Z',
+            endedAt: '2026-11-27T12:00:08Z',
+            destroyedAt: '2026-11-27T12:00:09Z',
+            supervisorPid: 20001,
+            teardownStatus: 'destroyed',
+            diskDestroyed: true,
+            tokenRevoked: true,
+            outputStatus: 'complete',
+            ...variant.extraRecord,
+          };
+          const execRecordPath = join(hostDir, 'execution-record.json');
+          const execRecordRaw = JSON.stringify(execRecord);
+          writeFileSync(execRecordPath, execRecordRaw);
+          const execRecordSha = sha256(execRecordRaw);
+
+          writeFileSync(
+            join(vaultDir, 'report.md'),
+            `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n\n## Methodology\n\n**Boundary.** ${variant.boundaryNote}\n`,
+          );
+          writeFileSync(join(vaultDir, 'verdict.txt'), 'merge-ready\n');
+          writeFileSync(
+            join(vaultDir, 'assertions.json'),
+            JSON.stringify({ total: 4, pass: 4, fail: 0 }),
+          );
+          writeFileSync(
+            join(vaultDir, 'boundary.json'),
+            JSON.stringify({
+              mode: variant.mode,
+              backend: variant.backend,
+              executionClass: 'hardware-isolated',
+              prTrust: 'external',
+              runId: execRecord.runId,
+              headRefOid: HEAD,
+              executionRecordSha256: execRecordSha,
+              writtenAfterTeardown: true,
+            }),
+          );
+          writeFileSync(join(vaultDir, 'evidence', '01-vm.png'), 'png');
+
+          const nowIso = new Date().toISOString();
+          const startIso = new Date(Date.now() - 30_000).toISOString();
+          const makeSnap = (capturedAt, extra = {}) => ({
+            pr: 18549,
+            repo: 'QwenLM/qwen-code',
+            headRefOid: HEAD,
+            state: 'OPEN',
+            capturedAt,
+            reviews: [],
+            reviewComments: [],
+            issueComments: [],
+            ...extra,
+          });
+          const startPath = join(hostDir, 'guard-start.json');
+          const nowPath = join(hostDir, 'guard-now.json');
+          const verdictPath = join(hostDir, 'guard-verdict.json');
+          writeFileSync(startPath, JSON.stringify(makeSnap(startIso)));
+          writeFileSync(nowPath, JSON.stringify(makeSnap(nowIso)));
+
+          const gClean = spawnSync(
+            process.execPath,
+            [
+              GUARD_SCRIPT,
+              '--compare',
+              '--start',
+              startPath,
+              '--now',
+              nowPath,
+              '--out',
+              verdictPath,
+            ],
+            { encoding: 'utf8' },
+          );
+          expect(gClean.status).toBe(0);
+          const guardSha = /^ {2}guard-sha256 {2}([0-9a-f]{64})$/m.exec(
+            gClean.stdout,
+          )[1];
+
+          // Without --execution-record, the container-style command refuses valid VM output.
+          const missingExec = spawnSync(
+            process.execPath,
+            [
+              SCRIPT,
+              '--context',
+              hostCtxPath,
+              '--context-sha256',
+              ctxSha,
+              '--require-guard',
+              '--guard',
+              verdictPath,
+              '--guard-sha256',
+              guardSha,
+              vaultDir,
+            ],
+            { encoding: 'utf8' },
+          );
+          expect(missingExec.status).toBe(1);
+          expect(missingExec.stdout).toMatch(/execution-record/i);
+
+          // Preserving the runner's --execution-record + --execution-record-sha256
+          // together with --require-guard passes cleanly for both firecracker and provider-vm.
+          const vmOk = spawnSync(
+            process.execPath,
+            [
+              SCRIPT,
+              '--context',
+              hostCtxPath,
+              '--context-sha256',
+              ctxSha,
+              '--execution-record',
+              execRecordPath,
+              '--execution-record-sha256',
+              execRecordSha,
+              '--require-guard',
+              '--guard',
+              verdictPath,
+              '--guard-sha256',
+              guardSha,
+              vaultDir,
+            ],
+            { encoding: 'utf8' },
+          );
+          expect(vmOk.status).toBe(0);
+
+          // A dirty guard verdict still blocks publication on the same valid VM artifacts.
+          writeFileSync(
+            nowPath,
+            JSON.stringify(
+              makeSnap(new Date().toISOString(), {
+                issueComments: [
+                  {
+                    id: 7223764648,
+                    stamp: nowIso,
+                    body: '[P1] review arrived',
+                  },
+                ],
+              }),
+            ),
+          );
+          const gDirty = spawnSync(
+            process.execPath,
+            [
+              GUARD_SCRIPT,
+              '--compare',
+              '--start',
+              startPath,
+              '--now',
+              nowPath,
+              '--out',
+              verdictPath,
+            ],
+            { encoding: 'utf8' },
+          );
+          expect(gDirty.status).toBe(1);
+          const dirtySha = sha256(readFileSync(verdictPath, 'utf8'));
+          const vmDirty = spawnSync(
+            process.execPath,
+            [
+              SCRIPT,
+              '--context',
+              hostCtxPath,
+              '--context-sha256',
+              ctxSha,
+              '--execution-record',
+              execRecordPath,
+              '--execution-record-sha256',
+              execRecordSha,
+              '--require-guard',
+              '--guard',
+              verdictPath,
+              '--guard-sha256',
+              dirtySha,
+              vaultDir,
+            ],
+            { encoding: 'utf8' },
+          );
+          expect(vmDirty.status).toBe(1);
+          expect(vmDirty.stdout).toMatch(
+            /--guard verdict is dirty: issueComments: 7223764648 is new/,
+          );
+        }
+      } finally {
+        rmSync(baseDir, { recursive: true, force: true });
+      }
+    },
+  );
 });
