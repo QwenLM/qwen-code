@@ -23,9 +23,13 @@ Prepare the public documentation content from the parent `docs` directory:
 npm run link
 ```
 
-This creates a `content` directory with copies of the public docs sections.
-Internal planning, design, and E2E notes remain outside the docs site content
-tree.
+The command links `docs/users/` and `docs/developers/` into `docs-site/content/`
+and copies `docs/index.md` and `docs/_meta.ts`. Internal sections such as
+`docs/design/` are outside the preview.
+
+Edits under either linked directory are available without running the link
+command again. After changing `docs/index.md` or `docs/_meta.ts`, run
+`npm run link` again from `docs-site` to refresh the copies.
 
 ### Development
 
