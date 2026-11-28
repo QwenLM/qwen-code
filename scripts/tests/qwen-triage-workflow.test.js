@@ -3216,11 +3216,7 @@ describe('qwen-triage verify hardening', () => {
   // rather than proceed on a workspace it could not clear.
   it('wipes the workspace before external code, ahead of checkout', () => {
     const verifyJob = job('verify');
-    // Both trust levels share one machine class now; nothing routes.
-    expect(verifyJob).toContain(
-      "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
-    );
-    expect(verifyJob).not.toContain('ubuntu-latest');
+    expect(parse(workflow).jobs.verify['runs-on']).toEqual(['ecs-verify-pr']);
 
     const wipe = stepIn('verify', 'Wipe workspace before external code');
     expect(wipe).not.toBe('');
@@ -11598,7 +11594,7 @@ describe('qwen-triage verify maintainer-review round', () => {
 
 describe('qwen-triage tmux lane parity', () => {
   // The verify lane earned these controls the hard way; the tmux lane
-  // executes the same untrusted PR code on the same persistent pool, so
+  // also executes untrusted PR code on a persistent pool, so
   // leaving them out was a gap rather than a scope boundary.
 
   // A fixed proxy port is squattable by a detached lifecycle process: the
@@ -12039,20 +12035,16 @@ describe('qwen-triage pnpm store producer', () => {
     );
   });
 
-  it('runs on the same target as the consumers so the cache version matches', () => {
-    // actions/cache scopes an entry by a hash of the literal cache path plus
-    // the compression method, so a producer on a different runner or outside
-    // the container computes a different version and every restore misses
-    // even when the key and path strings match.
+  it('keeps the producer on the tmux pool and matches both container images', () => {
     expect(cacheProducerWorkflow).toContain(
       "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
     );
     expect(cacheProducerWorkflow).toContain("image: 'node:22-bookworm'");
     expect(cacheProducerWorkflow).toContain("options: '--init --user node'");
+    expect(job('tmux-testing')).toContain(
+      "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
+    );
     for (const jobName of ['verify', 'tmux-testing']) {
-      expect(job(jobName)).toContain(
-        "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
-      );
       expect(job(jobName)).toContain("image: 'node:22-bookworm'");
     }
   });

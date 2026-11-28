@@ -2880,7 +2880,7 @@ jobs:
     # Cost of the raise, stated so it is a decision and not a surprise: a
     # verify run now occupies one ECS slot for up to ~3.5h instead of 1h.
     timeout-minutes: 213
-    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    runs-on: ['ecs-verify-pr']
     # The job checks out and executes PR code. Run the steps in a container so
     # package scripts/builds cannot persist changes in the self-hosted runner's
     # host filesystem across workflow runs.

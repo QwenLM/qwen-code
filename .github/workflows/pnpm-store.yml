@@ -21,12 +21,9 @@ defaults:
 jobs:
   save:
     name: 'Save pnpm store'
-    # Share the verify/tmux consumers' runs-on + container (qwen-triage.yml).
-    # actions/cache scopes an entry by a hash of the literal cache path plus
-    # the compression method, so a producer on ubuntu-latest (host path,
-    # zstd) can never be restored by a consumer in node:22-bookworm
-    # (container path, gzip); matching both by construction is what makes the
-    # restore hit. node:22-bookworm ships git, so checkout needs no setup.
+    # Share the tmux runner pool and the verify/tmux container environment.
+    # Cache versions depend on the path and compression tool, so keep the
+    # container consistent across the producer and consumers.
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     container:
       image: 'node:22-bookworm'

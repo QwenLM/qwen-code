@@ -1838,21 +1838,12 @@ describe('qwen-triage: pnpm store producer workflow', () => {
     );
   });
 
-  it('runs on the same target as the consumers so the cache version matches', () => {
-    // actions/cache scopes an entry by a hash of the literal cache path plus
-    // the compression method. A producer on a different runner or outside the
-    // container image computes a different version, so every restore misses
-    // even when the key and path strings match — pin runs-on + image to the
-    // consumers' so both match by construction.
+  it('keeps the producer on the tmux pool and matches both container images', () => {
+    assert.deepEqual(saveJob['runs-on'], tmuxJob['runs-on']);
     for (const [jobName, jobDef] of [
       ['verify', verifyJob],
       ['tmux-testing', tmuxJob],
     ]) {
-      assert.deepEqual(
-        saveJob['runs-on'],
-        jobDef['runs-on'],
-        `producer runs-on must match ${jobName}`,
-      );
       assert.equal(
         saveJob.container.image,
         jobDef.container.image,

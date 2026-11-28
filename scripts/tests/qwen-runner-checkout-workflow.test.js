@@ -32,7 +32,9 @@ import { expect, it } from 'vitest';
 const triagePoolCheckoutJobs = Object.entries(
   parse(readFileSync('.github/workflows/qwen-triage.yml', 'utf8')).jobs,
 )
-  .filter(([, job]) => String(job['runs-on'] ?? '').includes('ecs-qwen'))
+  .filter(([, job]) =>
+    /ecs-qwen|ecs-verify-pr/.test(String(job['runs-on'] ?? '')),
+  )
   .filter(([, job]) =>
     (job.steps ?? []).some((step) =>
       /^actions\/checkout@/.test(String(step.uses ?? '')),
