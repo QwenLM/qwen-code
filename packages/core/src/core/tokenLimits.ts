@@ -351,7 +351,8 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   // Google Gemini
   [/^gemini-4/, LIMITS['64k']], // Gemini 4.x: 64K
   [/^gemini-3/, LIMITS['64k']], // Gemini 3.x: 64K
-  [/^gemini-/, LIMITS['8k']], // Gemini fallback: 8K
+  [/^gemini-2\.5/, LIMITS['64k']], // Gemini 2.5 (Pro, Flash, Flash-Lite): 64K
+  [/^gemini-/, LIMITS['8k']], // Gemini fallback (1.5, 2.0): 8K
 
   // OpenAI
   [/^gpt-5/, LIMITS['128k']], // GPT-5.x: 128K
