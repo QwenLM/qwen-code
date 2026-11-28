@@ -159,18 +159,109 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
     expect(badSkillRes.status).toBe(1);
     expect(badSkillRes.stderr).toMatch(/invalid cmdline qwen\.skill/);
 
+    // 7242512674 P2: Linux AF_VSOCK ports are 32-bit unsigned (1..4294967294);
+    // high port 70000 succeeds end-to-end across Firecracker plan & guest cmdline,
+    // while 0xffffffff (VMADDR_PORT_ANY = 4294967295) is refused on both ends.
+    const highPortPlan = buildFirecrackerLaunchPlan({
+      runId: 'fc-hi-port',
+      jailBaseDir: join(root, 'j-hi'),
+      firecrackerBin: '/opt/firecracker',
+      jailerBin: '/opt/jailer',
+      vmmUid: 65534,
+      vmmGid: 65534,
+      vsockPort: 52,
+      inputVsockPort: 70000,
+    });
+    expect(highPortPlan.inputVsockPath.endsWith('v.sock_70000')).toBe(true);
+    expect(() =>
+      buildFirecrackerLaunchPlan({
+        runId: 'fc-any-port',
+        jailBaseDir: join(root, 'j-any'),
+        firecrackerBin: '/opt/firecracker',
+        jailerBin: '/opt/jailer',
+        vmmUid: 65534,
+        vmmGid: 65534,
+        vsockPort: 52,
+        inputVsockPort: 4294967295,
+      }),
+    ).toThrow(/32-bit vsock port/);
+
+    const highPortCmdline = join(root, 'high-port-cmdline');
+    writeFileSync(highPortCmdline, 'qwen.input_port=70000\n');
+    const pyHiPort = spawnSync(
+      'python3',
+      [
+        '-c',
+        `import argparse, importlib.util, json; spec=importlib.util.spec_from_file_location("gr", ${JSON.stringify(GUEST_RUNNER_PY)}); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); ns=argparse.Namespace(from_cmdline=True, cid=2, collector_port=52, input_port=53, model_port=54, workload=None, workload_timeout=30, skill_digest=None, skip_materialize=False, cmdline_file=${JSON.stringify(highPortCmdline)}); mod.apply_cmdline_overrides(ns); print(ns.input_port)`,
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(pyHiPort.status, pyHiPort.stderr).toBe(0);
+    expect(pyHiPort.stdout.trim()).toBe('70000');
+
     const badPortCmdline = join(root, 'bad-port-cmdline');
-    writeFileSync(badPortCmdline, 'qwen.collector_port=70000\n');
+    writeFileSync(badPortCmdline, 'qwen.collector_port=4294967295\n');
     const badPortRes = spawnSync(
       'python3',
       [GUEST_RUNNER_PY, '--from-cmdline', '--cmdline-file', badPortCmdline],
       { encoding: 'utf8' },
     );
     expect(badPortRes.status).toBe(1);
-    expect(badPortRes.stderr).toMatch(/expected port in 1\.\.65535/);
+    expect(badPortRes.stderr).toMatch(/expected 32-bit vsock port/);
+
+    // R5-7: materialize_bundle resolves relative bundle_path and repo_dir against caller cwd
+    const relRoot = join(root, 'rel-mat');
+    mkdirSync(relRoot, { mode: 0o700 });
+    const srcRelRepo = join(relRoot, 'src-repo');
+    const relCommits = makeTwoCommitRepo(srcRelRepo);
+    const relBundlePath = join(relRoot, 'round.bundle');
+    execFileSync(
+      'git',
+      ['-C', srcRelRepo, 'bundle', 'create', relBundlePath, '--all'],
+      {
+        encoding: 'utf8',
+      },
+    );
+    const pyRelMat = spawnSync(
+      'python3',
+      [
+        '-c',
+        `import importlib.util, json; spec=importlib.util.spec_from_file_location("gr", ${JSON.stringify(GUEST_RUNNER_PY)}); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); print(json.dumps(mod.materialize_bundle("round.bundle", "repo-rel", ${JSON.stringify(relCommits.baseRefOid)}, ${JSON.stringify(relCommits.headRefOid)})))`,
+      ],
+      { cwd: relRoot, encoding: 'utf8' },
+    );
+    expect(pyRelMat.status, pyRelMat.stderr).toBe(0);
+    const relMatOut = JSON.parse(pyRelMat.stdout);
+    expect(relMatOut.verified).toBe(true);
+    expect(relMatOut.changedFiles).toEqual(['hello.txt']);
+
+    // R5-12: un-enumerated bundles (materialized=None or skipped=True) render `unknown`, never `0`
+    const pyUnknownCount = spawnSync(
+      'python3',
+      [
+        '-c',
+        `import importlib.util, json; spec=importlib.util.spec_from_file_location("gr", ${JSON.stringify(GUEST_RUNNER_PY)}); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); m={"runId":"r","repo":"a/b","prNumber":1,"baseRefOid":"a"*40,"headRefOid":"b"*40,"bundleSha256":"0"*64,"bundleBytes":1,"modelProxy":None}; iso={"noNic":True,"hasDirectoryShare":False}; ent={"written":True}; r1=mod.build_self_test_payloads(manifest=m,isolation=iso,entropy_status=ent,materialized=None,model_health=None,bridge_url=None,model_probe_status=None)["report.md"].decode(); r2=mod.build_self_test_payloads(manifest=m,isolation=iso,entropy_status=ent,materialized={"verified":True,"skipped":True,"changedFiles":[]},model_health=None,bridge_url=None,model_probe_status=None)["report.md"].decode(); print(json.dumps({"r1": r1, "r2": r2}))`,
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(pyUnknownCount.status, pyUnknownCount.stderr).toBe(0);
+    const unk = JSON.parse(pyUnknownCount.stdout);
+    expect(unk.r1).toContain('Changed files in bundle: unknown');
+    expect(unk.r1).not.toContain('Changed files in bundle: 0');
+    expect(unk.r2).toContain('Changed files in bundle: unknown');
+    expect(unk.r2).not.toContain('Changed files in bundle: 0');
 
     // deriveCollectorAcceptDeadlineMs aligns collector accept window with qwen.workload_timeout
-    // including real buildVfkitLaunchPlan plans where cmdline="..." wraps the token at start or end.
+    // including last-wins on duplicate tokens (R5-2) and real buildVfkitLaunchPlan cmdline="...".
+    expect(
+      deriveCollectorAcceptDeadlineMs(
+        {
+          bootArgs:
+            'console=ttyS0 qwen.workload_timeout=30 qwen.workload_timeout=600',
+        },
+        {},
+      ),
+    ).toBe(630_000);
     expect(
       deriveCollectorAcceptDeadlineMs(
         {
@@ -1048,6 +1139,12 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
           `spec = importlib.util.spec_from_file_location("real_vsock", ${JSON.stringify(GUEST_VSOCK_PY)})`,
           'real = importlib.util.module_from_spec(spec)',
           'spec.loader.exec_module(real)',
+          'GREETING = real.GREETING',
+          'ACK = real.ACK',
+          'UPLOAD_CHUNK_SIZE = real.UPLOAD_CHUNK_SIZE',
+          'connect_endpoint = real.connect_endpoint',
+          'recv_exact = real.recv_exact',
+          'send_frame = real.send_frame',
           'cmd_fetch_inputs = real.cmd_fetch_inputs',
           'cmd_upload_artifacts = real.cmd_upload_artifacts',
           'if __name__ == "__main__":',
@@ -1530,35 +1627,51 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
       );
       expect(rtExit7.error).toMatch(/rc=7/);
 
-      // 1c. R3-1(c): Workload spawns a detached setsid descendant that continuously
-      // rewrites $QWEN_VERIFY_ARTIFACTS_DIR/verdict.txt=merge-ready past timeout;
-      // runner MUST upload demoted inconclusive artifacts from a fresh private dir.
-      const setsidWorkload = join(root, 'setsid-wl.py');
+      // 1c. R3-1(c) + R5-13: Workload spawns a real detached setsid descendant that
+      // continuously rewrites BOTH $QWEN_VERIFY_ARTIFACTS_DIR and dirname($TMPDIR)/qc-demoted-*
+      // with merge-ready past timeout; runner streams demoted artifacts from memory so
+      // the detached poller can never tamper with what reaches the host collector.
+      const realPyExe = execFileSync(
+        'python3',
+        ['-c', 'import sys; print(sys.executable)'],
+        { encoding: 'utf8' },
+      ).trim();
+      const setsidWorkload = join(root, 'setsid-wl.sh');
+      const setsidWriter = join(root, 'setsid-writer.py');
       const setsidPidFile = join(root, 'setsid-writer.pid');
+      writeFileSync(
+        setsidWriter,
+        [
+          'import glob, os, sys, time',
+          'art, tmp_parent, head, pid_file = sys.argv[1:5]',
+          'with open(pid_file, "w", encoding="utf-8") as fp:',
+          '    fp.write(str(os.getpid()))',
+          'end = time.monotonic() + 3.5',
+          'while time.monotonic() < end:',
+          '    targets = [art] + glob.glob(os.path.join(tmp_parent, "qc-demoted-*"))',
+          '    for d in targets:',
+          '        try:',
+          '            with open(os.path.join(d, "verdict.txt"), "w", encoding="utf-8") as f:',
+          '                f.write("merge-ready\\n")',
+          '            with open(os.path.join(d, "assertions.json"), "w", encoding="utf-8") as f:',
+          '                f.write(\'{"pass":1,"fail":0,"total":1}\\n\')',
+          '            with open(os.path.join(d, "report.md"), "w", encoding="utf-8") as f:',
+          '                f.write(f"merge-ready · 1 passed · 0 failed · 1 total · {head}\\n\\n## Methodology\\n\\n**Boundary.** microvm.\\n")',
+          '            with open(os.path.join(d, "comment.md"), "w", encoding="utf-8") as f:',
+          '                f.write("merge-ready\\n")',
+          '        except OSError:',
+          '            pass',
+          '    time.sleep(0.01)',
+        ].join('\n') + '\n',
+        { mode: 0o644 },
+      );
       writeFileSync(
         setsidWorkload,
         [
-          '#!/usr/bin/env python3',
-          'import os, subprocess, sys, time',
-          'art = os.environ["QWEN_VERIFY_ARTIFACTS_DIR"]',
-          'head = os.environ["QWEN_VERIFY_HEAD_OID"]',
-          'writer = f"""import os, time',
-          'open({setsidPidFile!r}, "w").write(str(os.getpid()))',
-          'end = time.monotonic() + 3.0',
-          'while time.monotonic() < end:',
-          '    try:',
-          '        open({art!r} + "/verdict.txt", "w").write("merge-ready\\\\n")',
-          '        open({art!r} + "/assertions.json", "w").write(\'{"pass":1,"fail":0,"total":1}\\\\n\')',
-          '        open({art!r} + "/report.md", "w").write("merge-ready · 1 passed · 0 failed · 1 total · " + {head!r} + "\\\\n\\\\n## Methodology\\\\n\\\\n**Boundary.** microvm.\\\\n")',
-          '        open({art!r} + "/comment.md", "w").write("merge-ready\\\\n")',
-          '    except OSError: pass',
-          '    time.sleep(0.01)',
-          '"""',
-          'subprocess.Popen([sys.executable, "-c", writer], start_new_session=True)',
-          'time.sleep(10)',
-        ]
-          .join('\n')
-          .replace('{setsidPidFile!r}', JSON.stringify(setsidPidFile)) + '\n',
+          '#!/bin/sh',
+          'set -eu',
+          `exec "${realPyExe}" -c 'import os, subprocess, sys, time; subprocess.Popen([sys.executable, sys.argv[1], os.environ["QWEN_VERIFY_ARTIFACTS_DIR"], os.path.dirname(os.environ["TMPDIR"]), os.environ["QWEN_VERIFY_HEAD_OID"], sys.argv[2]], start_new_session=True); time.sleep(10)' "${setsidWriter}" "${setsidPidFile}"`,
+        ].join('\n') + '\n',
         { mode: 0o755 },
       );
       chmodSync(setsidWorkload, 0o755);
@@ -1613,7 +1726,7 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
               '--workload',
               setsidWorkload,
               '--workload-timeout',
-              '1',
+              '2',
               '--urandom-path',
               join(root, 'ur1c'),
               '--sys-net-dir',
@@ -1636,6 +1749,12 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
       expect(resSetsid.errors).toEqual([]);
       expect(resSetsid.ok).toBe(true);
       expect(resSetsid.checkExitCode).toBe(0);
+      // Liveness proof (R5-13): detached setsid writer actually spawned and timeout fired
+      const rtSetsid = JSON.parse(
+        readFileSync(join(root, 'v1c', 'logs', 'guest-runtime.json'), 'utf8'),
+      );
+      expect(rtSetsid.error).toMatch(/timed out/);
+      expect(existsSync(setsidPidFile)).toBe(true);
       expect(
         readFileSync(join(root, 'v1c', 'verdict.txt'), 'utf8').trim(),
       ).toBe('inconclusive');
@@ -1646,6 +1765,87 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
         'workload-completed',
         'guest-lifecycle-error',
       ]);
+
+      // 1d. 7242512674 P1 + R3-1(d): If building the demoted failure report throws ENOSPC,
+      // finally MUST upload nothing — never falling back to workload's stale merge-ready dir.
+      const enospcRunner = join(root, 'enospc-demote-probe.py');
+      writeFileSync(
+        enospcRunner,
+        [
+          'import errno, importlib.util, sys',
+          `spec = importlib.util.spec_from_file_location("gr", ${JSON.stringify(GUEST_RUNNER_PY)})`,
+          'mod = importlib.util.module_from_spec(spec)',
+          'spec.loader.exec_module(mod)',
+          'def _boom(**kw): raise OSError(errno.ENOSPC, "No space left on device")',
+          'mod.build_self_test_payloads = _boom',
+          'try:',
+          '    sys.exit(mod.main(sys.argv[1:]))',
+          'except Exception as exc:',
+          '    sys.stderr.write(f"guest-runner: {exc}\\n")',
+          '    sys.exit(1)',
+        ].join('\n') + '\n',
+        { mode: 0o755 },
+      );
+      const planEnospc = buildFirecrackerLaunchPlan({
+        runId: 'gr-r3-1d',
+        jailBaseDir: join(root, 'j'),
+        firecrackerBin: '/opt/firecracker',
+        jailerBin: '/opt/jailer',
+        vmmUid: currentUid,
+        vmmGid: currentGid,
+        vsockPort: 52,
+        inputVsockPort: 53,
+      });
+      const resEnospc = await runHardwareRound({
+        contextPath: ctx.path,
+        contextSha256: ctx.sha256,
+        launcherDir: join(root, 'l1d'),
+        vaultDir: join(root, 'v1d'),
+        approvedRoots: [root],
+        plan: planEnospc,
+        sourceKernelPath: goldenKernel,
+        sourceRootfsPath: goldenRootfs,
+        stageAssets: true,
+        applyChown: false,
+        runChecker: false,
+        collectorOptions: { acceptDeadlineMs: 2500 },
+        roundInput: { repoDir, baseRefOid, headRefOid },
+        launchBackend: async ({ collectorSocketPath, inputSocketPath }) => {
+          const child = spawn(
+            'python3',
+            [
+              enospcRunner,
+              '--vsock-script',
+              GUEST_VSOCK_PY,
+              '--work-dir',
+              join(root, 'gw1d'),
+              '--unix-collector',
+              collectorSocketPath,
+              '--unix-input',
+              inputSocketPath,
+              '--workload',
+              exit7Workload,
+              '--urandom-path',
+              join(root, 'ur1d'),
+              '--sys-net-dir',
+              cleanNet,
+              '--proc-mounts',
+              cleanMounts,
+            ],
+            { stdio: 'pipe' },
+          );
+          await new Promise((ok) => child.once('exit', ok));
+          return {
+            workerPid: child.pid,
+            supervisorPid: child.pid,
+            workerExe: 'python3',
+            expectedExeTokens: ['python'],
+            child,
+          };
+        },
+      });
+      expect(resEnospc.ok).toBe(false);
+      expect(existsSync(join(root, 'v1d', 'verdict.txt'))).toBe(false);
 
       // 2. R3-4: Self-test renders footer from qwen.skill=<12-hex> when supplied,
       // and omits any fabricated footer when absent.

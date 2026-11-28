@@ -30,6 +30,7 @@ host-side integration testing.
 """
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -38,6 +39,7 @@ import re
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -48,6 +50,8 @@ DEFAULT_CID = 2
 DEFAULT_COLLECTOR_PORT = 52
 DEFAULT_INPUT_PORT = 53
 DEFAULT_MODEL_PORT = 54
+# Linux AF_VSOCK uses 32-bit unsigned ports (excluding 0 and VMADDR_PORT_ANY 0xffffffff).
+MAX_VSOCK_PORT = 0xFFFFFFFE
 # Fits inside verify-pr-vm-collector's 45s default accept window with 15s
 # headroom for boot/fetch/materialize/upload. Callers needing longer workloads
 # set `qwen.workload_timeout=<N>` so runHardwareRound scales acceptDeadlineMs.
@@ -289,6 +293,8 @@ def verify_bundle_header(bundle_path, base_oid, head_oid):
 def materialize_bundle(bundle_path, repo_dir, base_oid, head_oid):
     if not OID_RE.fullmatch(base_oid) or not OID_RE.fullmatch(head_oid):
         raise RuntimeError("baseRefOid and headRefOid must be 40-char lowercase hex")
+    bundle_path = Path(bundle_path).resolve()
+    repo_dir = Path(repo_dir).resolve()
     os.makedirs(repo_dir, mode=0o700, exist_ok=True)
     git_env = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
@@ -389,8 +395,7 @@ def write_runtime_log(
     )
 
 
-def write_self_test_artifacts(
-    artifacts_dir,
+def build_self_test_payloads(
     *,
     manifest,
     isolation,
@@ -402,10 +407,10 @@ def write_self_test_artifacts(
     error_message=None,
     include_model_probe=True,
     skill_digest=None,
-    workload_completed=False,
 ):
-    os.makedirs(artifacts_dir, mode=0o700, exist_ok=True)
-
+    """Builds harness-authored inconclusive diagnostic artifacts in process memory
+    so neither a failing workload nor a detached setsid descendant can overwrite
+    uploaded bytes on disk."""
     checks = [
         {"name": "entropy-injected", "ok": bool(entropy_status.get("written"))},
         {"name": "guest-no-nic", "ok": bool(isolation.get("noNic"))},
@@ -426,13 +431,12 @@ def write_self_test_artifacts(
             checks.append(
                 {"name": "model-proxy-probe", "ok": model_probe_status == 200}
             )
-    if not workload_completed:
-        checks.append({"name": "workload-completed", "ok": False})
+    checks.append({"name": "workload-completed", "ok": False})
     if error_message is not None:
         checks.append({"name": "guest-lifecycle-error", "ok": False})
 
     failed = [c for c in checks if not c["ok"]]
-    verdict = "merge-ready" if not failed else "inconclusive"
+    verdict = "inconclusive"
     passed_count = len(checks) - len(failed)
     total_count = len(checks)
 
@@ -447,11 +451,7 @@ def write_self_test_artifacts(
             )
         return f"guest check failed: {check_name}"
 
-    # Write verdict/report/assertions BEFORE guest-runtime.json so a sabotaged
-    # log path can never leave a workload-authored merge-ready verdict intact.
-    _force_write_text(Path(artifacts_dir) / "verdict.txt", f"{verdict}\n")
-    _force_write_text(
-        Path(artifacts_dir) / "assertions.json",
+    assertions_text = (
         json.dumps(
             {
                 "pass": passed_count,
@@ -468,11 +468,12 @@ def write_self_test_artifacts(
             },
             indent=2,
         )
-        + "\n",
+        + "\n"
     )
-    changed_count = (
-        len(materialized.get("changedFiles", [])) if isinstance(materialized, dict) else 0
-    )
+    if materialized is None or materialized.get("skipped"):
+        changed_display = "unknown"
+    else:
+        changed_display = str(len(materialized.get("changedFiles", [])))
     report_lines = [
         f"{verdict} · {passed_count} passed · {len(failed)} failed · {total_count} total · {manifest['headRefOid']}",
         "",
@@ -483,12 +484,11 @@ def write_self_test_artifacts(
         f"- Run ID: `{manifest['runId']}`",
         f"- Base OID: `{manifest['baseRefOid']}`",
         f"- Head OID: `{manifest['headRefOid']}`",
-        f"- Changed files in bundle: {changed_count}",
+        f"- Changed files in bundle: {changed_display}",
     ]
     if error_message:
         report_lines.append(f"- Guest lifecycle error: `{error_message}`")
     report_lines.append("")
-    _force_write_text(Path(artifacts_dir) / "report.md", "\n".join(report_lines))
     comment_lines = [
         f"{verdict} ({passed_count}/{total_count} guest checks passed for `{manifest['headRefOid']}`)"
     ]
@@ -499,27 +499,65 @@ def write_self_test_artifacts(
                 f"_— verify-pr-guest-runner via Qwen Code /verify-pr (v0.28.7; skill {skill_digest})_",
             ]
         )
-    comment_md = "\n".join(comment_lines) + "\n"
-    _force_write_text(Path(artifacts_dir) / "comment.md", comment_md)
+    runtime_log = {
+        "schemaVersion": "verify-pr-guest-runtime-v1",
+        "runId": manifest["runId"],
+        "repo": manifest["repo"],
+        "prNumber": manifest["prNumber"],
+        "baseRefOid": manifest["baseRefOid"],
+        "headRefOid": manifest["headRefOid"],
+        "bundleSha256": manifest["bundleSha256"],
+        "bundleBytes": manifest["bundleBytes"],
+        "isolation": isolation,
+        "entropy": entropy_status,
+        "materialized": materialized,
+        "hasModelProxy": manifest["modelProxy"] is not None,
+        "bridgeUrl": bridge_url,
+        "modelProbeStatus": model_probe_status,
+        "checks": checks,
+        "error": error_message,
+    }
+    return {
+        "verdict.txt": f"{verdict}\n".encode("utf-8"),
+        "assertions.json": assertions_text.encode("utf-8"),
+        "report.md": "\n".join(report_lines).encode("utf-8"),
+        "comment.md": ("\n".join(comment_lines) + "\n").encode("utf-8"),
+        "logs/guest-runtime.json": (json.dumps(runtime_log, indent=2) + "\n").encode(
+            "utf-8"
+        ),
+    }
 
-    try:
-        write_runtime_log(
-            artifacts_dir,
-            manifest=manifest,
-            isolation=isolation,
-            entropy_status=entropy_status,
-            materialized=materialized,
-            bridge_url=bridge_url,
-            model_probe_status=model_probe_status,
-            checks=checks,
-            error_message=error_message,
-        )
-    except OSError as log_exc:
-        if error_message is None:
-            raise
-        sys.stderr.write(
-            f"guest-runner: writing guest-runtime.json after error failed: {log_exc}\n"
-        )
+
+def upload_memory_artifacts(vsock_mod, upload_ns, artifacts_map):
+    """Streams in-memory artifact bytes directly to the host collector using the
+    exact same frame protocol as `cmd_upload_artifacts`."""
+    names = sorted(artifacts_map.keys())
+    chunk_size = getattr(vsock_mod, "UPLOAD_CHUNK_SIZE", 2048)
+    with vsock_mod.connect_endpoint(upload_ns, timeout=30.0) as sock:
+        sock.sendall(vsock_mod.GREETING)
+        ack = vsock_mod.recv_exact(sock, len(vsock_mod.ACK))
+        if ack != vsock_mod.ACK:
+            raise RuntimeError(f"unexpected collector ack: {ack!r}")
+        vsock_mod.send_frame(sock, "H", b"report-v1")
+        for rel_name in names:
+            raw = artifacts_map[rel_name]
+            if isinstance(raw, str):
+                raw = raw.encode("utf-8")
+            vsock_mod.send_frame(
+                sock,
+                "B",
+                struct.pack(">Q", len(raw)) + rel_name.encode("utf-8"),
+            )
+            digest = hashlib.sha256(raw).hexdigest().encode("ascii")
+            for offset in range(0, len(raw), chunk_size):
+                vsock_mod.send_frame(sock, "C", raw[offset : offset + chunk_size])
+            vsock_mod.send_frame(sock, "E", digest)
+        vsock_mod.send_frame(sock, "R", b"")
+        reply = sock.recv(256)
+        if not reply.startswith(b"O"):
+            raise RuntimeError(f"collector rejected round: {reply!r}")
+    sys.stdout.write(json.dumps({"uploaded": names, "ok": True}) + "\n")
+    return 0
 
 
 def run_guest_round(args):
@@ -573,9 +611,10 @@ def run_guest_round(args):
     model_probe_status = None
     workload_rc = 0
     round_error = None
-    harness_wrote_artifacts = False
-    upload_dir = artifacts_dir
-    demoted_dir = None
+    # Never default upload_dir to artifacts_dir: a workload's directory only
+    # becomes upload-eligible after the workload completes with exit code 0.
+    upload_dir = None
+    upload_payload = None
 
     skill_digest = getattr(args, "skill_digest", None)
     if skill_digest is not None and not SKILL_DIGEST_RE.fullmatch(skill_digest):
@@ -625,7 +664,7 @@ def run_guest_round(args):
                 raw_port
                 if isinstance(raw_port, int)
                 and not isinstance(raw_port, bool)
-                and 1 <= raw_port <= 65535
+                and 1 <= raw_port <= MAX_VSOCK_PORT
                 else args.model_port
             )
             bridge_proc, b_host, b_port = start_model_bridge(
@@ -703,7 +742,12 @@ def run_guest_round(args):
                     pass
                 raise
             if workload_rc != 0:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
                 raise RuntimeError(f"workload exited with rc={workload_rc}")
+            upload_dir = artifacts_dir
         else:
             if proxy is not None and bridge_url is not None:
                 probe_req = urllib.request.Request(
@@ -722,9 +766,8 @@ def run_guest_round(args):
                 except urllib.error.HTTPError as exc:
                     model_probe_status = exc.code
             # Self-test verifies plumbing only and never runs a PR workload, so
-            # it records workload_completed=False (verdict=inconclusive).
-            write_self_test_artifacts(
-                artifacts_dir,
+            # it streams an in-memory inconclusive report (workload-completed=false).
+            upload_payload = build_self_test_payloads(
                 manifest=manifest,
                 isolation=isolation,
                 entropy_status=entropy_status,
@@ -733,21 +776,15 @@ def run_guest_round(args):
                 bridge_url=bridge_url,
                 model_probe_status=model_probe_status,
                 skill_digest=skill_digest,
-                workload_completed=False,
             )
-            harness_wrote_artifacts = True
     except Exception as exc:
         round_error = exc
-        # Write demoted inconclusive artifacts into a fresh private directory
-        # created AFTER workload teardown so neither a pre-written merge-ready
-        # nor a detached setsid descendant rewriting artifacts_dir can override it.
-        if not harness_wrote_artifacts:
-            demoted_dir = Path(
-                tempfile.mkdtemp(prefix="qc-demoted-", dir=str(work_root.parent))
-            )
-            os.chmod(demoted_dir, 0o700)
-            write_self_test_artifacts(
-                demoted_dir,
+        upload_dir = None
+        # Build demoted inconclusive artifacts in memory so neither a stale
+        # workload verdict, an ENOSPC disk, nor a detached setsid poller can
+        # cause merge-ready to be uploaded.
+        if upload_payload is None:
+            upload_payload = build_self_test_payloads(
                 manifest=manifest,
                 isolation=isolation,
                 entropy_status=entropy_status,
@@ -758,33 +795,35 @@ def run_guest_round(args):
                 error_message=str(exc),
                 include_model_probe=(workload_path is None),
                 skill_digest=skill_digest,
-                workload_completed=False,
             )
-            upload_dir = demoted_dir
-            harness_wrote_artifacts = True
         raise
     finally:
         stop_process(bridge_proc)
-        # 7. Always upload produced artifacts to host collector (port 52)
-        upload_ns = argparse.Namespace(
-            cid=args.cid,
-            port=args.collector_port,
-            unix=args.unix_collector,
-            dir=str(upload_dir),
-        )
-        try:
-            rc_upload = vsock_mod.cmd_upload_artifacts(upload_ns)
-            if rc_upload != 0 and round_error is None:
-                raise RuntimeError(f"upload-artifacts failed with rc={rc_upload}")
-        except Exception as upload_exc:
-            if round_error is None:
-                raise
-            sys.stderr.write(
-                f"guest-runner: artifact upload after error failed: {upload_exc}\n"
+        # 7. Upload only harness-approved artifacts (in-memory demoted/self-test
+        # bytes or a completed rc==0 workload directory). If building demoted
+        # artifacts failed, upload nothing rather than leaking stale files.
+        if upload_payload is not None or upload_dir is not None:
+            upload_ns = argparse.Namespace(
+                cid=args.cid,
+                port=args.collector_port,
+                unix=args.unix_collector,
+                dir=str(upload_dir) if upload_dir is not None else "",
             )
-        finally:
-            if demoted_dir is not None:
-                shutil.rmtree(demoted_dir, ignore_errors=True)
+            try:
+                if upload_payload is not None:
+                    rc_upload = upload_memory_artifacts(
+                        vsock_mod, upload_ns, upload_payload
+                    )
+                else:
+                    rc_upload = vsock_mod.cmd_upload_artifacts(upload_ns)
+                if rc_upload != 0 and round_error is None:
+                    raise RuntimeError(f"upload-artifacts failed with rc={rc_upload}")
+            except Exception as upload_exc:
+                if round_error is None:
+                    raise
+                sys.stderr.write(
+                    f"guest-runner: artifact upload after error failed: {upload_exc}\n"
+                )
     return workload_rc
 
 
@@ -821,8 +860,10 @@ def _parse_positive_int(name, raw):
 
 def _parse_port(name, raw):
     val = _parse_positive_int(name, raw)
-    if val > 65535:
-        raise RuntimeError(f"invalid cmdline qwen.{name}: expected port in 1..65535")
+    if val > MAX_VSOCK_PORT:
+        raise RuntimeError(
+            f"invalid cmdline qwen.{name}: expected 32-bit vsock port in 1..{MAX_VSOCK_PORT}"
+        )
     return val
 
 

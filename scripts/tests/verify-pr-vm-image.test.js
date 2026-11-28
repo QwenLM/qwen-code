@@ -611,8 +611,81 @@ describe('verify-pr-vm-image offline golden ext4 derivation', () => {
         }),
       ).toThrow(/baseImagePath is truncated/);
       expect(existsSync(truncOut64)).toBe(false);
+
+      // 10. R5-1: Padded container file (64 MiB container whose ext4 superblock declares 32 MiB):
+      // --size-mib 48 must grow (NOT refuse as shrinking) and --size-mib 64 MUST invoke resize2fs.
+      const paddedBase = join(root, 'padded-64m-declares-32m.ext4');
+      const padBuf = Buffer.alloc(64 * 1024 * 1024, 0);
+      padBuf.writeUInt32LE(8192, 1024 + 0x04); // 32 MiB declared
+      padBuf.writeUInt32LE(2, 1024 + 0x18); // 4096-byte blocks
+      padBuf.writeUInt16LE(0xef53, 1024 + 0x38);
+      writeFileSync(paddedBase, padBuf, { mode: 0o444 });
+      const resizeCallsLog = join(root, 'padded-resize.log');
+      const trackingResize = join(root, 'tracking-resize2fs');
+      writeExecutable(
+        trackingResize,
+        `#!/bin/sh\nwc -c < "$2" | tr -d " " >> "${resizeCallsLog}"\n`,
+      );
+      const pad48Out = join(approved, 'pad-48m.ext4');
+      const pad48Res = deriveExt4GuestImage({
+        baseImagePath: paddedBase,
+        outputImagePath: pad48Out,
+        approvedRoots: [approved],
+        imageSizeMib: 48,
+        debugfsBin: okDebugfs,
+        resize2fsBin: trackingResize,
+        tune2fsBin: fakeTune2fs,
+        tempParentDir: root,
+      });
+      expect(pad48Res.imageBytes).toBe(48 * 1024 * 1024);
+      const pad64Out = join(approved, 'pad-64m.ext4');
+      const pad64Res = deriveExt4GuestImage({
+        baseImagePath: paddedBase,
+        outputImagePath: pad64Out,
+        approvedRoots: [approved],
+        imageSizeMib: 64,
+        debugfsBin: okDebugfs,
+        resize2fsBin: trackingResize,
+        tune2fsBin: fakeTune2fs,
+        tempParentDir: root,
+      });
+      expect(pad64Res.imageBytes).toBe(64 * 1024 * 1024);
+      // Omitting imageSizeMib on a padded container preserves the container without invoking resize2fs
+      const padKeepOut = join(approved, 'pad-keep.ext4');
+      const padKeepRes = deriveExt4GuestImage({
+        baseImagePath: paddedBase,
+        outputImagePath: padKeepOut,
+        approvedRoots: [approved],
+        debugfsBin: okDebugfs,
+        resize2fsBin: trackingResize,
+        tune2fsBin: fakeTune2fs,
+        tempParentDir: root,
+      });
+      expect(padKeepRes.imageBytes).toBe(64 * 1024 * 1024);
+      expect(readFileSync(resizeCallsLog, 'utf8').trim().split('\n')).toEqual([
+        String(48 * 1024 * 1024),
+        String(64 * 1024 * 1024),
+      ]);
+
+      // 11. R5-8: debugfs 1.47.2 non-directory stderr (`Ext2 inode is not a directory`) must
+      // fall through to the purpose-built ancestor error `cannot traverse non-directory inside image`.
+      const nonDirDebugfs = join(root, 'nondir-opt-debugfs');
+      makeFakeDebugfs(nonDirDebugfs, {
+        existingTypes: { '/': 'directory', '/opt': 'regular' },
+        statStderr: '/opt/qwen/guest-runner.py: Ext2 inode is not a directory',
+      });
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'nondir-opt.ext4'),
+          approvedRoots: [approved],
+          debugfsBin: nonDirDebugfs,
+          tune2fsBin: fakeTune2fs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/cannot traverse non-directory inside image: \/opt/);
     },
-    15_000,
+    20_000,
   );
 
   it.skipIf(process.platform === 'win32')(
@@ -796,8 +869,219 @@ describe('verify-pr-vm-image offline golden ext4 derivation', () => {
         }),
       ).toThrow(/already exists/);
       expect(readFileSync(raceOut, 'utf8')).toBe('existing-precious');
+
+      // 5. R5-3: Re-deriving a base that already has /opt/python + extraFiles under /opt/python
+      // MUST emit `mkdir "/opt/python"` after `rmdir "/opt/python"`.
+      const rederiveCmdLog = join(root, 'rederive-py.log');
+      const rederiveDebugfs = join(root, 'rederive-debugfs');
+      writeExecutable(
+        rederiveDebugfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'echo "debugfs 1.47.2 (1-Jan-2025)" >&2',
+          'if [ "$1" = "-f" ]; then',
+          '  if grep -q "^ls -p" "$2"; then',
+          '    printf "[pwd]   INODE: 20  PATH: /opt/python\\n"',
+          '    printf "/20/040755/0/0/.//\\n"',
+          '    printf "/21/100644/0/0/old.txt/4/\\n"',
+          '    exit 0',
+          '  fi',
+          '  while IFS= read -r line; do',
+          '    printf "debugfs: %s\\n" "$line"',
+          '    case "$line" in',
+          '      stat\\ *)',
+          '        P=$(printf "%s" "$line" | sed -e \'s|^stat "||\' -e \'s|"$||\')',
+          '        case "$P" in',
+          '          "/"|"/opt"|"/opt/python") printf "Inode: 12   Type: directory    Mode:  0755\\n" ;;',
+          '          *) printf "%s: File not found by ext2_lookup\\n" "$P" >&2 ;;',
+          '        esac ;;',
+          '    esac',
+          '  done < "$2"',
+          '  exit 0',
+          'fi',
+          'if [ "$1" = "-w" ] && [ "$2" = "-f" ]; then',
+          `  cp "$3" "${rederiveCmdLog}"`,
+          '  exit 0',
+          'fi',
+          'exit 2',
+        ].join('\n') + '\n',
+      );
+      const pyExtraCfg = join(root, 'py-custom.cfg');
+      writeFileSync(pyExtraCfg, 'ok=1\n', { mode: 0o644 });
+      deriveExt4GuestImage({
+        baseImagePath: golden,
+        outputImagePath: join(approved, 'rederive-py.ext4'),
+        approvedRoots: [approved],
+        bundleHostPython: true,
+        pythonBin: hostPyBin,
+        pythonLibDir: pyStdlib,
+        lddBin: argLdd,
+        extraFiles: [
+          {
+            srcPath: pyExtraCfg,
+            target: '/opt/python/custom.cfg',
+            mode: 0o644,
+          },
+        ],
+        debugfsBin: rederiveDebugfs,
+        tune2fsBin: fakeTune2fs,
+        tempParentDir: root,
+      });
+      const rederiveCmds = readFileSync(rederiveCmdLog, 'utf8');
+      const rmdirIdx = rederiveCmds.indexOf('rmdir "/opt/python"');
+      const mkdirIdx = rederiveCmds.indexOf('mkdir "/opt/python"', rmdirIdx);
+      expect(rmdirIdx).toBeGreaterThan(-1);
+      expect(mkdirIdx).toBeGreaterThan(rmdirIdx);
+
+      // 6. R5-6: listImageSubtree fails closed on unparseable/newline-split ls -p output
+      const badLsDebugfs = join(root, 'bad-ls-debugfs');
+      writeExecutable(
+        badLsDebugfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'echo "debugfs 1.47.2 (1-Jan-2025)" >&2',
+          'if [ "$1" = "-f" ]; then',
+          '  if grep -q "^ls -p" "$2"; then',
+          '    printf "[pwd]   INODE: 20  PATH: /opt/python\\n"',
+          '    printf "/21/100644/0/0/new\\nline.txt/0/\\n"',
+          '    exit 0',
+          '  fi',
+          '  while IFS= read -r line; do',
+          '    printf "debugfs: %s\\n" "$line"',
+          '    case "$line" in',
+          '      stat\\ *)',
+          '        P=$(printf "%s" "$line" | sed -e \'s|^stat "||\' -e \'s|"$||\')',
+          '        case "$P" in',
+          '          "/"|"/opt"|"/opt/python") printf "Inode: 12   Type: directory    Mode:  0755\\n" ;;',
+          '          *) printf "%s: File not found by ext2_lookup\\n" "$P" >&2 ;;',
+          '        esac ;;',
+          '    esac',
+          '  done < "$2"',
+          '  exit 0',
+          'fi',
+          'exit 0',
+        ].join('\n') + '\n',
+      );
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'bad-ls.ext4'),
+          approvedRoots: [approved],
+          bundleHostPython: true,
+          pythonBin: hostPyBin,
+          pythonLibDir: pyStdlib,
+          lddBin: argLdd,
+          debugfsBin: badLsDebugfs,
+          tune2fsBin: fakeTune2fs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/unparseable debugfs ls -p entry/);
+
+      // 7. R5-5: ldd `=> not found` fails closed naming the missing shared library
+      const missingLdd = join(root, 'missing-ldd');
+      writeExecutable(
+        missingLdd,
+        '#!/bin/sh\necho "  libmissing.so.1 => not found"\n',
+      );
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'missing-lib.ext4'),
+          approvedRoots: [approved],
+          bundleHostPython: true,
+          pythonBin: hostPyBin,
+          pythonLibDir: pyStdlib,
+          lddBin: missingLdd,
+          debugfsBin: fakeDebugfs,
+          tune2fsBin: fakeTune2fs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/missing shared library.*libmissing\.so\.1/);
+
+      // 8. R5-4: Escaping/absolute symlinks in host stdlib are materialized if valid files
+      // and fail closed if dangling.
+      const escPyRoot = join(root, 'esc-py');
+      const escStdlib = join(escPyRoot, 'python3.12');
+      mkdirSync(join(escStdlib, 'sub'), { recursive: true, mode: 0o700 });
+      const hostSite = join(root, 'host-sitecustomize.py');
+      const hostExt = join(escPyRoot, 'outside-lib.so');
+      writeFileSync(hostSite, '# site\n');
+      writeFileSync(hostExt, 'so-bytes');
+      symlinkSync(hostSite, join(escStdlib, 'sitecustomize.py'));
+      symlinkSync('../../outside-lib.so', join(escStdlib, 'sub', 'ext.so'));
+      const escCmdLog = join(root, 'esc-py-cmds.txt');
+      const escDebugfs = join(root, 'esc-debugfs');
+      makeFakeDebugfs(escDebugfs, {
+        existingTypes: { '/': 'directory', '/opt': 'directory' },
+        recordCommandsTo: escCmdLog,
+      });
+      deriveExt4GuestImage({
+        baseImagePath: golden,
+        outputImagePath: join(approved, 'esc-py-ok.ext4'),
+        approvedRoots: [approved],
+        bundleHostPython: true,
+        pythonBin: hostPyBin,
+        pythonLibDir: escStdlib,
+        lddBin: argLdd,
+        debugfsBin: escDebugfs,
+        tune2fsBin: fakeTune2fs,
+        tempParentDir: root,
+      });
+      const escCmds = readFileSync(escCmdLog, 'utf8');
+      expect(escCmds).toContain(
+        '"/opt/python/lib/python3.12/sitecustomize.py"',
+      );
+      expect(escCmds).not.toContain(
+        'symlink "/opt/python/lib/python3.12/sitecustomize.py"',
+      );
+      expect(escCmds).not.toContain(
+        'symlink "/opt/python/lib/python3.12/sub/ext.so"',
+      );
+
+      // Escaping symlink pointing into vaultDir is refused before staging
+      const vaultTarget = join(vault, 'secret-py.py');
+      writeFileSync(vaultTarget, 'SECRET=1\n');
+      const vaultSymStdlib = join(root, 'vault-sym-stdlib');
+      mkdirSync(vaultSymStdlib, { mode: 0o700 });
+      symlinkSync(vaultTarget, join(vaultSymStdlib, 'leak.py'));
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'esc-py-vault.ext4'),
+          approvedRoots: [approved],
+          vaultDir: vault,
+          bundleHostPython: true,
+          pythonBin: hostPyBin,
+          pythonLibDir: vaultSymStdlib,
+          lddBin: argLdd,
+          debugfsBin: escDebugfs,
+          tune2fsBin: fakeTune2fs,
+          tempParentDir: root,
+        }),
+      ).toThrow(
+        /bundled Python symlink target must not reside inside vaultDir/,
+      );
+
+      // Dangling escaping symlink fails closed
+      symlinkSync('/nonexistent/dangling-target', join(escStdlib, 'bad.py'));
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'esc-py-dangling.ext4'),
+          approvedRoots: [approved],
+          bundleHostPython: true,
+          pythonBin: hostPyBin,
+          pythonLibDir: escStdlib,
+          lddBin: argLdd,
+          debugfsBin: escDebugfs,
+          tune2fsBin: fakeTune2fs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/bundled Python symlink escapes \/opt\/python/);
     },
-    15_000,
+    20_000,
   );
 
   it.skipIf(process.platform === 'win32')(

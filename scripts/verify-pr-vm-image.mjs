@@ -47,13 +47,14 @@ import {
   readSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   truncateSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isEntryPoint } from './lib/entry-point.js';
 import {
@@ -346,7 +347,7 @@ function statImagePaths(debugfsBin, imagePath, guestPaths, workDir) {
         line.trim() !== '' &&
         !DEBUGFS_BANNER_LINE.test(line) &&
         !/: File not found by ext2_lookup\s*$/.test(line) &&
-        !/: Not a directory\s*$/.test(line),
+        !/: (?:Ext2 inode is not|Not) a directory\s*$/.test(line),
     );
   if (fatalStderr !== undefined) {
     throw new Error(
@@ -418,6 +419,14 @@ function listImageSubtree(debugfsBin, imagePath, rootGuestPath, workDir) {
     }
     let cur = null;
     for (const line of res.stdout.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (
+        trimmed === '' ||
+        /^debugfs:/.test(trimmed) ||
+        /^\[root\]/.test(trimmed)
+      ) {
+        continue;
+      }
       const pm = /^\[pwd\]\s+INODE:\s+\d+\s+PATH:\s+(.+)$/.exec(line);
       if (pm) {
         cur = pm[1];
@@ -425,7 +434,11 @@ function listImageSubtree(debugfsBin, imagePath, rootGuestPath, workDir) {
       }
       if (cur === null) continue;
       const lm = /^\/(\d+)\/([0-7]+)\/(\d+)\/(\d+)\/(.+)\/(\d*)\/$/.exec(line);
-      if (!lm) continue;
+      if (!lm) {
+        throw new Error(
+          `unparseable debugfs ls -p entry under ${cur}: ${trimmed.slice(0, 200)}`,
+        );
+      }
       const modeOct = parseInt(lm[2], 8);
       const name = lm[5];
       if (name === '.' || name === '..') continue;
@@ -445,7 +458,10 @@ function listImageSubtree(debugfsBin, imagePath, rootGuestPath, workDir) {
  * Stages host Python 3, its stdlib, and `ldd`-resolved shared libraries into a
  * private staging directory and enumerates entries to inject under `/opt/python`.
  */
-function stageHostPythonBundle(stageRoot, { pythonBin, pythonLibDir, lddBin }) {
+function stageHostPythonBundle(
+  stageRoot,
+  { pythonBin, pythonLibDir, lddBin, vaultDir = null },
+) {
   const realPy = realpathSync(pythonBin);
   const pyName = basename(realPy);
   const pyRoot = join(stageRoot, 'python');
@@ -483,14 +499,29 @@ function stageHostPythonBundle(stageRoot, { pythonBin, pythonLibDir, lddBin }) {
   const copiedLibs = new Map();
   const aliases = new Set();
   for (const binPath of binariesToScan) {
-    const lddOut = runTool(lddBin, [binPath]);
-    for (const line of lddOut.split(/\r?\n/)) {
+    const lddRes = runToolFull(lddBin, [binPath]);
+    if (lddRes.stderr.trim() !== '') {
+      throw new Error(
+        `ldd failed for ${binPath}: ${lddRes.stderr.trim().slice(0, 400)}`,
+      );
+    }
+    for (const line of lddRes.stdout.split(/\r?\n/)) {
       const parts = line.trim().split(/\s+/);
       if (parts.length === 0) continue;
+      if (parts.length >= 3 && parts[1] === '=>' && parts[2] === 'not') {
+        throw new Error(
+          `missing shared library required by ${binPath}: ${parts[0]}`,
+        );
+      }
       const candidate =
         parts.length > 2 && parts[1] === '=>' ? parts[2] : parts[0];
       if (!candidate.startsWith('/')) continue;
       const resolved = realpathSync(candidate);
+      if (vaultDir && withinDir(vaultDir, resolved)) {
+        throw new Error(
+          `bundled Python shared library must not reside inside vaultDir: ${resolved}`,
+        );
+      }
       const resolvedName = basename(resolved);
       if (resolvedName.startsWith('ld-linux')) continue;
       copiedLibs.set(resolved, resolvedName);
@@ -517,10 +548,52 @@ function stageHostPythonBundle(stageRoot, { pythonBin, pythonLibDir, lddBin }) {
       const guestChild = `${guestDir}/${name}`;
       const st = lstatSync(hostChild);
       if (st.isSymbolicLink()) {
-        symlinks.push({
-          guestPath: guestChild,
-          linkTarget: readlinkSync(hostChild),
-        });
+        const linkTarget = readlinkSync(hostChild);
+        const stageTarget = linkTarget.startsWith('/')
+          ? null
+          : resolve(dirname(hostChild), linkTarget);
+        if (
+          stageTarget !== null &&
+          withinDir(pyRoot, stageTarget) &&
+          existsSync(stageTarget)
+        ) {
+          symlinks.push({ guestPath: guestChild, linkTarget });
+        } else {
+          // Dereference absolute/escaping host symlinks (e.g. Debian sitecustomize.py
+          // or config-*/libpython*.so) against the original host location into
+          // regular files inside /opt/python, failing closed if dangling.
+          const origSourcePath = withinDir(targetStdlib, hostChild)
+            ? join(pythonLibDir, relative(targetStdlib, hostChild))
+            : hostChild;
+          let targetStat;
+          try {
+            targetStat = statSync(origSourcePath);
+          } catch {
+            throw new Error(
+              `bundled Python symlink escapes /opt/python and cannot be materialized: ${guestChild} -> ${linkTarget}`,
+            );
+          }
+          if (!targetStat.isFile()) {
+            throw new Error(
+              `bundled Python symlink escapes /opt/python to non-file: ${guestChild} -> ${linkTarget}`,
+            );
+          }
+          const realTarget = realpathSync(origSourcePath);
+          if (vaultDir && withinDir(vaultDir, realTarget)) {
+            throw new Error(
+              `bundled Python symlink target must not reside inside vaultDir: ${guestChild} -> ${realTarget}`,
+            );
+          }
+          const mode = targetStat.mode & 0o777 || 0o644;
+          unlinkSync(hostChild);
+          copyFileSync(realTarget, hostChild);
+          chmodSync(hostChild, mode);
+          files.push({
+            hostPath: hostChild,
+            guestPath: guestChild,
+            mode,
+          });
+        }
       } else if (st.isDirectory()) {
         dirs.push({ guestPath: guestChild, mode: st.mode & 0o777 || 0o755 });
         walk(hostChild, guestChild);
@@ -561,7 +634,6 @@ export function deriveExt4GuestImage({
   debugfsBin = null,
   resize2fsBin = null,
   tune2fsBin = null,
-  mkfsExt4Bin = null,
   bundleHostPython = false,
   pythonBin = '/usr/bin/python3',
   pythonLibDir = null,
@@ -630,15 +702,17 @@ export function deriveExt4GuestImage({
     throw new Error('outputImagePath must differ from baseImagePath');
   }
 
-  assertExt4NotTruncated(baseInfo.path, baseInfo.bytes);
+  const declaredBytes = assertExt4NotTruncated(baseInfo.path, baseInfo.bytes);
+  const baseFsBytes =
+    declaredBytes !== null ? Number(declaredBytes) : baseInfo.bytes;
 
-  const targetBytes =
-    imageSizeMib !== null && imageSizeMib !== undefined
-      ? imageSizeMib * 1024 * 1024
-      : baseInfo.bytes;
-  if (targetBytes < baseInfo.bytes) {
+  const hasExplicitSize = imageSizeMib !== null && imageSizeMib !== undefined;
+  const targetBytes = hasExplicitSize
+    ? imageSizeMib * 1024 * 1024
+    : baseInfo.bytes;
+  if (hasExplicitSize && targetBytes < baseFsBytes) {
     throw new Error(
-      `imageSizeMib (${imageSizeMib} MiB) is smaller than baseImagePath (${baseInfo.bytes} bytes); shrinking is not supported`,
+      `imageSizeMib (${imageSizeMib} MiB) is smaller than baseImagePath filesystem (${baseFsBytes} bytes); shrinking is not supported`,
     );
   }
 
@@ -690,17 +764,12 @@ export function deriveExt4GuestImage({
     return { ...item, target, srcReal: info.path, sha256: info.sha256 };
   });
 
-  // Preserve compatibility with callers passing explicit --mkfs-ext4-bin.
-  if (mkfsExt4Bin !== null && mkfsExt4Bin !== undefined) {
-    findExecutable(mkfsExt4Bin, ['mkfs.ext4', 'mke2fs']);
-  }
-
   const resolvedDebugfs = findExecutable(debugfsBin, ['debugfs']);
   if (!resolvedDebugfs) {
     throw new Error('debugfs executable not found (e2fsprogs required)');
   }
   const toolSiblingDir = dirname(resolvedDebugfs);
-  const needsResize = targetBytes > baseInfo.bytes;
+  const needsResize = hasExplicitSize && targetBytes > baseFsBytes;
   const resolvedResize2fs = needsResize
     ? findExecutable(resize2fsBin, ['resize2fs'], [toolSiblingDir])
     : null;
@@ -759,9 +828,12 @@ export function deriveExt4GuestImage({
     copyFileSync(baseInfo.path, tmpOut);
     chmodSync(tmpOut, 0o600);
 
-    // 2. Grow offline ext4 filesystem copy when a larger --size-mib was requested.
-    if (needsResize) {
+    // 2. When --size-mib was explicitly requested, match exact target file size
+    // and grow the ext4 filesystem when larger than the superblock's declared size.
+    if (hasExplicitSize && targetBytes !== baseInfo.bytes) {
       truncateSync(tmpOut, targetBytes);
+    }
+    if (needsResize) {
       runToolFull(resolvedResize2fs, ['-f', tmpOut]);
     }
 
@@ -815,6 +887,7 @@ export function deriveExt4GuestImage({
         pythonBin,
         pythonLibDir: pyLib,
         lddBin: resolvedLdd,
+        vaultDir: realVault,
       });
       bundledLibraries = pythonBundle.bundledLibraries;
     }
@@ -920,6 +993,7 @@ export function deriveExt4GuestImage({
         }
         writeCmds.push('rmdir "/opt/python"');
         pathTypes.set('/opt/python', 'missing');
+        createdDirs.delete('/opt/python');
       }
       ensureDirCmd('/opt/python', 0o755);
       for (const d of pythonBundle.dirs) {
@@ -1070,7 +1144,6 @@ function parseCliArgs(argv) {
     debugfsBin: null,
     resize2fsBin: null,
     tune2fsBin: null,
-    mkfsExt4Bin: null,
     bundleHostPython: false,
     error: null,
   };
@@ -1138,11 +1211,6 @@ function parseCliArgs(argv) {
       if (v === null) break;
       opts.tune2fsBin = v;
       i += 1;
-    } else if (arg === '--mkfs-ext4-bin') {
-      const v = take(arg, i);
-      if (v === null) break;
-      opts.mkfsExt4Bin = v;
-      i += 1;
     } else if (arg === '--bundle-host-python') {
       opts.bundleHostPython = true;
     } else {
@@ -1201,7 +1269,6 @@ function main(argv) {
       debugfsBin: opts.debugfsBin,
       resize2fsBin: opts.resize2fsBin,
       tune2fsBin: opts.tune2fsBin,
-      mkfsExt4Bin: opts.mkfsExt4Bin,
       bundleHostPython: opts.bundleHostPython,
     });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

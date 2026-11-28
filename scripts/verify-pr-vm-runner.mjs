@@ -249,16 +249,25 @@ export function buildFirecrackerLaunchPlan({
   if (!Number.isInteger(guestCid) || guestCid < 3) {
     throw new Error('firecracker guestCid must be an integer >= 3');
   }
+  const MAX_VSOCK_PORT = 0xfffffffe;
   for (const [label, val] of [
     ['cpus', cpus],
     ['memMib', memMib],
     ['maxFsizeBytes', maxFsizeBytes],
     ['maxNoFile', maxNoFile],
-    ['vsockPort', vsockPort],
   ]) {
     if (!Number.isInteger(val) || val <= 0) {
       throw new Error(`firecracker ${label} must be a positive integer`);
     }
+  }
+  if (
+    !Number.isInteger(vsockPort) ||
+    vsockPort <= 0 ||
+    vsockPort > MAX_VSOCK_PORT
+  ) {
+    throw new Error(
+      `firecracker vsockPort must be a 32-bit vsock port in 1..${MAX_VSOCK_PORT}`,
+    );
   }
   const seenPorts = new Set([vsockPort]);
   for (const [label, val] of [
@@ -266,8 +275,10 @@ export function buildFirecrackerLaunchPlan({
     ['modelVsockPort', modelVsockPort],
   ]) {
     if (val === null) continue;
-    if (!Number.isInteger(val) || val <= 0) {
-      throw new Error(`firecracker ${label} must be a positive integer`);
+    if (!Number.isInteger(val) || val <= 0 || val > MAX_VSOCK_PORT) {
+      throw new Error(
+        `firecracker ${label} must be a 32-bit vsock port in 1..${MAX_VSOCK_PORT}`,
+      );
     }
     if (seenPorts.has(val)) {
       throw new Error(
@@ -1141,22 +1152,25 @@ export function deriveCollectorAcceptDeadlineMs(plan, collectorOptions = {}) {
       }
     }
   }
+  let lastTimeoutSec = null;
   for (const line of cmdlines) {
-    const match = /(?:^|\s)qwen\.workload_timeout=([1-9]\d*)(?=\s|$)/.exec(
-      line,
-    );
-    if (match) {
+    for (const match of line.matchAll(
+      /(?:^|\s)qwen\.workload_timeout=([1-9]\d*)(?=\s|$)/g,
+    )) {
       const timeoutSec = Number(match[1]);
       if (Number.isSafeInteger(timeoutSec) && timeoutSec > 0) {
-        return Math.min(
-          COLLECTOR_MAX_DERIVED_ACCEPT_MS,
-          Math.max(
-            COLLECTOR_DEFAULT_ACCEPT_MS,
-            timeoutSec * 1000 + COLLECTOR_WORKLOAD_HEADROOM_MS,
-          ),
-        );
+        lastTimeoutSec = timeoutSec;
       }
     }
+  }
+  if (lastTimeoutSec !== null) {
+    return Math.min(
+      COLLECTOR_MAX_DERIVED_ACCEPT_MS,
+      Math.max(
+        COLLECTOR_DEFAULT_ACCEPT_MS,
+        lastTimeoutSec * 1000 + COLLECTOR_WORKLOAD_HEADROOM_MS,
+      ),
+    );
   }
   return undefined;
 }
