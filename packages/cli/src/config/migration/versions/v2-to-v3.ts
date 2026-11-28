@@ -10,6 +10,7 @@ import {
   getNestedProperty,
   setNestedPropertySafe,
 } from '../../settingsUtils.js';
+import { v5ToV4Migration } from './v5-to-v4.js';
 
 /**
  * Path mapping for boolean polarity migration (V2 disable* -> V3 enable*).
@@ -86,9 +87,11 @@ function normalizeDisableValue(value: unknown): {
  * V2 -> V3 migration (boolean polarity normalization stage).
  *
  * Migration contract:
- * - Input: V2 settings object (`$version: 2`).
+ * - Input: V2 settings object (`$version: 2`), or a versionless object with
+ *   nested V2 disable* keys (unless claimed by V5 -> V4).
  * - Output: `$version: 3` with deprecated disable* fields removed and
- *   valid values migrated to enable* equivalents.
+ *   valid values migrated to enable* equivalents (keeping existing boolean
+ *   enable* values when `$version` was absent).
  *
  * Compatibility strategy:
  * - Accept boolean values and coercible strings "true"/"false".
@@ -103,9 +106,20 @@ export class V2ToV3Migration implements SettingsMigration {
   /**
    * Migration trigger rule.
    *
-   * Execute only when `$version === 2`.
-   * This includes V2 files with no migratable disable* booleans so that version
-   * metadata still advances to 3.
+   * Execute when `$version === 2`. This includes V2 files with no migratable
+   * disable* booleans so that version metadata still advances to 3.
+   *
+   * Also execute for a versionless file that carries any of the nested V2
+   * disable* keys, e.g. a hand-written `{ "general": { "disableAutoUpdate":
+   * true } }`. V1 -> V2 skips object-valued keys, so no earlier migration
+   * claims this shape, and the loader would otherwise stamp the current
+   * `$version` over keys nothing reads any more: the setting would be ignored
+   * for good. Same approach as V3 -> V4's versionless `gitCoAuthor` branch.
+   * A versionless file that V5 -> V4 would unwrap is skipped here because
+   * once an earlier migration stamps a `$version`, V5 -> V4 no longer
+   * recognises the file: V5 -> V4 unwraps it unless V3 -> V4 claims a
+   * legacy `gitCoAuthor` key first, and any `disable*` keys in that mixed
+   * file stay unmigrated (both matching `main`).
    */
   shouldMigrate(settings: unknown): boolean {
     if (typeof settings !== 'object' || settings === null) {
@@ -114,8 +128,21 @@ export class V2ToV3Migration implements SettingsMigration {
 
     const s = settings as Record<string, unknown>;
 
-    // Migrate if $version is 2
-    return s['$version'] === 2;
+    if (s['$version'] === 2) {
+      return true;
+    }
+    if (s['$version'] === undefined) {
+      // Defer to V5 -> V4 so wrapped modelProviders still unwrap unless
+      // V3 -> V4 claims a legacy gitCoAuthor key first; both that ordering
+      // and leaving disable* keys unmigrated in the mixed file match main.
+      if (v5ToV4Migration.shouldMigrate(s)) {
+        return false;
+      }
+      return Object.keys(V2_TO_V3_BOOLEAN_MAP).some(
+        (path) => getNestedProperty(s, path) !== undefined,
+      );
+    }
+    return false;
   }
 
   /**
@@ -140,6 +167,9 @@ export class V2ToV3Migration implements SettingsMigration {
    * - Input object is not mutated.
    * - Valid migration and invalid cleanup are deterministic.
    * - Deprecated disable* keys are not retained after migration.
+   * - For input that reaches this step without `$version` (not already
+   *   stamped `$version: 2` by V1 -> V2), an existing boolean enable*
+   *   value is kept.
    */
   migrate(
     settings: unknown,
@@ -153,6 +183,13 @@ export class V2ToV3Migration implements SettingsMigration {
     const result = structuredClone(settings) as Record<string, unknown>;
     const processedPaths = new Set<string>();
     const warnings: string[] = [];
+    // Input that reaches V2 -> V3 without `$version` (not stamped
+    // `$version: 2` by V1 -> V2 first) may already set a boolean enable*
+    // key next to a stale disable* key. Keep that boolean value; V2 files
+    // and non-boolean targets derive the target from disable*.
+    const keepsExistingTarget = (path: string) =>
+      result['$version'] === undefined &&
+      typeof getNestedProperty(result, path) === 'boolean';
 
     // Step 1: Handle consolidated paths (multiple old paths → single new path)
     // Policy: if ANY of the old disable* settings is true, the new enable* should be false
@@ -182,7 +219,7 @@ export class V2ToV3Migration implements SettingsMigration {
         }
       }
 
-      if (hasAnyBooleanValue) {
+      if (hasAnyBooleanValue && !keepsExistingTarget(newPath)) {
         // enableAutoUpdate = !hasAnyDisable (if any disable* was true, enable should be false)
         setNestedPropertySafe(result, newPath, !hasAnyDisable);
       }
@@ -202,8 +239,10 @@ export class V2ToV3Migration implements SettingsMigration {
 
       deleteNestedPropertySafe(result, oldPath);
       if (normalized.isValid) {
-        // Set new property with inverted value
-        setNestedPropertySafe(result, newPath, !normalized.booleanValue);
+        if (!keepsExistingTarget(newPath)) {
+          // Set new property with inverted value
+          setNestedPropertySafe(result, newPath, !normalized.booleanValue);
+        }
       } else {
         warnings.push(
           `Removed deprecated setting '${oldPath}' from ${scope} settings because the value is invalid. Expected boolean or string "true"/"false".`,

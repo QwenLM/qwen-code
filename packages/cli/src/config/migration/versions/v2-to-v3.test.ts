@@ -47,6 +47,51 @@ describe('V2ToV3Migration', () => {
       expect(migration.shouldMigrate(v1Settings)).toBe(false);
     });
 
+    it('should return true for versionless settings with a nested disable* key', () => {
+      const handWritten = {
+        general: { disableAutoUpdate: true },
+      };
+
+      expect(migration.shouldMigrate(handWritten)).toBe(true);
+    });
+
+    it('should return true for versionless settings with a deeply nested disable* key', () => {
+      const handWritten = {
+        model: { generationConfig: { disableCacheControl: false } },
+      };
+
+      expect(migration.shouldMigrate(handWritten)).toBe(true);
+    });
+
+    it('should return false for versionless settings without disable* keys', () => {
+      const handWritten = {
+        general: { enableAutoUpdate: false },
+        ui: { theme: 'dark' },
+      };
+
+      expect(migration.shouldMigrate(handWritten)).toBe(false);
+    });
+
+    it('should return false for a V3 file that still carries a disable* key', () => {
+      const v3Settings = {
+        $version: 3,
+        general: { disableAutoUpdate: true },
+      };
+
+      expect(migration.shouldMigrate(v3Settings)).toBe(false);
+    });
+
+    it('should leave a versionless file with V5 modelProviders to V5 -> V4', () => {
+      const handWritten = {
+        general: { disableAutoUpdate: true },
+        modelProviders: {
+          openai: { protocol: 'openai', models: [{ id: 'gpt-4o' }] },
+        },
+      };
+
+      expect(migration.shouldMigrate(handWritten)).toBe(false);
+    });
+
     it('should return true for V2 settings without deprecated keys', () => {
       const cleanV2Settings = {
         $version: 2,
@@ -583,6 +628,82 @@ describe('V2ToV3Migration', () => {
       ).toBeUndefined();
       expect(warnings).toHaveLength(1);
       expect(warnings[0]).toContain('general.disableAutoUpdate');
+    });
+
+    it('should keep an enable* key already set in a versionless file', () => {
+      const handWritten = {
+        general: { disableUpdateNag: false, enableAutoUpdate: false },
+        model: {
+          generationConfig: {
+            disableCacheControl: false,
+            enableCacheControl: false,
+          },
+        },
+        context: { fileFiltering: { disableFuzzySearch: true } },
+      };
+
+      const { settings: result } = migration.migrate(handWritten, 'user') as {
+        settings: Record<string, unknown>;
+        warnings: string[];
+      };
+
+      expect(result).toEqual({
+        $version: 3,
+        general: { enableAutoUpdate: false },
+        model: { generationConfig: { enableCacheControl: false } },
+        context: { fileFiltering: { enableFuzzySearch: false } },
+      });
+    });
+
+    it('should still derive enable* from disable* in a V2 file', () => {
+      const v2Settings = {
+        $version: 2,
+        general: { disableUpdateNag: false, enableAutoUpdate: false },
+        model: {
+          generationConfig: {
+            disableCacheControl: false,
+            enableCacheControl: false,
+          },
+        },
+      };
+
+      const { settings: result } = migration.migrate(v2Settings, 'user') as {
+        settings: Record<string, unknown>;
+        warnings: string[];
+      };
+
+      expect(result).toEqual({
+        $version: 3,
+        general: { enableAutoUpdate: true },
+        model: { generationConfig: { enableCacheControl: true } },
+      });
+    });
+
+    it('should replace a non-boolean enable* key when deriving from disable* in a versionless file', () => {
+      const handWritten = {
+        general: { disableAutoUpdate: true, enableAutoUpdate: 'false' },
+        model: {
+          generationConfig: {
+            disableCacheControl: true,
+            enableCacheControl: 'false',
+          },
+        },
+      };
+
+      const { settings: result, warnings } = migration.migrate(
+        handWritten,
+        'user',
+      ) as {
+        settings: Record<string, unknown>;
+        warnings: string[];
+      };
+
+      expect(result).toEqual({
+        $version: 3,
+        general: { enableAutoUpdate: false },
+        model: { generationConfig: { enableCacheControl: false } },
+      });
+      expect(warnings).toHaveLength(0);
     });
   });
 
