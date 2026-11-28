@@ -3729,6 +3729,34 @@ describe('MemoryManager', () => {
       expect(third.taskId).not.toBe(first.taskId);
     });
 
+    it('does not read a lazy history when a gate skips the review', () => {
+      const mgr = new MemoryManager();
+      const history = vi.fn(() => [userText('hi')]);
+      const result = mgr.scheduleSkillReview(
+        reviewParams('/project', { history, toolCallCount: 1 }),
+      );
+
+      expect(result.status).toBe('skipped');
+      expect(history).not.toHaveBeenCalled();
+    });
+
+    it('reads a lazy history once for a review it schedules', async () => {
+      const mgr = new MemoryManager();
+      const history = vi.fn(() => [userText('hi')]);
+      const result = mgr.scheduleSkillReview(
+        reviewParams('/project', { history }),
+      );
+
+      expect(result.status).toBe('scheduled');
+      await result.promise;
+      expect(history).toHaveBeenCalledTimes(1);
+      expect(runSkillReviewByAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        }),
+      );
+    });
+
     it('schedules skill review at threshold', async () => {
       const mgr = new MemoryManager();
       const result = mgr.scheduleSkillReview(

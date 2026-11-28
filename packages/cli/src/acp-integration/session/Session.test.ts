@@ -672,6 +672,7 @@ describe('Session', () => {
     discardManagedAutoMemoryRecallDelivery: ReturnType<typeof vi.fn>;
     finishManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
     runManagedAutoMemoryBackgroundTasks: ReturnType<typeof vi.fn>;
+    runManagedAutoSkillReview: ReturnType<typeof vi.fn>;
     consumePendingMemoryTaskPromises: ReturnType<typeof vi.fn>;
     captureCacheSafeParams: ReturnType<typeof vi.fn>;
     recordCompletedToolCall: ReturnType<typeof vi.fn>;
@@ -945,6 +946,7 @@ describe('Session', () => {
       discardManagedAutoMemoryRecallDelivery: vi.fn(),
       finishManagedAutoMemoryRecall: vi.fn(),
       runManagedAutoMemoryBackgroundTasks: vi.fn(),
+      runManagedAutoSkillReview: vi.fn(),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       captureCacheSafeParams: vi.fn(),
       recordCompletedToolCall: vi.fn(),
@@ -8353,45 +8355,161 @@ describe('Session', () => {
         mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
       ).toHaveBeenCalledOnce();
       expect(textParts(firstSentMessage())).toEqual([memoryPrompt, 'hello']);
-      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
-        2,
-      );
-      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledWith({
-        projectRoot: '/repo',
-        scope: 'project',
-        config: mockConfig,
+      // The migration, Extract and Dream work lives in the client, which the
+      // ACP branch now delegates to instead of re-implementing it: one copy,
+      // so the session-agent skip cannot drift again.
+      expect(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+      ).toHaveBeenCalledWith(core.SendMessageType.UserQuery, {
+        skipMemoryExtraction: false,
       });
-      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledWith({
-        projectRoot: '/repo',
-        scope: 'user',
-        config: mockConfig,
-      });
+      expect(
+        mockMemoryManager.scheduleMetadataMigration,
+      ).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
 
       // Captured twice: once inside `#recordPromptCompletionEffects` (before
-      // `scheduleExtract`, pinned below) and once at the turn boundary that
+      // the delegated background work) and once at the turn boundary that
       // feeds the follow-up suggestion.
       expect(mockLlmClient.captureCacheSafeParams).toHaveBeenCalledTimes(2);
       expect(
         mockLlmClient.captureCacheSafeParams.mock.invocationCallOrder[0],
       ).toBeLessThan(
-        mockMemoryManager.scheduleExtract.mock.invocationCallOrder[0]!,
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks.mock
+          .invocationCallOrder[0]!,
       );
-      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledWith({
-        projectRoot: '/repo',
-        sessionId: 'test-session-id',
-        history: finalHistory,
-        config: mockConfig,
-      });
-      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
-      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledWith({
-        projectRoot: '/repo',
-        sessionId: 'test-session-id',
-        config: mockConfig,
-      });
-      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledOnce();
       expect(
         mockLlmClient.finishManagedAutoMemoryRecall,
       ).toHaveBeenCalledOnce();
+    });
+
+    it('schedules the managed skill review the shared round leaves to the client', async () => {
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      // The queue carries Extract and Dream as well as the review. A turn must
+      // not wait on the first two (design doc §6: background agents that can
+      // run for minutes), so a never-settling drained promise must NOT hold
+      // the turn open.
+      const neverSettles = new Promise<number>(() => {});
+      mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValue([
+        neverSettles,
+      ]);
+      const outcome = await Promise.race([
+        session
+          .prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          })
+          .then(() => 'turn-finished'),
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve('turn-still-waiting'), 50),
+        ),
+      ]);
+      expect(outcome).toBe('turn-finished');
+
+      // The skill review is the client's job now — it schedules one on every
+      // UserQuery/ToolResult turn — so the ACP branch only has to reach that
+      // entry point and drain what it queues.
+      expect(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+      ).toHaveBeenCalledWith(core.SendMessageType.UserQuery, {
+        skipMemoryExtraction: false,
+      });
+      // The queued promise belongs to this branch, so this branch has to take
+      // it back; nothing on the ACP path would ever drain it otherwise.
+      expect(mockLlmClient.consumePendingMemoryTaskPromises).toHaveBeenCalled();
+      // Draining before the schedule would empty an array the client has not
+      // filled yet, leaving the real promise to pile up.
+      expect(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks.mock
+          .invocationCallOrder[0]!,
+      ).toBeLessThan(
+        mockLlmClient.consumePendingMemoryTaskPromises.mock
+          .invocationCallOrder[0]!,
+      );
+    });
+
+    it('does not hold the turn open on the managed skill review', async () => {
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      // Nothing on the ACP path reads the review's result, and the review
+      // agent takes no abort signal, so awaiting it would hold
+      // `session/prompt` for up to the auto-skill timeout. An unsettled review
+      // must leave the turn free to finish.
+      const reviewNeverSettles = new Promise<number>(() => {});
+      mockLlmClient.runManagedAutoMemoryBackgroundTasks.mockReturnValue(
+        reviewNeverSettles,
+      );
+      mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValue([
+        reviewNeverSettles,
+      ]);
+
+      const outcome = await Promise.race([
+        session
+          .prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          })
+          .then(() => 'turn-finished'),
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve('turn-still-waiting'), 50),
+        ),
+      ]);
+      expect(outcome).toBe('turn-finished');
+      expect(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+      ).toHaveBeenCalledWith(core.SendMessageType.UserQuery, {
+        skipMemoryExtraction: false,
+      });
+      expect(mockLlmClient.consumePendingMemoryTaskPromises).toHaveBeenCalled();
+    });
+
+    it('does not hold the turn open when managed auto memory is off', async () => {
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockConfig.getManagedAutoMemoryEnabled)
+        .mockReturnValueOnce(false)
+        .mockReturnValueOnce(false);
+      const reviewNeverSettles = new Promise<number>(() => {});
+      mockLlmClient.runManagedAutoSkillReview.mockReturnValue(
+        reviewNeverSettles,
+      );
+      mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValue([
+        reviewNeverSettles,
+      ]);
+
+      const outcome = await Promise.race([
+        session
+          .prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          })
+          .then(() => 'turn-finished'),
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve('turn-still-waiting'), 50),
+        ),
+      ]);
+      expect(outcome).toBe('turn-finished');
+      expect(mockLlmClient.runManagedAutoSkillReview).toHaveBeenCalledOnce();
+      expect(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+      ).not.toHaveBeenCalled();
     });
 
     it("schedules no extraction or Dream after a channel's turn", async () => {
@@ -8413,15 +8531,48 @@ describe('Session', () => {
 
       expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
       expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
-      // The metadata migration reads no turn: it still runs.
-      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
-        2,
-      );
+      // The client still runs the migration for a channel turn; only the
+      // turn-shaped work is skipped.
+      expect(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+      ).toHaveBeenCalledWith(core.SendMessageType.UserQuery, {
+        skipMemoryExtraction: true,
+      });
       // Recall still serves the reply.
       expect(mockLlmClient.beginManagedAutoMemoryRecall).toHaveBeenCalledWith(
         'a comment',
         expect.any(AbortSignal),
       );
+    });
+
+    it("leaves an agent session's turn to the client's own skip", async () => {
+      // The hidden session an agent runs is agent-to-agent work: the client's
+      // helper drops Extract and Dream for it. The legacy round used to
+      // re-implement that block without the check, so it extracted memory from
+      // chatter the shared round deliberately excludes.
+      Object.assign(mockConfig, { isSessionAgentSession: () => true });
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
+        { role: 'user', parts: [{ text: 'agent prompt' }] },
+        { role: 'model', parts: [{ text: 'agent reply' }] },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'agent prompt' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+      expect(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+      ).toHaveBeenCalledWith(core.SendMessageType.UserQuery, {
+        skipMemoryExtraction: false,
+      });
     });
 
     it('drives the prepared recall-mode transition before the per-turn reset on a fresh user turn', async () => {
@@ -8533,6 +8684,9 @@ describe('Session', () => {
       ).not.toHaveBeenCalled();
       expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
       expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+      // The skill review gate skips retries too: scheduling one here would
+      // dispatch a background agent for a turn the user did not author.
+      expect(mockLlmClient.runManagedAutoSkillReview).not.toHaveBeenCalled();
       // A retry skips managed auto-memory, but the turn still ends `end_turn`,
       // so the follow-up suggestion fires and reads the process-global
       // cache-safe slot. The turn boundary has to refresh it anyway, or the
@@ -42752,8 +42906,13 @@ describe('Session', () => {
           });
 
           expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
-          expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
-          expect(mockMemoryManager.scheduleDream).toHaveBeenCalledOnce();
+          // Extract and Dream belong to the client's background work now, so
+          // the ACP branch only reaches that entry point.
+          expect(
+            mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+          ).toHaveBeenCalledWith(core.SendMessageType.UserQuery, {
+            skipMemoryExtraction: false,
+          });
         });
 
         it('waits for a requested delivery final without a channel marker', async () => {

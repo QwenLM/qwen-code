@@ -260,7 +260,9 @@ void memoryManager
   });
 ```
 
-两个任务都不要 await，也不要把它们的 promise 存入 `LlmClient.pendingMemoryTaskPromises`；ACP 没有 TUI 的 `memory_saved` 条目来消费这个队列。`MemoryManager` 已经跟踪这些工作。这两个 rejection 处理器是必需的，用于防止出现未处理的后台 rejection，而不是为了增加回退路径。
+两个任务都不要 await。`MemoryManager` 已经跟踪这些工作。这两个 rejection 处理器是必需的，用于防止出现未处理的后台 rejection，而不是为了增加回退路径。
+
+`runManagedAutoSkillReview()` 入队的 skill 评审是唯一会经过 `LlmClient.pendingMemoryTaskPromises` 的例外：它由同一个 client 入队，ACP 分支在调度之后立即消费并 await 这个队列。留在队列里会让 promise 在长期运行的 `qwen serve` 进程里一直驻留，而 ACP 没有 TUI 的 `memory_saved` 条目来消费它。
 
 不新增 "once" 字段。调度代码恰好只有一个可达的调用点，位于结束全新逻辑轮次的那一次 `#handleStopHookLoop()` 之后。工具续发与 Stop hook 续发从不会独立经过这个调用点。
 
@@ -274,7 +276,7 @@ this.config.getLlmClient().recordCompletedToolCall(toolName, args);
 
 这让召回的最近工具噪声过滤与交互式会话保持一致。由重复历史提供结果的调用不会进入 `runTool()`，因此不计数；已取消的调用仍被排除。成功终止与以错误终止的工具都计数，与交互式路径一致。不新增 ACP 专用的最近工具收集。
 
-这也会更新该方法现有的工具调用计数与 skill 写入标记。ACP 不会调用交互式的 auto-skill 调度器，因此本 PR 不为 ACP 增加任何 auto-skill 行为。
+这也会更新该方法现有的工具调用计数与 skill 写入标记。共享模型轮次把 auto-skill 评审交给 `LlmClient`，由它在自己的工具轮次里执行；legacy 轮次不经过那条路径，因此由持有轮后工作的 ACP 分支自行调用 `runManagedAutoSkillReview()`，并取走它入队的 promise。
 
 ## 端到端流程
 
@@ -303,6 +305,7 @@ sequenceDiagram
     end
 
     S->>S: final MessageDisplay + Stop-hook loop
+    S->>G: runManagedAutoSkillReview(), then drain its queued promise
     S->>M: scheduleExtract(final history)
     S->>M: scheduleDream()
     S->>G: finishRecall()
@@ -313,10 +316,10 @@ sequenceDiagram
 
 ### 生产代码
 
-| 文件                                                  | 变更                                                                                                                                                                                          |
-| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/core/src/core/client.ts`                    | 把现有的召回 begin/consume/finalize 操作抽取为公开方法，并把当前的 UserQuery/ToolResult 调用点迁移到这些方法上。交互式使用的行为不变。                                                        |
-| `packages/cli/src/acp-integration/session/Session.ts` | 对全新用户轮次分类，调用共享召回 API，在安全的发送点注入初始/精修结果，终结召回，保留平稳循环停止的来源信息，记录已完成的工具，并在不是 channel prompt 的轮次干净完成后各调度一次提取/Dream。 |
+| 文件                                                  | 变更                                                                                                                                                                                                                                      |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/core/src/core/client.ts`                    | 把现有的召回 begin/consume/finalize 操作抽取为公开方法，并把当前的 UserQuery/ToolResult 调用点迁移到这些方法上。交互式使用的行为不变。                                                                                                    |
+| `packages/cli/src/acp-integration/session/Session.ts` | 对全新用户轮次分类，调用共享召回 API，在安全的发送点注入初始/精修结果，终结召回，保留平稳循环停止的来源信息，记录已完成的工具，调度 auto-skill 评审并取走它入队的 promise，并在不是 channel prompt 的轮次干净完成后各调度一次提取/Dream。 |
 
 不应需要其他生产文件。特别是，不要在 `packages/core/src/memory/` 下新增文件：记忆算法与 manager API 都已存在。
 
@@ -412,7 +415,7 @@ cd .. && npm run typecheck
 
 ### 把全部轮次后调度放进 `LlmClient`
 
-否决。ACP 持有权威的完整轮次边界，而 `LlmClient.sendMessageStream()` 在交互式流程中是一个物理的模型发送边界。强制 ACP 调用交互式的后台任务方法，还会让仅供 TUI 使用的通知 promise 入队，并让这一变更与 auto-skill 调度耦合。
+否决。ACP 持有权威的完整轮次边界，而 `LlmClient.sendMessageStream()` 在交互式流程中是一个物理的模型发送边界。强制 ACP 调用交互式的后台任务方法，还会让仅供 TUI 使用的通知 promise 入队，并让 Extract 与 Dream 和 auto-skill 调度耦合。auto-skill 评审改由它自己的公开方法调度，两者保持独立。
 
 ### 在 `#buildNextMessageAfterToolRun()` 中消费精修召回
 
