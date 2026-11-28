@@ -166,6 +166,11 @@ describe('validateAutofixPrParams', () => {
     [{ command: 'sync', pr: 1, discard: 'yes' as never }, /must be a boolean/],
     [{ command: 'schedule', pr: 1, every: 2.5 }, /positive integer/],
     [{ command: 'push', pr: 1, in_place: true }, /does not take "in_place"/],
+    [{ command: 'push', pr: 1, watch: true }, /does not take "watch"/],
+    [
+      { command: 'prepare', pr: 1, repo: 'o/r', watch: true },
+      /needs "in_place"/,
+    ],
     // The plan is the one the skill writes beside the worktree, never a file
     // of another PR, a relative path, or one the PR's own tree carries.
     [
@@ -214,6 +219,7 @@ describe('validateAutofixPrParams', () => {
     for (const params of [
       { command: 'prepare', pr: 1, repo: 'o/r', host: 'github.com' },
       { command: 'prepare', pr: 1, repo: 'o/r', in_place: true },
+      { command: 'prepare', pr: 1, repo: 'o/r', in_place: true, watch: true },
       { command: 'snapshot', pr: 1, task: '0123456789ab' },
       { command: 'reply', pr: 1, plan, task: 't1' },
       { command: 'status' },
@@ -234,6 +240,10 @@ describe('autofixPrArgs', () => {
     [
       { command: 'prepare', pr: 5, repo: 'o/r', in_place: true },
       ['prepare', '5', '--repo=o/r', '--in-place'],
+    ],
+    [
+      { command: 'prepare', pr: 5, repo: 'o/r', in_place: true, watch: true },
+      ['prepare', '5', '--repo=o/r', '--in-place', '--watch'],
     ],
     [
       { command: 'ci-log', pr: 5, run_id: '99', lines: 300, task: 't1' },

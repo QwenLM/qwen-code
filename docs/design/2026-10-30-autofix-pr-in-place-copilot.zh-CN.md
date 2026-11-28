@@ -2,7 +2,9 @@
 
 [English](2026-10-30-autofix-pr-in-place-copilot.md) | [简体中文](2026-10-30-autofix-pr-in-place-copilot.zh-CN.md)
 
-状态：提案并在同一改动中实现。日期：2026-10-30。
+状态：已实现（定时轮次能力由
+[`2026-10-31-autofix-pr-in-place-scheduled-ask`](2026-10-31-autofix-pr-in-place-scheduled-ask.zh-CN.md)
+扩展）。日期：2026-10-30。
 
 本设计为 [`/autofix-pr`](2026-10-21-autofix-pr-command.zh-CN.md) 增加第二种
 工作模式。下文引用"命令设计"的章节号均指该文档。

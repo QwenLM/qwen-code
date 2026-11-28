@@ -120,8 +120,9 @@ describe('qwen-triage-finalize workflow', () => {
     // Bot authorship alone is forgeable-by-proxy: other bot lanes (serve-ab,
     // visuals) publish bodies a fork PR's own scripts generated, so an
     // approve-on-green marker planted there must stay inert. The Stage 3
-    // first-line marker is publisher-enforced (triage-publish.mjs rejects a
-    // body that does not start with it), which makes startswith the structural
+    // first-line marker is publisher-enforced (triage-publish.mjs guarantees
+    // the exact first-line marker — prepending/normalizing it and rejecting
+    // mismatched leading triage markers), which makes startswith the structural
     // filter — the skill emits approve-on-green only in that comment.
     expect(script).toContain("STAGE3_MARKER='<!-- qwen-triage stage=3 -->'");
     expect(script).toContain(

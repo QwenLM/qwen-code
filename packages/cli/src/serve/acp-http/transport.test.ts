@@ -115,9 +115,15 @@ const setupGithubMocks = vi.hoisted(() => ({
   setupGithub: vi.fn(),
 }));
 
-vi.mock('../../utils/stdioHelpers.js', () => ({
-  writeStderrLine: stdioMocks.writeStderrLine,
-}));
+vi.mock('../../utils/stdioHelpers.js', async () => {
+  const actual = await vi.importActual<
+    typeof import('../../utils/stdioHelpers.js')
+  >('../../utils/stdioHelpers.js');
+  return {
+    ...actual,
+    writeStderrLine: stdioMocks.writeStderrLine,
+  };
+});
 
 vi.mock('../../services/setup-github.js', async () => {
   const actual = await vi.importActual<
@@ -12245,6 +12251,51 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           expect(deleteLog).not.toContain(bidiOverride);
         } finally {
           removeSessionSpy.mockRestore();
+        }
+      });
+    });
+
+    it('_qwen/sessions/delete warns via stderr when worktree sidecar unlink fails', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-44665544012a';
+      await withRuntimeDir(async () => {
+        await writeStoredSession(sessionId);
+        const sidecarPath = path.join(
+          new Storage(TEST_WORKSPACE).getProjectDir(),
+          'chats',
+          `${sessionId}.worktree.json`,
+        );
+        // A directory at the sidecar path makes unlinkSync fail on every
+        // platform (EISDIR / EPERM), even under root or Windows.
+        await fs.mkdir(sidecarPath);
+
+        try {
+          const connId = await initialize();
+          const streamRes = openStream(connId);
+          await new Promise((r) => setTimeout(r, 30));
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 6801,
+            method: '_qwen/sessions/delete',
+            params: { sessionIds: [sessionId] },
+          });
+          const frames = await takeFrames(await streamRes, 1);
+          expect(frames[0]).toMatchObject({
+            result: {
+              removed: [sessionId],
+              notFound: [],
+              errors: [],
+            },
+          });
+
+          const warningLog = stdioMocks.writeStderrLine.mock.calls
+            .map(([line]) => line)
+            .find((line) => line.includes('worktree sidecar not removed'));
+          expect(warningLog).toContain(
+            'qwen serve: worktree sidecar not removed:',
+          );
+          expect(warningLog).toContain(`${sessionId}.worktree.json`);
+        } finally {
+          await fs.rm(sidecarPath, { recursive: true, force: true });
         }
       });
     });

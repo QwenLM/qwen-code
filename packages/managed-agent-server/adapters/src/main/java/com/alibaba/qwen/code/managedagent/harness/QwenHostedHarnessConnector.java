@@ -812,9 +812,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public Admission submit(String tenantId, String sessionId,
             String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
+        return submit(tenantId, sessionId, promptId, input, payloadDigest, null);
+    }
+
+    @Override
+    public Admission submit(String tenantId, String sessionId, String promptId,
+            List<Map<String, Object>> input, String payloadDigest, String ingestTurnId) {
         try {
             return doSubmit(tenantId, sessionId, promptId, input,
-                    payloadDigest);
+                    payloadDigest, ingestTurnId);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -1106,6 +1112,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsEventIngest() {
+        return sessionStore.isEnabled() && feature(HarnessFeature.EVENT_INGEST);
+    }
+
+    @Override
     public SideQueryTarget prepareSideQuery() {
         if (!supportsSideQueries()) {
             throw new ManagedAgentException(409, "unsupported_feature", "Hosted side queries are unavailable.");
@@ -1209,7 +1220,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     private Admission doSubmit(String tenantId, String sessionId,
             String promptId,
-            List<Map<String, Object>> input, String payloadDigest) {
+            List<Map<String, Object>> input, String payloadDigest, String ingestTurnId) {
         SessionRecord session = requireReadyForNewWork(tenantId, sessionId, false);
         HarnessSessionRef ref = attachment(tenantId, sessionId, true);
         SubmitHarnessTurn.Builder builder = SubmitHarnessTurn.builder()
@@ -1242,6 +1253,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             throw new IllegalStateException("Hosted input attachments are unavailable");
         }
         input.forEach(builder::addContent);
+        if (ingestTurnId != null) {
+            builder.eventIngest(ingestTurnId);
+        }
         PromptReceipt receipt = turnAdmission(tenantId, sessionId, ref,
                 attached -> client().submitTurn(builder.session(attached).build()));
         return new Admission(receipt.getLastEventId(),

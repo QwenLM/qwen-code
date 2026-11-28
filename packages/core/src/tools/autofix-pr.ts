@@ -85,6 +85,7 @@ export interface AutofixPrParams {
   host?: string;
   take_over?: boolean;
   in_place?: boolean;
+  watch?: boolean;
   task?: string;
   run_id?: string;
   lines?: number;
@@ -102,7 +103,7 @@ type OptionName = Exclude<keyof AutofixPrParams, 'command' | 'pr'>;
 
 /** The options each command takes; any other is a refusal. */
 const OPTIONS: Readonly<Record<AutofixPrCommand, readonly OptionName[]>> = {
-  prepare: ['repo', 'host', 'take_over', 'in_place'],
+  prepare: ['repo', 'host', 'take_over', 'in_place', 'watch'],
   snapshot: ['repo', 'host', 'task'],
   'ci-log': ['run_id', 'lines', 'task'],
   push: ['task'],
@@ -128,6 +129,7 @@ const REQUIRED: Partial<Record<AutofixPrCommand, readonly OptionName[]>> = {
 const BOOLEAN_OPTIONS = new Set<OptionName>([
   'take_over',
   'in_place',
+  'watch',
   'no_post',
   'discard',
   'no_reply',
@@ -223,6 +225,13 @@ export function validateAutofixPrParams(
       return `"${command}" needs "${option}".`;
     }
   }
+  if (
+    command === 'prepare' &&
+    params.watch === true &&
+    params.in_place !== true
+  ) {
+    return '"watch" needs "in_place".';
+  }
   return null;
 }
 
@@ -259,6 +268,7 @@ export function autofixPrArgs(params: AutofixPrParams): string[] {
   value('attempt', params.attempt);
   flag('take-over', params.take_over);
   flag('in-place', params.in_place);
+  flag('watch', params.watch);
   flag('no-post', params.no_post);
   flag('discard', params.discard);
   flag('no-reply', params.no_reply);
@@ -1518,6 +1528,11 @@ export class AutofixPrTool extends BaseDeclarativeTool<
             type: 'boolean',
             description:
               "--in-place (prepare): fix in the user's own checkout of the PR head branch — attended, never unattended or background, nothing ever discarded.",
+          },
+          watch: {
+            type: 'boolean',
+            description:
+              '--watch (prepare, with --in-place): record consent for scheduled in-place rounds.',
           },
           task: {
             type: 'string',
