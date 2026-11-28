@@ -168,10 +168,20 @@ implementation of the write path for both CI and local use. It:
 1. Parses and validates the whole draft set before writing anything
    (fail-closed preflight): unknown actions or fields reject the set;
    `marker` must be in the allowlist (`stage=1`, `stage=2`, `stage=3`,
-   `stage=1-pre`, `stage=1b`); every comment body must start with the exact
-   `<!-- qwen-triage <marker> -->` line (the publisher enforces the prefix,
-   the agent is not trusted for it); bodies over GitHub's 65,536-character
-   limit are rejected, not truncated (truncation could cut the CI-region or
+   `stage=1-pre`, `stage=1b`); every published comment body is guaranteed to
+   start with the exact `<!-- qwen-triage <marker> -->` line (the publisher
+   owns the prefix — it prepends the marker when omitted, normalizes harmless
+   leading blank lines or whitespace on a matching marker, emits a
+   `::warning::` annotation on Actions or a plain `note:` locally when it
+   repairs a draft, and rejects empty bodies or any mismatched/malformed
+   leading `<!-- qwen-triage ... -->` comment; stamping an omitted marker is
+   a rendering robustness measure rather than a security barrier against the
+   same agent that writes `actions.jsonl`, while the security boundary for
+   `qwen-triage-finalize.yml` remains bot authorship plus isolating triage
+   comments from other bot lanes such as `serve-ab` / `visuals`); bodies over
+   GitHub's 65,536-character
+   limit (including after marker prefixing) are rejected, not truncated
+   (truncation could cut the CI-region or
    approve-on-green markers); review events are limited to `APPROVE` and
    `REQUEST_CHANGES`; `APPROVE` requires `commit_id`; body paths must resolve
    to regular files inside the draft directory; `actions.jsonl` and `bodies/`
@@ -283,8 +293,9 @@ openai --approval-mode yolo --prompt '/triage …' --output-format stream-json`.
 ## Contract preservation
 
 - Markers (`stage=N`, `qwen-triage-ci sha=…` region, `approve-on-green sha=…`,
-  lifecycle) stay byte-identical; the publisher posts bodies as-is after
-  prefix validation.
+  lifecycle) stay byte-identical; the publisher preserves body text verbatim
+  after enforcing the leading stage marker (prepending if omitted, normalizing
+  harmless whitespace on a matching marker, and rejecting mismatches).
 - All writes still land under the PAT's bot identity, so
   `qwen-triage-finalize.yml`'s author filters, CI-region replacement, and
   deferred approvals work unchanged.

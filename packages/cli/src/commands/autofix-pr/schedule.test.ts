@@ -86,9 +86,60 @@ describe('runSchedule', () => {
     rmSync(repo, { recursive: true, force: true });
   });
 
-  it('refuses an in-place watch: its rounds run only when asked', () => {
+  it('schedules an in-place watch with --in-place in the tick prompt and durable in a daemon session', () => {
     write({ inPlace: true, worktreePath: repo, branch: 'main' });
-    expect(() => runSchedule({ pr: 7 })).toThrow(/in-place watch/);
+    writeFileSync(paths.instructionsPath, 'keep exports stable\n', 'utf8');
+    process.env['QWEN_CODE_SERVE'] = '1';
+    const task = runSchedule({
+      pr: 7,
+      every: 5,
+      noReply: true,
+      instructions: true,
+    });
+    expect(task).toEqual({
+      cron: '*/5 * * * *',
+      recurring: true,
+      gate: `${GATE}${task.task}`,
+      prompt: `Run /autofix-pr tick o/r#7 --task ${task.task} --in-place --no-reply -- keep exports stable`,
+      durable: true,
+      sessionMode: 'current',
+      every: 5,
+      reply: false,
+      instructions: 'keep exports stable',
+      task: expect.stringMatching(TASK),
+    });
+    expect(state().watch).toEqual({
+      every: 5,
+      reply: false,
+      instructions: 'keep exports stable',
+      task: task.task,
+    });
+    // --again preserves --in-place and options under a new task id.
+    const again = runSchedule({ pr: 7, again: true });
+    expect(again.task).not.toBe(task.task);
+    expect(again).toMatchObject({
+      cron: '*/5 * * * *',
+      durable: true,
+      sessionMode: 'current',
+      prompt: `Run /autofix-pr tick o/r#7 --task ${again.task} --in-place --no-reply -- keep exports stable`,
+    });
+  });
+
+  it('refuses --again on an unscheduled in-place watch, naming --in-place --watch', () => {
+    write({ inPlace: true, worktreePath: repo, branch: 'main' });
+    expect(() => runSchedule({ pr: 7, again: true })).toThrow(
+      /--in-place --watch/,
+    );
+  });
+
+  it('still refuses scheduling an in-place watch when the PR author cannot push', () => {
+    write({
+      inPlace: true,
+      worktreePath: repo,
+      branch: 'main',
+      authorCanPush: false,
+    });
+    expect(() => runSchedule({ pr: 7 })).toThrow(/only --once/);
     expect(state().watch).toBeUndefined();
   });
 

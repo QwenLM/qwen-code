@@ -62,6 +62,7 @@ import {
   preclassifyWorktreeCleanup,
   verifyWorktreeCleanupOwnership,
 } from './worktree-orphan-cleanup.js';
+import * as worktreeOwnership from './worktree-ownership-op.js';
 import {
   startWorktreeRetention,
   sweepWorktreeRetentionOnce,
@@ -2934,6 +2935,210 @@ describe('worktree retention with real repositories', () => {
       expect(report.removed).toEqual([]);
       expect(report.skipped).toContain('management root is shared');
       expect(fs.existsSync(old.worktreePath)).toBe(true);
+    },
+  );
+
+  it('stops an in-flight sweep when maxRetained becomes 0 instead of capturing every remaining candidate', async () => {
+    const primary = makeRetentionRepo(root, 'primary');
+    configureRetention(primary, 1);
+    const oldest = await makeRetainedSession(primary, {
+      slug: 'disabled-mid-sweep-oldest',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const middle = await makeRetainedSession(primary, {
+      slug: 'disabled-mid-sweep-middle',
+      dirty: true,
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    await makeRetainedSession(primary, {
+      slug: 'disabled-mid-sweep-newest',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+    // Disabling retention is the reported emergency mitigation. It must take
+    // effect before the NEXT candidate's capture: on a large checkout each
+    // capture is minutes of compression and hashing, and the sweep used to
+    // run it only to refuse removal afterwards in beforePhysicalRemoval.
+    const snapshotService = await import(
+      '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js'
+    );
+    let captures = 0;
+    const spy = vi
+      .spyOn(snapshotService, 'captureWorktreeSnapshot')
+      .mockImplementation(async () => {
+        captures += 1;
+        if (captures >= 1) configureRetention(primary, 0);
+        return {
+          snapshotPath: path.join(root, `injected-${captures}.tar.gz`),
+          metaPath: path.join(root, `injected-${captures}.json`),
+          checkoutMatchesCapture: true,
+        };
+      });
+
+    try {
+      const report = await sweep(primary);
+
+      expect(captures).toBe(1);
+      expect(report.removed).toEqual([]);
+      expect(report.skipped).toContain('retention disabled during sweep');
+      expect(fs.existsSync(oldest.worktreePath)).toBe(true);
+      expect(fs.existsSync(middle.worktreePath)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('stops an in-flight sweep when maxRetained is raised instead of deleting remaining candidates against a stale plan (R1-2)', async () => {
+    const primary = makeRetentionRepo(root, 'primary');
+    configureRetention(primary, 1);
+    const oldest = await makeRetainedSession(primary, {
+      slug: 'raised-mid-sweep-oldest',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const middle = await makeRetainedSession(primary, {
+      slug: 'raised-mid-sweep-middle',
+      dirty: true,
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(primary, {
+      slug: 'raised-mid-sweep-newest',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+
+    const snapshotService = await import(
+      '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js'
+    );
+    const actualSnapshotService = await vi.importActual<
+      typeof import('@qwen-code/qwen-code-core/services/worktree-snapshot-service.js')
+    >('@qwen-code/qwen-code-core/services/worktree-snapshot-service.js');
+    let captures = 0;
+    const spy = vi
+      .spyOn(snapshotService, 'captureWorktreeSnapshot')
+      .mockImplementation(async (...args) => {
+        captures += 1;
+        const result = await actualSnapshotService.captureWorktreeSnapshot(
+          ...args,
+        );
+        if (captures >= 1) configureRetention(primary, 5);
+        return result;
+      });
+    try {
+      const report = await sweep(primary);
+      expect(captures).toBe(1);
+      expect(report.removed).toEqual([oldest.id]);
+      expect(report.skipped).toContain('retention limit changed during sweep');
+      expect(fs.existsSync(oldest.worktreePath)).toBe(false);
+      expect(fs.existsSync(middle.worktreePath)).toBe(true);
+      expect(fs.existsSync(newest.worktreePath)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it.each([
+    { nextLimit: 0, reason: 'retention disabled during sweep' },
+    { nextLimit: 5, reason: 'retention limit changed during sweep' },
+  ] as const)(
+    'aborts before capturing when maxRetained changes to $nextLimit while waiting on the cleanup lock',
+    async ({ nextLimit, reason }) => {
+      const primary = makeRetentionRepo(root, 'primary');
+      configureRetention(primary, 1);
+      const oldest = await makeRetainedSession(primary, {
+        slug: `lock-wait-limit-${nextLimit}-oldest`,
+        dirty: true,
+        activity: '2026-01-01T00:00:00.000Z',
+      });
+      const middle = await makeRetainedSession(primary, {
+        slug: `lock-wait-limit-${nextLimit}-middle`,
+        dirty: true,
+        activity: '2026-01-02T00:00:00.000Z',
+      });
+      const newest = await makeRetainedSession(primary, {
+        slug: `lock-wait-limit-${nextLimit}-newest`,
+        activity: '2026-01-03T00:00:00.000Z',
+      });
+
+      const plan = await preclassifyWorktreeCleanup(primary.service, oldest.id);
+      expect(plan).toBeDefined();
+
+      const snapshotService = await import(
+        '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js'
+      );
+      let captures = 0;
+      const captureSpy = vi
+        .spyOn(snapshotService, 'captureWorktreeSnapshot')
+        .mockImplementation(async () => {
+          captures += 1;
+          return {
+            snapshotPath: path.join(root, `unexpected-${captures}.tar.gz`),
+            metaPath: path.join(root, `unexpected-${captures}.json`),
+            checkoutMatchesCapture: true,
+          };
+        });
+
+      const origAcquire = worktreeOwnership.acquireWorktreeOwnershipOp;
+      let callsForOldest = 0;
+      let blockerPromise: Promise<() => void> | undefined;
+      let releaseBlocker: (() => void) | undefined;
+      let notifyQueued!: () => void;
+      const queuedOnRemovalLock = new Promise<void>((resolve) => {
+        notifyQueued = resolve;
+      });
+      const acquireSpy = vi
+        .spyOn(worktreeOwnership, 'acquireWorktreeOwnershipOp')
+        .mockImplementation(async (key) => {
+          if (key === plan!.lockKey) {
+            callsForOldest += 1;
+            if (callsForOldest === 1) {
+              // Call #1 happens during `collectEligible`. As soon as it
+              // releases, take the real ownership lock so `removeRetainedCheckout`
+              // (call #2, after the pre-lock `sweepLimit` check) genuinely waits
+              // in the lock queue.
+              const releaseCollect = await origAcquire(key);
+              return () => {
+                blockerPromise = origAcquire(key);
+                releaseCollect();
+              };
+            }
+            if (callsForOldest === 2) {
+              const queued = origAcquire(key);
+              notifyQueued();
+              return queued;
+            }
+          }
+          return origAcquire(key);
+        });
+
+      let released = false;
+      const sweepPromise = sweep(primary);
+      try {
+        await queuedOnRemovalLock;
+        releaseBlocker = await blockerPromise!;
+        configureRetention(primary, nextLimit);
+        releaseBlocker();
+        released = true;
+
+        const report = await sweepPromise;
+        expect(captures).toBe(0);
+        expect(report.removed).toEqual([]);
+        expect(report.issues).toEqual([]);
+        expect(report.skipped).toContain(reason);
+        expect(fs.existsSync(oldest.worktreePath)).toBe(true);
+        expect(fs.existsSync(middle.worktreePath)).toBe(true);
+        expect(fs.existsSync(newest.worktreePath)).toBe(true);
+        const archives = fs
+          .readdirSync(path.dirname(oldest.sidecarPath))
+          .filter((f) => f.endsWith('.worktree-snapshot.tar.gz'));
+        expect(archives).toHaveLength(0);
+      } finally {
+        if (!released && blockerPromise) {
+          (await blockerPromise)();
+        }
+        await sweepPromise.catch(() => undefined);
+        captureSpy.mockRestore();
+        acquireSpy.mockRestore();
+      }
     },
   );
 
