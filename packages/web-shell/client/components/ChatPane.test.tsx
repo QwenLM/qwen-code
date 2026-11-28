@@ -70,6 +70,9 @@ let latestAskUserQuestionProps: any;
 let renderRealChatEditor: boolean;
 let renderRealAskUserQuestion: boolean;
 const transcriptScrollToBottom = vi.fn();
+let latestCanScrollToBottomChange:
+  | ((canScrollToBottom: boolean) => void)
+  | undefined;
 let latestFollowupAccept: ((suggestion: string) => void) | undefined;
 let latestMonitorDetailsOnOpen:
   | ((tool: {
@@ -267,6 +270,7 @@ vi.mock('./TranscriptViewport', () => ({
     useImperativeHandle(ref, () => ({
       scrollToBottom: transcriptScrollToBottom,
     }));
+    latestCanScrollToBottomChange = props.onCanScrollToBottomChange;
     return (
       <div
         data-testid="pane-messages"
@@ -563,6 +567,7 @@ beforeEach(() => {
   renderRealChatEditor = false;
   renderRealAskUserQuestion = false;
   transcriptScrollToBottom.mockClear();
+  latestCanScrollToBottomChange = undefined;
   sessionHasActivePromptValue = false;
   queuedPromptStreamingState = undefined;
   queuedPromptSessionHasActivePrompt = undefined;
@@ -4747,6 +4752,28 @@ describe('pane reported-artifact registration (R6-1)', () => {
 });
 
 describe('ChatPane ChatSurface convergence (slice 4)', () => {
+  it('shows a scroll-to-bottom control above the composer while the transcript is detached', () => {
+    render();
+    const label = 'Scroll to bottom';
+    expect(
+      container!.querySelector(`button[aria-label="${label}"]`),
+    ).toBeNull();
+
+    act(() => latestCanScrollToBottomChange?.(true));
+    const button = container!.querySelector<HTMLButtonElement>(
+      `button[aria-label="${label}"]`,
+    );
+    expect(button).not.toBeNull();
+
+    act(() => button!.click());
+    expect(transcriptScrollToBottom).toHaveBeenCalledOnce();
+
+    act(() => latestCanScrollToBottomChange?.(false));
+    expect(
+      container!.querySelector(`button[aria-label="${label}"]`),
+    ).toBeNull();
+  });
+
   it('renders through ChatSurface, routes AskUserQuestion submit and dismiss, forwards isResponding, and scrolls transcript on submit', async () => {
     streamingStateValue = 'responding';
     pendingPermission = {
