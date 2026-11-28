@@ -258,7 +258,11 @@ function budgetOutputTokensForWindow(
     // every other estimator on the send path uses it, and pricing a kept image
     // low here over-states the room, which is the 400 this budget exists to
     // prevent.
-    estimateContentTokens(contents, imageTokenEstimate) -
+    // The floor prices each kept image at no less than the resolved flat
+    // estimate (#17321 F2): the resolution charge can fall below what the
+    // provider actually transports, and that gap is exactly the
+    // non-retryable 400 this budget exists to prevent.
+    estimateContentTokens(contents, imageTokenEstimate, imageTokenEstimate) -
     estimateSystemInstructionTokens(requestConfig.systemInstruction) -
     estimateToolTokens(tools) -
     estimateResponseSchemaTokens(requestConfig.responseJsonSchema);

@@ -239,6 +239,303 @@ describe('compactionInputSlimming', () => {
       ).toBe(expected);
     });
 
+    it('derives the budget from image resolution when the header parses (#17315)', () => {
+      // Minimal PNG header declaring 1920×1080: the patch-grid formula
+      // charges ceil(1920*1080/2048) = 1013 tokens instead of the flat 1600.
+      const b = new Uint8Array(33);
+      b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+      b[8] = 0;
+      b[9] = 0;
+      b[10] = 0;
+      b[11] = 13;
+      b.set([0x49, 0x48, 0x44, 0x52], 12);
+      b[16] = 0;
+      b[17] = 0;
+      b[18] = 0x07;
+      b[19] = 0x80; // width 1920
+      b[20] = 0;
+      b[21] = 0;
+      b[22] = 0x04;
+      b[23] = 0x38; // height 1080
+      const data = Buffer.from(b).toString('base64');
+      expect(
+        estimatePartChars(
+          { inlineData: { mimeType: 'image/png', data } },
+          1600,
+        ),
+      ).toBe(1013 * 4);
+    });
+
+    it('bills GIF at the flat estimate regardless of dimensions (#17321 R1-1)', () => {
+      // GIF always bills flat: the byte-scan heuristic was wrong in both
+      // directions, so static GIFs pay the flat cost too until a real
+      // frame parser lands.
+      const gif = Buffer.from([
+        0x47,
+        0x49,
+        0x46,
+        0x38,
+        0x39,
+        0x61, // 'GIF89a'
+        0x20,
+        0x03,
+        0xe0,
+        0x01, // 800x480 LE
+      ]).toString('base64');
+      expect(
+        estimatePartChars(
+          { inlineData: { mimeType: 'image/gif', data: gif } },
+          1600,
+        ),
+      ).toBe(1600 * 4);
+    });
+
+    // Chunked-PNG helper for the animation-guard pins: big-endian length,
+    // fourcc type, payload, zero CRC (the dimension parser ignores CRC).
+    const pngChunk = (type: string, data: Uint8Array): Uint8Array => {
+      const out = new Uint8Array(12 + data.length);
+      out[0] = (data.length >>> 24) & 0xff;
+      out[1] = (data.length >>> 16) & 0xff;
+      out[2] = (data.length >>> 8) & 0xff;
+      out[3] = data.length & 0xff;
+      for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+      out.set(data, 8);
+      return out;
+    };
+    const pngSig = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ]);
+    const ihdr = (width: number, height: number): Uint8Array => {
+      const d = new Uint8Array(13);
+      d[0] = (width >>> 24) & 0xff;
+      d[1] = (width >>> 16) & 0xff;
+      d[2] = (width >>> 8) & 0xff;
+      d[3] = width & 0xff;
+      d[4] = (height >>> 24) & 0xff;
+      d[5] = (height >>> 16) & 0xff;
+      d[6] = (height >>> 8) & 0xff;
+      d[7] = height & 0xff;
+      d[8] = 8;
+      d[9] = 2;
+      return pngChunk('IHDR', d);
+    };
+    const b64 = (parts: Uint8Array[]) =>
+      Buffer.from(
+        parts.reduce((acc, p) => {
+          acc.push(...p);
+          return acc;
+        }, [] as number[]),
+      ).toString('base64');
+
+    it('bills GIF-signature text files flat, not garbage dimensions (#17321 F3)', () => {
+      // A text file whose first bytes merely look like GIF ("GIF export
+      // notes…") must never reach the GIF dimension parser: under the old
+      // 3-byte signature it was billed 400K+ tokens of nonsense dimensions.
+      const text = Buffer.from(
+        'GIF export notes: this is not an image',
+      ).toString('base64');
+      expect(
+        estimatePartChars(
+          { inlineData: { mimeType: 'image/png', data: text } },
+          1600,
+        ),
+      ).toBe(1600 * 4);
+      const gif8 = Buffer.from('GIF8 report: dimensions are metadata').toString(
+        'base64',
+      );
+      expect(
+        estimatePartChars(
+          { inlineData: { mimeType: 'image/png', data: gif8 } },
+          1600,
+        ),
+      ).toBe(1600 * 4);
+    });
+
+    it('bills a real GIF flat through the animation guard, not the parse floor (#17321 F5)', () => {
+      // 16+ bytes so the payload clears the dimension parser's own floor:
+      // this fixture distinguishes "flat because the guard fired" from
+      // "flat because the parser gave up".
+      const gif = Buffer.concat([
+        Buffer.from('GIF89a'),
+        Buffer.from([0x20, 0x03, 0xe0, 0x01]), // 800x480 LE
+        Buffer.alloc(24, 0x2c), // padding past the 16-byte floor
+      ]).toString('base64');
+      expect(
+        estimatePartChars(
+          { inlineData: { mimeType: 'image/gif', data: gif } },
+          1600,
+        ),
+      ).toBe(1600 * 4);
+    });
+
+    it('finds acTL behind an oversized metadata chunk and bills the APNG flat (#17321 F1 residual)', () => {
+      // Metadata chunks before acTL are legal and unbounded; the scan must
+      // cover the whole pre-IDAT region, not the first 1 KiB. With a
+      // 2 KiB tEXt ahead of acTL, a windowed scan would take the static
+      // resolution path (1013 tokens for 1920×1080).
+      const data = b64([
+        pngSig,
+        ihdr(1920, 1080),
+        pngChunk('tEXt', new Uint8Array(2048)),
+        pngChunk('acTL', new Uint8Array(8)),
+      ]);
+      expect(
+        estimatePartChars(
+          { inlineData: { mimeType: 'image/png', data } },
+          1600,
+        ),
+      ).toBe(1600 * 4);
+    });
+
+    it('bills a mislabeled animated WebP flat through the magic-keyed guard (#17321 F1 residual)', () => {
+      // VP8X with the ANIM flag under an image/png label: the guard is
+      // keyed on the RIFF/WEBP magic, never the mime label, so the
+      // animation flag still routes the payload to the flat estimate.
+      const bytes = new Uint8Array(30);
+      bytes.set([0x52, 0x49, 0x46, 0x46], 0); // 'RIFF'
+      bytes.set([0x57, 0x45, 0x42, 0x50], 8); // 'WEBP'
+      bytes.set([0x56, 0x50, 0x38, 0x58], 12); // 'VP8X'
+      bytes[20] = 0x02; // ANIM flag
+      expect(
+        estimatePartChars(
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: Buffer.from(bytes).toString('base64'),
+            },
+          },
+          1600,
+        ),
+      ).toBe(1600 * 4);
+    });
+
+    it('keeps a static mislabeled WebP on the parse path (#17321 F1 residual)', () => {
+      // The same magic-keyed check must not over-trigger: a VP8X without
+      // the ANIM flag stays static and takes the resolution formula. The
+      // canvas is 1920×1080 (canvas-minus-1, 24-bit LE in the VP8X
+      // payload), so the parse path yields 1013 tokens — distinct from
+      // both the flat 1600 and any fallback.
+      const bytes = new Uint8Array(30);
+      bytes.set([0x52, 0x49, 0x46, 0x46], 0);
+      bytes.set([0x57, 0x45, 0x42, 0x50], 8);
+      bytes.set([0x56, 0x50, 0x38, 0x58], 12);
+      bytes[20] = 0x00; // no ANIM
+      bytes[24] = 0x7f; // width-1 = 1919 (0x77F) LE
+      bytes[25] = 0x07;
+      bytes[27] = 0x37; // height-1 = 1079 (0x437) LE
+      bytes[28] = 0x04;
+      expect(
+        estimatePartChars(
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: Buffer.from(bytes).toString('base64'),
+            },
+          },
+          1600,
+        ),
+      ).toBe(1013 * 4);
+    });
+
+    it('honors an explicitly configured estimate over the resolution path (#17321 R1-3)', () => {
+      // Real PNG bytes at 1920x1080 with a non-default estimate: the
+      // override must keep having its effect — the resolution path is
+      // default-only.
+      const b = new Uint8Array(33);
+      b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+      b[8] = 0;
+      b[9] = 0;
+      b[10] = 0;
+      b[11] = 13;
+      b.set([0x49, 0x48, 0x44, 0x52], 12);
+      b[16] = 0;
+      b[17] = 0;
+      b[18] = 0x07;
+      b[19] = 0x80;
+      b[20] = 0;
+      b[21] = 0;
+      b[22] = 0x04;
+      b[23] = 0x38;
+      const data = Buffer.from(b).toString('base64');
+      expect(
+        estimatePartChars(
+          { inlineData: { mimeType: 'image/png', data } },
+          3000,
+        ),
+      ).toBe(3000 * 4); // override, not 1013*4
+    });
+    it('propagates the image floor into functionResponse-nested media (#17321 round-6 deferral)', () => {
+      // Tool media rides on functionResponse.parts; the transport floor
+      // must reach it or a nested screenshot prices below what the send
+      // path charges. Reverting the floor pass-through on the nested walk
+      // must redden this test.
+      const real = new Uint8Array(33);
+      real.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+      real[8] = 0;
+      real[9] = 0;
+      real[10] = 0;
+      real[11] = 13;
+      real.set([0x49, 0x48, 0x44, 0x52], 12);
+      real[16] = 0;
+      real[17] = 0;
+      real[18] = 0x07;
+      real[19] = 0x80; // 1920
+      real[20] = 0;
+      real[21] = 0;
+      real[22] = 0x04;
+      real[23] = 0x38; // 1080
+      const nested = {
+        functionResponse: {
+          name: 'read_file',
+          response: { output: 'ok' },
+          parts: [
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: Buffer.from(real).toString('base64'),
+              },
+            },
+          ],
+        },
+      };
+      // Without the floor the nested 1920x1080 image bills 1013 tokens
+      // (4052 chars); with it, the flat 1600 (6400) wins.
+      expect(
+        estimatePartChars(nested as never, 1600, 1600),
+      ).toBeGreaterThanOrEqual(1600 * 4 + 'ok'.length + 64);
+      expect(estimatePartChars(nested as never, 1600)).toBe(
+        1013 * 4 + 'ok'.length + 64,
+      );
+    });
+
+    it('keeps the flat budget for non-image inline binary kinds (#17321 F4)', () => {
+      // Real parseable PNG bytes under a non-image mime: the mime gate must
+      // reject them before the parser runs, proving the gate exists rather
+      // than the parser just failing on the bytes.
+      const png = new Uint8Array(33);
+      png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+      png[8] = 0;
+      png[9] = 0;
+      png[10] = 0;
+      png[11] = 13;
+      png.set([0x49, 0x48, 0x44, 0x52], 12);
+      png[16] = 0;
+      png[17] = 0;
+      png[18] = 0x07;
+      png[19] = 0x80;
+      png[20] = 0;
+      png[21] = 0;
+      png[22] = 0x04;
+      png[23] = 0x38;
+      const data = Buffer.from(png).toString('base64');
+      expect(
+        estimatePartChars(
+          { inlineData: { mimeType: 'application/pdf', data } },
+          1600,
+        ),
+      ).toBe(1600 * 4);
+    });
+
     it('uses fixed budget for fileData', () => {
       expect(
         estimatePartChars(
