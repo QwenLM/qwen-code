@@ -50,40 +50,25 @@ export function transcriptBlocksToLocalizedMessages(
   });
 }
 
-// Causes the daemon can stop a turn for. Other or incomplete details fall
-// back to the generic loop text.
+// Causes the daemon can stop a turn for. Other or incomplete details, such as
+// the causes an older session recorded, fall back to the generic loop text.
 function localizeLoopStop(
   loop: DaemonLoopStop,
   t: Translator,
 ): string | undefined {
   const limit = loop.toolCallLimit;
-  switch (loop.loopType) {
-    case 'turn_tool_call_cap':
-      if (limit === undefined) return undefined;
-      switch (loop.loopReason) {
-        case 'explicit_cap':
-          return t('error.loopDetected.explicitCap', { limit });
-        case 'backstop':
-          return t('error.loopDetected.backstop', { limit });
-        case 'stuck_repetition':
-          return t('error.loopDetected.stuckRepetition', { limit });
-        default:
-          return undefined;
-      }
-    case 'global_tool_call_duplicate':
-      switch (loop.loopReason) {
-        case 'repeated_call':
-          return t('error.loopDetected.repeatedCall');
-        case 'provider_duplicate_id':
-          return t('error.loopDetected.providerDuplicateId');
-        default:
-          return undefined;
-      }
-    case 'invalid_tool_params_stagnation':
-      return t('error.loopDetected.invalidToolParams');
-    case 'repeated_tool_execution_failure':
-      return t('error.loopDetected.repeatedToolFailure');
-    default:
-      return undefined;
+  if (
+    loop.loopType === 'turn_tool_call_cap' &&
+    loop.loopReason === 'explicit_cap' &&
+    limit !== undefined
+  ) {
+    return t('error.loopDetected.explicitCap', { limit });
   }
+  if (
+    loop.loopType === 'global_tool_call_duplicate' &&
+    loop.loopReason === 'provider_duplicate_id'
+  ) {
+    return t('error.loopDetected.providerDuplicateId');
+  }
+  return undefined;
 }

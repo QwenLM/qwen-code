@@ -842,5 +842,40 @@ describe('runCleanup (real git)', () => {
       expect(existsSync(paths.gatePath)).toBe(false);
       expect(run(repo, 'symbolic-ref', 'HEAD')).toBe('refs/heads/main');
     });
+
+    it('refuses a prNumber-mismatched state without --force, and --force removes only the argument PR files leaving the other PR intact', () => {
+      makeInPlace();
+      const base = readState(paths.statePath)!;
+      // Live PR #99 watch with its own ref, lock, and state.
+      const paths99 = autofixPrPaths(repo, 99);
+      writeState(paths99.statePath, {
+        ...base,
+        prNumber: 99,
+      });
+      run(repo, 'update-ref', paths99.headRef, headSha);
+      writeFileSync(paths99.lockPath, 'lock99');
+      // PR #7's own gate cursor and private ref, plus a corrupted state claiming prNumber: 99.
+      writeFileSync(paths.gatePath, JSON.stringify({ version: 1 }));
+      run(repo, 'update-ref', paths.headRef, headSha);
+      writeState(paths.statePath, {
+        ...base,
+        prNumber: 99,
+      });
+
+      expect(() => runCleanup(7, false)).toThrow(
+        /records PR #99.*cleanup 7 --force/,
+      );
+      expect(existsSync(paths.statePath)).toBe(true);
+
+      // --force removes only PR #7's watch files and ref; PR #99 is untouched, and PR #7's gate stays.
+      runCleanup(7, true);
+      expect(existsSync(paths.statePath)).toBe(false);
+      expect(existsSync(paths.gatePath)).toBe(true);
+      expect(run(repo, 'for-each-ref', paths.headRef)).toBe('');
+      expect(existsSync(paths99.statePath)).toBe(true);
+      expect(existsSync(paths99.lockPath)).toBe(true);
+      expect(run(repo, 'for-each-ref', paths99.headRef)).not.toBe('');
+      expect(run(repo, 'symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+    });
   });
 });

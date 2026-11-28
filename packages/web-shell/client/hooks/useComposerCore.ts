@@ -74,8 +74,9 @@ import {
   pushInputHistoryEntry,
   useInputHistory,
 } from '../hooks/useInputHistory';
-import { subscribeSidechannelRemotePrompt } from '../daemon/remotePromptSidechannel';
+import { subscribeSidechannelRemotePrompt } from '../utils/remote-prompt-sidechannel';
 import type { DaemonInputHistoryKind } from '../daemon/workspace/types';
+import { MAX_INPUT_HISTORY_ENTRY_CHARS } from '@qwen-code/qwen-code-core/utils/input-history.js';
 import {
   useAtMentionMenu,
   type AtMentionMenuState,
@@ -3656,6 +3657,8 @@ export function useComposerCore(
       inputHistoryTarget.workspaceId === undefined) ||
       promptHistoryStorageKey ===
         getPromptHistoryStorageKey(inputHistoryTarget.workspaceCwd));
+  const remoteHistoryEnabledRef = useRef(remoteHistoryEnabled);
+  remoteHistoryEnabledRef.current = remoteHistoryEnabled;
   const shellRemoteHistoryEnabled =
     shellModeEnabled &&
     inputHistoryTarget !== undefined &&
@@ -5844,6 +5847,29 @@ export function useComposerCore(
     return viewRef.current?.state.doc.toString() ?? '';
   }, [isTouchComposer]);
 
+  const saveCurrentDraftToHistory = useCallback(() => {
+    if (!composerMountedRef.current || shellModeRef.current) return;
+    const text = getText().trim();
+    if (!text) return;
+    historyActionsRef.current.push(text, { keepLocalOnRemoteMiss: true });
+
+    if (
+      !remoteHistoryEnabledRef.current ||
+      text.length > MAX_INPUT_HISTORY_ENTRY_CHARS
+    ) {
+      return;
+    }
+    const target = inputHistoryTargetRef.current;
+    const recordInputHistory =
+      workspaceRef.current?.actions?.recordInputHistory;
+    if (!target || typeof recordInputHistory !== 'function') return;
+    void recordInputHistory({
+      kind: 'prompt',
+      entry: text,
+      workspaceId: target.workspaceId,
+    }).catch(() => {});
+  }, [getText]);
+
   const setText = useCallback(
     (text: string) => {
       if (isTouchComposer) {
@@ -6531,6 +6557,7 @@ export function useComposerCore(
       hasAttachments,
       hasInput,
       setText,
+      saveCurrentDraftToHistory,
       addTags,
       removeTag: removeTopTag,
       insertText,
@@ -6554,6 +6581,7 @@ export function useComposerCore(
     restoreFiles,
     restoreInputAnnotations,
     retryLast,
+    saveCurrentDraftToHistory,
     setText,
     submit,
   ]);

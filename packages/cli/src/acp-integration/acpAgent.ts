@@ -267,6 +267,7 @@ import {
   UserFeedbackRating,
 } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { formatBtwToolCallNotice } from '../ui/utils/btw-view.js';
+import { persistSessionUsageOnClose } from '../utils/usage-persistence.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -4820,6 +4821,46 @@ class QwenAgent implements Agent {
     }
   }
 
+  private finalizeSessionUsageOnTeardown(
+    sessionId: string,
+    session: Session,
+    cleanupErrors?: unknown[],
+  ): void {
+    let sessionConfig: ReturnType<Session['getConfig']> | undefined;
+    try {
+      sessionConfig =
+        typeof session?.getConfig === 'function'
+          ? session.getConfig()
+          : undefined;
+    } catch (error) {
+      cleanupErrors?.push(error);
+    }
+    let activeSessionId: string | undefined;
+    try {
+      activeSessionId = sessionConfig?.getSessionId?.();
+    } catch (error) {
+      cleanupErrors?.push(error);
+    }
+    const sessionIdsToFinalize =
+      activeSessionId && activeSessionId !== sessionId
+        ? [sessionId, activeSessionId]
+        : [sessionId];
+    for (const id of sessionIdsToFinalize) {
+      if (sessionConfig) {
+        try {
+          persistSessionUsageOnClose(sessionConfig, id);
+        } catch (error) {
+          cleanupErrors?.push(error);
+        }
+      }
+      try {
+        uiTelemetryService.removeSession(id);
+      } catch (error) {
+        cleanupErrors?.push(error);
+      }
+    }
+  }
+
   private async removeStoredSessionEntry(
     sessionId: string,
     session: Session,
@@ -4861,11 +4902,7 @@ class QwenAgent implements Agent {
     } catch (error) {
       cleanupErrors.push(error);
     }
-    try {
-      uiTelemetryService.removeSession(sessionId);
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
+    this.finalizeSessionUsageOnTeardown(sessionId, session, cleanupErrors);
     try {
       await this.turnSkillLeases.collect(sessionId, true);
     } catch (error) {
@@ -5148,7 +5185,9 @@ class QwenAgent implements Agent {
     // into a new hold while the drain below is in progress, so this early read
     // is an optimization rather than the final authorization.
     if (opts?.onlyIfUnheld) {
-      const holds = session.collectActiveWorkHolds();
+      const holds = session.collectActiveWorkHolds({
+        includeScheduledTasks: true,
+      });
       if (holds.length > 0) {
         cancelClose();
         return { closed: false, holds };
@@ -5165,7 +5204,9 @@ class QwenAgent implements Agent {
           drainTimeoutMs,
           'close',
         );
-        const holds = session.collectActiveWorkHolds();
+        const holds = session.collectActiveWorkHolds({
+          includeScheduledTasks: true,
+        });
         if (holds.length > 0) {
           return { closed: false, holds };
         }
@@ -5254,7 +5295,9 @@ class QwenAgent implements Agent {
           // every active turn has settled, while both the close gate and the
           // history-mutation gate still block destructive races.
           if (opts?.onlyIfUnheld) {
-            const holds = session.collectActiveWorkHolds();
+            const holds = session.collectActiveWorkHolds({
+              includeScheduledTasks: true,
+            });
             if (holds.length > 0) {
               return { closed: false, holds };
             }
@@ -5578,6 +5621,12 @@ class QwenAgent implements Agent {
         }),
       ),
     );
+    // Any session whose budgeted close/drain threw before reaching
+    // removeStoredSessionEntry is still in `this.sessions`; sweep its live
+    // telemetry bucket per session so its delta is not lost on process exit.
+    for (const [sessionId, session] of [...this.sessions.entries()]) {
+      this.finalizeSessionUsageOnTeardown(sessionId, session);
+    }
     // Turn admission can return a peer item to the queue after the inbox's
     // first snapshot. Session disposal detaches those items as well.
     await Promise.all(this.pendingPeerExpiries);
@@ -14556,16 +14605,30 @@ class QwenAgent implements Agent {
             'Invalid or missing taskId',
           );
         }
+        const source = params['source'];
+        if (source !== undefined && source !== 'cron' && source !== 'wakeup') {
+          throw RequestError.invalidParams(
+            undefined,
+            'source must be "cron" or "wakeup"',
+          );
+        }
         const taskKind = params['taskKind'];
         if (
           taskKind !== 'agent' &&
           taskKind !== 'shell' &&
           taskKind !== 'monitor' &&
-          taskKind !== 'workflow'
+          taskKind !== 'workflow' &&
+          taskKind !== 'cron'
         ) {
           throw RequestError.invalidParams(
             undefined,
-            'taskKind must be "agent", "shell", "monitor", or "workflow"',
+            'taskKind must be "agent", "shell", "monitor", "workflow", or "cron"',
+          );
+        }
+        if (taskKind !== 'cron' && source !== undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'source is valid only for taskKind "cron"',
           );
         }
         debugLogger.info(
@@ -14670,6 +14733,52 @@ class QwenAgent implements Agent {
               `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
             );
             return { cancelled: true, status: task.status };
+          }
+          case 'cron': {
+            if (!config.isCronEnabled?.()) {
+              return { cancelled: false, reason: 'disabled' };
+            }
+            const scheduler = config.getCronScheduler?.();
+            const candidates =
+              scheduler
+                ?.list?.()
+                .filter(
+                  (item) =>
+                    item.id === taskId &&
+                    (source === undefined ||
+                      (source === 'wakeup'
+                        ? item.cronExpr === '@wakeup'
+                        : item.cronExpr !== '@wakeup')),
+                ) ?? [];
+            const job =
+              candidates.find((item) => !item.durable) ??
+              candidates.find((item) => item.durable);
+            if (!job) {
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} source=${source ?? 'legacy'} reason=not_found`,
+              );
+              return { cancelled: false, reason: 'not_found' };
+            }
+            if (job.durable) {
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} source=${source ?? 'legacy'} reason=not_session_scoped`,
+              );
+              return { cancelled: false, reason: 'not_session_scoped' };
+            }
+            if (
+              source === undefined &&
+              candidates.filter((item) => !item.durable).length > 1
+            ) {
+              return { cancelled: false, reason: 'ambiguous' };
+            }
+            const deleted =
+              job.cronExpr === '@wakeup'
+                ? scheduler!.cancelWakeup(taskId)
+                : scheduler!.cancelSessionCron(taskId);
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} deleted=${deleted}`,
+            );
+            return { cancelled: deleted };
           }
           default: {
             const exhaustive: never = taskKind;

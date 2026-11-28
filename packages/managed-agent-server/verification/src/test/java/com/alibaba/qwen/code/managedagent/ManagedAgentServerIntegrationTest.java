@@ -157,6 +157,9 @@ class ManagedAgentServerIntegrationTest {
         // cannot pass for the wrong reason.
         assertThat(applicationContext.containsBean("managedArtifactScheduler")).isTrue();
         assertThat(applicationContext.containsBean("runtimeRecoveryScheduler")).isFalse();
+        assertThat(applicationContext.getBeanNamesForType(
+                com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpController.class))
+                .isEmpty();
     }
 
     // Keeps the dispatch recovery scanner from claiming a Turn that the

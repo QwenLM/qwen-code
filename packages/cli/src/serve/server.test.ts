@@ -777,6 +777,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_tasks',
   'session_agents',
   'session_agent_trace',
+  'scheduled_task_owner_selection',
   'scheduled_task_gate',
   'autofix_pr_watches',
   'session_monitor_tool_correlation',
@@ -1280,8 +1281,9 @@ interface FakeBridgeOpts {
   cancelSessionTaskImpl?: (
     sessionId: string,
     taskId: string,
-    taskKind: 'agent' | 'shell' | 'monitor' | 'workflow',
+    taskKind: Parameters<AcpSessionBridge['cancelSessionTask']>[2],
     context?: BridgeClientRequestContext,
+    source?: Parameters<AcpSessionBridge['cancelSessionTask']>[4],
   ) => Promise<{ cancelled: boolean }>;
   controlSessionWorkflowTaskImpl?: (
     sessionId: string,
@@ -1621,8 +1623,9 @@ interface FakeBridge extends AcpSessionBridge {
   cancelSessionTaskCalls: Array<{
     sessionId: string;
     taskId: string;
-    taskKind: 'agent' | 'shell' | 'monitor' | 'workflow';
+    taskKind: Parameters<AcpSessionBridge['cancelSessionTask']>[2];
     context?: BridgeClientRequestContext;
+    source?: Parameters<AcpSessionBridge['cancelSessionTask']>[4];
   }>;
   controlSessionWorkflowTaskCalls: Array<{
     sessionId: string;
@@ -2934,14 +2937,21 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionTurnIndexCalls.push(req);
       return sessionTurnIndexImpl(req);
     },
-    async cancelSessionTask(sessionId, taskId, taskKind, context) {
+    async cancelSessionTask(sessionId, taskId, taskKind, context, source) {
       cancelSessionTaskCalls.push({
         sessionId,
         taskId,
         taskKind,
         ...(context ? { context } : {}),
+        ...(source ? { source } : {}),
       });
-      return cancelSessionTaskImpl(sessionId, taskId, taskKind, context);
+      return cancelSessionTaskImpl(
+        sessionId,
+        taskId,
+        taskKind,
+        context,
+        source,
+      );
     },
     async controlSessionWorkflowTask(
       sessionId,
@@ -12248,9 +12258,97 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toBe(
-        '`kind` must be "agent", "shell", "monitor", or "workflow"',
+        '`kind` must be "agent", "shell", "monitor", "workflow", or "cron"',
       );
       expect(bridge.cancelSessionTaskCalls).toEqual([]);
+    });
+
+    it('cancels a cron task through the bridge', async () => {
+      const bridge = fakeBridge({
+        cancelSessionTaskImpl: async () => ({ cancelled: true }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/tasks/cron-1/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ kind: 'cron' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ cancelled: true });
+      expect(bridge.cancelSessionTaskCalls).toEqual([
+        {
+          sessionId: 's-1',
+          taskId: 'cron-1',
+          taskKind: 'cron',
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it.each([
+      { kind: 'agent', source: 'wakeup' },
+      { kind: 'cron', source: 'unsupported' },
+    ])('rejects invalid kind/source combinations: %j', async (body) => {
+      const bridge = fakeBridge({
+        cancelSessionTaskImpl: async () => ({ cancelled: true }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/tasks/task-1/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send(body);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(
+        '`source` must be "cron" or "wakeup" for a cron task',
+      );
+      expect(bridge.cancelSessionTaskCalls).toEqual([]);
+    });
+
+    it('forwards the selected cron wakeup source through the bridge', async () => {
+      const bridge = fakeBridge({
+        cancelSessionTaskImpl: async () => ({ cancelled: true }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/tasks/shared-source/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ kind: 'cron', source: 'wakeup' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ cancelled: true });
+      expect(bridge.cancelSessionTaskCalls).toEqual([
+        {
+          sessionId: 's-1',
+          taskId: 'shared-source',
+          taskKind: 'cron',
+          context: { clientId: 'client-1' },
+          source: 'wakeup',
+        },
+      ]);
     });
 
     it('cancels a workflow task through the bridge', async () => {
@@ -28367,8 +28465,27 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ ...summary, lastUserPromptAt: timestamp });
-      expect(read).toHaveBeenCalledWith('s-time');
+      expect(read).toHaveBeenCalledWith('s-time', 'active', {
+        allowSidecarWrite: false,
+      });
       expect(read.mock.instances[0]?.getProjectRoot()).toBe(WS_BOUND);
+
+      read.mockClear();
+      read.mockResolvedValueOnce(timestamp);
+      const trustedApp = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+      const trustedRes = await request(trustedApp)
+        .get('/session/s-time/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(trustedRes.status).toBe(200);
+      expect(trustedRes.body).toEqual({
+        ...summary,
+        lastUserPromptAt: timestamp,
+      });
+      expect(read).toHaveBeenCalledWith('s-time');
       read.mockRestore();
     });
 

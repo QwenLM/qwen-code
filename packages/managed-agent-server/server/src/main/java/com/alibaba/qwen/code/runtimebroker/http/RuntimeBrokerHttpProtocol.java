@@ -11,18 +11,13 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -33,9 +28,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.function.BiFunction;
 import java.util.function.Function;
 
 /**
@@ -48,82 +43,50 @@ import java.util.function.Function;
  * {@code progress} list with {@code firstAvailableSeq} equal to
  * {@code lastSeq}.
  */
-public final class RuntimeBrokerHttpServer implements AutoCloseable {
-    public static final String ROUTE_PREFIX = "/internal/runtime-broker/v1";
+final class RuntimeBrokerHttpProtocol implements AutoCloseable {
+    static final String ROUTE_PREFIX = "/internal/runtime-broker/v1";
     private static final int MAXIMUM_REQUEST_BYTES = 8 * 1024 * 1024;
     private static final int MAXIMUM_HTTP_THREADS = 32;
     private static final int MAXIMUM_QUEUED_REQUESTS = 64;
     private final RuntimeBrokerService service;
     private final byte[] authorization;
-    private final HttpServer server;
     private final ExecutorService executor;
 
-    public RuntimeBrokerHttpServer(InetSocketAddress address, String token,
-            RuntimeBrokerService service) throws IOException {
-        this(address, token, service, false);
-    }
-
-    /**
-     * The face authenticates with one global Bearer token over plaintext
-     * HTTP, so by default it only binds a loopback address. Serving beyond
-     * loopback requires {@code allowNonLoopback} and a deployment that
-     * terminates TLS and authorizes callers in front.
-     */
-    public RuntimeBrokerHttpServer(InetSocketAddress address, String token,
-            RuntimeBrokerService service, boolean allowNonLoopback)
-            throws IOException {
-        this(address, token, service, allowNonLoopback, null);
-    }
-
-    public RuntimeBrokerHttpServer(InetSocketAddress address, String token,
-            RuntimeBrokerService service, boolean allowNonLoopback,
-            BiFunction<String, Map<String, Object>, Map<String, Object>> nativeReadback) throws IOException {
-        if (address == null || service == null) {
-            throw new IllegalArgumentException(
-                    "address and service are required");
+    RuntimeBrokerHttpProtocol(String token, RuntimeBrokerService service) {
+        if (service == null) {
+            throw new IllegalArgumentException("service is required");
         }
-        InetAddress bind = address.getAddress();
-        if (!allowNonLoopback && (bind == null || !bind.isLoopbackAddress())) {
-            throw new IllegalArgumentException("Runtime Broker serves one"
-                    + " global token over plaintext HTTP and refuses a"
-                    + " non-loopback listen address (" + address
-                    + "); pass allowNonLoopback only behind a TLS-terminating"
-                    + " layer that authorizes callers");
-        }
-        this.authorization = ("Bearer "
-                + BrokerValues.requireId(token, "token"))
+        this.authorization = ("Bearer " + BrokerValues.requireId(token, "token"))
                 .getBytes(StandardCharsets.UTF_8);
         this.service = service;
-        this.server = HttpServer.create(address, 0);
         this.executor = new ThreadPoolExecutor(MAXIMUM_HTTP_THREADS, MAXIMUM_HTTP_THREADS,
                 0, TimeUnit.SECONDS, new ArrayBlockingQueue<>(MAXIMUM_QUEUED_REQUESTS),
                 Thread.ofPlatform().daemon().name("runtime-broker-http-", 0).factory(),
                 new ThreadPoolExecutor.AbortPolicy());
-        server.setExecutor(executor);
-        server.createContext(ROUTE_PREFIX, this::handle);
     }
 
-    public void start() {
-        server.start();
-    }
-
-    public URI getBaseUri() {
-        InetSocketAddress address = server.getAddress();
-        String host = address.getAddress().getHostAddress();
-        if (host.indexOf(':') >= 0) {
-            host = "[" + host + "]";
+    void accept(BrokerHttpExchange exchange) {
+        try {
+            executor.execute(() -> handle(exchange));
+        } catch (RejectedExecutionException rejected) {
+            sendError(exchange, new RuntimeBrokerException(503,
+                    "runtime_broker_overloaded",
+                    "Runtime Broker request capacity is exhausted.", true));
         }
-        return URI.create("http://" + host + ":" + address.getPort() + "/");
+    }
+
+    static void unavailable(BrokerHttpExchange exchange) {
+        sendError(exchange, new RuntimeBrokerException(503,
+                "runtime_broker_unavailable",
+                "Runtime Broker is shutting down.", true));
     }
 
     @Override
     public void close() {
-        server.stop(0);
         executor.shutdownNow();
-        service.close();
     }
 
-    private void handle(HttpExchange exchange) {
+    private void handle(BrokerHttpExchange exchange) {
         try {
             authorize(exchange);
             String path = exchange.getRequestURI().getRawPath();
@@ -149,7 +112,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                         ? JsonCodec.requiredString(body, "expectedRuntimeBindingId", "extension metadata control") : null;
                 Long generation = body.containsKey("expectedRuntimeGeneration")
                         ? Long.parseLong(JsonCodec.requiredString(body, "expectedRuntimeGeneration", "extension metadata control")) : null;
-                exchange.getResponseHeaders().set("Cache-Control", "no-store");
+                exchange.setResponseHeader("Cache-Control", "no-store");
                 complete(exchange, service.extensionControl(sessionId, binding, generation,
                         requiredObject(body, "operation", "extension metadata control")), result -> result);
                 return;
@@ -238,7 +201,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 }
                 String runtimeSessionId = body.containsKey("runtimeSessionId")
                         ? JsonCodec.requiredString(body, "runtimeSessionId", "MCP definitions request") : null;
-                exchange.getResponseHeaders().set("Cache-Control", "no-store");
+                exchange.setResponseHeader("Cache-Control", "no-store");
                 complete(exchange, service.mcpDefinitions(sessionId, runtimeSessionId), definitions -> Map.of(
                         "protocolVersion", 1, "harnessSessionId", sessionId, "servers", definitions));
                 return;
@@ -340,9 +303,9 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         }
     }
 
-    private static RuntimeLifecycleAuthority lifecycleAuthority(HttpExchange exchange) {
-        String operation = exchange.getRequestHeaders().getFirst(RuntimeLifecycleAuthority.OPERATION_HEADER);
-        String generation = exchange.getRequestHeaders().getFirst(RuntimeLifecycleAuthority.GENERATION_HEADER);
+    private static RuntimeLifecycleAuthority lifecycleAuthority(BrokerHttpExchange exchange) {
+        String operation = exchange.getRequestHeader(RuntimeLifecycleAuthority.OPERATION_HEADER);
+        String generation = exchange.getRequestHeader(RuntimeLifecycleAuthority.GENERATION_HEADER);
         if (operation == null && generation == null) {
             return null;
         }
@@ -353,7 +316,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         }
     }
 
-    private void acquire(HttpExchange exchange) throws IOException {
+    private void acquire(BrokerHttpExchange exchange) throws IOException {
         Map<String, Object> body = requestBody(exchange, "acquire request");
         requireProtocol(body);
         JsonCodec.requiredString(body, "requestId", "acquire request");
@@ -394,7 +357,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         });
     }
 
-    private void toolSession(HttpExchange exchange, String suffix)
+    private void toolSession(BrokerHttpExchange exchange, String suffix)
             throws IOException {
         if ("POST".equals(exchange.getRequestMethod()) && suffix.endsWith(":publisher")) {
             String runtimeSessionId = pathId(suffix.substring(0, suffix.length() - ":publisher".length()));
@@ -534,7 +497,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         throw notFound();
     }
 
-    private void executionRequest(HttpExchange exchange, boolean prepare) throws IOException {
+    private void executionRequest(BrokerHttpExchange exchange, boolean prepare) throws IOException {
         Map<String, Object> body = requestBody(exchange, "execution request", prepare);
         requireProtocol(body);
         JsonCodec.requiredString(body, "requestId", "execution request");
@@ -588,12 +551,12 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                         runtimeSessionId, record));
     }
 
-    private void readBatch(HttpExchange exchange) throws IOException {
+    private void readBatch(BrokerHttpExchange exchange) throws IOException {
         throw new RuntimeBrokerException(501, "runtime_broker_csi_removed",
                 "CSI batch read is no longer supported", false);
     }
 
-    private void execution(HttpExchange exchange, String suffix)
+    private void execution(BrokerHttpExchange exchange, String suffix)
             throws IOException {
         if ("POST".equals(exchange.getRequestMethod()) && suffix.endsWith(":acknowledge")) {
             String executionCallId = pathId(suffix.substring(0, suffix.length() - ":acknowledge".length()));
@@ -756,12 +719,10 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         return executionEnvelope(harnessSessionId, runtimeSessionId, record);
     }
 
-    private void authorize(HttpExchange exchange) {
-        String supplied = exchange.getRequestHeaders().getFirst(
-                "Authorization");
-        byte[] bytes = supplied == null ? new byte[0]
-                : supplied.getBytes(StandardCharsets.UTF_8);
-        if (!MessageDigest.isEqual(authorization, bytes)) {
+    private void authorize(BrokerHttpExchange exchange) {
+        String supplied = exchange.getRequestHeader("Authorization");
+        if (!RuntimeBrokerAuthenticationFilter.authorized(authorization,
+                supplied)) {
             throw new RuntimeBrokerException(401,
                     "runtime_broker_unauthorized",
                     "Runtime Broker authentication failed.", false);
@@ -797,14 +758,14 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         return object;
     }
 
-    private static Map<String, Object> requestBody(HttpExchange exchange,
+    private static Map<String, Object> requestBody(BrokerHttpExchange exchange,
             String context) throws IOException {
         return requestBody(exchange, context, false);
     }
 
-    private static Map<String, Object> requestBody(HttpExchange exchange,
+    private static Map<String, Object> requestBody(BrokerHttpExchange exchange,
             String context, boolean strict) throws IOException {
-        String rawLength = exchange.getRequestHeaders().getFirst(
+        String rawLength = exchange.getRequestHeader(
                 "Content-Length");
         if (rawLength != null) {
             int contentLength;
@@ -972,7 +933,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         }
     }
 
-    private static <T> void complete(HttpExchange exchange,
+    private static <T> void complete(BrokerHttpExchange exchange,
             CompletionStage<T> operation,
             Function<T, Map<String, Object>> response) {
         operation.whenComplete((value, error) -> {
@@ -988,7 +949,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         });
     }
 
-    private static void sendError(HttpExchange exchange, Throwable error) {
+    private static void sendError(BrokerHttpExchange exchange, Throwable error) {
         Throwable actual = unwrap(error);
         RuntimeBrokerException failure;
         if (actual instanceof RuntimeBrokerException brokerFailure) {
@@ -1003,7 +964,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                     "runtime_broker_closed",
                     "Runtime Broker is closed.", false);
         } else {
-            System.getLogger(RuntimeBrokerHttpServer.class.getName()).log(
+            System.getLogger(RuntimeBrokerHttpProtocol.class.getName()).log(
                     System.Logger.Level.ERROR, "Unexpected Runtime Broker operation failure.", actual);
             failure = new RuntimeBrokerException(500,
                     "runtime_broker_internal_error",
@@ -1032,20 +993,18 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         return current;
     }
 
-    private static void sendJson(HttpExchange exchange, int status,
+    private static void sendJson(BrokerHttpExchange exchange, int status,
             Map<String, Object> body) throws IOException {
         byte[] bytes = JsonCodec.encode(body);
-        exchange.getResponseHeaders().set("Content-Type",
-                "application/json; charset=utf-8");
-        exchange.sendResponseHeaders(status, bytes.length);
-        // Close the response stream before the exchange. Since JDK 23
-        // (JDK-6968351) the status line, headers and body stay buffered until
-        // this stream is flushed, and HttpExchange.close() drains the unread
-        // request body first: an early 413 would then wait for that drain, or
-        // be dropped when the client's EOF fails it.
-        try (OutputStream output = exchange.getResponseBody()) {
-            output.write(bytes);
+        try {
+            exchange.setResponseHeader("Content-Type",
+                    "application/json; charset=utf-8");
+            exchange.sendResponseHeaders(status, bytes.length);
+            try (OutputStream output = exchange.getResponseBody()) {
+                output.write(bytes);
+            }
+        } finally {
+            exchange.close();
         }
-        exchange.close();
     }
 }

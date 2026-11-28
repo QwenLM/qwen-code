@@ -188,6 +188,7 @@ import {
   type ComposerChipTask,
 } from './utils/composerTasks';
 import {
+  getScheduledTaskActivityKey,
   getTaskActivityKey,
   hasActiveTaskActivity,
 } from './utils/taskActivity';
@@ -231,6 +232,7 @@ import type {
 import { ChatSurface } from './chat-core/ChatSurface';
 import { useDaemonChatControllerFromState } from './daemon/useDaemonChatController';
 import type { ComposerToolbarAction } from './components/ChatEditor';
+import { DAEMON_COMPOSER_INTEGRATIONS } from './components/composer/daemon-composer-integrations';
 import { getWorkflowModeMessages } from './components/workflow-mode-messages';
 import {
   mapRestoredInputAnnotationsAfterTextChange,
@@ -381,6 +383,7 @@ import {
   type ContextInstructionFileContent,
 } from './components/artifacts/readContextInstructionFile';
 import {
+  enrichScheduledTasksByTurn,
   getArtifactsByTurn,
   getFileChangesByTurn,
   getScheduledTasksByTurn,
@@ -498,6 +501,10 @@ import {
 } from './utils/workspace';
 import { loadReadyWorkspaceSkills } from './daemon/workspace/load-ready-skills';
 import {
+  OVERLOAD_REFUSAL_TTL_MS,
+  useDaemonOverloadPause,
+} from './daemon/workspace/hooks/useDaemonOverloadPause.js';
+import {
   getLocalCommands,
   localizeBuiltinDescriptions,
   skillDescriptionKey,
@@ -505,8 +512,16 @@ import {
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameTranscriptSnapshot } from './hooks/useAnimationFrameTranscriptBlocks';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
+import {
+  useSessionScheduledTasks,
+  type SessionScheduledTask,
+} from './hooks/useSessionScheduledTasks';
 import { useSubSessionTasks } from './hooks/useSubSessionTasks';
 import { extractErrorDetail } from './utils/errorDetail';
+import {
+  createScheduledTaskCancellation,
+  isScheduledTaskCancellation,
+} from './utils/scheduledTaskManualRun';
 import {
   getSendWorkspace,
   parseSendCommand,
@@ -542,7 +557,10 @@ import {
 } from './i18n';
 import { CapacityRecoveryDialog } from './components/workspaces/CapacityRecoveryDialog';
 import { useCapacityRecovery } from './hooks/useCapacityRecovery';
-import { isAcpChildCapacityError } from './daemon/session/httpErrors.js';
+import {
+  isAcpChildCapacityError,
+  isSystemOverloadedError,
+} from './daemon/session/httpErrors.js';
 import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
@@ -941,7 +959,7 @@ interface SendPromptOptionsWithRetry {
   inputAnnotations?: DaemonInputAnnotation[];
   retry?: boolean;
   idempotencyKey?: string;
-  beforeDispatch?: (clientId: string | undefined) => void;
+  beforeDispatch?: (clientId: string | undefined) => void | Promise<void>;
   onAdmissionStarted?: () => void;
   clearComposerOnPromptStart?: boolean;
   commitComposerAccepted?: ComposerSubmitCommit;
@@ -1996,6 +2014,7 @@ const emptyComposerApi: WebShellComposerApi = {
   focus: () => {},
   insertText: () => {},
   setText: () => {},
+  saveCurrentDraftToHistory: () => {},
   addTags: () => {},
   removeTag: () => {},
   clear: () => {},
@@ -2035,6 +2054,7 @@ const DEFAULT_CHAT_HEADER_ITEMS: readonly WebShellChatHeaderItem[] = [
   'title',
   'environment',
   'rightPanel',
+  'scheduledTasks',
   'artifacts',
 ];
 const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
@@ -2065,7 +2085,14 @@ const DRAFT_PANEL_KEY_PREFIX = 'draft\0';
  */
 const trajectoryTabId = (sessionId: string) => `trajectory:${sessionId}`;
 const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
-  ['environment', 'sources', 'subagents', 'backgroundTasks', 'artifacts'];
+  [
+    'environment',
+    'sources',
+    'subagents',
+    'backgroundTasks',
+    'scheduledTasks',
+    'artifacts',
+  ];
 const ATTACHMENTS_REFRESH_INTERVAL_MS = 1000;
 const SESSION_AGENTS_REFRESH_INTERVAL_MS = 3000;
 const SESSION_AGENTS_MAX_RETRY_INTERVAL_MS = 30_000;
@@ -2334,6 +2361,9 @@ type PersistedArtifactPanelTab =
       kind: 'scheduled_task';
       title: string;
       toolCallId: string;
+      taskId?: string;
+      taskScope?: 'durable' | 'session';
+      taskSource?: 'cron' | 'wakeup';
       sourceSessionId?: string;
       workspaceCwd?: string;
       workspaceId?: string;
@@ -2386,6 +2416,118 @@ type PersistedArtifactPanelTab =
       'id' | 'kind' | 'title' | 'sessionId'
     >;
 
+function resolveScheduledTaskWorkspace(
+  capabilities: ReturnType<typeof useWorkspace>['capabilities'],
+  workspaceCwd?: string,
+): { workspaceId?: string; ownerWorkspaceId?: string; resolvable: boolean } {
+  const registeredWorkspaces = capabilities?.workspaces;
+  if (!registeredWorkspaces) {
+    return {
+      workspaceId: undefined,
+      resolvable:
+        workspaceCwd !== undefined &&
+        workspaceCwd === capabilities?.workspaceCwd,
+    };
+  }
+  const matches = registeredWorkspaces.filter(
+    (entry) => entry.cwd === workspaceCwd,
+  );
+  if (matches.length !== 1) {
+    return { workspaceId: undefined, resolvable: false };
+  }
+  const matched = matches[0]!;
+  if (
+    matched.primary !== (matched.cwd === capabilities?.workspaceCwd) ||
+    (!matched.primary && !matched.id) ||
+    registeredWorkspaces.some(
+      (entry) => entry !== matched && entry.id === matched.id,
+    )
+  ) {
+    return { workspaceId: undefined, resolvable: false };
+  }
+  // The primary can use the unqualified route when it is trusted.
+  return {
+    workspaceId: matched.primary ? undefined : matched.id,
+    ownerWorkspaceId: matched.id,
+    resolvable: matched.trusted,
+  };
+}
+
+interface ScheduledTaskRestoreReference {
+  id: string;
+  scope: 'durable' | 'session';
+  source?: 'cron' | 'wakeup';
+}
+
+function getScheduledTaskRestoreReference(tab: {
+  toolCallId?: string;
+  taskId?: unknown;
+  taskScope?: unknown;
+  taskSource?: unknown;
+}): ScheduledTaskRestoreReference | undefined {
+  const qualified = /^scheduled:session:(cron|wakeup):(.+)$/u.exec(
+    tab.toolCallId ?? '',
+  );
+  const source =
+    tab.taskSource === 'cron' || tab.taskSource === 'wakeup'
+      ? tab.taskSource
+      : (qualified?.[1] as 'cron' | 'wakeup' | undefined);
+  if (
+    typeof tab.taskId === 'string' &&
+    tab.taskId &&
+    (tab.taskScope === 'durable' || tab.taskScope === 'session')
+  ) {
+    return {
+      id: tab.taskId,
+      scope: tab.taskScope,
+      ...(tab.taskScope === 'session' && source ? { source } : {}),
+    };
+  }
+  if (qualified?.[1] && qualified[2]) {
+    return {
+      id: qualified[2],
+      scope: 'session',
+      source: qualified[1] as 'cron' | 'wakeup',
+    };
+  }
+  const legacy = /^scheduled:(durable|session):(.+)$/u.exec(
+    tab.toolCallId ?? '',
+  );
+  return legacy?.[1] && legacy[2]
+    ? { id: legacy[2], scope: legacy[1] as 'durable' | 'session' }
+    : undefined;
+}
+
+function findRestoredScheduledTask(
+  tasks: readonly TurnOutputScheduledTask[],
+  tab: { toolCallId?: string; taskId?: unknown; taskScope?: unknown },
+): TurnOutputScheduledTask | undefined {
+  const reference = getScheduledTaskRestoreReference(tab);
+  // A stopped or consumed task is absent live, but its backend id can still
+  // identify the original creation record even with a synthetic toolCallId.
+  const matching = tasks.filter(
+    (task) =>
+      reference &&
+      task.id === reference.id &&
+      task.durable === (reference.scope === 'durable') &&
+      (reference.scope !== 'session' ||
+        !reference.source ||
+        (task.cron === '@wakeup'
+          ? reference.source === 'wakeup'
+          : reference.source === 'cron')),
+  );
+  if (
+    reference?.scope === 'session' &&
+    reference.source === undefined &&
+    matching.length > 1
+  ) {
+    return;
+  }
+  return (
+    matching[0] ?? tasks.find((task) => task.toolCallId === tab.toolCallId)
+  );
+}
+
 function parsePersistedArtifactPanelTab(
   value: unknown,
 ): PersistedArtifactPanelTab | undefined {
@@ -2407,6 +2549,8 @@ function parsePersistedArtifactPanelTab(
     'sessionId',
     'rootToolCallId',
     'taskId',
+    'taskScope',
+    'taskSource',
     'parentSessionId',
     'recordId',
     'promptId',
@@ -2489,11 +2633,25 @@ function parsePersistedArtifactPanelTab(
         sourceSessionId: tab['sourceSessionId'],
       } as PersistedArtifactPanelTab;
     case 'scheduled_task':
-      if (typeof tab['toolCallId'] !== 'string') return;
+      if (
+        typeof tab['toolCallId'] !== 'string' ||
+        (tab['taskScope'] !== undefined &&
+          tab['taskScope'] !== 'durable' &&
+          tab['taskScope'] !== 'session') ||
+        (tab['taskSource'] !== undefined &&
+          tab['taskSource'] !== 'cron' &&
+          tab['taskSource'] !== 'wakeup')
+      )
+        return;
       return {
         ...common,
         kind: 'scheduled_task',
         toolCallId: tab['toolCallId'],
+        taskId: tab['taskId'],
+        taskScope: tab['taskScope'],
+        ...(tab['taskSource'] !== undefined
+          ? { taskSource: tab['taskSource'] }
+          : {}),
         sourceSessionId: tab['sourceSessionId'],
         workspaceCwd: tab['workspaceCwd'],
         workspaceId: tab['workspaceId'],
@@ -2697,18 +2855,23 @@ function serializeArtifactPanelTabs(
             sourceSessionId: tab.sourceSessionId,
           },
         ];
-      case 'scheduled_task':
+      case 'scheduled_task': {
+        const reference = getScheduledTaskRestoreReference(tab.task);
         return [
           {
             id,
             kind: tab.kind,
             title,
             toolCallId: tab.task.toolCallId,
+            taskId: tab.task.id,
+            taskScope: tab.task.durable ? 'durable' : 'session',
+            ...(reference?.source ? { taskSource: reference.source } : {}),
             sourceSessionId: tab.sourceSessionId,
             workspaceCwd: tab.workspaceCwd,
             workspaceId: tab.workspaceId,
           },
         ];
+      }
       case 'image':
         return tab.source
           ? [
@@ -2832,7 +2995,8 @@ function serializeArtifactPanelTabs(
                   },
                 ]
               : [];
-          case 'scheduled_task':
+          case 'scheduled_task': {
+            const reference = getScheduledTaskRestoreReference(tab);
             return tab.toolCallId
               ? [
                   {
@@ -2840,11 +3004,21 @@ function serializeArtifactPanelTabs(
                     kind: 'scheduled_task',
                     sourceSessionId: tab.sourceSessionId,
                     toolCallId: tab.toolCallId,
+                    ...(reference
+                      ? {
+                          taskId: reference.id,
+                          taskScope: reference.scope,
+                          ...(reference.source
+                            ? { taskSource: reference.source }
+                            : {}),
+                        }
+                      : {}),
                     workspaceCwd: tab.workspaceCwd,
                     workspaceId: tab.workspaceId,
                   },
                 ]
               : [];
+          }
           case 'subagent':
             return tab.rootToolCallId
               ? [
@@ -3082,7 +3256,9 @@ function updateCockpitLocation(open: boolean, replace = false): void {
 }
 
 function formatError(error: unknown, fallback: string): string {
-  return error instanceof Error ? error.message : fallback;
+  return error instanceof Error && error.message.length > 0
+    ? error.message
+    : fallback;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -3921,6 +4097,8 @@ export function App({
   const managedMode = managedAgentProvider !== undefined && managedHome;
   const managedModeRef = useRef(managedMode);
   managedModeRef.current = managedMode;
+  const overloadPausedRef = useRef(false);
+  const overloadDetailRef = useRef<string | undefined>(undefined);
   const [managedNavigationTarget, setManagedNavigationTarget] =
     useState<HTMLDivElement | null>(null);
   const [archivedSessionsTarget, setArchivedSessionsTarget] =
@@ -3986,6 +4164,8 @@ export function App({
   const titleHeaderItemVisible = chatHeaderItems.includes('title');
   const environmentHeaderItemVisible = chatHeaderItems.includes('environment');
   const rightPanelHeaderItemVisible = chatHeaderItems.includes('rightPanel');
+  const scheduledTasksHeaderItemVisible =
+    chatHeaderItems.includes('scheduledTasks');
   const artifactsHeaderItemVisible = chatHeaderItems.includes('artifacts');
   const tokenUsageHeaderItemVisible = chatHeaderItems.includes('tokenUsage');
   const contextUsageHeaderItemVisible =
@@ -6222,6 +6402,13 @@ export function App({
           setArtifactPanelOpen(true);
           return true;
         }
+      } else if (overloadPausedRef.current && !managedModeRef.current) {
+        // Opening a brand-new side-task tab spawns a fresh daemon child.
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return false;
       }
       // A details side task is one-per-pending-question: repeat clicks focus
       // the existing tab instead of provisioning a duplicate child session.
@@ -6273,10 +6460,19 @@ export function App({
       setArtifactPanelOpen(true);
       return true;
     },
-    [connection.sessionId, connection.workspaceCwd, sideTasksAvailable, t],
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      pushToast,
+      sideTasksAvailable,
+      t,
+    ],
   );
   const createEmptySideTask = useCallback(() => {
-    if (createSideTask()) return;
+    const created = createSideTask();
+    if (created || (overloadPausedRef.current && !managedModeRef.current)) {
+      return;
+    }
     pushToast('error', t('sideTask.createFailed'));
   }, [createSideTask, pushToast, t]);
   const openWebPreviewTab = useCallback(() => {
@@ -6336,6 +6532,18 @@ export function App({
     (tabId: string, parentSessionId: string, title: string) => {
       const pending = sideTaskCreationPromisesRef.current.get(tabId);
       if (pending) return pending;
+      if (overloadPausedRef.current && !managedModeRef.current) {
+        // A failed tab's Retry bypasses the tab-opening guard.
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return Promise.reject(
+          Object.assign(new Error(t('sidebar.overloadPaused')), {
+            _alreadyDispatched: true,
+          }),
+        );
+      }
       if (tabId.startsWith(DETAILS_TAB_ID_PREFIX)) {
         // Capture the parent identity now: the draft tab may close before
         // creation resolves, and the association must still be recorded.
@@ -6387,6 +6595,7 @@ export function App({
       sessionOwnerGuard,
       pushToast,
       sessionCatalogController,
+      t,
       workspace.client,
     ],
   );
@@ -6982,16 +7191,27 @@ export function App({
       tabWorkspaceId?: string,
       sourceSessionId?: string,
     ) => {
+      const routeWorkspaceCwd = tabWorkspaceCwd ?? activeWorkspaceCwd;
+      const workspaceTarget = resolveScheduledTaskWorkspace(
+        workspace.capabilities,
+        routeWorkspaceCwd,
+      );
+      const matchedOwner = workspace.capabilities?.workspaces?.find(
+        (entry) => entry.cwd === routeWorkspaceCwd,
+      );
+      const ownerSessionId = sourceSessionId ?? connection.sessionId;
+      const ownerWorkspaceId =
+        tabWorkspaceId ?? matchedOwner?.id ?? workspaceTarget.workspaceId;
       const tab: ArtifactPanelTab = {
-        id: sourceSessionId
-          ? `scheduled-task:${sourceSessionId}:${task.toolCallId}`
+        id: ownerSessionId
+          ? `scheduled-task:${ownerSessionId}:${task.toolCallId}`
           : `scheduled-task:${task.toolCallId}`,
         kind: 'scheduled_task',
         title: t('scheduledTasks.title'),
-        task: tabWorkspaceId ? { ...task, workspaceId: tabWorkspaceId } : task,
-        ...(tabWorkspaceCwd ? { workspaceCwd: tabWorkspaceCwd } : {}),
-        ...(tabWorkspaceId ? { workspaceId: tabWorkspaceId } : {}),
-        ...(sourceSessionId ? { sourceSessionId } : {}),
+        task: { ...task, workspaceId: workspaceTarget.workspaceId },
+        ...(routeWorkspaceCwd ? { workspaceCwd: routeWorkspaceCwd } : {}),
+        ...(ownerWorkspaceId ? { workspaceId: ownerWorkspaceId } : {}),
+        ...(ownerSessionId ? { sourceSessionId: ownerSessionId } : {}),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === tab.id)
@@ -7004,7 +7224,13 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t],
+    [
+      activeWorkspaceCwd,
+      connection.sessionId,
+      getDefaultReviewPanelWidth,
+      t,
+      workspace.capabilities,
+    ],
   );
   const openMonitorPanel = useCallback(
     (
@@ -7584,6 +7810,60 @@ export function App({
     sessionOwnerGuard,
     workspace.capabilities,
   ]);
+  const restoreScheduledTaskFromLiveSource = useCallback(
+    async (
+      sourceSessionId: string,
+      reference: ScheduledTaskRestoreReference,
+      workspaceId?: string,
+    ): Promise<TurnOutputScheduledTask | undefined> => {
+      if (reference.scope === 'durable') {
+        const tasks = await workspaceActions.listScheduledTasks?.(workspaceId);
+        const task = tasks?.find(
+          (item) =>
+            item.id === reference.id && item.sessionId === sourceSessionId,
+        );
+        return task
+          ? {
+              id: task.id,
+              toolCallId: `scheduled:durable:${task.id}`,
+              title: task.name?.trim() || task.prompt || task.id,
+              cron: task.cron,
+              prompt: task.prompt,
+              recurring: task.recurring,
+              durable: true,
+              ...(workspaceId ? { workspaceId } : {}),
+            }
+          : undefined;
+      }
+      const snapshot =
+        sourceSessionId === connection.sessionId
+          ? await sessionActions.getTasks({ silent: true })
+          : await workspace.client.sessionTasks(sourceSessionId);
+      if (snapshot.sessionId !== sourceSessionId) return undefined;
+      const candidates =
+        snapshot.scheduledTasks?.filter(
+          (item) =>
+            item.id === reference.id &&
+            (reference.source === undefined ||
+              item.source === reference.source),
+        ) ?? [];
+      if (reference.source === undefined && candidates.length > 1)
+        return undefined;
+      const task = candidates[0];
+      return task && (task.source === 'cron' || task.source === 'wakeup')
+        ? {
+            id: task.id,
+            toolCallId: `scheduled:session:${task.source}:${task.id}`,
+            title: task.prompt || task.id,
+            cron: task.cronExpr,
+            prompt: task.prompt,
+            recurring: task.recurring,
+            durable: false,
+          }
+        : undefined;
+    },
+    [connection.sessionId, sessionActions, workspace.client, workspaceActions],
+  );
   const hydratePendingArtifactPanelTab = useCallback(
     async (tab: Extract<ArtifactPanelTab, { kind: 'pending' }> | undefined) => {
       if (!tab) return;
@@ -7789,17 +8069,26 @@ export function App({
               };
             }
           } else if (tab.targetKind === 'scheduled_task') {
-            const task = Array.from(
-              getScheduledTasksByTurn(sourceMessages).values(),
-            )
-              .flat()
-              .find((item) => item.toolCallId === tab.toolCallId);
+            const task = findRestoredScheduledTask(
+              Array.from(
+                getScheduledTasksByTurn(sourceMessages).values(),
+              ).flat(),
+              tab,
+            );
             if (task) {
               restored = {
                 id: tab.id,
                 kind: 'scheduled_task',
                 title: tab.title,
-                task,
+                task: {
+                  ...task,
+                  workspaceId: task.durable
+                    ? resolveScheduledTaskWorkspace(
+                        workspace.capabilities,
+                        tab.workspaceCwd,
+                      ).workspaceId
+                    : task.workspaceId,
+                },
                 sourceSessionId: tab.sourceSessionId,
                 workspaceCwd: tab.workspaceCwd,
                 workspaceId: tab.workspaceId,
@@ -8303,6 +8592,36 @@ export function App({
                       }
                     : tab;
                 case 'scheduled_task': {
+                  const reference = getScheduledTaskRestoreReference(tab);
+                  const liveSourceSessionId =
+                    tab.sourceSessionId ?? connection.sessionId;
+                  if (reference && liveSourceSessionId) {
+                    const workspaceTarget = resolveScheduledTaskWorkspace(
+                      workspace.capabilities,
+                      tab.workspaceCwd,
+                    );
+                    const task =
+                      reference.scope === 'session' ||
+                      workspaceTarget.resolvable
+                        ? await restoreScheduledTaskFromLiveSource(
+                            liveSourceSessionId,
+                            reference,
+                            workspaceTarget.workspaceId,
+                          ).catch(() => undefined)
+                        : undefined;
+                    if (task) {
+                      return {
+                        id: tab.id,
+                        kind: 'scheduled_task',
+                        title: tab.title,
+                        task,
+                        sourceSessionId: liveSourceSessionId,
+                        workspaceCwd: tab.workspaceCwd,
+                        workspaceId:
+                          workspaceTarget.ownerWorkspaceId ?? tab.workspaceId,
+                      };
+                    }
+                  }
                   if (
                     tab.sourceSessionId &&
                     tab.sourceSessionId !== connection.sessionId
@@ -8314,11 +8633,12 @@ export function App({
                       sourceSessionId: tab.sourceSessionId,
                     };
                   }
-                  const task = Array.from(
-                    restoreInputs.scheduledTasksByTurn.values(),
-                  )
-                    .flat()
-                    .find((item) => item.toolCallId === tab.toolCallId);
+                  const task = findRestoredScheduledTask(
+                    Array.from(
+                      restoreInputs.scheduledTasksByTurn.values(),
+                    ).flat(),
+                    tab,
+                  );
                   if (!task) {
                     const sourceSessionId =
                       tab.sourceSessionId ?? connection.sessionId;
@@ -8332,7 +8652,18 @@ export function App({
                       : undefined;
                   }
                   const { toolCallId: _toolCallId, ...rest } = tab;
-                  return { ...rest, task };
+                  return {
+                    ...rest,
+                    task: {
+                      ...task,
+                      workspaceId: task.durable
+                        ? resolveScheduledTaskWorkspace(
+                            workspace.capabilities,
+                            tab.workspaceCwd,
+                          ).workspaceId
+                        : task.workspaceId,
+                    },
+                  };
                 }
                 case 'image': {
                   if (!tab.source) return undefined;
@@ -8585,6 +8916,7 @@ export function App({
     hydrateRestoredAttachmentTab,
     panelStateKey,
     resetEmptyArtifactPanel,
+    restoreScheduledTaskFromLiveSource,
     rightPanelItems,
     sessionAgentTraceSupported,
     sessionActions,
@@ -9547,6 +9879,128 @@ export function App({
   );
   const [backgroundTasksRefreshTrigger, setBackgroundTasksRefreshTrigger] =
     useState(0);
+  const scheduledTaskActivityKey = useMemo(
+    () => getScheduledTaskActivityKey(messages),
+    [messages],
+  );
+  const scheduledTaskWorkspaceTarget = useMemo(
+    () =>
+      resolveScheduledTaskWorkspace(workspace.capabilities, activeWorkspaceCwd),
+    [activeWorkspaceCwd, workspace.capabilities],
+  );
+  const sessionScheduledTasks = useSessionScheduledTasks({
+    sessionId: connection.sessionId,
+    workspaceId: scheduledTaskWorkspaceTarget.workspaceId,
+    workspaceCwd: scheduledTaskWorkspaceTarget.resolvable
+      ? activeWorkspaceCwd
+      : undefined,
+    connected: connection.status === 'connected' && !managedMode,
+    durableEnabled:
+      projectFeaturesAvailable &&
+      !managedMode &&
+      scheduledTaskWorkspaceTarget.resolvable,
+    durableSeeded: currentSessionSummary?.sourceType === 'scheduled_task',
+    activityKey: scheduledTaskActivityKey,
+    onRunPrompt: (
+      prompt: string,
+      boundSessionId: string | null,
+      workspaceCwd?: string,
+      taskIsStale?: () => boolean,
+      beforeTaskDispatch?: () => void | Promise<void>,
+    ) =>
+      runTaskManually(
+        prompt,
+        boundSessionId,
+        workspaceCwd,
+        taskIsStale,
+        beforeTaskDispatch,
+      ),
+    shouldRefuseManualRun: (fresh) => shouldRefuseScheduledManualRun(fresh),
+    onOverloadRefused: () => {
+      pushToast(
+        'warning',
+        overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+      );
+    },
+    onError: (error, fallback) =>
+      reportScheduledTaskError(error, t(fallback), true),
+    translate: t,
+    refreshTrigger: backgroundTasksRefreshTrigger,
+  });
+  const matchesCurrentScheduledTaskScope = useCallback(
+    (task: { workspaceId?: string; sessionId?: string | null }) =>
+      scheduledTaskWorkspaceTarget.resolvable &&
+      task.sessionId === connection.sessionId &&
+      (task.workspaceId ?? null) ===
+        (scheduledTaskWorkspaceTarget.workspaceId ?? null),
+    [scheduledTaskWorkspaceTarget, connection.sessionId],
+  );
+  const isDurableTaskDeletedRef = useRef(
+    (task: { id: string; workspaceId?: string; sessionId?: string | null }) =>
+      matchesCurrentScheduledTaskScope(task) &&
+      sessionScheduledTasks.isDurableTaskDeletionConfirmed(task),
+  );
+  isDurableTaskDeletedRef.current = (task) =>
+    matchesCurrentScheduledTaskScope(task) &&
+    sessionScheduledTasks.isDurableTaskDeletionConfirmed(task);
+  const notifyScheduledTaskMutatedRef = useRef(
+    (task?: { workspaceId?: string; sessionId?: string | null }) => {
+      if (task && !matchesCurrentScheduledTaskScope(task)) return;
+      sessionScheduledTasks.refresh();
+    },
+  );
+  notifyScheduledTaskMutatedRef.current = (task) => {
+    if (task && !matchesCurrentScheduledTaskScope(task)) return;
+    sessionScheduledTasks.refresh();
+  };
+  const confirmDurableTaskDeletedRef = useRef(
+    (task: { id: string; workspaceId?: string; sessionId?: string | null }) => {
+      if (!matchesCurrentScheduledTaskScope(task)) return;
+      sessionScheduledTasks.confirmDurableDeletion(task);
+    },
+  );
+  confirmDurableTaskDeletedRef.current = (task) => {
+    if (!matchesCurrentScheduledTaskScope(task)) return;
+    sessionScheduledTasks.confirmDurableDeletion(task);
+  };
+  const openSessionScheduledTaskDetail = useCallback(
+    (entry: SessionScheduledTask) => {
+      openScheduledTaskPanel(
+        {
+          id: entry.id,
+          toolCallId: `scheduled:${entry.scope}:${entry.scope === 'session' ? `${entry.source}:` : ''}${entry.id}`,
+          title: entry.title,
+          cron: entry.cronExpr,
+          prompt: entry.prompt,
+          recurring: entry.recurring,
+          durable: entry.scope === 'durable',
+          ...(entry.scope === 'durable' && entry.workspaceId
+            ? { workspaceId: entry.workspaceId }
+            : {}),
+        },
+        activeWorkspaceCwd,
+        entry.scope === 'durable' ? entry.workspaceId : undefined,
+        connection.sessionId,
+      );
+    },
+    [activeWorkspaceCwd, connection.sessionId, openScheduledTaskPanel],
+  );
+  const { taskStatusById, hasLiveDurableSnapshot, hasLiveSessionSnapshot } =
+    sessionScheduledTasks;
+  const enrichedScheduledTasksByTurn = useMemo(
+    () =>
+      enrichScheduledTasksByTurn(scheduledTasksByTurn, {
+        taskStatusById,
+        hasLiveDurableSnapshot,
+        hasLiveSessionSnapshot,
+      }),
+    [
+      scheduledTasksByTurn,
+      taskStatusById,
+      hasLiveDurableSnapshot,
+      hasLiveSessionSnapshot,
+    ],
+  );
   const sessionTasks = useBackgroundTasks(
     connection.sessionId,
     taskActivityKey,
@@ -9554,6 +10008,8 @@ export function App({
     connection.status === 'connected',
     backgroundTasksRefreshTrigger,
     workflowsEnabled,
+    sessionScheduledTasks.syncSessionTasks,
+    scheduledTaskActivityKey,
   );
   // Bumped after a `/send` so its chip shows without waiting for the event.
   const [subSessionTasksRefresh, setSubSessionTasksRefresh] = useState(0);
@@ -10872,6 +11328,35 @@ export function App({
   const sessionLimitScopeRef = useRef<
     { sessionId?: string; workspaceCwd?: string } | undefined
   >(undefined);
+  // Load-admission pause: the proactive poll verdict OR an unexpired
+  // `system_overloaded` refusal. The refusal hint matches the daemon's
+  // Retry-After so the UI never stays paused longer than advised without
+  // poll confirmation.
+  const [overloadRefusal, setOverloadRefusal] = useState<{
+    message: string;
+    expiresAt: number;
+  } | null>(null);
+  const clearOverloadRefusal = useCallback(() => setOverloadRefusal(null), []);
+  const {
+    paused: overloadPaused,
+    pollOverloaded,
+    loadAdmission: pollLoadAdmission,
+    refusalMessage: overloadRefusalMessage,
+  } = useDaemonOverloadPause({
+    enabled: daemonAvailable,
+    refusal: overloadRefusal,
+    onRefusalExpired: clearOverloadRefusal,
+  });
+  const overloadDetail =
+    pollOverloaded && pollLoadAdmission
+      ? t('sidebar.overloadDetail', {
+          ratio: pollLoadAdmission.loadRatio.toFixed(2),
+          lag: Math.round(pollLoadAdmission.eventLoopLagP99Ms),
+          reason: pollLoadAdmission.reason ?? 'unknown',
+        })
+      : overloadRefusalMessage;
+  overloadPausedRef.current = overloadPaused;
+  overloadDetailRef.current = overloadDetail;
   const [showRewindDialog, setShowRewindDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
@@ -11799,15 +12284,20 @@ export function App({
         ? settingsAvailable &&
           hostSidebar?.footer !== false &&
           (hostSidebar?.footer?.items?.includes('settings') ?? true)
-        : projectFeaturesAvailable &&
-          (page !== 'live' || liveSidebarEnabled) &&
-          (page !== 'pr-watches' || prWatchesAvailable) &&
-          (page !== 'artifacts' || workspaceArtifactLibraryAvailable) &&
-          (page !== 'channel-events' || channelNavigationEnabled) &&
-          (hostSidebar?.primaryNav?.items?.some(
-            (item) => item === primaryItem,
-          ) ??
-            true));
+        : (projectFeaturesAvailable &&
+            (page !== 'live' || liveSidebarEnabled) &&
+            (page !== 'pr-watches' || prWatchesAvailable) &&
+            (page !== 'artifacts' || workspaceArtifactLibraryAvailable) &&
+            (page !== 'channel-events' || channelNavigationEnabled) &&
+            (hostSidebar?.primaryNav?.items?.some(
+              (item) => item === primaryItem,
+            ) ??
+              true)) ||
+          // An explicit scheduled-tasks opening can also come from the task
+          // surfaces, not only a primary navigation entry.
+          (page === 'scheduled-tasks' &&
+            projectFeaturesAvailable &&
+            visibleNavigationPage === page));
     if (navigationAppliedRef.current === navigation.revision && allowed) return;
     navigationAppliedRef.current = navigation.revision;
     navigationSettledRef.current = false;
@@ -11842,6 +12332,7 @@ export function App({
     settingsAvailable,
     hostSidebar?.footer,
     hostSidebar?.primaryNav?.items,
+    visibleNavigationPage,
     liveSidebarEnabled,
     prWatchesAvailable,
     workspaceArtifactLibraryAvailable,
@@ -12394,6 +12885,17 @@ export function App({
           )
             return;
         }
+        if (
+          command.sessionId === undefined &&
+          overloadPausedRef.current &&
+          !managedModeRef.current
+        ) {
+          pushToast(
+            'warning',
+            overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+          );
+          return;
+        }
         const result = await workspace.client.sendToSubSession(
           callerSessionId,
           {
@@ -12414,6 +12916,15 @@ export function App({
           setSubSessionTasksRefresh((value) => value + 1);
         }
       } catch (error) {
+        if (appMountedRef.current && isSystemOverloadedError(error)) {
+          const message = extractErrorDetail(error);
+          setOverloadRefusal({
+            message,
+            expiresAt: Date.now() + OVERLOAD_REFUSAL_TTL_MS,
+          });
+          pushToast('warning', message);
+          return;
+        }
         if (appMountedRef.current)
           pushToast('error', extractErrorDetail(error));
       } finally {
@@ -13263,6 +13774,16 @@ export function App({
         // its own submitter.
       }
       if (currentSessionId) return Promise.resolve(undefined);
+      // Chokepoint for !ls / control commands / @-mention runs: refuse the
+      // allocation up front while paused instead of paying a doomed create
+      // round-trip on a saturated host.
+      if (overloadPausedRef.current && !managedModeRef.current) {
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return Promise.resolve(undefined);
+      }
       const pendingManualTitle = pendingManualTitleRef.current;
       const promise = (async () => {
         let allocatedSessionId: string | undefined;
@@ -13526,10 +14047,12 @@ export function App({
     [
       getComposerWorkspaceCwd,
       lockedWorkspaceCwd,
+      pushToast,
       sessionActions,
       sessionCatalogController,
       setPendingSessionContext,
       setPendingReasoningIntent,
+      t,
     ],
   );
   const onSubmitBeforeRef = useRef(onSubmitBefore);
@@ -13565,7 +14088,7 @@ export function App({
   // sendPrompt / enqueuePrompt so their dep arrays can reference it (a
   // reference below those callbacks would be a TDZ error).
   const reportError = useCallback(
-    (error: unknown, fallback: string) => {
+    (error: unknown, fallback: string, includeErrorContext = false) => {
       if (isAbortError(error)) return;
       if (isDaemonTurnError(error)) {
         return;
@@ -13573,13 +14096,75 @@ export function App({
       if (isAlreadyDispatched(error)) {
         return;
       }
+      if (isSystemOverloadedError(error)) {
+        const message = formatError(error, fallback);
+        setOverloadRefusal({
+          message,
+          expiresAt: Date.now() + OVERLOAD_REFUSAL_TTL_MS,
+        });
+        pushToast('warning', message);
+        return;
+      }
+      const includeLocalizedContext =
+        includeErrorContext &&
+        error instanceof Error &&
+        error.message.length > 0 &&
+        !error.message.startsWith(fallback);
       const message = isAcpChildCapacityError(error)
         ? t('daemon.capacity.exhausted')
-        : formatError(error, fallback);
+        : includeLocalizedContext
+          ? `${fallback}: ${error.message}`
+          : formatError(error, fallback);
       console.error('[web-shell]', message, error);
       pushToast('error', message);
     },
     [pushToast, t],
+  );
+  const shouldRefuseScheduledManualRun = useCallback(
+    (fresh: {
+      sessionId: string | null;
+      sessionMode?: 'persistent' | 'per_run';
+    }) => {
+      if (!overloadPausedRef.current || managedModeRef.current) {
+        return false;
+      }
+      if (fresh.sessionMode === 'per_run') return true;
+      const current = connectionRef.current;
+      if (
+        !current.sessionId ||
+        current.loadingTranscript ||
+        current.status !== 'connected'
+      ) {
+        return true;
+      }
+      return (
+        typeof fresh.sessionId === 'string' &&
+        fresh.sessionId !== current.sessionId
+      );
+    },
+    [],
+  );
+  // Scheduled-task manual runs already suppress internal target-replacement
+  // cancellations before reaching onError; non-cancellation AbortErrors
+  // (revalidation failures) and consumed one-shot warnings must stay visible.
+  const reportScheduledTaskError = useCallback(
+    (error: unknown, fallback: string, includeErrorContext = false) => {
+      if (isAbortError(error)) {
+        const message = isScheduledTaskCancellation(error)
+          ? fallback
+          : includeErrorContext &&
+              error instanceof Error &&
+              error.message &&
+              !error.message.startsWith(fallback)
+            ? `${fallback}: ${error.message}`
+            : fallback;
+        console.error('[web-shell]', message, error);
+        pushToast('error', message);
+        return;
+      }
+      reportError(error, fallback, includeErrorContext);
+    },
+    [pushToast, reportError],
   );
   // Drop any details association pointing at one of these children. Shared by
   // the panel archive path and the read-site check so every route that retires
@@ -13808,10 +14393,15 @@ export function App({
         commitComposerAccepted?: ComposerSubmitCommit;
         source?: 'mcp-app';
         isCurrent?: () => boolean;
-        beforeDispatch?: (clientId: string | undefined) => void;
+        canRebindOwner?: () => boolean;
+        beforeDispatch?: (clientId: string | undefined) => void | Promise<void>;
+        beforeDetachedDispatch?: (
+          clientId: string | undefined,
+        ) => void | Promise<void>;
         onAdmissionStarted?: (sessionId: string | undefined) => void;
         onAdmitted?: (admission: { promptId: string }) => void;
         onCancelledBeforeAdmission?: () => void;
+        rethrowDetachedError?: boolean;
         onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
         onPreparedSubmit?: (prepared: WebShellPreparedSubmit) => void;
         onSessionAllocated?: (sessionId: string) => void;
@@ -13824,6 +14414,22 @@ export function App({
         ownerRef?: { current: DaemonSessionOwnerSnapshot };
       },
     ) => {
+      // A first prompt in a fresh draft would allocate a daemon session;
+      // refuse it up front while paused instead of failing after submit.
+      // `false` is the refusal contract: awaited callers (composer submit,
+      // settings language sync) must not treat it as an accepted submission.
+      if (
+        overloadPausedRef.current &&
+        !managedModeRef.current &&
+        !connectionRef.current.sessionId &&
+        !createSessionPromiseRef.current
+      ) {
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return false;
+      }
       if (sessionWriteBlockedRef.current) {
         throw new DOMException(
           'Session switch is still preparing',
@@ -13878,6 +14484,18 @@ export function App({
           allocatedSessionId !== undefined &&
           (currentSessionId === undefined ||
             currentSessionId === allocatedSessionId);
+        if (
+          !admissionSource.owner.isCurrent() &&
+          opts?.canRebindOwner?.() === true
+        ) {
+          const owner = sessionOwnerGuard.capture();
+          if (owner.isCurrent()) {
+            admissionSource.owner = owner;
+            admissionSource.sourceVersion = composerSourceVersionRef.current;
+            admissionSource.writeBlockGeneration =
+              sessionWriteBlockGenerationRef.current;
+          }
+        }
         return (
           (admissionSource.owner.isCurrent() || ownAllocationSucceeded) &&
           sessionMatches &&
@@ -14012,6 +14630,28 @@ export function App({
           prompt: preparedPrompt,
           queued: false,
         });
+        let beforeDetachedDispatchRejected = false;
+        const wrappedBeforeDetachedDispatch = opts?.beforeDetachedDispatch
+          ? (clientId: string | undefined): void | Promise<void> => {
+              beforeDetachedDispatchRejected = false;
+              try {
+                const result = opts.beforeDetachedDispatch!(clientId);
+                if (
+                  result &&
+                  typeof (result as Promise<void>).then === 'function'
+                ) {
+                  return (result as Promise<void>).catch((error: unknown) => {
+                    beforeDetachedDispatchRejected = true;
+                    throw error;
+                  });
+                }
+                return result;
+              } catch (error) {
+                beforeDetachedDispatchRejected = true;
+                throw error;
+              }
+            }
+          : undefined;
         try {
           await sessionActions.sendDetachedPrompt(
             detachedSession,
@@ -14032,6 +14672,11 @@ export function App({
               retry: opts?.retry,
               ...(opts?.idempotencyKey
                 ? { idempotencyKey: opts.idempotencyKey }
+                : {}),
+              ...(wrappedBeforeDetachedDispatch
+                ? {
+                    beforeDetachedDispatch: wrappedBeforeDetachedDispatch,
+                  }
                 : {}),
               onAdmissionStarted: () => {
                 opts?.onAdmissionStarted?.(detachedSessionId);
@@ -14056,11 +14701,15 @@ export function App({
         } catch (error) {
           if (
             detachedWorkspaceCwd &&
+            !beforeDetachedDispatchRejected &&
             !isDefinitelyRejectedPromptAdmission(error)
           ) {
             sessionCatalogController.promptAdmissionUncertain(
               detachedWorkspaceCwd,
             );
+          }
+          if (opts?.rethrowDetachedError) {
+            throw error;
           }
           if (appMountedRef.current) {
             reportError(error, 'Failed to send message');
@@ -14079,6 +14728,10 @@ export function App({
       }
       const sessionIdAfterEnsure =
         connectionRef.current.sessionId ?? allocatedSessionId;
+      if (!sessionIdAfterEnsure) {
+        restoreCancelledSubmitState();
+        return false;
+      }
       const allocatedOwner = allocatedSessionCatalogOwnerRef.current;
       const promptWorkspaceCwd = allocatedSessionId
         ? allocatedOwner?.sessionId === allocatedSessionId
@@ -14169,6 +14822,28 @@ export function App({
         };
         inFlightPromptRef.current = inFlightPrompt;
       };
+      let beforeDispatchRejected = false;
+      const wrappedBeforeDispatch = opts?.beforeDispatch
+        ? (clientId: string | undefined): void | Promise<void> => {
+            beforeDispatchRejected = false;
+            try {
+              const result = opts.beforeDispatch!(clientId);
+              if (
+                result &&
+                typeof (result as Promise<void>).then === 'function'
+              ) {
+                return (result as Promise<void>).catch((error: unknown) => {
+                  beforeDispatchRejected = true;
+                  throw error;
+                });
+              }
+              return result;
+            } catch (error) {
+              beforeDispatchRejected = true;
+              throw error;
+            }
+          }
+        : undefined;
       const promptOptions: SendPromptOptionsWithRetry = {
         ...(opts?.submittedPrompt !== undefined
           ? { submittedPrompt: opts.submittedPrompt }
@@ -14187,12 +14862,12 @@ export function App({
         ...(opts?.idempotencyKey
           ? { idempotencyKey: opts.idempotencyKey }
           : {}),
-        ...(opts?.beforeDispatch
-          ? { beforeDispatch: opts.beforeDispatch }
+        ...(wrappedBeforeDispatch
+          ? { beforeDispatch: wrappedBeforeDispatch }
           : {}),
         onAdmissionStarted: () => {
           opts?.onAdmissionStarted?.(
-            connectionRef.current.sessionId ?? allocatedSessionId,
+            sessionIdAfterEnsure ?? connectionRef.current.sessionId,
           );
           admissionStarted = true;
         },
@@ -14267,6 +14942,7 @@ export function App({
         if (
           admissionStarted &&
           !admitted &&
+          !beforeDispatchRejected &&
           !(preserveComposer
             ? isMcpAppPromptAdmissionRejected(error)
             : isDefinitelyRejectedPromptAdmission(error)) &&
@@ -14284,6 +14960,8 @@ export function App({
     [
       beginPromptPreparation,
       clearFollowup,
+      pushToast,
+      t,
       disarmSubmittedPromptRetry,
       ensureSessionForPrompt,
       finishPromptPreparation,
@@ -14321,10 +14999,28 @@ export function App({
           );
           if (page.sessions.length > 0) return page.sessions[0].sessionId;
         }
+        // Only allocation is paused: reuse above must keep working while
+        // overloaded (GitDialog commit/PR generation allocates nothing).
+        if (overloadPausedRef.current && !managedModeRef.current) {
+          pushToast(
+            'warning',
+            overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+          );
+          return undefined;
+        }
         // No session exists or forced: create one. Creating binds the chat
         // connection — session navigation that must discard an armed
         // `/clear` carry, mirroring loadSidebarSession.
         pendingManualTitleRef.current = undefined;
+        if (pendingBoundRunRef.current) {
+          const stale = pendingBoundRunRef.current;
+          stale.cancelledBeforeAdmission = true;
+          if (!stale.dispatchStarted) {
+            stale.reject(
+              createScheduledTaskCancellation('Bound run target was replaced'),
+            );
+          }
+        }
         const result = await (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).createSession({
@@ -14339,6 +15035,8 @@ export function App({
     },
     [
       getComposerWorkspaceCwd,
+      pushToast,
+      t,
       connection.sessionId,
       activeWorkspaceCwd,
       sessionCatalogController,
@@ -15150,6 +15848,19 @@ export function App({
         notice.operation === 'create_session'
       ) {
         setSessionLimitReached(true);
+      }
+      if (
+        notice.code === 'system_overloaded' &&
+        (notice.operation === 'create_session' ||
+          notice.operation === 'branch_session' ||
+          notice.operation === 'fork_session' ||
+          notice.operation === 'load_session' ||
+          notice.operation === 'resume_session')
+      ) {
+        setOverloadRefusal({
+          message: notice.message,
+          expiresAt: Date.now() + OVERLOAD_REFUSAL_TTL_MS,
+        });
       }
       if (shouldToastNotice(notice)) {
         pushToast(
@@ -16534,11 +17245,12 @@ export function App({
       // running sessions; a plain settings write would leave both stale.
       const command = `/language output ${language.trim() || 'auto'}`;
       try {
-        await sendPrompt(command, undefined, undefined, {
+        const admitted = await sendPrompt(command, undefined, undefined, {
           ownerRef: owner,
           suppressSessionTitle: true,
           suppressInputHistory: true,
         });
+        if (admitted === false) return false;
       } catch (error) {
         if (owner.current.isCurrent()) {
           reportError(error, 'Failed to sync /language output command');
@@ -17390,6 +18102,15 @@ export function App({
       }
       if (sessionWriteBlocked) return;
       if (!requireActiveSessionForLocalCommand()) return;
+      // A record-point branch also reaches startSessionSwitch and can allocate
+      // a restored child, so every branch path must honor load admission.
+      if (overloadPausedRef.current && !managedModeRef.current) {
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return false;
+      }
       const sourceSessionId = connectionRef.current.sessionId;
       const sourceWorkspaceCwd = connectionRef.current.workspaceCwd;
       const requestKey = JSON.stringify([
@@ -17417,10 +18138,22 @@ export function App({
               })
             : sessionActions.branchSession({ name: options.name });
       const request = branchRequest
-        .then((result) => {
-          if (!result.switchStarted) return;
+        .then(async (result) => {
+          // The branch itself was created, so source-copy warnings apply
+          // whether or not the follow-up switch completes.
           if (result.sourceWarnings?.length)
             pushToast('warning', result.sourceWarnings.join(' '));
+          if (
+            !result.switchStarted ||
+            (await result.switchCompleted) === false
+          ) {
+            // The branch metadata was already published even when its
+            // switch was refused or aborted.
+            if (sourceWorkspaceCwd) {
+              sessionCatalogController.invalidateWorkspace(sourceWorkspaceCwd);
+            }
+            return;
+          }
           store.dispatch([
             {
               type: 'status',
@@ -17474,6 +18207,7 @@ export function App({
                 : undefined;
             const code = body?.['code'];
             if (
+              isSystemOverloadedError(error) ||
               code === 'branch_worktree_activation_failed' ||
               code === 'branch_worktree_outcome_unknown'
             ) {
@@ -17516,7 +18250,12 @@ export function App({
       const sourceSessionId = connectionRef.current.sessionId;
       const sourceWorkspaceCwd = connectionRef.current.workspaceCwd;
       if (!branchWorktreeEligible || !sourceSessionId || !sourceWorkspaceCwd) {
-        return branchCurrentSession({ atRecordId });
+        const request = branchCurrentSession({ atRecordId });
+        return request === false ? undefined : request;
+      }
+      if (overloadPausedRef.current && !managedModeRef.current) {
+        branchCurrentSession({ atRecordId });
+        return;
       }
       return (async () => {
         try {
@@ -17529,11 +18268,13 @@ export function App({
           if (connectionRef.current.sessionId !== sourceSessionId) return;
           setSelectedWorkspaceGitStatus(status);
           if (status.worktreeSupported !== true) {
-            return branchCurrentSession({ atRecordId });
+            await branchCurrentSession({ atRecordId });
+            return;
           }
         } catch {
           if (connectionRef.current.sessionId !== sourceSessionId) return;
-          return branchCurrentSession({ atRecordId });
+          await branchCurrentSession({ atRecordId });
+          return;
         }
         setBranchSessionDialog({ sourceSessionId, atRecordId });
         setBranchSessionDialogBusy(false);
@@ -17611,6 +18352,8 @@ export function App({
       opts?: {
         keepView?: boolean;
         keepPanel?: boolean;
+        // A directory recovery reset clears local state; a later prompt
+        // still observes fresh-child admission independently.
         allowRecoveryReset?: boolean;
         /**
          * Git mode the new workspace draft starts with. Set here, in the same
@@ -17621,6 +18364,17 @@ export function App({
         carryManualTitle?: string;
       },
     ) => {
+      if (
+        overloadPausedRef.current &&
+        !managedModeRef.current &&
+        !(opts?.allowRecoveryReset && intent.kind !== 'inherit')
+      ) {
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return false;
+      }
       if (
         connectionRef.current.standaloneSession?.creationRecovery &&
         !opts?.allowRecoveryReset
@@ -17678,6 +18432,17 @@ export function App({
         }
         if (nextContext?.kind === 'live') {
           pendingManualTitleRef.current = undefined;
+          if (pendingBoundRunRef.current) {
+            const stale = pendingBoundRunRef.current;
+            stale.cancelledBeforeAdmission = true;
+            if (!stale.dispatchStarted) {
+              stale.reject(
+                createScheduledTaskCancellation(
+                  'Bound run target was replaced',
+                ),
+              );
+            }
+          }
           gitModeIntentRef.current = { mode: 'current' };
           setGitModeIntent({ mode: 'current' });
           try {
@@ -17784,6 +18549,15 @@ export function App({
       let focusRequest: number | undefined;
       try {
         autoRecapVersionRef.current += 1;
+        if (pendingBoundRunRef.current) {
+          const stale = pendingBoundRunRef.current;
+          stale.cancelledBeforeAdmission = true;
+          if (!stale.dispatchStarted) {
+            stale.reject(
+              createScheduledTaskCancellation('Bound run target was replaced'),
+            );
+          }
+        }
         const clearPromise = (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).clearSession(
@@ -17897,6 +18671,7 @@ export function App({
         {
           keepView: true,
           keepPanel: true,
+          allowRecoveryReset: true,
         },
       );
       const latest = connectionRef.current;
@@ -18925,9 +19700,27 @@ export function App({
             ? ({ kind: 'live' } as const)
             : ({ kind: 'workspace', cwd: workspaceCwd } as const)
           : undefined);
+      const navigationWorkspaceCwd =
+        targetContext?.kind === 'workspace' ? targetContext.cwd : workspaceCwd;
       const selectedWorkspace = workspacesRef.current.find(
         (entry) => entry.cwd === workspaceCwd,
       );
+      const boundRun = pendingBoundRunRef.current;
+      const targetMatchesBoundRun =
+        boundRun !== null &&
+        boundRun.sessionId === sessionId &&
+        (navigationWorkspaceCwd === undefined ||
+          boundRun.workspaceCwd === undefined ||
+          getLogicalSessionKey(sessionId, navigationWorkspaceCwd) ===
+            getLogicalSessionKey(boundRun.sessionId, boundRun.workspaceCwd));
+      if (boundRun && !targetMatchesBoundRun) {
+        boundRun.cancelledBeforeAdmission = true;
+        if (!boundRun.dispatchStarted) {
+          boundRun.reject(
+            createScheduledTaskCancellation('Bound run target was replaced'),
+          );
+        }
+      }
       navigationRef.current?.beginSessionNavigation(
         sessionId,
         selectedWorkspace && !selectedWorkspace.primary
@@ -19495,13 +20288,22 @@ export function App({
   // rejects if the bound session can't be opened (archived/deleted), supersedes,
   // or times out — so the caller only records the run after it truly happened,
   // never on a failed session switch. Only one bound run waits at a time.
+  const boundRunRuntimeClientRef = useRef(workspace.client);
+  boundRunRuntimeClientRef.current = workspace.client;
   const pendingBoundRunRef = useRef<{
     sessionId: string;
+    logicalSessionKey?: string;
+    workspaceCwd?: string;
+    cancelledBeforeAdmission?: boolean;
+    dispatchStarted?: boolean;
+    runtimeClient: typeof workspace.client;
     prompt: string;
     resolve: () => void;
     reject: (err: unknown) => void;
     timer?: ReturnType<typeof setTimeout>;
-    owner?: { isCurrent(): boolean };
+    loadCompleted?: boolean;
+    taskIsStale?: () => boolean;
+    beforeTaskDispatch?: () => void | Promise<void>;
   } | null>(null);
   const clearPendingBoundRun = useCallback((sessionId: string) => {
     const cur = pendingBoundRunRef.current;
@@ -19510,6 +20312,26 @@ export function App({
       pendingBoundRunRef.current = null;
     }
   }, []);
+  useEffect(() => {
+    const pending = pendingBoundRunRef.current;
+    if (pending?.logicalSessionKey === undefined) return;
+    const currentLogicalSessionKey = getLogicalSessionKey(
+      connection.sessionId,
+      connection.workspaceCwd,
+    );
+    if (
+      currentLogicalSessionKey !== undefined &&
+      currentLogicalSessionKey !== pending.logicalSessionKey
+    ) {
+      pending.cancelledBeforeAdmission = true;
+      if (!pending.dispatchStarted) {
+        clearPendingBoundRun(pending.sessionId);
+        pending.reject(
+          createScheduledTaskCancellation('Bound run target was replaced'),
+        );
+      }
+    }
+  }, [clearPendingBoundRun, connection.sessionId, connection.workspaceCwd]);
   // Enqueue a manual-run prompt in the CURRENT session, resolving as soon as the
   // daemon ADMITS it — not when the whole turn finishes. sendPrompt resolves via
   // waitForAcceptedPromptCompletion (turn end), which is too late: a long or
@@ -19528,8 +20350,107 @@ export function App({
   // admission, reject so the caller skips recording a run that never reached the
   // session.
   const enqueueManualRun = useCallback(
-    (prompt: string): Promise<void> =>
+    (
+      prompt: string,
+      taskIsStale?: () => boolean,
+      beforeTaskDispatch?: () => void | Promise<void>,
+      scheduledScope?: {
+        runtimeClient: typeof workspace.client;
+        logicalSessionKey?: string;
+        cancelledBeforeAdmission?: () => boolean;
+      },
+    ): Promise<void> =>
       new Promise<void>((resolve, reject) => {
+        const taskRuntimeClient =
+          scheduledScope?.runtimeClient ?? workspace.client;
+        const startSourceVersion = composerSourceVersionRef.current;
+        const startSessionOpenInvocation = sessionOpenInvocationRef.current;
+        let targetLogicalSessionKey = scheduledScope?.logicalSessionKey;
+        let targetSessionId: string | undefined;
+        let sawTargetSessionConnected = false;
+        const scheduledScopeIsCurrent = () => {
+          if (taskRuntimeClient !== boundRunRuntimeClientRef.current) {
+            return false;
+          }
+          if (scheduledScope) {
+            return (
+              targetLogicalSessionKey !== undefined &&
+              getLogicalSessionKey(
+                connectionRef.current.sessionId,
+                connectionRef.current.workspaceCwd,
+              ) === targetLogicalSessionKey
+            );
+          }
+          if (
+            composerSourceVersionRef.current !== startSourceVersion ||
+            sessionOpenInvocationRef.current !== startSessionOpenInvocation
+          ) {
+            return false;
+          }
+          if (targetLogicalSessionKey !== undefined) {
+            return (
+              getLogicalSessionKey(
+                connectionRef.current.sessionId,
+                connectionRef.current.workspaceCwd,
+              ) === targetLogicalSessionKey
+            );
+          }
+          if (targetSessionId === undefined) return true;
+          const currentSessionId = connectionRef.current.sessionId;
+          if (currentSessionId === targetSessionId) {
+            sawTargetSessionConnected = true;
+            const logicalKey = getLogicalSessionKey(
+              targetSessionId,
+              connectionRef.current.workspaceCwd,
+            );
+            if (logicalKey !== undefined) {
+              targetLogicalSessionKey = logicalKey;
+            }
+            return true;
+          }
+          return !sawTargetSessionConnected && currentSessionId === undefined;
+        };
+        const assertRunnable = () => {
+          if (scheduledScope?.cancelledBeforeAdmission?.()) {
+            throw createScheduledTaskCancellation('Bound run was cancelled');
+          }
+          if (!scheduledScopeIsCurrent()) {
+            throw createScheduledTaskCancellation(
+              'Bound run target or runtime was replaced',
+            );
+          }
+          if (taskIsStale?.()) {
+            throw new DOMException(
+              'Scheduled task was deleted before prompt admission',
+              'AbortError',
+            );
+          }
+        };
+        let guardFailure: unknown;
+        const beforeTaskHttpDispatch = async () => {
+          guardFailure = undefined;
+          try {
+            assertRunnable();
+            await beforeTaskDispatch?.();
+            assertRunnable();
+          } catch (error) {
+            const failure =
+              scheduledScope?.cancelledBeforeAdmission?.() ||
+              !scheduledScopeIsCurrent()
+                ? createScheduledTaskCancellation(
+                    'Bound run target or runtime was replaced',
+                  )
+                : error;
+            guardFailure = failure;
+            throw failure;
+          }
+        };
+        try {
+          assertRunnable();
+        } catch (error) {
+          reject(error);
+          return;
+        }
         // Session-less means no Goal can exist (and `sendPrompt` allocates a
         // session itself), so gate on the shared predicate rather than on a
         // bare `goalState === undefined`, which also fires with no session.
@@ -19544,20 +20465,102 @@ export function App({
           resolve();
         };
         sendPrompt(prompt, undefined, undefined, {
+          ...(taskIsStale
+            ? {
+                isCurrent: () => !taskIsStale(),
+                beforeAdmission: async () => {
+                  assertRunnable();
+                },
+                beforeDispatch: beforeTaskHttpDispatch,
+                beforeDetachedDispatch: beforeTaskHttpDispatch,
+                onAdmissionStarted: (startedSessionId) => {
+                  if (!scheduledScope && startedSessionId) {
+                    if (targetSessionId === undefined) {
+                      targetSessionId = startedSessionId;
+                    }
+                    if (connectionRef.current.sessionId === startedSessionId) {
+                      sawTargetSessionConnected = true;
+                      if (targetLogicalSessionKey === undefined) {
+                        targetLogicalSessionKey = getLogicalSessionKey(
+                          startedSessionId,
+                          connectionRef.current.workspaceCwd,
+                        );
+                      }
+                    }
+                  }
+                  assertRunnable();
+                },
+              }
+            : {}),
+          canRebindOwner: () =>
+            !scheduledScope?.cancelledBeforeAdmission?.() &&
+            scheduledScope !== undefined &&
+            scheduledScopeIsCurrent(),
           onAdmitted: admit,
+          rethrowDetachedError: true,
+          onCancelledBeforeAdmission: () => {
+            if (!admitted) {
+              reject(
+                createScheduledTaskCancellation(
+                  'Run was cancelled before it started',
+                ),
+              );
+            }
+          },
           suppressInputHistory: true,
         }).then(
-          () => {
+          (result) => {
+            if (result === false) {
+              if (!admitted) {
+                // sendPrompt's guard already pushed the warning toast with
+                // load readings; mark as dispatched so reportError does not
+                // surface a duplicate error-toned toast for the same click.
+                reject(
+                  Object.assign(new Error(t('sidebar.overloadPaused')), {
+                    _alreadyDispatched: true,
+                  }),
+                );
+              }
+              return;
+            }
             if (!admitted) {
+              if (
+                !scheduledScopeIsCurrent() ||
+                scheduledScope?.cancelledBeforeAdmission?.()
+              ) {
+                reject(
+                  createScheduledTaskCancellation(
+                    'Run was cancelled before it started',
+                  ),
+                );
+                return;
+              }
+              if (guardFailure !== undefined) {
+                reject(guardFailure);
+                return;
+              }
               reject(new Error('Run was cancelled before it started'));
             }
           },
           (error: unknown) => {
-            if (!admitted) reject(error);
+            if (!admitted) {
+              if (
+                !scheduledScopeIsCurrent() ||
+                scheduledScope?.cancelledBeforeAdmission?.()
+              ) {
+                reject(
+                  createScheduledTaskCancellation(
+                    'Run was cancelled before it started',
+                  ),
+                );
+                return;
+              }
+              reject(guardFailure ?? error);
+            }
           },
         );
       }),
-    [isGoalGateBlocked, sendPrompt, t],
+    [isGoalGateBlocked, sendPrompt, t, workspace],
   );
   // Enqueue the pending bound run once its session is the current, fully-loaded
   // one — driven both by the effect below (when the session switch changes a
@@ -19568,8 +20571,39 @@ export function App({
   const tryFireBoundRun = useCallback(() => {
     const pending = pendingBoundRunRef.current;
     const conn = connectionRef.current;
+    if (!pending || pending.dispatchStarted) return;
+    if (pending.runtimeClient !== boundRunRuntimeClientRef.current) {
+      clearPendingBoundRun(pending.sessionId);
+      pending.reject(
+        createScheduledTaskCancellation('Bound run runtime was replaced'),
+      );
+      return;
+    }
+    if (!pending.loadCompleted || pending.logicalSessionKey === undefined) {
+      return;
+    }
     if (
-      !pending ||
+      conn.sessionId !== pending.sessionId ||
+      getLogicalSessionKey(conn.sessionId, conn.workspaceCwd) !==
+        pending.logicalSessionKey
+    ) {
+      clearPendingBoundRun(pending.sessionId);
+      pending.reject(
+        createScheduledTaskCancellation('Bound run session was replaced'),
+      );
+      return;
+    }
+    if (pending.taskIsStale?.()) {
+      clearPendingBoundRun(pending.sessionId);
+      pending.reject(
+        new DOMException(
+          'Scheduled task was deleted before prompt admission',
+          'AbortError',
+        ),
+      );
+      return;
+    }
+    if (
       conn.sessionId !== pending.sessionId ||
       conn.loadingTranscript ||
       conn.goalState === undefined
@@ -19585,20 +20619,28 @@ export function App({
       }
       return;
     }
-    if (pending.owner && !pending.owner.isCurrent()) {
-      clearPendingBoundRun(pending.sessionId);
-      pending.reject(
-        new DOMException('Bound run session was replaced', 'AbortError'),
-      );
-      return;
-    }
     if (pending.timer !== undefined) clearTimeout(pending.timer);
-    pendingBoundRunRef.current = null;
+    pending.dispatchStarted = true;
     // Resolves at prompt admission (see enqueueManualRun); the switch-timeout was
     // cleared above, so a long turn can't trip it. Recording happens in the
     // dialog once this resolves.
-    enqueueManualRun(pending.prompt).then(
-      () => pending.resolve(),
+    enqueueManualRun(
+      pending.prompt,
+      pending.taskIsStale,
+      pending.beforeTaskDispatch,
+      {
+        runtimeClient: pending.runtimeClient,
+        logicalSessionKey: pending.logicalSessionKey,
+        cancelledBeforeAdmission: () =>
+          pending.cancelledBeforeAdmission === true,
+      },
+    ).then(
+      () => {
+        if (pendingBoundRunRef.current === pending) {
+          pendingBoundRunRef.current = null;
+        }
+        pending.resolve();
+      },
       (error: unknown) => pending.reject(error),
     );
   }, [clearPendingBoundRun, enqueueManualRun]);
@@ -19609,16 +20651,41 @@ export function App({
       // The workspace the bound session lives in: restoring it from another
       // workspace's conversation would name the wrong one.
       workspaceCwd?: string,
+      taskIsStale?: () => boolean,
+      beforeTaskDispatch?: () => void | Promise<void>,
     ): Promise<void> => {
       showChat();
       if (!sessionId) {
         // Unbound: runs in the current session — resolves at admission.
-        return enqueueManualRun(prompt);
+        const activeLogicalKey = getLogicalSessionKey(
+          connectionRef.current.sessionId,
+          connectionRef.current.workspaceCwd,
+        );
+        return enqueueManualRun(
+          prompt,
+          taskIsStale,
+          beforeTaskDispatch,
+          activeLogicalKey !== undefined
+            ? {
+                runtimeClient: workspace.client,
+                logicalSessionKey: activeLogicalKey,
+              }
+            : undefined,
+        );
       }
       // A newer bound run supersedes an older one still waiting on the latch;
       // reject the old promise so its caller doesn't record a dropped run.
+      // Once the older run has already started dispatching, refuse the
+      // incoming run instead of cancelling an in-flight POST.
       const prev = pendingBoundRunRef.current;
       if (prev) {
+        if (prev.dispatchStarted) {
+          return Promise.reject(
+            createScheduledTaskCancellation(
+              'Another scheduled run is already dispatching',
+            ),
+          );
+        }
         if (prev.timer !== undefined) clearTimeout(prev.timer);
         pendingBoundRunRef.current = null;
         prev.reject(new Error('superseded by another run'));
@@ -19626,9 +20693,25 @@ export function App({
       return new Promise<void>((resolve, reject) => {
         const pending: NonNullable<typeof pendingBoundRunRef.current> = {
           sessionId,
+          workspaceCwd,
+          logicalSessionKey:
+            workspaceCwd === undefined
+              ? undefined
+              : getLogicalSessionKey(sessionId, workspaceCwd),
+          runtimeClient: workspace.client,
+          cancelledBeforeAdmission: false,
           prompt,
           resolve,
-          reject,
+          reject: (error: unknown) => {
+            pending.cancelledBeforeAdmission = true;
+            if (pending.timer !== undefined) clearTimeout(pending.timer);
+            if (pendingBoundRunRef.current === pending) {
+              pendingBoundRunRef.current = null;
+            }
+            reject(error);
+          },
+          taskIsStale,
+          beforeTaskDispatch,
         };
         pendingBoundRunRef.current = pending;
         loadSidebarSession(sessionId, workspaceCwd)
@@ -19637,34 +20720,83 @@ export function App({
           // which case the effect picks it up.
           .then(() => {
             if (pendingBoundRunRef.current !== pending) return;
-            pending.owner = sessionOwnerGuard.capture();
+            if (
+              connectionRef.current.sessionId !== sessionId ||
+              (workspaceCwd !== undefined &&
+                getLogicalSessionKey(
+                  sessionId,
+                  connectionRef.current.workspaceCwd,
+                ) !== getLogicalSessionKey(sessionId, workspaceCwd))
+            ) {
+              pending.reject(
+                createScheduledTaskCancellation(
+                  'Bound run target was replaced',
+                ),
+              );
+              return;
+            }
+            pending.loadCompleted = true;
+            pending.logicalSessionKey = getLogicalSessionKey(
+              sessionId,
+              connectionRef.current.workspaceCwd,
+            );
+            pending.timer = setTimeout(() => {
+              if (pendingBoundRunRef.current !== pending) return;
+              pendingBoundRunRef.current = null;
+              pending.reject(new Error('Timed out waiting for session replay'));
+            }, BOUND_RUN_SWITCH_TIMEOUT_MS);
             tryFireBoundRun();
           })
           .catch((error: unknown) => {
             if (pendingBoundRunRef.current !== pending) return;
-            clearPendingBoundRun(sessionId);
-            reject(error);
+            pending.reject(error);
           });
       });
     },
     [
       enqueueManualRun,
       loadSidebarSession,
-      clearPendingBoundRun,
       showChat,
-      sessionOwnerGuard,
       tryFireBoundRun,
+      workspace.client,
     ],
   );
   useEffect(() => {
+    const pending = pendingBoundRunRef.current;
+    if (pending && pending.runtimeClient !== workspace.client) {
+      pending.cancelledBeforeAdmission = true;
+      if (!pending.dispatchStarted) {
+        clearPendingBoundRun(pending.sessionId);
+        pending.reject(
+          createScheduledTaskCancellation('Bound run runtime was replaced'),
+        );
+      }
+      return;
+    }
     tryFireBoundRun();
   }, [
+    clearPendingBoundRun,
     connection.sessionId,
     connection.loadingTranscript,
     connection.catchingUp,
     connection.goalState,
     tryFireBoundRun,
+    workspace.client,
   ]);
+  useEffect(
+    () => () => {
+      const pending = pendingBoundRunRef.current;
+      if (!pending) return;
+      pending.cancelledBeforeAdmission = true;
+      if (pending.dispatchStarted) return;
+      if (pending.timer !== undefined) clearTimeout(pending.timer);
+      pendingBoundRunRef.current = null;
+      pending.reject(
+        createScheduledTaskCancellation('Bound run owner was unmounted'),
+      );
+    },
+    [],
+  );
 
   const openTasksPanel = useCallback(
     (
@@ -20317,7 +21449,7 @@ export function App({
       let admitted = false;
       let admissionUnknown = false;
       try {
-        await sendPrompt(trimmed, images, files, {
+        const submission = await sendPrompt(trimmed, images, files, {
           submittedPrompt: trimmed,
           inputAnnotations,
           idempotencyKey: editIdempotencyKey,
@@ -20386,6 +21518,7 @@ export function App({
             admitted = true;
           },
         });
+        if (submission === false) return false;
       } catch (error) {
         if (!isCurrent()) return false;
         if (
@@ -20532,6 +21665,17 @@ export function App({
       }
 
       const needsSession = !connectionRef.current.sessionId;
+      if (
+        needsSession &&
+        overloadPausedRef.current &&
+        !managedModeRef.current
+      ) {
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return false;
+      }
       goalSessionCreationInFlightRef.current = needsSession;
       void (async () => {
         const sourceOwner = sessionOwnerGuard.capture();
@@ -21124,8 +22268,11 @@ export function App({
           if (cmd === 'branch') {
             if (commandBlocked) return blockCommand();
             const branchName = text.slice(match[0].length).trim();
-            branchCurrentSession({ name: branchName || undefined });
-            return true;
+            return (
+              branchCurrentSession({
+                name: branchName || undefined,
+              }) !== false
+            );
           }
           if (cmd === 'fork') {
             if (commandBlocked) return blockCommand();
@@ -22023,12 +23170,23 @@ export function App({
       } else if (text.startsWith('!')) {
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
+        const needsSession = !connectionRef.current.sessionId;
+        if (
+          needsSession &&
+          overloadPausedRef.current &&
+          !managedModeRef.current
+        ) {
+          pushToast(
+            'warning',
+            overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+          );
+          return false;
+        }
         if (streamingStateRef.current !== 'idle') {
           queuedShellCommandsRef.current.push(cmd);
           pushToast('info', t('queue.shellQueued'));
           return true;
         }
-        const needsSession = !connectionRef.current.sessionId;
         let shellPromptPreparationOwner: symbol | undefined;
         if (needsSession) {
           if (shellSubmitInFlightRef.current) return false;
@@ -22649,9 +23807,9 @@ export function App({
           }
           if (isDaemonTurnError(error)) {
             // A loop-detected rejection ends the retry lineage: the
-            // retried turn itself was stopped for loop protection, so
-            // the stashed prompt must not be re-offered — resubmitting
-            // it tends to re-loop.
+            // retried turn itself was stopped by the tool-call cap or the
+            // duplicate tool-call breaker, so the stashed prompt must not
+            // be re-offered — resubmitting it tends to hit the same stop.
             if (error.body !== 'LOOP_DETECTED') {
               failedTurnErrorRetryRef.current = {
                 errorId: retryErrorId,
@@ -23893,6 +25051,13 @@ export function App({
   // ordinary first prompt (`promptWorkspaceCwd` in the submit path).
   const ensureAgentMentionSession = useCallback(async () => {
     const existing = connectionRef.current.sessionId;
+    if (!existing && overloadPausedRef.current && !managedModeRef.current) {
+      pushToast(
+        'warning',
+        overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+      );
+      return { paused: true as const };
+    }
     const allocated = existing ? undefined : await ensureSessionForPrompt();
     const sessionId =
       existing ?? allocated?.sessionId ?? connectionRef.current.sessionId;
@@ -23916,7 +25081,7 @@ export function App({
           }
         : {}),
     };
-  }, [ensureSessionForPrompt, getComposerWorkspaceCwd]);
+  }, [ensureSessionForPrompt, getComposerWorkspaceCwd, pushToast, t]);
   const settledAgentRunsKey = useMemo(
     () => settledAgentRunKey(blocks),
     [blocks],
@@ -24332,6 +25497,13 @@ export function App({
     persistEnvironmentPanelOpen(false);
     setEnvironmentPanelOpen(false);
   }, [persistEnvironmentPanelOpen]);
+  const [focusScheduledTasksNonce, setFocusScheduledTasksNonce] = useState(0);
+  const refreshSessionScheduledTasks = sessionScheduledTasks.refresh;
+  const openEnvironmentScheduledTasks = useCallback(() => {
+    refreshSessionScheduledTasks();
+    handleEnvironmentPanelOpenChange(true);
+    setFocusScheduledTasksNonce((n) => n + 1);
+  }, [handleEnvironmentPanelOpenChange, refreshSessionScheduledTasks]);
   const handleRightPanelOpenChange = useCallback(
     (open: boolean) => {
       if (open) {
@@ -24769,6 +25941,7 @@ export function App({
     sideTasks: visibleSideTasks,
     archivedSideTasks: visibleArchivedSideTasks,
     sideTasksLoading,
+    overloadPaused: overloadPaused && !managedMode,
     onCreateSideTask: createEmptySideTask,
     onOpenSideTask: openSideTask,
     onArchiveSideTasks: sideTaskArchiveAvailable ? archiveSideTasks : undefined,
@@ -24780,6 +25953,46 @@ export function App({
     onSideTaskCreated: handleSideTaskCreated,
     onSideTaskTitleChange: handleSideTaskTitleChange,
     onSideTaskInitialPromptRefused: handleSideTaskInitialPromptRefused,
+    liveSessionScheduledTasks: sessionScheduledTasks.liveSessionTaskById,
+    liveSessionScheduledTasksOwnerSessionId: connection.sessionId,
+    liveDurableScheduledTasks: sessionScheduledTasks.tasks.filter(
+      (entry) => entry.scope === 'durable',
+    ),
+    liveDurableScheduledTasksWorkspaceId:
+      scheduledTaskWorkspaceTarget.resolvable
+        ? (scheduledTaskWorkspaceTarget.workspaceId ?? null)
+        : undefined,
+    confirmedDeletedDurableTaskKeys:
+      sessionScheduledTasks.confirmedDeletedDurableTaskKeys,
+    confirmedCancelledSessionTaskIds:
+      sessionScheduledTasks.confirmedCancelledSessionTaskIds,
+    hasLiveDurableScheduledSnapshot:
+      scheduledTaskWorkspaceTarget.resolvable &&
+      sessionScheduledTasks.hasLiveDurableSnapshot,
+    hasLiveSessionScheduledSnapshot:
+      sessionScheduledTasks.hasLiveSessionSnapshot,
+    onCancelSessionScheduledTask: sessionScheduledTasks.cancelSessionTaskById,
+    onSessionScheduledTaskStopped: (
+      id: string,
+      sourceSessionId?: string,
+      source?: 'cron' | 'wakeup',
+    ) =>
+      sessionScheduledTasks.confirmSessionCancellation(
+        id,
+        sourceSessionId,
+        source,
+      ),
+    onDurableScheduledTaskDeleted: (
+      id: string,
+      workspaceId: string | undefined,
+      sourceSessionId: string | undefined,
+    ) =>
+      sessionScheduledTasks.confirmDurableDeletion({
+        id,
+        workspaceId,
+        sessionId: sourceSessionId,
+      }),
+    onScheduledTasksMutated: sessionScheduledTasks.refresh,
     onNestedRightPanelOpen: handleTurnOutputOpen,
     onNestedArtifactsChange: handlePaneArtifactsChange,
     onOpenNestedSubagent: openSubagentPanelForSession,
@@ -25572,6 +26785,15 @@ export function App({
                   // in the composer's workspace picker instead. From a Live
                   // chat it opens an ordinary task; a fresh voice conversation
                   // comes from the Live controls.
+                  overloadPaused={overloadPaused && !managedMode}
+                  overloadDetail={overloadDetail}
+                  onOverloadRefused={() => {
+                    pushToast(
+                      'warning',
+                      overloadDetailRef.current ??
+                        t('sidebar.overloadPaused'),
+                    );
+                  }}
                   onNewSession={(workspaceCwd) => {
                     if (managedMode && typeof workspaceCwd !== 'string') {
                       if (
@@ -25894,6 +27116,26 @@ export function App({
                             }
                           : {}),
                         ...artifactsHeaderEntry,
+                        scheduledTaskCount:
+                          scheduledTasksHeaderItemVisible
+                            ? sessionScheduledTasks.tasks.length
+                            : undefined,
+                        scheduledTaskActiveCount:
+                          scheduledTasksHeaderItemVisible
+                            ? sessionScheduledTasks.activeCount
+                            : undefined,
+                        scheduledTaskNextRunAt:
+                          scheduledTasksHeaderItemVisible
+                            ? sessionScheduledTasks.nextRunAt
+                            : undefined,
+                        onOpenScheduledTasks:
+                          scheduledTasksHeaderItemVisible &&
+                          environmentPanelReachable &&
+                          environmentPanelMounted &&
+                          environmentPanelItems.includes('scheduledTasks') &&
+                          connection.sessionId
+                            ? openEnvironmentScheduledTasks
+                            : undefined,
                         onOpenLocalControlSettings:
                           showMobileAccess && workspaceContextActive
                             ? handleOpenLocalControlSettings
@@ -25965,10 +27207,39 @@ export function App({
                               )
                           : undefined
                       }
+                      scheduledTaskCount={
+                        scheduledTasksHeaderItemVisible
+                          ? sessionScheduledTasks.tasks.length
+                          : undefined
+                      }
+                      scheduledTaskActiveCount={
+                        scheduledTasksHeaderItemVisible
+                          ? sessionScheduledTasks.activeCount
+                          : undefined
+                      }
+                      scheduledTaskNextRunAt={
+                        scheduledTasksHeaderItemVisible
+                          ? sessionScheduledTasks.nextRunAt
+                          : undefined
+                      }
+                      onOpenScheduledTasks={
+                        scheduledTasksHeaderItemVisible &&
+                        environmentPanelReachable &&
+                        environmentPanelMounted &&
+                        environmentPanelItems.includes('scheduledTasks') &&
+                        connection.sessionId
+                          ? openEnvironmentScheduledTasks
+                          : undefined
+                      }
                       {...artifactsHeaderEntry}
-                      onOpenLocalControlSettings={
+                      renderLeadingAction={
                         showMobileAccess && workspaceContextActive
-                          ? handleOpenLocalControlSettings
+                          ? (actionClassName) => (
+                              <LocalControlQrButton
+                                onOpenSettings={handleOpenLocalControlSettings}
+                                className={actionClassName}
+                              />
+                            )
                           : undefined
                       }
                     />
@@ -26111,6 +27382,13 @@ export function App({
                         splitFoldedByShrinkRef.current = false;
                         const current = connectionRef.current;
                         const currentSessionId = current.sessionId;
+                        if (
+                          overloadPausedRef.current &&
+                          !managedModeRef.current
+                        ) {
+                          closePanel();
+                          return;
+                        }
                         const currentWorkspaceCwd =
                           current.workspaceCwd ||
                           lockedWorkspaceCwd ||
@@ -26613,6 +27891,24 @@ export function App({
                         'workspace_channel_observed_contacts',
                       )}
                       autofixPrWatchesAvailable={prWatchesAvailable}
+                      shouldRefuseManualRun={shouldRefuseScheduledManualRun}
+                      overloadDetail={overloadDetail}
+                      onOverloadRefused={() => {
+                        pushToast(
+                          'warning',
+                          overloadDetailRef.current ??
+                            t('sidebar.overloadPaused'),
+                        );
+                      }}
+                      isTaskDeleted={(task) =>
+                        isDurableTaskDeletedRef.current(task)
+                      }
+                      onTaskMutated={(task) =>
+                        notifyScheduledTaskMutatedRef.current(task)
+                      }
+                      onTaskDeleted={(task) =>
+                        confirmDurableTaskDeletedRef.current(task)
+                      }
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
                         // creation chat doesn't pile onto the current
@@ -26653,7 +27949,9 @@ export function App({
                           },
                         );
                       }}
-                      onError={reportError}
+                      onError={(error, fallback) =>
+                        reportScheduledTaskError(error, fallback, true)
+                      }
                     />
                   </div>
                 </div>
@@ -27436,7 +28734,7 @@ export function App({
                                 }
                                 turnScheduledTasks={
                                   visibleTurnOutputKinds.has('scheduled_task')
-                                    ? scheduledTasksByTurn
+                                    ? enrichedScheduledTasksByTurn
                                     : undefined
                                 }
                                 onTurnOutputOpen={handleTurnOutputOpen}
@@ -27890,6 +29188,15 @@ export function App({
                             isTaskOpen={isComposerTaskOpen}
                             onExplainTask={explainComposerTask}
                             onReturnToInput={handleReturnToEditor}
+                            activeScheduledCount={
+                              sessionScheduledTasks.activeSessionCount
+                            }
+                            onOpenScheduledTasks={
+                              environmentPanelReachable &&
+                              environmentPanelItems.includes('scheduledTasks')
+                                ? openEnvironmentScheduledTasks
+                                : undefined
+                            }
                           />
                         )}
                         {(queuedPrompts.length > 0 ||
@@ -28044,6 +29351,7 @@ export function App({
                               ? undefined
                               : mainVoiceTarget,
                           voiceStatusRevision: mainVoiceStatusRevision,
+                          composerIntegrations: DAEMON_COMPOSER_INTEGRATIONS,
                           queuedMessages: queuedTexts,
                           onFocusFooter: handleFocusTaskChips,
                           onPopQueuedMessages: editLastQueuedPrompt,
@@ -28371,6 +29679,11 @@ export function App({
                 }
                 tasks={sessionTasks}
                 agentTasks={environmentAgentTasks}
+                scheduledTasks={sessionScheduledTasks.tasks}
+                scheduledTaskBusyIds={sessionScheduledTasks.busyIds}
+                manualRunActive={sessionScheduledTasks.manualRunActive}
+                focusScheduledTasksNonce={focusScheduledTasksNonce}
+                scheduledTasksOwnerSessionId={connection.sessionId}
                 attachments={
                   logicalSessionKey
                     ? (sessionAttachmentsBySessionRef.current.get(
@@ -28425,6 +29738,22 @@ export function App({
                   sessionAgentTraceSupported ? openAgentWorkflow : undefined
                 }
                 onOpenTask={openEnvironmentTask}
+                onOpenScheduledTask={openSessionScheduledTaskDetail}
+                onToggleScheduledTask={(entry) =>
+                  void sessionScheduledTasks.toggleDurableTask(entry)
+                }
+                onRunScheduledTask={(entry) =>
+                  void sessionScheduledTasks.runDurableTask(entry)
+                }
+                onDeleteScheduledTask={(entry) =>
+                  sessionScheduledTasks.deleteDurableTask(entry)
+                }
+                onCancelSessionScheduledTask={(entry) =>
+                  sessionScheduledTasks.cancelSessionTask(entry)
+                }
+                onManageAllScheduledTasks={
+                  projectFeaturesAvailable ? openScheduledTasks : undefined
+                }
                 onReadImage={readSessionImage}
                 onImagePreview={(src, alt, source) => {
                   if (environmentPanelOwner.isCurrent()) {

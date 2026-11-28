@@ -4649,7 +4649,12 @@ describe('transcriptBlocksToDaemonMessages', () => {
     };
 
     const [withCause] = transcriptBlocksToDaemonMessages(
-      [loopError({ loopType: 'turn_tool_call_cap', loopReason: 'backstop' })],
+      [
+        loopError({
+          loopType: 'turn_tool_call_cap',
+          loopReason: 'explicit_cap',
+        }),
+      ],
       { labels },
     );
     const [unknownCause] = transcriptBlocksToDaemonMessages(
@@ -4660,7 +4665,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       labels,
     });
 
-    expect(withCause.content).toBe('Cause: backstop');
+    expect(withCause.content).toBe('Cause: explicit_cap');
     expect(unknownCause.content).toBe('Generic loop guidance.');
     expect(noLoop.content).toBe('Generic loop guidance.');
   });

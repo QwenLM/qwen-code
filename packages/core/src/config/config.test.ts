@@ -10498,6 +10498,7 @@ describe('Server Config (config.ts)', () => {
     const config = recordingConfig();
     const { newChatsDir, from, to } = sessionArtifacts(config, [
       '.jsonl',
+      '.prompt-time.json',
       '.runtime.json',
       '.worktree.json',
       '.pr.json',

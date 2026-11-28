@@ -166,6 +166,65 @@ describe('useComposerCore cross-device input history sync', () => {
     window.history.replaceState({}, '', '/');
   });
 
+  it('restores a saved welcome draft in the selected workspace without submitting', async () => {
+    const draft = "Summarize yesterday's failed jobs";
+    const recommendation = 'Show my upcoming jobs';
+    const onSubmit = vi.fn();
+    const recordInputHistory = vi.fn().mockRejectedValue(new Error('offline'));
+    let revision = 0;
+    const loadInputHistory = vi.fn(
+      async (): Promise<DaemonInputHistoryResult> => ({
+        notModified: false,
+        kind: 'prompt',
+        entries: [],
+        revision: `rev${++revision}`,
+      }),
+    );
+    currentWorkspace = {
+      workspaceCwd: '/repo/primary',
+      capabilities: {
+        features: ['workspace_input_history', 'workspace_qualified_rest_core'],
+        workspaces: [
+          { id: 'primary', cwd: '/repo/primary', primary: true },
+          { id: 'secondary', cwd: '/repo/secondary', trusted: true },
+        ],
+      },
+      actions: { loadInputHistory, recordInputHistory },
+      client: makeFakeClient(),
+    };
+    const options = { sessionId: undefined, onSubmit };
+    await mount({ ...options, atWorkspaceCwd: '/repo/secondary' });
+    await act(async () => {
+      const { handle } = latest!;
+      handle.setText(' \n ');
+      handle.saveCurrentDraftToHistory();
+      handle.setText(` ${draft} `);
+      handle.saveCurrentDraftToHistory();
+      handle.setText(recommendation);
+    });
+    expect(latest!.handle.getText()).toBe(recommendation);
+    expect(recordInputHistory).toHaveBeenCalledExactlyOnceWith({
+      kind: 'prompt',
+      workspaceId: 'secondary',
+      entry: draft,
+    });
+
+    // The draft survives successive remote revisions even if the write fails.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await act(async () => latest!.searchState.openHistorySearch());
+      expect(latest!.searchState.searchMatches).toEqual([draft]);
+      act(() => latest!.searchState.closeSearch(true));
+    }
+    expect(loadInputHistory).toHaveBeenCalledTimes(4);
+    act(() => latest!.searchState.restoreSearchMatch!(draft));
+    expect(latest!.handle.getText()).toBe(draft);
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    await mount({ ...options, atWorkspaceCwd: '/repo/primary' });
+    await act(async () => latest!.searchState.openHistorySearch());
+    expect(latest!.searchState.searchMatches).toEqual([]);
+  });
+
   it('shows desktop history in mobile Input history panel and live-updates while open', async () => {
     let resolveOpenRefresh!: (value: DaemonInputHistoryResult) => void;
     const loadInputHistory = vi

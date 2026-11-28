@@ -220,7 +220,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'auth_provider_install', 'workspace_memory',
  'workspace_agents', 'workspace_agent_generate', 'workspace_env',
  'workspace_preflight', 'session_context', 'session_context_usage',
- 'session_supported_commands', 'session_tasks', 'scheduled_task_gate', 'autofix_pr_watches', 'session_monitor_tool_correlation', 'session_stats',
+ 'session_supported_commands', 'session_tasks', 'scheduled_task_owner_selection', 'scheduled_task_gate', 'autofix_pr_watches', 'session_monitor_tool_correlation', 'session_stats',
  'session_lsp', 'session_resources', 'session_status',
  'session_close', 'session_metadata', 'session_organization',
  'session_archive', 'mcp_guardrails',
@@ -598,6 +598,8 @@ operator diagnostic snapshot documented below.
 
 `daemon_update` advertises the process-global `GET /daemon/update`,
 `POST /daemon/update/prepare`, and `POST /daemon/update/restart` surface.
+
+`scheduled_task_owner_selection` is an always-on tag advertising that scheduled-task item mutations `PATCH /scheduled-tasks/:id`, `DELETE /scheduled-tasks/:id`, and `POST /scheduled-tasks/:id/run` (including workspace-qualified forms) accept an optional `expectedSessionId` query parameter for same-workspace records. It asserts the bound owner of the selected task; it never rebinds a task. An empty value selects an unbound task. Omitting it preserves legacy behavior for a unique id, but an id with multiple matching records returns 409 `ambiguous_scheduled_task_id` without mutating any record. New clients require this feature before an owner-selected mutation; unqualified legacy calls retain their existing behavior, and an omitted owner selects the then-current unique record rather than asserting an older snapshot's identity (the capability preflight is not a transaction across replacing the backend before mutation). A supplied owner with no matching record returns 404; multiple matching records return 409. Bound-owner pending deletion records a `[sessionId, taskId]` intent, so returning 404 for an already consumed one-shot still vetoes its later restoration, without vetoing another owner's restoration. Rejected owner selections and ambiguous ids acquire no incumbent owner's veto. Repeated or non-scalar selectors return 400 `invalid_expected_session_id`. Creation refuses a generated id collision with 409 `scheduled_task_id_conflict` rather than appending a duplicate. Per-run dispatch outcomes use the selected owner and an exact in-flight run identifier, including when same-owner manual runs share a timestamp; natural dispatch likewise constrains its annotation to the fired task owner rather than every row with that ID. Natural one-shot consumption and failure restoration also preserve owner-scoped siblings and observe both the legacy bare ID and fired-owner deletion generations.
 
 `scheduled_task_gate` advertises the optional `gate` on `POST` and
 `PATCH /scheduled-tasks`, and `gate` and `gateStatus` on task views. A gate is
@@ -2894,15 +2896,46 @@ names only; clients must not expect skill bodies or paths over this route.
       "parentName": "reviewer",
       "depth": 1
     }
-  ]
+  ],
+  "scheduledTasks": []
 }
 ```
 
 This route is a read-only out-of-band snapshot. It is intentionally not a
-prompt and can be queried while the session is streaming. The response only
-contains whitelisted metadata from the agent, shell, and monitor task
-registries; controllers, timers, offsets, pending messages, and raw registry
-objects are never exposed.
+prompt and can be queried while the session is streaming. Agent, shell, and
+monitor registry entries contain only whitelisted metadata; controllers,
+timers, offsets, pending messages, and raw registry objects are never
+exposed.
+
+A response from this daemon always has a `scheduledTasks` array, including
+when it is empty. The absence of this optional field means an older daemon
+does not support the projection: clients must not treat such an omission as
+an authoritative empty snapshot or as evidence of cancellation. Each entry
+carries `id`, `source` (`"cron"` for a session-only `cron_create` job or
+`"wakeup"` for a pending self-paced
+`loop_wakeup`), `cronExpr`, `prompt`, `recurring`, `createdAt`, `expiresAt`,
+`lastFiredAt`, `nextRunAt`, optional `gate`, and `enabled` (`false` when the
+owning session's scheduler is disabled; omitted only in older snapshots).
+`prompt` is the task's literal user/model prompt text, and `gate`, when
+present, is its optional shell command. The scheduler also derives fire times
+from its cron expression, creation/firing history, and optional jitter. These
+public schedule fields are separate from internal registry implementation
+objects, and trigger expiry or stop reasons are not part of this snapshot.
+These entries never appear in the ordinary background `tasks` array. Durable tasks created through
+`/scheduled-tasks` are excluded and remain owned by that CRUD surface.
+`POST /session/:id/tasks/:taskId/cancel` accepts `kind: "cron"` only for these
+session-owned entries; an optional `source: "cron" | "wakeup"` selects the
+exact entry when those two kinds share an id. Omitting `source` preserves
+legacy cancellation for a unique candidate, but multiple session-only
+candidates return `{ "cancelled": false, "reason": "ambiguous" }` without
+deleting either one. A durable task must be disabled or deleted through its
+workspace-scoped scheduled-task route instead. As with the snapshot itself,
+cancellation resolves the live-session owner and returns
+`{ "cancelled": false }` without mutating another runtime or primary session
+when the task is unknown, already gone, durable, or the session's cron feature
+is unavailable. `reason: "disabled"` refers to that feature switch, not the
+per-entry `enabled` projection. An exposed scheduler-disabled entry can still
+be explicitly stopped; removing that entry does not enable it to fire again.
 
 Agent tasks spawned by another sub-agent (nested sub-agents, bounded by
 `maxSubagentDepth`) carry three optional lineage fields: `parentAgentId` (the
